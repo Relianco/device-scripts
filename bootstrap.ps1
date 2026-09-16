@@ -19,6 +19,9 @@
 .PARAMETER Branch
     Optional. Git branch to use. Defaults to "main".
 
+.PARAMETER userDataJson
+    Optional. Base64-encoded JSON forwarded unchanged to the downloaded script.
+
 .NOTES
     Requirements: Windows PowerShell 5.1+
     Timeout: 5 minutes
@@ -33,7 +36,10 @@ param(
     [string]$RepoUrl = "https://github.com/Relianco/device-scripts",
 
     [Parameter(Mandatory = $false)]
-    [string]$Branch = "main"
+    [string]$Branch = "main",
+
+    [Parameter(Mandatory = $false)]
+    [string]$userDataJson
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,7 +175,11 @@ try {
         Write-Status "Executing: $scriptFile"
 
         # Execute the script
-        $scriptOutput = & powershell.exe -ExecutionPolicy Bypass -File $scriptPath 2>&1
+        $scriptArguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath)
+        if ($PSBoundParameters.ContainsKey('userDataJson')) {
+            $scriptArguments += @('-userDataJson', $userDataJson)
+        }
+        $scriptOutput = & powershell.exe @scriptArguments 2>&1
         $scriptExitCode = $LASTEXITCODE
 
         if ($scriptOutput) {
