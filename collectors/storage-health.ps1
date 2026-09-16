@@ -12,7 +12,7 @@
 .NOTES
     Requirements: Windows PowerShell 5.1+
     Duration: <10 seconds
-    No external module dependencies — uses CIM/WMI only
+    No external module dependencies - uses CIM/WMI only
     Version: 1.0
 #>
 

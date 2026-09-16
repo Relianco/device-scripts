@@ -21,6 +21,6 @@ Use `-ParametersBase64 e30=` for a single script with no parameters. The optiona
 
 Without either parameter argument, bootstrap uses the existing collector mode: profile names from `profiles.json`, comma-separated collector names, checksum verification when a manifest is available, and optional `-CallbackUrl` / `-CallbackToken` reporting. Single-script mode streams output to the RMM without requiring collector JSON output or sending collector callbacks. Both modes enforce the five-minute execution timeout and clean up downloaded files.
 
-Keep the UTF-8 BOM when writing the script to disk for Windows PowerShell 5.1. Parameter payloads can contain sensitive data; do not log the encoded request or save it in reusable RMM presets.
+Keep every .ps1 in this repo ASCII-only. An RMM writes the script body to disk without a byte order mark, and Windows PowerShell 5.1 then reads it as ANSI: one em dash in a comment broke the whole parse on a live NinjaOne run. Parameter payloads can contain sensitive data; do not log the encoded request or save it in reusable RMM presets.
 
 Run local dispatch regressions with `python3 tests/test_bootstrap.py` (requires PowerShell 7). Windows PowerShell 5.1 is also verified on the disposable AD lab before deployment.

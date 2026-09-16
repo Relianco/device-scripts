@@ -11,7 +11,7 @@
 .NOTES
     Requirements: Windows PowerShell 5.1+
     Duration: ~20 seconds total
-    Impact: Minimal — CPU spikes are brief (<10s per test)
+    Impact: Minimal - CPU spikes are brief (<10s per test)
     Version: 1.0
 #>
 
@@ -24,7 +24,7 @@ function Write-Status {
     Write-Host "[$Level] $timestamp - $Message"
 }
 
-# Prime sieve benchmark — compute-bound, deterministic workload
+# Prime sieve benchmark - compute-bound, deterministic workload
 function Invoke-PrimeSieve {
     param([int]$Limit = 100000)
 

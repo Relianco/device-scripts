@@ -1,6 +1,6 @@
-﻿<#
+<#
 .SYNOPSIS
-    Relian Bootstrap v2 — RMM-agnostic script loader for Windows.
+    Relian Bootstrap v2 - RMM-agnostic script loader for Windows.
 
 .DESCRIPTION
     One script uploaded to any RMM. Downloads collector scripts from GitHub,
@@ -8,7 +8,7 @@
     directly to the Relian platform via an authenticated HTTPS callback.
 
     RMMs (NinjaOne, SyncroMSP, etc.) serve only as a delivery mechanism.
-    Results flow directly to Relian's API — no RMM custom field dependency.
+    Results flow directly to Relian's API - no RMM custom field dependency.
 
 .PARAMETER ScriptName
     Required. Comma-separated collector names or a profile name from profiles.json.
@@ -114,7 +114,7 @@ function Get-RmmPlatform {
         return "syncro"
     } catch { }
 
-    Write-Status "No RMM detected — standalone mode"
+    Write-Status "No RMM detected - standalone mode"
     return "standalone"
 }
 
@@ -215,7 +215,7 @@ function Test-FileChecksum {
     param([string]$FilePath, [string]$ExpectedHash)
 
     if (-not $ExpectedHash) {
-        Write-Status "No checksum for $(Split-Path $FilePath -Leaf) — skipping verification" "WARN"
+        Write-Status "No checksum for $(Split-Path $FilePath -Leaf) - skipping verification" "WARN"
         return $true
     }
 
