@@ -345,6 +345,9 @@ process {
         exit 1
     }
 
+    # Nothing has failed yet; a group failure below is the only thing that changes it.
+    $ExitCode = 0
+
     # Add user to specified AD groups. Membership of the primary group (Domain Users
     # by default) is implicit, and adding it fails — skip it instead of reporting a
     # failed run for a user that was created correctly.
