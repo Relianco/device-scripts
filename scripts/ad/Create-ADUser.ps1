@@ -69,7 +69,7 @@ begin {
     $Username = $UserData.username
     $DisplayName = $UserData.displayName
     $EmailAlias = $UserData.emailAlias  # Match JSON key casing
-    $DomainName = $UserData.adDomain    # Match JSON key for domain
+    $DomainName = if ($UserData.domain) { $UserData.domain } else { $UserData.adDomain }
     $CustomField = "temppass"           # Hardcode to 'temppass' as expected by NinjaOne
     $PasswordLength = $UserData.passwordLength
     $CustomPassword = $UserData.password
@@ -211,9 +211,28 @@ begin {
         exit 1
     }
 
+    # Resolve the configured directory and OU before creating anything, the same way
+    # the edit and offboard scripts do: a user created outside the managed OU could
+    # never be edited or offboarded again.
+    Write-Host "=== Resolving Configured Directory and OU ==="
+    try {
+        if (-not $DomainName -or -not $UserData.userOu) { throw 'Configured domain and user OU are required' }
+        $domain = Get-ADDomain -Identity $DomainName -Server $DomainName -ErrorAction Stop
+        if ($domain.DNSRoot -ine $DomainName) { throw 'Configured directory does not match the resolved domain' }
+        $DirectoryServer = $domain.PDCEmulator
+        if (-not $DirectoryServer) { throw 'Directory server could not be resolved' }
+        $ManagedOu = Get-ADOrganizationalUnit -Identity $UserData.userOu -Server $DirectoryServer -ErrorAction Stop
+        if (-not $ManagedOu.DistinguishedName.EndsWith(',' + $domain.DistinguishedName, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Configured user OU is outside the configured directory'
+        }
+    } catch {
+        Write-Host -Object "Directory target rejected: $($_.Exception.Message)"
+        exit 1
+    }
+
     # Check if user already exists in AD
     Write-Host "=== Checking if User Exists in AD ==="
-    if (Get-ADUser -Filter { SamAccountName -eq "$Username" }) {
+    if (Get-ADUser -Filter { SamAccountName -eq "$Username" } -Server $DirectoryServer) {
         Write-Host -Object "[Error] User $Username already exists in Active Directory!"
         exit 1
     }
@@ -267,6 +286,8 @@ process {
     # Prepare parameters for New-ADUser
     Write-Host "=== Preparing Parameters for New-ADUser ==="
     $UserSplat = @{
+        Server               = $DirectoryServer
+        Path                 = $ManagedOu.DistinguishedName
         SamAccountName       = $Username
         Name                 = if ($DisplayName) { $DisplayName } else { $Username }
         UserPrincipalName    = if ($EmailAlias) { $EmailAlias } else { "$Username@$DomainName" }
@@ -324,14 +345,26 @@ process {
         exit 1
     }
 
-    # Add user to specified AD groups
+    # Add user to specified AD groups. Membership of the primary group (Domain Users
+    # by default) is implicit, and adding it fails — skip it instead of reporting a
+    # failed run for a user that was created correctly.
     Write-Host "=== Adding User to AD Groups ==="
+    $CreatedUser = Get-ADUser -Identity $Username -Server $DirectoryServer -Properties PrimaryGroup -ErrorAction SilentlyContinue
+    $PrimaryGroupName = if ($CreatedUser -and $CreatedUser.PrimaryGroup) {
+        (Get-ADGroup -Identity $CreatedUser.PrimaryGroup -Server $DirectoryServer -ErrorAction SilentlyContinue).Name
+    } else { $null }
     foreach ($Group in $AddToGroups) {
+        $GroupName = "$Group".Trim()
+        if (-not $GroupName) { continue }
+        if ($PrimaryGroupName -and $GroupName -ieq $PrimaryGroupName) {
+            Write-Host "User '$Username' already belongs to its primary group '$GroupName'."
+            continue
+        }
         try {
-            Add-ADGroupMember -Identity $Group -Members $Username -ErrorAction Stop
-            Write-Host "User '$Username' was added to the AD group '$Group'."
+            Add-ADGroupMember -Identity $GroupName -Members $Username -Server $DirectoryServer -ErrorAction Stop
+            Write-Host "User '$Username' was added to the AD group '$GroupName'."
         } catch {
-            Write-Host "[Error] Failed to add user to group '$Group'. Error: $($_.Exception.Message)"
+            Write-Host "[Error] Failed to add user to group '$GroupName'. Error: $($_.Exception.Message)"
             $ExitCode = 1
         }
     }
