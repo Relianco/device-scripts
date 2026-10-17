@@ -188,14 +188,14 @@ Decision table, and the test asserts every row:
 - Consumes: `Get-TeamsPlan` from Task 3. Blob names from Task 2.
 - Produces: `Save-TeamsPayload -Url -Destination -Sha256 -Label -CancelPath`. Returns 0, 1, or 130. `$script:DownloadFile` and `$script:RetryDelay` are replaceable. Empty `Sha256` returns 0 and does not call `DownloadFile`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Cover: matching hash returns 0; mismatch returns 1 and does not leave the destination; userinfo URL returns 1 with zero download calls; HTTP 404 returns 1 after one attempt; HTTP 503 then success returns 0 and sleeps once via `$script:RetryDelay`; three HTTP 503 results return 1; `RELIAN_DEPLOY_CANCEL=1` before the second attempt returns 130. Assert the error text does not contain `https://`.
 
-- [ ] **Step 2: Run it.** Expected: FAIL because `Save-TeamsPayload` does not exist.
-- [ ] **Step 3: Implement `Save-TeamsPayload`** with the retry rules in Global Constraints. Copy the status list from `runner/Invoke-RelianRunner.ps1`. Do not dot-source the runner.
-- [ ] **Step 4: Run `tests/teams-download.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
-- [ ] **Step 5: Commit** `Download the Teams payloads with retries`
+- [x] **Step 2: Run it.** Expected: FAIL because `Save-TeamsPayload` does not exist.
+- [x] **Step 3: Implement `Save-TeamsPayload`** with the retry rules in Global Constraints. Copy the status list from `runner/Invoke-RelianRunner.ps1`. Do not dot-source the runner.
+- [x] **Step 4: Run `tests/teams-download.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
+- [x] **Step 5: Commit** `Download the Teams payloads with retries`
 
 ### Task 5: Build the bootstrapper command and the classic-removal list
 

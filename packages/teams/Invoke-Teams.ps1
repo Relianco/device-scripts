@@ -134,6 +134,191 @@ function Get-TeamsPlan {
     return New-TeamsPlan -ExitCode 1
 }
 
+$script:DownloadFile = {
+    param($Url, $Destination)
+    $parent = Split-Path -Parent $Destination
+    if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
+}
+
+$script:RetryDelay = {
+    param($Seconds)
+    Start-Sleep -Seconds ([int]$Seconds)
+}
+
+function Add-TeamsError {
+    param([string]$Message)
+    if ($null -eq $script:TeamsErrorLog) {
+        $script:TeamsErrorLog = [System.Collections.Generic.List[string]]::new()
+    }
+    $script:TeamsErrorLog.Add($Message)
+    if ($env:RELIAN_DEPLOY_TEST -ne '1') {
+        [Console]::Error.WriteLine($Message)
+    }
+}
+
+function Test-TeamsUrlHasUserInfo {
+    param([string]$Url)
+    try {
+        $uri = [Uri]$Url
+        if (-not $uri.IsAbsoluteUri) {
+            return $false
+        }
+        return -not [string]::IsNullOrEmpty($uri.UserInfo)
+    } catch {
+        return $false
+    }
+}
+
+function Test-TeamsCancelled {
+    param([string]$CancelPath)
+    if ($env:RELIAN_DEPLOY_CANCEL -eq '1') {
+        return $true
+    }
+    if ([string]::IsNullOrWhiteSpace($CancelPath)) {
+        return $false
+    }
+    return [bool](Test-Path -LiteralPath $CancelPath)
+}
+
+function Get-TeamsHttpStatus {
+    param($Exception)
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard++
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'StatusCode' -and $null -ne $current.StatusCode) {
+            try {
+                $parsed = [int]$current.StatusCode
+                if ($parsed -ge 100 -and $parsed -le 599) {
+                    return $parsed
+                }
+            } catch {
+                $parsed = $null
+            }
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Test-TeamsTransientTransport {
+    param($Exception)
+    $webTransient = @(
+        'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
+        'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
+    )
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard++
+        if ($current -is [System.TimeoutException] -or
+            $current -is [System.Threading.Tasks.TaskCanceledException] -or
+            $current -is [System.Net.Sockets.SocketException]) {
+            return $true
+        }
+        if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
+            return $true
+        }
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'HttpRequestError' -and $null -ne $current.HttpRequestError -and $requestTransient -contains [string]$current.HttpRequestError) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Test-TeamsDownloadIsTransient {
+    param($ErrorRecord)
+    $exception = $null
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ErrorRecord.Exception
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $exception = $ErrorRecord
+    }
+    if ($null -eq $exception) {
+        return $false
+    }
+    $status = Get-TeamsHttpStatus -Exception $exception
+    if ($null -ne $status) {
+        return @(408, 429, 500, 502, 503, 504) -contains $status
+    }
+    return [bool](Test-TeamsTransientTransport -Exception $exception)
+}
+
+function Save-TeamsPayload {
+    param(
+        [string]$Url,
+        [string]$Destination,
+        [string]$Sha256,
+        [string]$Label,
+        [string]$CancelPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
+    if (Test-TeamsUrlHasUserInfo -Url $Url) {
+        Add-TeamsError -Message "refusing a URL that contains userinfo for $Label"
+        return 1
+    }
+
+    $expected = $Sha256.Trim().ToLowerInvariant()
+    $delays = @(5, 20)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (Test-TeamsCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+        $thrown = $null
+        try {
+            [void](& $script:DownloadFile -Url $Url -Destination $Destination)
+        } catch {
+            $thrown = $_
+        }
+        $exists = Test-Path -LiteralPath $Destination
+        if ($null -eq $thrown -and $exists) {
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Destination).Hash.ToLowerInvariant()
+            if (-not $actual.Equals($expected, [System.StringComparison]::Ordinal)) {
+                Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                Add-TeamsError -Message "hash mismatch for $Label"
+                return 1
+            }
+            return 0
+        }
+        if ($exists) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        }
+        $status = $null
+        $transient = $false
+        if ($null -ne $thrown) {
+            $status = Get-TeamsHttpStatus -Exception $thrown.Exception
+            $transient = [bool](Test-TeamsDownloadIsTransient -ErrorRecord $thrown)
+        }
+        if (-not $transient -or $attempt -eq 3) {
+            if ($null -ne $status) {
+                Add-TeamsError -Message "download failed with HTTP $status for $Label"
+            } else {
+                Add-TeamsError -Message "download failed for $Label"
+            }
+            return 1
+        }
+        if (Test-TeamsCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+        [void](& $script:RetryDelay -Seconds $delays[$attempt - 1])
+        if (Test-TeamsCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+    }
+    Add-TeamsError -Message "download failed for $Label"
+    return 1
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }

@@ -21,8 +21,8 @@ machine that has them, read `AGENTS.md`, then `.agents/memory/MEMORY.md`.
   and run the Teams package through those tests. That push is allowed. The
   pull request base is `deploy-runner`, not `main`. Do not merge pull request
   2. Do not install Teams on a client device.
-- Next task: Task 4, Download the two payloads. Tasks 1 to 3 are committed.
-  Do not pass `-Publish`. The installer files stay in `releases/cache/`.
+- Next task: Task 5, Pin the bootstrapper arguments. Tasks 1 to 4 are
+  committed. Do not pass `-Publish`. The installer files stay in `releases/cache/`.
 
 ## Already on `deploy-runner`
 
