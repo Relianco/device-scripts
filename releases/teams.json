@@ -1,0 +1,13 @@
+{
+  "name": "Microsoft Teams",
+  "arch": "x64",
+  "bootstrapperSourceUrl": "https://go.microsoft.com/fwlink/?linkid=2243204&clcid=0x409",
+  "bootstrapperFile": "teamsbootstrapper.exe",
+  "bootstrapperSha256": "c9d1c68b1f9048e6d04bc4313a4036f91c255df0988c4d876f687b5c1140440d",
+  "bootstrapperSize": 2035352,
+  "msixSourceUrl": "https://go.microsoft.com/fwlink/?linkid=2196106",
+  "msixFile": "MSTeams-x64.msix",
+  "msixSha256": "1bd28e184c0ec8572a8674560cd3f00e7cef002fe4471ccb9198f50d57391993",
+  "msixSize": 287175864,
+  "blobBase": "https://relianpub.blob.core.windows.net/pub/sec/"
+}

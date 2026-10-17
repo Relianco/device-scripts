@@ -76,29 +76,29 @@
 - Consumes: nothing
 - Produces: `Get-TeamsPinHash -Path <file>` returns lowercase SHA256. `releases/teams.json` keys, all required: `name`, `arch`, `bootstrapperSourceUrl`, `bootstrapperFile`, `bootstrapperSha256`, `bootstrapperSize`, `msixSourceUrl`, `msixFile`, `msixSha256`, `msixSize`, `blobBase`. `arch` is `x64`. `name` is `Microsoft Teams`. `blobBase` is the base in Global Constraints. The two source URLs are the fwlinks in Global Constraints. Both hashes are 64 lowercase hex characters. Both sizes are integers greater than zero.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `tests/teams-pin.Tests.ps1` dot-sources `scripts/pin-teams.ps1` under `RELIAN_DEPLOY_TEST=1`. It writes a temp file whose bytes are `teams-pin`, asserts `Get-TeamsPinHash` equals the SHA256 of those bytes, and asserts a json fixture with a short hash or a missing `msixSha256` makes `Test-TeamsPinRecord` return `$false`. It then loads `releases/teams.json` and asserts `Test-TeamsPinRecord` returns `$true`. It does not download.
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [x] **Step 2: Run the test and confirm it fails**
 
 Run: `pwsh -NoProfile -File tests/teams-pin.Tests.ps1`
 Expected: FAIL because `pin-teams.ps1` does not exist.
 
-- [ ] **Step 3: Implement the pin script and fill `releases/teams.json`**
+- [x] **Step 3: Implement the pin script and fill `releases/teams.json`**
 
 `Get-TeamsPinHash` uses `Get-FileHash -Algorithm SHA256` and returns lowercase hex. `Test-TeamsPinRecord` checks the keys and formats above.
 
 Download each source URL once, following redirects, into `releases/cache/`, with `curl` flags inline. Hash with `sha256sum` and size with `wc -c`. If either download fails, stop with status BLOCKED and do not invent a hash. Write `releases/teams.json` from those two results. Do not commit `releases/cache/`.
 
-- [ ] **Step 4: Run the test and the suite**
+- [x] **Step 4: Run the test and the suite**
 
 Run: `pwsh -NoProfile -File tests/teams-pin.Tests.ps1`
 Expected: exit 0.
 Run: `pwsh -NoProfile -File tests/run-all.ps1`
 Expected: exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `Add the Teams installer pin`
 
