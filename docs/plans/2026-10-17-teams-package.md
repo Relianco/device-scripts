@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work on branch `teams-package`, cut from `deploy-runner` at `61e6ec4`. Do not commit to `main`. Do not push. Do not open a pull request. Do not merge pull request 2.
+- Work on branch `teams-package`, cut from `deploy-runner` at `61e6ec4`. Do not commit to `main`. Do not merge pull request 2. Push, and open a pull request with base `deploy-runner`, only when the maintainer asks in the current session.
 - Before stopping, update `docs/STATUS.md` in the same commit as the task, or in its own commit if the task is unfinished. Set the next task, the branch, and what is still uncommitted. Do not write client names, device ids, tokens, or home-directory paths in that file or in any other committed file.
 - Do not run this package on a client device. Do not pass `-Publish`. Machine-specific notes, when they exist, are under `.agents/`. That directory is gitignored. Do not `git add` it.
 - Do not modify `bootstrap.ps1`, `collectors/`, `runner/Invoke-RelianRunner.ps1`, or `packages/action-probe/`.
@@ -241,4 +241,4 @@ The script's executed path, which tests assert by reading the source:
 
 ## Controller after Task 6
 
-Uploading the blobs, pushing `teams-package`, and any run on a client device are controller steps. They are not implementer tasks. Pull request 2 stays open.
+Uploading the blobs and any run on a client device are controller steps. They are not implementer tasks. Pull request 2 stays open. A pull request for this branch, when the maintainer asks, uses base `deploy-runner`.
