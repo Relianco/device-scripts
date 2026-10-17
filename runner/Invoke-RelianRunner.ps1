@@ -10,7 +10,8 @@ param(
     [AllowEmptyString()][string]$BrandPackSha256,
     [ValidateSet('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall')]
     [string]$Action,
-    [string]$PinVersion
+    [string]$PinVersion,
+    [AllowEmptyString()][string]$CancelPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +25,21 @@ function Write-RelianRunnerError {
     [Console]::Error.WriteLine($Message)
 }
 
+function Write-RelianRunnerDetail {
+    param(
+        [AllowEmptyString()][string]$Message,
+        [string[]]$Urls
+    )
+    $text = [string]$Message
+    foreach ($url in @($Urls)) {
+        if ([string]::IsNullOrWhiteSpace($url)) {
+            continue
+        }
+        $text = $text.Replace($url, 'a download URL')
+    }
+    Write-RelianRunnerError $text
+}
+
 function Test-RelianUrlHasUserInfo {
     param([Parameter(Mandatory)][string]$Url)
     try {
@@ -35,6 +51,152 @@ function Test-RelianUrlHasUserInfo {
     } catch {
         return $false
     }
+}
+
+function Test-RelianCancelled {
+    param([AllowEmptyString()][string]$CancelPath)
+    return [bool](& $script:TestCancel -CancelPath $CancelPath)
+}
+
+function Get-RelianHttpStatus {
+    param($Exception)
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard++
+        $code = $null
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'StatusCode' -and $null -ne $current.StatusCode) {
+            try {
+                $parsed = [int]$current.StatusCode
+                if ($parsed -ge 100 -and $parsed -le 599) {
+                    $code = $parsed
+                }
+            } catch {
+                $code = $null
+            }
+        }
+        if ($null -eq $code -and $names -contains 'Response' -and $null -ne $current.Response) {
+            $response = $current.Response
+            $responseNames = @($response.PSObject.Properties.Name)
+            if ($responseNames -contains 'StatusCode' -and $null -ne $response.StatusCode) {
+                try {
+                    $parsed = [int]$response.StatusCode
+                    if ($parsed -ge 100 -and $parsed -le 599) {
+                        $code = $parsed
+                    }
+                } catch {
+                    $code = $null
+                }
+            }
+        }
+        if ($null -ne $code) {
+            return $code
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Test-RelianTransientTransport {
+    param($Exception)
+    $webTransient = @(
+        'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
+        'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
+    )
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard++
+        if ($current -is [System.TimeoutException] -or
+            $current -is [System.Threading.Tasks.TaskCanceledException] -or
+            $current -is [System.Net.Sockets.SocketException]) {
+            return $true
+        }
+        if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
+            return $true
+        }
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'HttpRequestError' -and $null -ne $current.HttpRequestError -and $requestTransient -contains [string]$current.HttpRequestError) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Test-RelianDownloadIsTransient {
+    param($ErrorRecord)
+    $exception = $null
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ErrorRecord.Exception
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $exception = $ErrorRecord
+    }
+    if ($null -eq $exception) {
+        return $false
+    }
+    $status = Get-RelianHttpStatus -Exception $exception
+    if ($null -ne $status) {
+        return @(408, 429, 500, 502, 503, 504) -contains $status
+    }
+    return [bool](Test-RelianTransientTransport -Exception $exception)
+}
+
+function Invoke-RelianDownload {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$Label,
+        [AllowEmptyString()][string]$CancelPath
+    )
+
+    # Three attempts. Waits are 5s then 20s. The URL is never written to the error text.
+    $delays = @(5, 20)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if (Test-RelianCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+        $thrown = $null
+        try {
+            [void](& $script:DownloadFile -Url $Url -Destination $Destination)
+        } catch {
+            $thrown = $_
+        }
+        $exists = Test-Path -LiteralPath $Destination
+        if ($null -eq $thrown -and $exists) {
+            return 0
+        }
+        $status = $null
+        $transient = $false
+        if ($null -ne $thrown) {
+            $status = Get-RelianHttpStatus -Exception $thrown.Exception
+            $transient = [bool](Test-RelianDownloadIsTransient -ErrorRecord $thrown)
+        }
+        if (-not $transient -or $attempt -eq 3) {
+            if ($null -ne $status) {
+                Write-RelianRunnerError "download failed with HTTP $status for $Label"
+            } elseif ($null -eq $thrown) {
+                Write-RelianRunnerError "download wrote no file for $Label"
+            } else {
+                Write-RelianRunnerError "download failed for $Label"
+            }
+            return 1
+        }
+        if (Test-RelianCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+        if ($exists) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        }
+        [void](& $script:RetryDelay -Seconds $delays[$attempt - 1])
+        if (Test-RelianCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+    }
+    Write-RelianRunnerError "download failed for $Label"
+    return 1
 }
 
 function Remove-RelianDirectory {
@@ -56,7 +218,8 @@ function Invoke-RelianPackageSequence {
         [Parameter(Mandatory)][string]$ScriptPath,
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][string]$PinVersion,
-        [Parameter(Mandatory)][string]$WorkRoot
+        [Parameter(Mandatory)][string]$WorkRoot,
+        [AllowEmptyString()][string]$CancelPath = ''
     )
 
     # Reinstall is one uninstall followed by one install. Do not pass Action Reinstall.
@@ -78,6 +241,10 @@ function Invoke-RelianPackageSequence {
 
     $code = 0
     foreach ($step in $steps) {
+        # Checked before the call. A package process that has started is not stopped.
+        if (Test-RelianCancelled -CancelPath $CancelPath) {
+            return 130
+        }
         $result = & $script:InvokePackage -ScriptPath $ScriptPath -DeploymentType $step.DeploymentType -Action $step.Action -PinVersion $PinVersion -WorkRoot $WorkRoot
         if ($null -eq $result) {
             return 1
@@ -102,6 +269,31 @@ $script:DownloadFile = {
 $script:ExpandArchive = {
     param($Path, $Destination)
     Expand-Archive -LiteralPath $Path -DestinationPath $Destination -Force
+}
+
+$script:RelianCancelPath = ''
+$script:RetryDelay = {
+    param($Seconds)
+    # Callers pass 5 then 20. Sleep one second at a time so cancel is visible during the wait.
+    $remaining = [int]$Seconds
+    while ($remaining -gt 0) {
+        if (& $script:TestCancel -CancelPath $script:RelianCancelPath) {
+            return
+        }
+        Start-Sleep -Seconds 1
+        $remaining = $remaining - 1
+    }
+}
+
+$script:TestCancel = {
+    param($CancelPath)
+    if ($env:RELIAN_DEPLOY_CANCEL -eq '1') {
+        return $true
+    }
+    if ([string]::IsNullOrWhiteSpace($CancelPath)) {
+        return $false
+    }
+    return [bool](Test-Path -LiteralPath $CancelPath)
 }
 
 # Child process so a package exit does not end a second reinstall call.
@@ -134,7 +326,8 @@ function Invoke-RelianRunner {
         [Parameter(Mandatory)]
         [ValidateSet('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall')]
         [string]$Action,
-        [Parameter(Mandatory)][string]$PinVersion
+        [Parameter(Mandatory)][string]$PinVersion,
+        [AllowEmptyString()][string]$CancelPath = ''
     )
 
     foreach ($url in @($PackageUrl, $ToolkitUrl, $BrandPackUrl)) {
@@ -150,6 +343,11 @@ function Invoke-RelianRunner {
         return 0
     }
 
+    if (Test-RelianCancelled -CancelPath $CancelPath) {
+        return 130
+    }
+
+    $script:RelianCancelPath = [string]$CancelPath
     $keep = $env:RELIAN_DEPLOY_KEEP_WORK -eq '1'
     $stamp = [guid]::NewGuid().ToString('n')
     $tempRoot = [System.IO.Path]::GetTempPath()
@@ -164,25 +362,24 @@ function Invoke-RelianRunner {
         $toolkitFile = Join-Path $stage 'toolkit.zip'
         $brandFile = Join-Path $stage 'brand.zip'
 
-        [void](& $script:DownloadFile -Url $PackageUrl -Destination $packageFile)
-        [void](& $script:DownloadFile -Url $ToolkitUrl -Destination $toolkitFile)
-        [void](& $script:DownloadFile -Url $BrandPackUrl -Destination $brandFile)
-
         $pins = @(
-            [pscustomobject]@{ Path = $packageFile; Expected = $PackageSha256; Label = 'package' }
-            [pscustomobject]@{ Path = $toolkitFile; Expected = $ToolkitSha256; Label = 'toolkit' }
-            [pscustomobject]@{ Path = $brandFile; Expected = $BrandPackSha256; Label = 'brand pack' }
+            [pscustomobject]@{ Url = $PackageUrl; Path = $packageFile; Expected = $PackageSha256; Label = 'package' }
+            [pscustomobject]@{ Url = $ToolkitUrl; Path = $toolkitFile; Expected = $ToolkitSha256; Label = 'toolkit' }
+            [pscustomobject]@{ Url = $BrandPackUrl; Path = $brandFile; Expected = $BrandPackSha256; Label = 'brand pack' }
         )
         $verified = $true
         foreach ($pin in $pins) {
-            if (-not (Test-Path -LiteralPath $pin.Path)) {
-                Write-RelianRunnerError "download wrote no file for $($pin.Label)"
+            $downloadCode = [int](Invoke-RelianDownload -Url $pin.Url -Destination $pin.Path -Label $pin.Label -CancelPath $CancelPath)
+            if ($downloadCode -ne 0) {
+                $exitCode = $downloadCode
                 $verified = $false
                 break
             }
+            # A hash mismatch is not retried, and the remaining pins are not downloaded.
             $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $pin.Path).Hash
             if (-not $actual.Equals([string]$pin.Expected, [System.StringComparison]::OrdinalIgnoreCase)) {
                 Write-RelianRunnerError "hash mismatch for $($pin.Label)"
+                $exitCode = 1
                 $verified = $false
                 break
             }
@@ -193,12 +390,13 @@ function Invoke-RelianRunner {
             [void](& $script:ExpandArchive -Path $brandFile -Destination $work)
             $scriptPath = Join-Path $work 'Invoke-Package.ps1'
             [System.IO.File]::Copy($packageFile, $scriptPath, $true)
-            $exitCode = [int](Invoke-RelianPackageSequence -ScriptPath $scriptPath -Action $Action -PinVersion $PinVersion -WorkRoot $work)
+            $exitCode = [int](Invoke-RelianPackageSequence -ScriptPath $scriptPath -Action $Action -PinVersion $PinVersion -WorkRoot $work -CancelPath $CancelPath)
         }
     } catch {
-        Write-RelianRunnerError $_.Exception.Message
+        Write-RelianRunnerDetail -Message $_.Exception.Message -Urls @($PackageUrl, $ToolkitUrl, $BrandPackUrl)
         $exitCode = 1
     } finally {
+        $script:RelianCancelPath = ''
         Remove-RelianDirectory -Path $stage
         if (-not $keep) {
             Remove-RelianDirectory -Path $work
@@ -230,7 +428,13 @@ $script:ExitCode = 1
 try {
     $script:ExitCode = [int](Invoke-RelianRunner @PSBoundParameters)
 } catch {
-    Write-RelianRunnerError $_.Exception.Message
+    $urls = @()
+    foreach ($secretName in @('PackageUrl', 'ToolkitUrl', 'BrandPackUrl')) {
+        if ($PSBoundParameters.ContainsKey($secretName)) {
+            $urls += [string]$PSBoundParameters[$secretName]
+        }
+    }
+    Write-RelianRunnerDetail -Message $_.Exception.Message -Urls $urls
     $script:ExitCode = 1
 }
 

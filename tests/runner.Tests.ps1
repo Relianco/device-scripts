@@ -141,6 +141,16 @@ function Set-ByteStubs {
     $script:downloadDestinations = [System.Collections.Generic.List[string]]::new()
     $script:expandCount = 0
     $script:calls = [System.Collections.Generic.List[object]]::new()
+    $script:retryDelays = [System.Collections.Generic.List[int]]::new()
+    $script:retryReplacementUsed = $false
+    if ($null -ne $script:savedTestCancel) {
+        $script:TestCancel = $script:savedTestCancel
+    }
+    $script:RetryDelay = {
+        param($Seconds)
+        $script:retryReplacementUsed = $true
+        [void]$script:retryDelays.Add([int]$Seconds)
+    }
     $script:DownloadFile = {
         param($Url, $Destination)
         [void]$script:downloadUrls.Add($Url)
@@ -207,6 +217,7 @@ function Invoke-PinnedRunner {
         [string]$PackageUrlValue = $packageUrl,
         [string]$ToolkitUrlValue = $toolkitUrl,
         [string]$BrandPackUrlValue = $brandUrl,
+        [AllowEmptyString()][string]$CancelPath = '',
         $PackageSha256,
         $ToolkitSha256,
         $BrandPackSha256
@@ -214,7 +225,7 @@ function Invoke-PinnedRunner {
     if (-not $PSBoundParameters.ContainsKey('PackageSha256')) { $PackageSha256 = [string]$Hashes['package'] }
     if (-not $PSBoundParameters.ContainsKey('ToolkitSha256')) { $ToolkitSha256 = [string]$Hashes['toolkit'] }
     if (-not $PSBoundParameters.ContainsKey('BrandPackSha256')) { $BrandPackSha256 = [string]$Hashes['brand'] }
-    return [int](Invoke-RelianRunner -PackageUrl $PackageUrlValue -PackageSha256 $PackageSha256 -ToolkitUrl $ToolkitUrlValue -ToolkitSha256 $ToolkitSha256 -BrandPackUrl $BrandPackUrlValue -BrandPackSha256 $BrandPackSha256 -Action $Action -PinVersion $PinVersion)
+    return [int](Invoke-RelianRunner -PackageUrl $PackageUrlValue -PackageSha256 $PackageSha256 -ToolkitUrl $ToolkitUrlValue -ToolkitSha256 $ToolkitSha256 -BrandPackUrl $BrandPackUrlValue -BrandPackSha256 $BrandPackSha256 -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath)
 }
 
 function Assert-NoInvokeOrExpand {
@@ -236,6 +247,90 @@ function Assert-WorkRemoved {
     }
     if ($script:calls.Count -gt 0 -and (Test-Path -LiteralPath $script:calls[0].WorkRoot)) {
         Fail "$Label left work directory $($script:calls[0].WorkRoot)"
+    }
+}
+
+function Write-FixtureDownload {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    [void]$script:downloadUrls.Add($Url)
+    [void]$script:downloadDestinations.Add($Destination)
+    if (-not $script:fixturePayloads.ContainsKey($Url)) {
+        throw "no fixture for $Url"
+    }
+    $parent = Split-Path -Parent $Destination
+    if (-not [string]::IsNullOrEmpty($parent) -and -not (Test-Path -LiteralPath $parent)) {
+        [void](New-Item -ItemType Directory -Path $parent -Force)
+    }
+    [System.IO.File]::WriteAllBytes($Destination, [byte[]]$script:fixturePayloads[$Url])
+}
+
+function New-StatusException {
+    param(
+        [Parameter(Mandatory)][int]$Status,
+        [Parameter(Mandatory)][string]$Url
+    )
+    $response = [System.Net.Http.HttpResponseMessage]::new([System.Net.HttpStatusCode]$Status)
+    return [Microsoft.PowerShell.Commands.HttpResponseException]::new("Response status code does not indicate success: $Status ($Url).", $response)
+}
+
+function New-ResponseStatusException {
+    param(
+        [Parameter(Mandatory)][int]$Status,
+        [Parameter(Mandatory)][string]$Url
+    )
+    if (-not ('RelianFakeResponseException' -as [type])) {
+        Add-Type -TypeDefinition @'
+public class RelianFakeHttpResponse {
+    public int StatusCode { get; private set; }
+    public RelianFakeHttpResponse(int statusCode) { StatusCode = statusCode; }
+}
+public class RelianFakeResponseException : System.Exception {
+    public RelianFakeHttpResponse Response { get; private set; }
+    public RelianFakeResponseException(string message, int statusCode) : base(message) {
+        Response = new RelianFakeHttpResponse(statusCode);
+    }
+}
+'@
+    }
+    return [RelianFakeResponseException]::new("The remote server returned an error: ($Status) $Url", $Status)
+}
+
+function New-TransportException {
+    param(
+        [Parameter(Mandatory)][ValidateSet('timeout', 'connection', 'dns')][string]$Kind,
+        [Parameter(Mandatory)][string]$Url
+    )
+    if ($Kind -eq 'timeout') {
+        return [System.Net.WebException]::new('The operation has timed out. ' + $Url, [System.Net.WebExceptionStatus]::Timeout)
+    }
+    if ($Kind -eq 'connection') {
+        return [System.Net.Http.HttpRequestException]::new([System.Net.Http.HttpRequestError]::ConnectionError, 'Connection refused ' + $Url, $null, $null)
+    }
+    return [System.Net.Http.HttpRequestException]::new([System.Net.Http.HttpRequestError]::NameResolutionError, 'Name or service not known ' + $Url, $null, $null)
+}
+
+function Invoke-RunnerCaptured {
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $previousTest = $env:RELIAN_DEPLOY_TEST
+    $writer = [System.IO.StringWriter]::new()
+    $previousError = [Console]::Error
+    [Console]::SetError($writer)
+    $env:RELIAN_DEPLOY_TEST = '0'
+    try {
+        $code = & $Body
+        $text = $writer.ToString()
+        return [pscustomobject]@{ Code = [int]$code; ErrorText = $text }
+    } finally {
+        [Console]::SetError($previousError)
+        if ([string]::IsNullOrEmpty($previousTest)) {
+            Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST' -ErrorAction SilentlyContinue
+        } else {
+            $env:RELIAN_DEPLOY_TEST = $previousTest
+        }
+        $writer.Dispose()
     }
 }
 
@@ -262,9 +357,18 @@ $userInfoUrl = 'https://user:token@github.com/Relianco/device-scripts'
 if (-not (Get-Command Invoke-RelianRunner -ErrorAction SilentlyContinue)) {
     Fail 'Invoke-RelianRunner was not defined'
 }
+foreach ($hookName in @('RetryDelay', 'TestCancel')) {
+    $hook = Get-Variable -Name $hookName -Scope Script -ErrorAction SilentlyContinue
+    if ($null -eq $hook -or $null -eq $hook.Value -or $hook.Value -isnot [scriptblock]) {
+        Fail "$hookName is not a scriptblock"
+    }
+}
+
 foreach ($pair in @(
     @{ Name = 'DownloadFile'; Block = $script:DownloadFile; Needles = @('param($Url, $Destination)', 'Invoke-WebRequest', '-UseBasicParsing', '-TimeoutSec 120') }
     @{ Name = 'ExpandArchive'; Block = $script:ExpandArchive; Needles = @('param($Path, $Destination)', 'Expand-Archive') }
+    @{ Name = 'RetryDelay'; Block = $script:RetryDelay; Needles = @('param($Seconds)', 'Start-Sleep', '-Seconds') }
+    @{ Name = 'TestCancel'; Block = $script:TestCancel; Needles = @('param($CancelPath)', 'RELIAN_DEPLOY_CANCEL', 'Test-Path', '-LiteralPath') }
     @{ Name = 'InvokePackage'; Block = $script:InvokePackage; Needles = @(
             'param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)'
             'MainModule.FileName'
@@ -296,6 +400,8 @@ foreach ($pair in @(
 
 $savedExpand = $script:ExpandArchive
 $savedInvoke = $script:InvokePackage
+$script:savedRetryDelay = $script:RetryDelay
+$script:savedTestCancel = $script:TestCancel
 
 $temp = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-fixture-' + [guid]::NewGuid().ToString('n'))
 [void](New-Item -ItemType Directory -Path $temp)
@@ -446,8 +552,12 @@ exit 9
     if ($mismatch -ne 1) {
         Fail "hash mismatch returned $mismatch"
     }
-    if ($script:downloadUrls.Count -ne 3) {
-        Fail "hash mismatch downloaded $($script:downloadUrls.Count) files"
+    # Checked after the package download. The other pins are not fetched, and the download is not retried.
+    if ($script:downloadUrls.Count -ne 1 -or $script:downloadUrls[0] -cne $packageUrl) {
+        Fail "hash mismatch downloaded [$($script:downloadUrls -join ', ')]"
+    }
+    if ($script:retryDelays.Count -ne 0) {
+        Fail "hash mismatch waited [$($script:retryDelays -join ', ')]"
     }
     Assert-NoInvokeOrExpand -Label 'hash mismatch'
     Assert-WorkRemoved -Label 'hash mismatch'
@@ -461,6 +571,12 @@ exit 9
     $downloadFailed = Invoke-PinnedRunner -Hashes (Get-RoleHashes -Payloads $payloads -Casing 'upper') -Action 'Install' -PinVersion '1.0.0'
     if ($downloadFailed -ne 1) {
         Fail "download failure returned $downloadFailed"
+    }
+    if ($script:downloadUrls.Count -ne 1) {
+        Fail "download failure called DownloadFile $($script:downloadUrls.Count) times"
+    }
+    if ($script:retryDelays.Count -ne 0) {
+        Fail "download failure waited [$($script:retryDelays -join ', ')]"
     }
     Assert-NoInvokeOrExpand -Label 'download failure'
 
@@ -486,6 +602,12 @@ exit 9
     }
     if ($script:expandCount -ne 2) {
         Fail "uppercase install expanded $($script:expandCount) times"
+    }
+    if ($script:downloadUrls.Count -ne 3) {
+        Fail "uppercase install downloaded $($script:downloadUrls.Count) files"
+    }
+    if ($script:retryDelays.Count -ne 0) {
+        Fail "uppercase install waited [$($script:retryDelays -join ', ')]"
     }
     Assert-WorkRemoved -Label 'uppercase install'
     $leaked = @(Get-RunnerTempDirs | Where-Object { $beforeDirs -notcontains $_ })
@@ -663,6 +785,280 @@ exit 9
         Fail "test did not delete $keptRoot"
     }
 
+    $cancelFlag = Join-Path $temp 'cancel.flag'
+    [System.IO.File]::WriteAllText($cancelFlag, '1', [System.Text.UTF8Encoding]::new($false))
+    $missingCancel = Join-Path $temp 'missing-cancel-flag'
+    $previousCancel = $env:RELIAN_DEPLOY_CANCEL
+    Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+    try {
+        if (& $script:savedTestCancel -CancelPath '') {
+            Fail 'default TestCancel is true without a signal'
+        }
+        if (& $script:savedTestCancel -CancelPath '   ') {
+            Fail 'default TestCancel checks a whitespace path'
+        }
+        if (& $script:savedTestCancel -CancelPath $missingCancel) {
+            Fail 'default TestCancel treated a missing file as cancel'
+        }
+        $env:RELIAN_DEPLOY_CANCEL = '1'
+        if (-not (& $script:savedTestCancel -CancelPath '')) {
+            Fail 'default TestCancel ignored RELIAN_DEPLOY_CANCEL'
+        }
+        if (-not (& $script:savedTestCancel -CancelPath $missingCancel)) {
+            Fail 'default TestCancel ignored the env when the file is missing'
+        }
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+        if (-not (& $script:savedTestCancel -CancelPath $cancelFlag)) {
+            Fail 'default TestCancel ignored an existing CancelPath'
+        }
+    } finally {
+        if ([string]::IsNullOrEmpty($previousCancel)) {
+            Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+        } else {
+            $env:RELIAN_DEPLOY_CANCEL = $previousCancel
+        }
+    }
+
+    foreach ($kind in @('timeout', 'connection', 'dns', 'web-connect', '408', '429', '500', '502', '503', '504', 'response503')) {
+        Set-ByteStubs -Payloads $urlPayloads
+        $script:failureKind = $kind
+        $script:packageFailures = 0
+        $script:DownloadFile = {
+            param($Url, $Destination)
+            if ($Url -eq $packageUrl -and $script:packageFailures -lt 2) {
+                $script:packageFailures = $script:packageFailures + 1
+                [void]$script:downloadUrls.Add($Url)
+                [void]$script:downloadDestinations.Add($Destination)
+                if ($script:failureKind -eq 'timeout' -or $script:failureKind -eq 'connection' -or $script:failureKind -eq 'dns') {
+                    throw (New-TransportException -Kind $script:failureKind -Url $Url)
+                }
+                if ($script:failureKind -eq 'web-connect') {
+                    throw [System.Net.WebException]::new('Unable to connect to the remote server. ' + $Url, [System.Net.WebExceptionStatus]::ConnectFailure)
+                }
+                if ($script:failureKind -eq 'response503') {
+                    throw (New-ResponseStatusException -Status 503 -Url $Url)
+                }
+                throw (New-StatusException -Status ([int]$script:failureKind) -Url $Url)
+            }
+            Write-FixtureDownload -Url $Url -Destination $Destination
+        }
+        $retried = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.2.3'
+        if ($retried -ne 0) {
+            Fail "$kind retry returned $retried"
+        }
+        if (-not $script:retryReplacementUsed) {
+            Fail "$kind retry did not use the replacement delay"
+        }
+        if ($script:retryDelays.Count -ne 2 -or [int]$script:retryDelays[0] -ne 5 -or [int]$script:retryDelays[1] -ne 20) {
+            Fail "$kind retry delays were [$($script:retryDelays -join ', ')]"
+        }
+        if ($script:calls.Count -ne 1) {
+            Fail "$kind retry called InvokePackage $($script:calls.Count) times"
+        }
+        $packageDownloads = @($script:downloadUrls | Where-Object { $_ -eq $packageUrl })
+        if ($packageDownloads.Count -ne 3) {
+            Fail "$kind retry downloaded the package $($packageDownloads.Count) times"
+        }
+        Assert-WorkRemoved -Label "$kind retry"
+    }
+
+    foreach ($status in @(401, 403, 404, 'response404')) {
+        Set-ByteStubs -Payloads $urlPayloads
+        $script:permanentStatus = $status
+        $script:DownloadFile = {
+            param($Url, $Destination)
+            [void]$script:downloadUrls.Add($Url)
+            if ($script:permanentStatus -eq 'response404') {
+                throw (New-ResponseStatusException -Status 404 -Url $Url)
+            }
+            throw (New-StatusException -Status ([int]$script:permanentStatus) -Url $Url)
+        }
+        $permanent = Invoke-RunnerCaptured {
+            Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0'
+        }
+        if ($permanent.Code -ne 1) {
+            Fail "HTTP $status returned $($permanent.Code)"
+        }
+        if ($script:downloadUrls.Count -ne 1) {
+            Fail "HTTP $status downloaded $($script:downloadUrls.Count) times"
+        }
+        if ($script:retryDelays.Count -ne 0) {
+            Fail "HTTP $status waited [$($script:retryDelays -join ', ')]"
+        }
+        Assert-NoInvokeOrExpand -Label "HTTP $status"
+        $shownStatus = $(if ($status -eq 'response404') { 404 } else { [int]$status })
+        if ($permanent.ErrorText -notmatch "(^|\D)$shownStatus(\D|$)") {
+            Fail "HTTP $status error was [$($permanent.ErrorText)]"
+        }
+        if ($permanent.ErrorText.Contains($packageUrl) -or $permanent.ErrorText.Contains('example.invalid') -or $permanent.ErrorText.Contains('https://')) {
+            Fail "HTTP $status error included the URL [$($permanent.ErrorText)]"
+        }
+    }
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        [void]$script:downloadUrls.Add($Url)
+        throw (New-TransportException -Kind 'dns' -Url $Url)
+    }
+    $exhausted = Invoke-RunnerCaptured {
+        Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0'
+    }
+    if ($exhausted.Code -ne 1) {
+        Fail "exhausted download returned $($exhausted.Code)"
+    }
+    if ($script:downloadUrls.Count -ne 3 -or @($script:downloadUrls | Where-Object { $_ -eq $packageUrl }).Count -ne 3) {
+        Fail "exhausted download fetched [$($script:downloadUrls -join ', ')]"
+    }
+    if ($script:retryDelays.Count -ne 2 -or [int]$script:retryDelays[0] -ne 5 -or [int]$script:retryDelays[1] -ne 20) {
+        Fail "exhausted download delays were [$($script:retryDelays -join ', ')]"
+    }
+    if (-not $script:retryReplacementUsed) {
+        Fail 'exhausted download did not use the replacement delay'
+    }
+    Assert-NoInvokeOrExpand -Label 'exhausted download'
+    if ($exhausted.ErrorText -notmatch 'download failed') {
+        Fail "exhausted download error was [$($exhausted.ErrorText)]"
+    }
+    if ($exhausted.ErrorText.Contains($packageUrl) -or $exhausted.ErrorText.Contains('example.invalid') -or $exhausted.ErrorText.Contains('https://')) {
+        Fail "exhausted download error included the URL [$($exhausted.ErrorText)]"
+    }
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        [void]$script:downloadUrls.Add($Url)
+        [void]$script:downloadDestinations.Add($Destination)
+    }
+    $missingFile = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0'
+    if ($missingFile -ne 1) {
+        Fail "missing download file returned $missingFile"
+    }
+    if ($script:downloadUrls.Count -ne 1) {
+        Fail "missing download file called DownloadFile $($script:downloadUrls.Count) times"
+    }
+    if ($script:retryDelays.Count -ne 0) {
+        Fail "missing download file waited [$($script:retryDelays -join ', ')]"
+    }
+    Assert-NoInvokeOrExpand -Label 'missing download file'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $script:cancelNow = $false
+    $script:TestCancel = {
+        param($CancelPath)
+        return [bool]$script:cancelNow
+    }
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        [void]$script:downloadUrls.Add($Url)
+        $script:cancelNow = $true
+        throw (New-TransportException -Kind 'timeout' -Url $Url)
+    }
+    $cancelBeforeWait = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0'
+    if ($cancelBeforeWait -ne 130) {
+        Fail "cancel before retry wait returned $cancelBeforeWait"
+    }
+    if ($script:downloadUrls.Count -ne 1 -or $script:retryDelays.Count -ne 0) {
+        Fail "cancel before retry wait downloaded $($script:downloadUrls.Count) and waited [$($script:retryDelays -join ', ')]"
+    }
+    Assert-NoInvokeOrExpand -Label 'cancel before retry wait'
+    Assert-WorkRemoved -Label 'cancel before retry wait'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $script:cancelNow = $false
+    $script:TestCancel = {
+        param($CancelPath)
+        return [bool]$script:cancelNow
+    }
+    $script:RetryDelay = {
+        param($Seconds)
+        $script:retryReplacementUsed = $true
+        [void]$script:retryDelays.Add([int]$Seconds)
+        $script:cancelNow = $true
+    }
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        [void]$script:downloadUrls.Add($Url)
+        throw (New-TransportException -Kind 'connection' -Url $Url)
+    }
+    $cancelDuringWait = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0'
+    if ($cancelDuringWait -ne 130) {
+        Fail "cancel during retry wait returned $cancelDuringWait"
+    }
+    if (-not $script:retryReplacementUsed) {
+        Fail 'cancel during retry wait did not use the replacement delay'
+    }
+    if ($script:downloadUrls.Count -ne 1 -or $script:retryDelays.Count -ne 1 -or [int]$script:retryDelays[0] -ne 5) {
+        Fail "cancel during retry wait downloaded $($script:downloadUrls.Count) and waited [$($script:retryDelays -join ', ')]"
+    }
+    Assert-NoInvokeOrExpand -Label 'cancel during retry wait'
+
+    Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+    Set-ByteStubs -Payloads $urlPayloads
+    $env:RELIAN_DEPLOY_CANCEL = '1'
+    try {
+        $envCancel = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0'
+    } finally {
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+    }
+    if ($envCancel -ne 130) {
+        Fail "RELIAN_DEPLOY_CANCEL returned $envCancel"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'RELIAN_DEPLOY_CANCEL called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'RELIAN_DEPLOY_CANCEL'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $pathCancel = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -CancelPath $cancelFlag
+    if ($pathCancel -ne 130) {
+        Fail "CancelPath returned $pathCancel"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'CancelPath called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'CancelPath'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $absentCancel = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -CancelPath $missingCancel
+    if ($absentCancel -ne 0 -or $script:calls.Count -ne 1 -or $script:downloadUrls.Count -ne 3) {
+        Fail "missing CancelPath returned $absentCancel calls $($script:calls.Count) downloads $($script:downloadUrls.Count)"
+    }
+
+    Set-ByteStubs -Payloads $urlPayloads -Codes @(0, 99)
+    Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+    $script:InvokePackage = {
+        param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)
+        [void]$script:calls.Add([pscustomobject]@{
+            ScriptPath = [string]$ScriptPath
+            DeploymentType = [string]$DeploymentType
+            Action = [string]$Action
+            PinVersion = [string]$PinVersion
+            WorkRoot = [string]$WorkRoot
+            Exists = (Test-Path -LiteralPath $ScriptPath)
+        })
+        if ($script:calls.Count -eq 1) {
+            $env:RELIAN_DEPLOY_CANCEL = '1'
+            return 0
+        }
+        return 99
+    }
+    try {
+        $reinstallCancel = Invoke-PinnedRunner -Hashes $upper -Action 'Reinstall' -PinVersion '3.2.1'
+    } finally {
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+    }
+    if ($reinstallCancel -ne 130) {
+        Fail "reinstall cancel returned $reinstallCancel"
+    }
+    if ($script:calls.Count -ne 1) {
+        Fail "reinstall cancel called InvokePackage $($script:calls.Count) times"
+    }
+    if ($script:calls[0].DeploymentType -cne 'Uninstall' -or $script:calls[0].Action -cne 'Uninstall') {
+        Fail "reinstall cancel first call was $($script:calls[0].DeploymentType)/$($script:calls[0].Action)"
+    }
+    Assert-WorkRemoved -Label 'reinstall cancel'
+
     $entryBlank = Invoke-PwshFile -Script $runner -Arguments @(
         '-PackageUrl', $packageUrl,
         '-PackageSha256', 'AA',
@@ -701,9 +1097,52 @@ exit 9
         Fail "entry userinfo stderr was [$($entryUser.Stderr)]"
     }
 
+    $entryCancelPath = Invoke-PwshFile -Script $runner -Arguments @(
+        '-PackageUrl', $packageUrl,
+        '-PackageSha256', 'AA',
+        '-ToolkitUrl', $toolkitUrl,
+        '-ToolkitSha256', 'BB',
+        '-BrandPackUrl', $brandUrl,
+        '-BrandPackSha256', 'CC',
+        '-Action', 'Install',
+        '-PinVersion', '1.0.0',
+        '-CancelPath', $cancelFlag
+    )
+    if ($entryCancelPath.ExitCode -ne 130) {
+        Fail "entry CancelPath exited $($entryCancelPath.ExitCode) stdout=[$($entryCancelPath.Stdout)] stderr=[$($entryCancelPath.Stderr)]"
+    }
+    $entryCancelText = $entryCancelPath.Stdout + $entryCancelPath.Stderr
+    if ($entryCancelText.Contains($packageUrl) -or $entryCancelText.Contains('example.invalid') -or $entryCancelText.Trim() -ne '') {
+        Fail "entry CancelPath printed [$entryCancelText]"
+    }
+
+    $env:RELIAN_DEPLOY_CANCEL = '1'
+    try {
+        $entryCancelEnv = Invoke-PwshFile -Script $runner -Arguments @(
+            '-PackageUrl', $packageUrl,
+            '-PackageSha256', 'AA',
+            '-ToolkitUrl', $toolkitUrl,
+            '-ToolkitSha256', 'BB',
+            '-BrandPackUrl', $brandUrl,
+            '-BrandPackSha256', 'CC',
+            '-Action', 'Reinstall',
+            '-PinVersion', '1.0.0'
+        )
+    } finally {
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+    }
+    if ($entryCancelEnv.ExitCode -ne 130) {
+        Fail "entry RELIAN_DEPLOY_CANCEL exited $($entryCancelEnv.ExitCode) stdout=[$($entryCancelEnv.Stdout)] stderr=[$($entryCancelEnv.Stderr)]"
+    }
+    $entryEnvText = $entryCancelEnv.Stdout + $entryCancelEnv.Stderr
+    if ($entryEnvText.Contains($packageUrl) -or $entryEnvText.Contains('example.invalid') -or $entryEnvText.Trim() -ne '') {
+        Fail "entry RELIAN_DEPLOY_CANCEL printed [$entryEnvText]"
+    }
+
     Write-Output 'runner tests passed'
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_KEEP_WORK' -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $temp) {
         Remove-Item -LiteralPath $temp -Recurse -Force
     }
