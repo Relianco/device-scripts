@@ -230,6 +230,31 @@ if ((Invoke-ExitMap -ToolkitExit 60001) -ne 60001) {
 }
 
 try {
+    $savedProgramData = $env:ProgramData
+    $savedMarkerRoot = $MarkerRoot
+    try {
+        $env:ProgramData = Join-Path (New-WorkRoot) 'programdata'
+        $MarkerRoot = ''
+        $defaultRoot = Get-ProbeMarkerRoot
+        $expectedRoot = Join-Path (Join-Path $env:ProgramData 'Relian') 'action-probe'
+        if ($defaultRoot -cne $expectedRoot) {
+            Fail "default marker root was [$defaultRoot] expected [$expectedRoot]"
+        }
+        $explicitRoot = Join-Path (New-WorkRoot) 'explicit'
+        $MarkerRoot = $explicitRoot
+        $overrideRoot = Get-ProbeMarkerRoot
+        if ($overrideRoot -cne $explicitRoot) {
+            Fail "explicit marker root was [$overrideRoot] expected [$explicitRoot]"
+        }
+    } finally {
+        if ([string]::IsNullOrEmpty($savedProgramData)) {
+            Remove-Item -LiteralPath 'Env:ProgramData' -ErrorAction SilentlyContinue
+        } else {
+            $env:ProgramData = $savedProgramData
+        }
+        $MarkerRoot = $savedMarkerRoot
+    }
+
     foreach ($badPin in @('', 'not-a-version', '1.2.3.4.5', 'v1.0')) {
         $parent = New-WorkRoot
         $root = Join-Path $parent 'marker'
@@ -302,6 +327,18 @@ try {
             Fail "$actionName newer without sentinel returned $newerBareCode"
         }
         Assert-Snapshot -Root $newerBare -Before $newerBareBefore -Label "$actionName newer without sentinel"
+
+        $gapParent = New-WorkRoot
+        $gap = Join-Path $gapParent 'marker'
+        Write-Exact -Path (Join-Path $gap 'marker.txt') -Text '1.2.3'
+        Write-Exact -Path (Join-Path $gap 'toolkit.log') -Text "Install`n"
+        $gapCode = Invoke-Action -ActionName $actionName -Pin '1.2.3' -Root $gap
+        if ($gapCode -ne 0) {
+            Fail "$actionName sentinel gap returned $gapCode"
+        }
+        Assert-Text -Path (Join-Path $gap 'marker.txt') -Expected '1.2.3' -Label "$actionName sentinel gap marker"
+        Assert-Text -Path (Join-Path $gap 'sentinel.txt') -Expected 'ok' -Label "$actionName sentinel gap sentinel"
+        Assert-Text -Path (Join-Path $gap 'toolkit.log') -Expected "Install`n" -Label "$actionName sentinel gap log"
     }
 
     $repairMissingParent = New-WorkRoot

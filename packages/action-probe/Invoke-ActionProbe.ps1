@@ -1,6 +1,7 @@
 # Script parameters are not Mandatory: a mandatory param block prompts when this
 # file is dot-sourced under RELIAN_DEPLOY_TEST. The runner passes DeploymentType,
-# Action, and PinVersion. MarkerRoot is optional; the default is beside the script.
+# Action, and PinVersion. MarkerRoot is optional; the default is
+# $env:ProgramData\Relian\action-probe so the marker survives the work directory.
 [CmdletBinding()]
 param(
     [ValidateSet('Install', 'Uninstall', 'Repair')]
@@ -103,7 +104,7 @@ function Get-ProbeMarkerRoot {
     if (-not [string]::IsNullOrWhiteSpace($MarkerRoot)) {
         return $MarkerRoot
     }
-    return (Join-Path $PSScriptRoot 'marker')
+    return (Join-Path (Join-Path $env:ProgramData 'Relian') 'action-probe')
 }
 
 function Invoke-ProbeAction {
@@ -189,10 +190,9 @@ function Invoke-ProbeAction {
     if ($marker.Version -gt $pin) {
         return 0
     }
-    if ($sentinelExists) {
-        return 0
+    if (-not $sentinelExists) {
+        Write-ProbeText -Path $sentinelPath -Text 'ok'
     }
-    Write-ProbeInstall -MarkerPath $markerPath -SentinelPath $sentinelPath -LogPath $logPath -PinText $PinVersion
     return 0
 }
 

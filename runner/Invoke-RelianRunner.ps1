@@ -83,6 +83,10 @@ function Invoke-RelianPackageSequence {
             return 1
         }
         $code = [int]$result
+        # 1602 is a toolkit deferral. Map it to 1 and do not continue.
+        if ($code -eq 1602) {
+            return 1
+        }
         if ($code -ne 0) {
             return $code
         }

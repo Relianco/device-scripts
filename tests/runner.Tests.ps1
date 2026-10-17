@@ -558,6 +558,24 @@ exit 9
         Fail "reinstall first failure call was $($script:calls[0].DeploymentType)/$($script:calls[0].Action)"
     }
 
+    Set-ByteStubs -Payloads $urlPayloads -Codes @(1602)
+    $reinstallDefer = Invoke-PinnedRunner -Hashes $upper -Action 'Reinstall' -PinVersion '3.2.1'
+    if ($reinstallDefer -ne 1) {
+        Fail "reinstall deferral returned $reinstallDefer"
+    }
+    if ($script:calls.Count -ne 1) {
+        Fail "reinstall deferral called InvokePackage $($script:calls.Count) times"
+    }
+    if ($script:calls[0].DeploymentType -cne 'Uninstall' -or $script:calls[0].Action -cne 'Uninstall') {
+        Fail "reinstall deferral call was $($script:calls[0].DeploymentType)/$($script:calls[0].Action)"
+    }
+
+    Set-ByteStubs -Payloads $urlPayloads -Codes @(1602)
+    $installDefer = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '3.2.1'
+    if ($installDefer -ne 1 -or $script:calls.Count -ne 1) {
+        Fail "install deferral returned $installDefer calls $($script:calls.Count)"
+    }
+
     Set-ByteStubs -Payloads $urlPayloads -Codes @(0, 4)
     $reinstallSecond = Invoke-PinnedRunner -Hashes $upper -Action 'Reinstall' -PinVersion '3.2.1'
     if ($reinstallSecond -ne 4 -or $script:calls.Count -ne 2) {
