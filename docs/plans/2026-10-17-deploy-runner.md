@@ -214,10 +214,41 @@ Dry run prints two blob URLs and does not invoke `az`. The brand URL uses the sh
 
 The test replaces the az invoker. Without `-Publish`, the invoker is not called. With `-Publish`, the recorded argument list contains `--auth-mode` and `login`, and does not contain a connection string or an account key.
 
-README `Deploy runner` says, in this order: the runner file path, the three pins and that an empty pin exits 0, the blob base URL, and that `bootstrap.ps1` remains the collector loader.
+README `Deploy runner` says, in this order: the runner file path, the three pins and that an empty pin exits 0, the three download attempts and that a bad hash is not retried, cancel exit 130, the blob base URL, and that `bootstrap.ps1` remains the collector loader.
 
 Commit: `Add the pack publisher`.
 
-## Controller after Task 5
+## Task 6: Retries and cancel
+
+Add download retries and a cancel check to `runner/Invoke-RelianRunner.ps1`. Extend `tests/runner.Tests.ps1`. Do not retry the package, and do not call NinjaOne.
+
+Download attempts: 3. The first retry waits 5 seconds and the second waits 20. Tests set `$script:RetryDelay` to a scriptblock `{ param($Seconds) }` that records the seconds and does not sleep. The default delay uses `Start-Sleep -Seconds`.
+
+Retry only when `DownloadFile` throws, or returns and the file is missing, and the failure is transient:
+
+- A timeout, a connection failure, or a DNS failure.
+- HTTP status 408, 429, 500, 502, 503, or 504.
+
+Do not retry HTTP 401, 403, or 404. Do not retry a hash mismatch. Do not retry a URL that contains userinfo. An empty SHA256 still exits 0 before any download. After 3 transient failures, exit 1. The error text does not include the URL.
+
+Cancel:
+
+- Optional parameter `CancelPath`. Also honor environment variable `RELIAN_DEPLOY_CANCEL=1`.
+- Check before each download attempt and during each retry wait. The replaceable check is `$script:TestCancel`. The default returns true when the environment variable is `1` or when `CancelPath` is a path that exists.
+- If cancel is set before `InvokePackage`, delete the temp files and return 130. Do not call `InvokePackage`.
+- If the first reinstall call has returned 0 and cancel is then set, do not make the second call. Return 130.
+- Do not stop a package process that has already started.
+
+Tests:
+
+- The first two download calls throw a transient error and the third writes the fixture. `InvokePackage` runs once. The recorded delays are 5 then 20 when the test delay is not replaced... The test replaces the delay, so it asserts the requested seconds were 5 then 20 and that the replacement was used.
+- A hash mismatch is one download and no retry.
+- HTTP 404 is one attempt and exit 1.
+- `RELIAN_DEPLOY_CANCEL=1` before the run returns 130 and does not call `DownloadFile`.
+- Cancel that becomes true after the first reinstall `InvokePackage` returns skips the install call and returns 130.
+
+Commit: `Retry transient downloads and honor cancel`.
+
+## Controller after Task 6
 
 Upload is a separate controller step. Pushing the branch is a separate controller step. Neither is an implementer task.
