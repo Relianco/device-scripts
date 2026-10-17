@@ -273,8 +273,8 @@ foreach ($pair in @(
             '-NonInteractive'
             '-ExecutionPolicy'
             'Bypass'
-            '-WorkingDirectory'
             '-File'
+            '(Get-Process -Id $PID).Path'
         ) }
 )) {
     if ($pair.Block -isnot [scriptblock]) {
@@ -288,6 +288,9 @@ foreach ($pair in @(
     }
     if ($pair.Name -eq 'InvokePackage' -and $text -match '(?i)(^|[^.\w])pwsh([^.\w]|$)') {
         Fail 'InvokePackage hardcodes pwsh'
+    }
+    if ($pair.Name -eq 'InvokePackage' -and $text -match '(?i)-WorkingDirectory') {
+        Fail 'InvokePackage passes -WorkingDirectory'
     }
 }
 
@@ -347,10 +350,13 @@ exit 9
         Fail "package host '$($recorded[0])' was not the current process '$parentExe'"
     }
     $recordedLine = $recorded[1]
-    foreach ($token in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WorkingDirectory', '-File')) {
+    foreach ($token in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File')) {
         if (-not $recordedLine.Contains($token)) {
             Fail "recorded command missing $token : $recordedLine"
         }
+    }
+    if ($recordedLine -match '(?i)-WorkingDirectory') {
+        Fail "recorded command passes -WorkingDirectory: $recordedLine"
     }
     $recordedExe = ($recordedLine -split '\s+', 2)[0]
     if ($recordedExe -eq 'pwsh' -or $recordedExe -eq 'powershell' -or $recordedExe -eq 'powershell.exe') {

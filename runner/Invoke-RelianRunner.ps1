@@ -101,11 +101,19 @@ $script:ExpandArchive = {
 }
 
 # Child process so a package exit does not end a second reinstall call.
-# Executable is this host process. Windows PowerShell 5.1 has no pwsh on PATH.
+# Executable is this host process. Windows PowerShell 5.1 has no pwsh on PATH
+# and rejects -WorkingDirectory. The package path is absolute.
 $script:InvokePackage = {
     param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)
-    $hostPath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-    & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -WorkingDirectory $WorkRoot -File $ScriptPath -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion | Out-Host
+    $hostPath = $null
+    $current = [System.Diagnostics.Process]::GetCurrentProcess()
+    if ($null -ne $current.MainModule) {
+        $hostPath = $current.MainModule.FileName
+    }
+    if ([string]::IsNullOrWhiteSpace($hostPath)) {
+        $hostPath = (Get-Process -Id $PID).Path
+    }
+    & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion | Out-Host
     return [int]$LASTEXITCODE
 }
 
