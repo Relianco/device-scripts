@@ -233,11 +233,11 @@ The script's executed path, which tests assert by reading the source:
 6. After a successful session, the code calls `Get-TeamsPlan`. When `RunBootstrapper` is `install` and that hook returns 0, it calls `Get-TeamsPlan` again with the installed version refreshed, then runs `Reregister` and `RemoveClassic` from that second object. Hook order is `SetOptimizationKey`, then `StartBootstrapper` or `ReregisterTeams`, then `RemoveClassicTeams`. The first non-zero hook exits 1 and skips the rest. The marker and the log are written only after the last hook returns 0. `$script:StartBootstrapper`, `$script:ReregisterTeams`, `$script:RemoveClassicTeams`, and `$script:SetOptimizationKey` are the hooks. The optimization hook is the only registry write, and the source sets `IsWVDEnvironment` to `1`. The source does not contain `disableAutoUpdate`, `MsRdcWebRTCSvc`, or `Reset-AppxPackage`.
 7. Toolkit exit 1602 becomes package exit 1 with the marker unchanged.
 
-- [ ] **Step 1: Write the failing test** for `Test-TeamsDeferralBlock`, `Get-TeamsCloseList`, `Get-TeamsNotice`, the default URL and hash parameters matching `releases/teams.json`, and the source assertions above.
-- [ ] **Step 2: Run it.** Expected: FAIL.
-- [ ] **Step 3: Implement the session path and the four hooks.** On success, write `marker.txt` from `WriteMarker` when that property is non-empty, append `Log` when that property is non-empty, and delete `marker.txt` when `Log` is `Uninstall`. A hook returning non-zero exits 1 and does not write the marker.
-- [ ] **Step 4: Run `tests/teams-session.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
-- [ ] **Step 5: Commit** `Add the Teams package session`
+- [x] **Step 1: Write the failing test** for `Test-TeamsDeferralBlock`, `Get-TeamsCloseList`, `Get-TeamsNotice`, the default URL and hash parameters matching `releases/teams.json`, and the source assertions above.
+- [x] **Step 2: Run it.** Expected: FAIL.
+- [x] **Step 3: Implement the session path and the four hooks.** On success, write `marker.txt` from `WriteMarker` when that property is non-empty, append `Log` when that property is non-empty, and delete `marker.txt` when `Log` is `Uninstall`. A hook returning non-zero exits 1 and does not write the marker.
+- [x] **Step 4: Run `tests/teams-session.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
+- [x] **Step 5: Commit** `Add the Teams package session`
 
 ## Controller after Task 6
 

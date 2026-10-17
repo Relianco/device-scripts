@@ -4,7 +4,13 @@
 param(
     [string]$DeploymentType,
     [string]$Action,
-    [string]$PinVersion
+    [string]$PinVersion,
+    [string]$BootstrapperUrl = 'https://relianpub.blob.core.windows.net/pub/sec/teamsbootstrapper-c9d1c68b1f9048e6d04bc4313a4036f91c255df0988c4d876f687b5c1140440d.exe',
+    [string]$BootstrapperSha256 = 'c9d1c68b1f9048e6d04bc4313a4036f91c255df0988c4d876f687b5c1140440d',
+    [string]$MsixUrl = 'https://relianpub.blob.core.windows.net/pub/sec/MSTeams-x64-1bd28e184c0ec8572a8674560cd3f00e7cef002fe4471ccb9198f50d57391993.msix',
+    [string]$MsixSha256 = '1bd28e184c0ec8572a8674560cd3f00e7cef002fe4471ccb9198f50d57391993',
+    [string]$CancelPath = '',
+    [string]$MarkerRoot = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -359,6 +365,278 @@ function Get-TeamsClassicUserUninstall {
     return '-uninstall -s'
 }
 
+function Test-TeamsDeferralBlock {
+    param(
+        [string[]]$SessionStates,
+        [bool]$CloseProcessRunning,
+        [bool]$DeferralAlreadyUsed
+    )
+    if (-not $CloseProcessRunning -or $DeferralAlreadyUsed) {
+        return $false
+    }
+    $hasDisc = $false
+    $hasActive = $false
+    foreach ($state in @($SessionStates)) {
+        if ($state -eq 'Disc') { $hasDisc = $true }
+        if ($state -eq 'Active') { $hasActive = $true }
+    }
+    return $hasDisc -and -not $hasActive
+}
+
+function Get-TeamsCloseList {
+    param([string[]]$RunningNames)
+    $allowed = @('ms-teams', 'Teams', 'OUTLOOK')
+    $found = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in $allowed) {
+        foreach ($running in @($RunningNames)) {
+            if ([string]$running -ceq $name) {
+                $found.Add($name)
+                break
+            }
+        }
+    }
+    return @($found.ToArray())
+}
+
+function Get-TeamsNotice {
+    param([string]$Action)
+    if ($Action -eq 'Repair') {
+        return 'Teams will close for a repair. You can wait once. The next run will close it and continue.'
+    }
+    if ($Action -eq 'Uninstall') {
+        return 'Teams will close. You can wait once. The next run will close it and continue. This removes the Teams sign-in on this PC.'
+    }
+    return 'Teams will close for an update. You can wait once. The next run will close it and continue.'
+}
+
+function Get-TeamsInstalledVersion {
+    $packages = @(Get-AppxPackage -Name 'MSTeams' -AllUsers -ErrorAction SilentlyContinue)
+    foreach ($package in $packages) {
+        $parsed = Convert-TeamsVersionText -Text ([string]$package.Version)
+        if ($parsed -is [version]) {
+            return Format-TeamsVersion -Version $parsed
+        }
+    }
+    return ''
+}
+
+function Test-TeamsToolkitCancelled {
+    param([string]$Detail)
+    return $Detail -match '(^|\D)1602(\D|$)'
+}
+
+function Read-TeamsMarkerVersion {
+    param([string]$Root)
+    $path = Join-Path $Root 'marker.txt'
+    if (-not (Test-Path -LiteralPath $path)) {
+        return ''
+    }
+    return ([System.IO.File]::ReadAllText($path)).Trim()
+}
+
+function Test-TeamsClassicPresent {
+    foreach ($code in @(Get-TeamsClassicProductCodes)) {
+        $keys = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$code",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$code"
+        )
+        foreach ($key in $keys) {
+            if (Test-Path -LiteralPath $key) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+$script:SetOptimizationKey = {
+    $key = 'HKLM:\SOFTWARE\Microsoft\Teams'
+    if (-not (Test-Path -LiteralPath $key)) {
+        New-Item -Path $key -Force | Out-Null
+    }
+    $current = $null
+    try {
+        $current = (Get-ItemProperty -LiteralPath $key -Name 'IsWVDEnvironment' -ErrorAction Stop).IsWVDEnvironment
+    } catch {
+        $current = $null
+    }
+    if ([string]$current -ne '1') {
+        New-ItemProperty -LiteralPath $key -Name 'IsWVDEnvironment' -PropertyType DWord -Value 1 -Force | Out-Null
+    }
+    return 0
+}
+
+$script:StartBootstrapper = {
+    $argumentList = @(Get-TeamsBootstrapperArgumentList -Mode $script:TeamsBootstrapperMode -MsixPath $script:TeamsMsixPath)
+    if ($script:TeamsBootstrapperMode -eq 'install' -and -not (Test-TeamsPathRooted -Path $script:TeamsMsixPath)) {
+        return 1
+    }
+    $process = Start-Process -FilePath $script:TeamsBootstrapperPath -ArgumentList $argumentList -Wait -PassThru -WindowStyle Hidden
+    return [int]$process.ExitCode
+}
+
+$script:ReregisterTeams = {
+    $packages = @(Get-AppxPackage -Name 'MSTeams' -AllUsers -ErrorAction SilentlyContinue)
+    if ($packages.Count -eq 0) {
+        return 1
+    }
+    foreach ($package in $packages) {
+        $manifest = Join-Path $package.InstallLocation 'AppXManifest.xml'
+        Add-AppxPackage -DisableDevelopmentMode -Register $manifest -ErrorAction Stop
+    }
+    return 0
+}
+
+$script:RemoveClassicTeams = {
+    foreach ($code in @(Get-TeamsClassicProductCodes)) {
+        $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$code"
+        $wowKey = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$code"
+        if (-not (Test-Path -LiteralPath $uninstallKey) -and -not (Test-Path -LiteralPath $wowKey)) {
+            continue
+        }
+        $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList @('/x', $code, '/quiet', '/norestart') -Wait -PassThru -WindowStyle Hidden
+        if ($null -ne $process -and [int]$process.ExitCode -ne 0) {
+            return 1
+        }
+    }
+    $updater = Join-Path $env:LOCALAPPDATA 'Microsoft\Teams\Update.exe'
+    if (Test-Path -LiteralPath $updater) {
+        $process = Start-Process -FilePath $updater -ArgumentList (Get-TeamsClassicUserUninstall) -Wait -PassThru -WindowStyle Hidden
+        if ($null -ne $process -and [int]$process.ExitCode -ne 0) {
+            return 1
+        }
+    }
+    return 0
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
+}
+
+foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
+    if (-not $PSBoundParameters.ContainsKey($name)) {
+        [Console]::Error.WriteLine("missing parameter $name")
+        exit 1
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
+    $MarkerRoot = Join-Path $env:ProgramData 'Relian\teams'
+}
+if (-not (Test-Path -LiteralPath $MarkerRoot)) {
+    New-Item -ItemType Directory -Path $MarkerRoot -Force | Out-Null
+}
+
+$runningNames = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName })
+$closeList = @(Get-TeamsCloseList -RunningNames $runningNames)
+$sessionStates = [System.Collections.Generic.List[string]]::new()
+try {
+    $query = & query.exe user 2>$null
+    foreach ($line in @($query)) {
+        if ($line -match '\sActive\s') { $sessionStates.Add('Active') }
+        if ($line -match '\sDisc\s') { $sessionStates.Add('Disc') }
+    }
+} catch {
+    $sessionStates.Clear()
+}
+if (Test-TeamsDeferralBlock -SessionStates $sessionStates.ToArray() -CloseProcessRunning ($closeList.Count -gt 0) -DeferralAlreadyUsed $false) {
+    exit 1
+}
+
+$adtSession = @{
+    AppVendor                 = 'Relian'
+    AppName                   = 'Microsoft Teams'
+    AppVersion                = $PinVersion
+    AppProcessesToClose       = $closeList
+    RequireAdmin              = $true
+    DeployAppScriptVersion    = '4.1.8'
+    DeployAppScriptParameters = $PSBoundParameters
+}
+
+$cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-teams-' + [guid]::NewGuid().ToString('n'))
+try {
+    try {
+        $moduleManifest = "$PSScriptRoot\PSAppDeployToolkit\PSAppDeployToolkit.psd1"
+        if (-not (Test-Path -LiteralPath $moduleManifest -PathType Leaf)) {
+            throw "missing PSAppDeployToolkit module at $moduleManifest"
+        }
+        Import-Module -FullyQualifiedName @{ ModuleName = $moduleManifest; Guid = '8c3c366b-8606-4576-9f2d-4051144f7ca2'; ModuleVersion = '4.1.8' } -Force
+        $adtSession = Remove-ADTHashtableNullOrEmptyValues -Hashtable $adtSession
+        $adtSession = Open-ADTSession @adtSession -DeploymentType $DeploymentType -PassThru
+        if ($closeList.Count -gt 0) {
+            Show-ADTInstallationWelcome -CloseProcesses $closeList -AllowDefer -DeferTimes 1 -ForceWelcomeText (Get-TeamsNotice -Action $Action)
+        }
+    } catch {
+        $detail = [string]$_.Exception.Message
+        if (Test-TeamsToolkitCancelled -Detail $detail) {
+            exit 1
+        }
+        [Console]::Error.WriteLine($detail)
+        exit 1
+    }
+
+    $installed = Get-TeamsInstalledVersion
+    $marker = Read-TeamsMarkerVersion -Root $MarkerRoot
+    $classic = Test-TeamsClassicPresent
+    $plan = Get-TeamsPlan -Action $Action -PinVersion $PinVersion -InstalledVersion $installed -MarkerVersion $marker -ClassicPresent $classic
+    $opt = & $script:SetOptimizationKey
+    if ([int]$opt -ne 0) {
+        exit 1
+    }
+    New-Item -ItemType Directory -Path $cache -Force | Out-Null
+    $script:TeamsBootstrapperPath = Join-Path $cache 'teamsbootstrapper.exe'
+    $script:TeamsMsixPath = Join-Path $cache 'MSTeams-x64.msix'
+    if ($plan.RunBootstrapper -eq 'install') {
+        $script:TeamsBootstrapperMode = 'install'
+        foreach ($payload in @(
+                @{ Url = $BootstrapperUrl; Dest = $script:TeamsBootstrapperPath; Sha = $BootstrapperSha256; Label = 'bootstrapper' }
+                @{ Url = $MsixUrl; Dest = $script:TeamsMsixPath; Sha = $MsixSha256; Label = 'msix' }
+            )) {
+            $downloaded = [int](Save-TeamsPayload -Url $payload.Url -Destination $payload.Dest -Sha256 $payload.Sha -Label $payload.Label -CancelPath $CancelPath)
+            if ($downloaded -ne 0) { exit $downloaded }
+        }
+        $boot = & $script:StartBootstrapper
+        if ([int]$boot -ne 0) { exit 1 }
+        $installed = Get-TeamsInstalledVersion
+        $plan = Get-TeamsPlan -Action $Action -PinVersion $PinVersion -InstalledVersion $installed -MarkerVersion $marker -ClassicPresent (Test-TeamsClassicPresent)
+    } elseif ($plan.Reregister) {
+        $registered = & $script:ReregisterTeams
+        if ([int]$registered -ne 0) { exit 1 }
+    } elseif ($plan.RunBootstrapper -eq 'uninstall') {
+        $script:TeamsBootstrapperMode = 'uninstall'
+        $downloaded = [int](Save-TeamsPayload -Url $BootstrapperUrl -Destination $script:TeamsBootstrapperPath -Sha256 $BootstrapperSha256 -Label 'bootstrapper' -CancelPath $CancelPath)
+        if ($downloaded -ne 0) { exit $downloaded }
+        $boot = & $script:StartBootstrapper
+        if ([int]$boot -ne 0) { exit 1 }
+    }
+    if ($plan.RemoveClassic) {
+        $removed = & $script:RemoveClassicTeams
+        if ([int]$removed -ne 0) { exit 1 }
+    }
+
+    $markerFile = Join-Path $MarkerRoot 'marker.txt'
+    $logFile = Join-Path $MarkerRoot 'toolkit.log'
+    if ($plan.Log -eq 'Uninstall') {
+        if (Test-Path -LiteralPath $markerFile) {
+            Remove-Item -LiteralPath $markerFile -Force
+        }
+    } elseif (-not [string]::IsNullOrWhiteSpace([string]$plan.WriteMarker)) {
+        [System.IO.File]::WriteAllText($markerFile, [string]$plan.WriteMarker)
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$plan.Log)) {
+        [System.IO.File]::AppendAllText($logFile, ([string]$plan.Log + "`n"))
+    }
+    Close-ADTSession -ExitCode 0
+    exit 0
+} catch {
+    $detail = [string]$_.Exception.Message
+    if (Test-TeamsToolkitCancelled -Detail $detail) {
+        exit 1
+    }
+    [Console]::Error.WriteLine($detail)
+    exit 1
+} finally {
+    if (Test-Path -LiteralPath $cache) {
+        Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

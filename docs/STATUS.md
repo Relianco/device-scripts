@@ -11,19 +11,20 @@ machine that has them, read `AGENTS.md`, then `.agents/memory/MEMORY.md`.
 
 ## Now
 
-- Branch: `teams-package` (local only, not pushed). Confirm with
-  `git status -sb` and `git log -1 --oneline`.
-- The Teams plan commit sits under the resume documents. Confirm with
-  `git log --oneline`.
+- Branch: `teams-package`. Confirm with `git status -sb` and
+  `git log -1 --oneline`.
 - Plan: `docs/plans/2026-10-17-teams-package.md`
 - The maintainer accepted that plan on 2026-10-17.
 - The maintainer asked on 2026-10-17 to push this branch, add GitHub Actions,
   and run the Teams package through those tests. That push is allowed. The
   pull request base is `deploy-runner`, not `main`. Do not merge pull request
   2. Do not install Teams on a client device.
-- Next task: Task 6, Open the toolkit session and apply the plan. Tasks 1
-  to 5 are committed. Do not pass `-Publish`. The installer files stay in
-  `releases/cache/`.
+- Tasks 1 to 6 are committed. `tests/teams-session.Tests.ps1` and
+  `tests/run-all.ps1` passed on 2026-10-17. Do not pass `-Publish`. The
+  installer files stay in `releases/cache/`.
+- Next: open the pull request with base `deploy-runner` if it is not open
+  yet. After that, uploading the blobs and a client-device run wait for an
+  explicit ask.
 
 ## Already on `deploy-runner`
 
