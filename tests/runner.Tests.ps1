@@ -265,7 +265,17 @@ if (-not (Get-Command Invoke-RelianRunner -ErrorAction SilentlyContinue)) {
 foreach ($pair in @(
     @{ Name = 'DownloadFile'; Block = $script:DownloadFile; Needles = @('param($Url, $Destination)', 'Invoke-WebRequest', '-UseBasicParsing', '-TimeoutSec 120') }
     @{ Name = 'ExpandArchive'; Block = $script:ExpandArchive; Needles = @('param($Path, $Destination)', 'Expand-Archive') }
-    @{ Name = 'InvokePackage'; Block = $script:InvokePackage; Needles = @('param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)', '-File') }
+    @{ Name = 'InvokePackage'; Block = $script:InvokePackage; Needles = @(
+            'param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)'
+            'MainModule.FileName'
+            '& $hostPath'
+            '-NoProfile'
+            '-NonInteractive'
+            '-ExecutionPolicy'
+            'Bypass'
+            '-WorkingDirectory'
+            '-File'
+        ) }
 )) {
     if ($pair.Block -isnot [scriptblock]) {
         Fail "$($pair.Name) is not a scriptblock"
@@ -275,6 +285,9 @@ foreach ($pair in @(
         if (-not $text.Contains($needle)) {
             Fail "$($pair.Name) is missing $needle"
         }
+    }
+    if ($pair.Name -eq 'InvokePackage' -and $text -match '(?i)(^|[^.\w])pwsh([^.\w]|$)') {
+        Fail 'InvokePackage hardcodes pwsh'
     }
 }
 
@@ -297,21 +310,51 @@ try {
     }
 
     $childScript = Join-Path $temp 'child.ps1'
+    $hostRecord = Join-Path $temp 'host-record.txt'
     $childBody = @"
 param(
     [string]`$DeploymentType,
     [string]`$Action,
     [string]`$PinVersion
 )
+`$exe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+`$line = [System.Environment]::CommandLine
+[System.IO.File]::WriteAllText(`$env:RELIAN_HOST_RECORD, (`$exe + [Environment]::NewLine + `$line), [System.Text.UTF8Encoding]::new(`$false))
 if (`$DeploymentType -ne 'Install') { exit 2 }
 if (`$Action -ne 'Update') { exit 3 }
 if (`$PinVersion -ne '8.0') { exit 4 }
 exit 9
 "@
     [System.IO.File]::WriteAllText($childScript, $childBody.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
-    $childCode = [int](& $savedInvoke -ScriptPath $childScript -DeploymentType 'Install' -Action 'Update' -PinVersion '8.0' -WorkRoot $temp)
+    $env:RELIAN_HOST_RECORD = $hostRecord
+    try {
+        $childCode = [int](& $savedInvoke -ScriptPath $childScript -DeploymentType 'Install' -Action 'Update' -PinVersion '8.0' -WorkRoot $temp)
+    } finally {
+        Remove-Item -LiteralPath 'Env:RELIAN_HOST_RECORD' -ErrorAction SilentlyContinue
+    }
     if ($childCode -ne 9) {
         Fail "default InvokePackage returned $childCode"
+    }
+    if (-not (Test-Path -LiteralPath $hostRecord)) {
+        Fail 'default InvokePackage did not record its command'
+    }
+    $recorded = @([System.IO.File]::ReadAllLines($hostRecord))
+    if ($recorded.Count -lt 2) {
+        Fail "host record was [$($recorded -join ' | ')]"
+    }
+    $parentExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+    if ($recorded[0] -cne $parentExe) {
+        Fail "package host '$($recorded[0])' was not the current process '$parentExe'"
+    }
+    $recordedLine = $recorded[1]
+    foreach ($token in @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WorkingDirectory', '-File')) {
+        if (-not $recordedLine.Contains($token)) {
+            Fail "recorded command missing $token : $recordedLine"
+        }
+    }
+    $recordedExe = ($recordedLine -split '\s+', 2)[0]
+    if ($recordedExe -eq 'pwsh' -or $recordedExe -eq 'powershell' -or $recordedExe -eq 'powershell.exe') {
+        Fail "recorded executable is the bare name $recordedExe"
     }
 
     $packageBytes = [System.Text.UTF8Encoding]::new($false).GetBytes("Write-Output 'package'`n")
