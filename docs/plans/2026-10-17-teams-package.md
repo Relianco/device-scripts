@@ -172,11 +172,11 @@ Decision table, and the test asserts every row:
 
 `Update` uses the Install column for every other Install row. The test loops those rows with Action `Update` and asserts the same properties. In a result, "no work" means `RunBootstrapper` empty, `RemoveClassic` false, `Reregister` false, `WriteMarker` empty, and `Log` empty. A property the row does not mention is empty or false.
 
-- [ ] **Step 1: Write the failing test** for the table above.
-- [ ] **Step 2: Run it.** Expected: FAIL because `Invoke-Teams.ps1` does not exist.
-- [ ] **Step 3: Implement `Get-TeamsPlan` only.** The file may define the function and return immediately under `RELIAN_DEPLOY_TEST=1`. No toolkit call yet.
-- [ ] **Step 4: Run `pwsh -NoProfile -File tests/teams-plan.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
-- [ ] **Step 5: Commit** `Decide the Teams action from the installed version`
+- [x] **Step 1: Write the failing test** for the table above.
+- [x] **Step 2: Run it.** Expected: FAIL because `Invoke-Teams.ps1` does not exist.
+- [x] **Step 3: Implement `Get-TeamsPlan` only.** The file may define the function and return immediately under `RELIAN_DEPLOY_TEST=1`. No toolkit call yet.
+- [x] **Step 4: Run `pwsh -NoProfile -File tests/teams-plan.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
+- [x] **Step 5: Commit** `Decide the Teams action from the installed version`
 
 ### Task 4: Download the two payloads
 
