@@ -15,8 +15,8 @@ a client name, a device id, a token, or a home-directory path here.
   file so a new session can continue.
 - Next task: Task 1, Pin the bootstrapper and the x64 MSIX. No task has
   been started. Every checkbox in the plan is open.
-- Uncommitted: `docs/ninja-script-variables.md` is an untracked local note.
-  Leave it untracked unless the maintainer asks to commit it.
+- Machine notes live under `.agents/`, which is gitignored. Do not commit
+  that directory.
 
 ## Already on `deploy-runner`
 

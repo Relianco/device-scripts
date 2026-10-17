@@ -14,7 +14,7 @@
 
 - Work on branch `teams-package`, cut from `deploy-runner` at `61e6ec4`. Do not commit to `main`. Do not push. Do not open a pull request. Do not merge pull request 2.
 - Before stopping, update `docs/STATUS.md` in the same commit as the task, or in its own commit if the task is unfinished. Set the next task, the branch, and what is still uncommitted. Do not write client names, device ids, tokens, or home-directory paths in that file or in any other committed file.
-- Do not run this package on a client device. Do not pass `-Publish`. The machine-specific notes, when they exist, are `docs/local/STATUS.md`, and that directory is gitignored.
+- Do not run this package on a client device. Do not pass `-Publish`. Machine-specific notes, when they exist, are under `.agents/`. That directory is gitignored. Do not `git add` it.
 - Do not modify `bootstrap.ps1`, `collectors/`, `runner/Invoke-RelianRunner.ps1`, or `packages/action-probe/`.
 - The package does not call `Ninja-Property-Get`, `Ninja-Property-Set`, or any NinjaOne API. It does not read `relian_git_deploy_token`.
 - A payload URL with userinfo (`scheme://user@host`) exits 1 before any download. A hash mismatch exits 1 and does not run the bootstrapper. Neither case is retried.
@@ -70,7 +70,7 @@
 - Create: `scripts/pin-teams.ps1`
 - Create: `tests/teams-pin.Tests.ps1`
 
-`.gitignore` already ignores `releases/cache/` and `docs/local/`. Leave both entries in place.
+`.gitignore` already ignores `releases/cache/` and `.agents/`. Leave both entries in place.
 
 **Interfaces:**
 - Consumes: nothing
