@@ -138,6 +138,7 @@ Assert-SourceHas -Needle "AppVendor = 'Relian'"
 Assert-SourceHas -Needle "AppName = 'Action Probe'"
 Assert-SourceHas -Needle 'AppVersion = $PinVersion'
 Assert-SourceHas -Needle 'AppProcessesToClose = @()'
+Assert-SourceHas -Needle 'Remove-ADTHashtableNullOrEmptyValues -Hashtable $adtSession'
 Assert-SourceHas -Needle 'RequireAdmin = $true'
 Assert-SourceHas -Needle "DeployAppScriptVersion = '4.1.8'"
 Assert-SourceHas -Needle 'Open-ADTSession'
@@ -154,6 +155,12 @@ if ($source.Contains('DeferTimes')) {
 }
 if ($source.Contains('Ninja-Property-') -or $source.Contains('relian_git_deploy_token')) {
     Fail 'package references Ninja or the git token'
+}
+
+$stripAt = $source.IndexOf('Remove-ADTHashtableNullOrEmptyValues -Hashtable $adtSession', [System.StringComparison]::Ordinal)
+$openAt = $source.IndexOf('Open-ADTSession @adtSession', [System.StringComparison]::Ordinal)
+if ($stripAt -lt 0 -or $openAt -lt 0 -or $stripAt -gt $openAt) {
+    Fail 'empty session values are not removed before Open-ADTSession'
 }
 
 $guardNeedle = "if (`$env:RELIAN_DEPLOY_TEST -eq '1' -and `$MyInvocation.InvocationName -eq '.')"

@@ -291,6 +291,8 @@ try {
     }
     Get-ChildItem -LiteralPath (Split-Path -Parent $moduleManifest) -Recurse -File | Unblock-File -ErrorAction Ignore
     Import-Module -FullyQualifiedName @{ ModuleName = $moduleManifest; Guid = '8c3c366b-8606-4576-9f2d-4051144f7ca2'; ModuleVersion = '4.1.8' } -Force
+    # 4.1.8 rejects an empty AppProcessesToClose. The template removes empty values before opening the session.
+    $adtSession = Remove-ADTHashtableNullOrEmptyValues -Hashtable $adtSession
     $adtSession = Open-ADTSession @adtSession -DeploymentType $DeploymentType -PassThru
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
