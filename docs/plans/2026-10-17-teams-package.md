@@ -207,11 +207,11 @@ Cover: matching hash returns 0; mismatch returns 1 and does not leave the destin
 - Consumes: `Get-TeamsPlan`
 - Produces: `Get-TeamsBootstrapperArgumentList -Mode install|uninstall -MsixPath <full path>` returns a string array. Install returns `-p`, `-o`, the full MSIX path, `--installTMA`. Uninstall returns `-x` only. `Get-TeamsClassicProductCodes` returns the two product codes in Global Constraints. `Get-TeamsClassicUserUninstall` returns the argument string `-uninstall -s`.
 
-- [ ] **Step 1: Write the failing test** for those three functions, including that install does not contain `-x` and uninstall does not contain `-p` or `--installTMA`.
-- [ ] **Step 2: Run it.** Expected: FAIL.
-- [ ] **Step 3: Implement the three functions.** Reject a relative MSIX path by returning `$null` from `Get-TeamsBootstrapperArgumentList` when `-o` is required and the path is not rooted.
-- [ ] **Step 4: Run `tests/teams-command.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
-- [ ] **Step 5: Commit** `Pin the Teams bootstrapper arguments`
+- [x] **Step 1: Write the failing test** for those three functions, including that install does not contain `-x` and uninstall does not contain `-p` or `--installTMA`.
+- [x] **Step 2: Run it.** Expected: FAIL.
+- [x] **Step 3: Implement the three functions.** Reject a relative MSIX path by returning `$null` from `Get-TeamsBootstrapperArgumentList` when `-o` is required and the path is not rooted.
+- [x] **Step 4: Run `tests/teams-command.Tests.ps1` and `tests/run-all.ps1`.** Expected: both exit 0.
+- [x] **Step 5: Commit** `Pin the Teams bootstrapper arguments`
 
 ### Task 6: Open the toolkit session and apply the plan
 

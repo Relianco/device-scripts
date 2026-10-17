@@ -319,6 +319,46 @@ function Save-TeamsPayload {
     return 1
 }
 
+function Test-TeamsPathRooted {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return $true
+    }
+    # Tests run on Linux. A Windows drive path is still a full path.
+    return $Path -match '^[A-Za-z]:[\\/]'
+}
+
+function Get-TeamsBootstrapperArgumentList {
+    param(
+        [string]$Mode,
+        [string]$MsixPath
+    )
+    if ($Mode -eq 'uninstall') {
+        return @('-x')
+    }
+    if ($Mode -ne 'install') {
+        return $null
+    }
+    if (-not (Test-TeamsPathRooted -Path $MsixPath)) {
+        return $null
+    }
+    return @('-p', '-o', $MsixPath, '--installTMA')
+}
+
+function Get-TeamsClassicProductCodes {
+    return @(
+        '{731F6BAA-A986-45A4-8936-7C3AAAAA760B}',
+        '{39AF0813-FA7B-4860-ADBE-93B9B214B914}'
+    )
+}
+
+function Get-TeamsClassicUserUninstall {
+    return '-uninstall -s'
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
