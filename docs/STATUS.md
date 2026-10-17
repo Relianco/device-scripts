@@ -21,9 +21,9 @@ machine that has them, read `AGENTS.md`, then `.agents/memory/MEMORY.md`.
   and run the Teams package through those tests. That push is allowed. The
   pull request base is `deploy-runner`, not `main`. Do not merge pull request
   2. Do not install Teams on a client device.
-- Next task: Task 2, Publish the two blobs. Task 1 is committed. The pin
-  hashes are in `releases/teams.json`. The installer files stay in
-  `releases/cache/`, which is gitignored. Do not pass `-Publish`.
+- Next task: Task 3, Decide the action before anything runs. Tasks 1 and 2
+  are committed. Do not pass `-Publish`. The installer files stay in
+  `releases/cache/`.
 
 ## Already on `deploy-runner`
 

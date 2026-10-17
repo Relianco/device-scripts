@@ -112,25 +112,25 @@ Expected: exit 0.
 - Consumes: `releases/teams.json` from Task 1
 - Produces: `Get-TeamsBlobName -Kind bootstrapper|msix -Sha256 <hex>` returns `teamsbootstrapper-<hex>.exe` or `MSTeams-x64-<hex>.msix`. With `-Publish` omitted, the script prints both blob URLs and returns before `az`. `$script:InvokeAz` receives a string array.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 The test dot-sources the script under `RELIAN_DEPLOY_TEST=1` with a temp json and temp files whose hashes match that json. It sets `$script:InvokeAz` to record its argument array and throw if called. A run without `-Publish` prints both URLs under `https://relianpub.blob.core.windows.net/pub/sec/` and does not call `InvokeAz`. A second run with `-Publish` and a fake `InvokeAz` that reports the blob missing then present asserts the upload arguments include `--auth-mode`, `login`, the account `relianpub`, the container `pub`, and the blob name, as separate array elements. A hash mismatch throws before `InvokeAz`.
 
-- [ ] **Step 2: Run the test and confirm it fails**
+- [x] **Step 2: Run the test and confirm it fails**
 
 Run: `pwsh -NoProfile -File tests/teams-publish.Tests.ps1`
 Expected: FAIL because the script does not exist.
 
-- [ ] **Step 3: Implement `scripts/publish-teams.ps1`**
+- [x] **Step 3: Implement `scripts/publish-teams.ps1`**
 
 Match the argument-array shape in `scripts/publish-relian-packs.ps1`. Default is dry-run. `-Publish` checks hash and size against `releases/teams.json`, skips a blob that already exists, and uploads from `releases/cache/`. Do not run `-Publish` in this task.
 
-- [ ] **Step 4: Run the test and the suite**
+- [x] **Step 4: Run the test and the suite**
 
 Run: `pwsh -NoProfile -File tests/teams-publish.Tests.ps1` then `pwsh -NoProfile -File tests/run-all.ps1`
 Expected: both exit 0.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `Add the Teams blob publisher`
 
