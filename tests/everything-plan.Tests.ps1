@@ -326,6 +326,7 @@ function Reset-EverythingCase {
     $script:EverythingErrorLog = [System.Collections.Generic.List[string]]::new()
     $script:InstalledVersion = ''
     $script:ProductCode = '{11111111-2222-3333-4444-555555555555}'
+    $script:RegistryReads = 0
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:MarkerRoot) {
         Remove-Item -LiteralPath $script:MarkerRoot -Recurse -Force
@@ -341,9 +342,11 @@ function Reset-EverythingCase {
         [System.IO.File]::WriteAllBytes($Destination, $script:GoodBytes)
     }
     $script:GetInstalledEverythingVersion = {
+        $script:RegistryReads++
         return [string]$script:InstalledVersion
     }
     $script:GetEverythingProductCode = {
+        $script:RegistryReads++
         return [string]$script:ProductCode
     }
     $script:InvokeMsiExec = {
@@ -467,26 +470,69 @@ try {
         Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '3.0.0.0' -ExpectLog "Old`n" -Label "$action vendor newer"
     }
 
+    # An empty hash returns before registry, download, msiexec, and marker changes.
+    foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
+        foreach ($row in @(
+                @{ Kind = 'empty'; Hash = ''; Url = (New-EverythingUserInfoUrl) }
+                @{ Kind = 'whitespace'; Hash = '   '; Url = 'https://example.invalid/everything.msi' }
+                @{ Kind = 'tab'; Hash = "`t"; Url = (New-EverythingUserInfoUrl) }
+            )) {
+            Reset-EverythingCase
+            $script:InstalledVersion = '2.0.0.0'
+            Set-Marker '2.0.0.0'
+            Set-Log "Old`n"
+            $code = Invoke-Case -Action $action -PinVersion '2.0.0.0' -InstallerSha256 $row.Hash -InstallerUrl $row.Url
+            Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -ExpectLog "Old`n" -Label "$action $($row.Kind) hash"
+            if ($script:RegistryReads -ne 0) {
+                Fail "$action $($row.Kind) hash read the registry"
+            }
+            if ($script:EverythingErrorLog.Count -ne 0) {
+                Fail "$action $($row.Kind) hash logged an error"
+            }
+        }
+    }
+
+    Reset-EverythingCase
+    $script:InstalledVersion = ''
+    Set-Marker '2.0.0.0'
+    Set-Log "Old`n"
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -ExpectLog "Old`n" -Label 'uninstall empty hash marker only'
+    if ($script:RegistryReads -ne 0) {
+        Fail 'uninstall empty hash marker only read the registry'
+    }
+
     Reset-EverythingCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-EverythingUserInfoUrl)
+    Set-Log "Old`n"
+    $script:ProductCode = ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -ExpectLog "Old`n" -Label 'uninstall whitespace hash missing product code'
+    if ($script:RegistryReads -ne 0) {
+        Fail 'uninstall whitespace hash missing product code read the registry'
+    }
+
+    Reset-EverythingCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 1 -MarkerAbsent $true -ExpectLog "Uninstall`n" -Label 'uninstall'
-    if ($script:MsiCalls[0].Mode -cne 'uninstall' -or $script:MsiCalls[0].ProductCode -cne $script:ProductCode) {
+    if ($script:MsiCalls.Count -lt 1 -or $script:MsiCalls[0].Mode -cne 'uninstall' -or $script:MsiCalls[0].ProductCode -cne $script:ProductCode) {
         Fail 'uninstall did not pass the product code'
     }
 
     Reset-EverythingCase
     $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -ExpectLog "Uninstall`n" -Label 'uninstall marker only'
 
     Reset-EverythingCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
     $script:ProductCode = ''
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'uninstall missing product code'
 
     Reset-EverythingCase
@@ -600,8 +646,11 @@ try {
 
     Reset-EverythingCase
     $script:InstalledVersion = ''
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'missing hash'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-EverythingUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'empty hash install'
+    if ($script:RegistryReads -ne 0) {
+        Fail 'empty hash install read the registry'
+    }
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {

@@ -78,7 +78,7 @@ function Get-EverythingPlan {
     $installed = Convert-EverythingVersionText -Text $InstalledVersion
     $marker = Convert-EverythingVersionText -Text $MarkerVersion
 
-    # Uninstall does not compare versions and does not need the installer hash.
+    # Uninstall does not compare versions.
     if ($Action -eq 'Uninstall') {
         $present = -not [string]::IsNullOrWhiteSpace($InstalledVersion)
         $hasMarker = -not [string]::IsNullOrWhiteSpace($MarkerVersion)
@@ -644,6 +644,11 @@ function Invoke-EverythingAction {
         [string]$MarkerRoot
     )
 
+    # An empty hash disables the package. Do not read the registry, download, or change the marker.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return 0
+    }
+
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-EverythingDefaultMarkerRoot
     }
@@ -667,10 +672,6 @@ function Invoke-EverythingAction {
     $cache = ''
     try {
         if ($plan.RunInstaller -eq 'install') {
-            if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
-                Add-EverythingError -Message 'missing hash for installer'
-                return 1
-            }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-everything-' + [guid]::NewGuid().ToString('n'))
             New-Item -ItemType Directory -Path $cache -Force | Out-Null
             $installerPath = Join-Path $cache 'Everything-1.5.0.1423b.x64-Setup.msi'
