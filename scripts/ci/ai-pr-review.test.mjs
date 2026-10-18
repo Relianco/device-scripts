@@ -43,8 +43,10 @@ test('markdown and docs are skipped and PowerShell is reviewed', () => {
 })
 
 test('a patch longer than 64000 characters is capped and the 21st file is omitted', () => {
-  assert.equal(capPatch('a'.repeat(64001)).length < 64100, true)
-  assert.match(capPatch('a'.repeat(64001)), /truncated/)
+  const kept = 'a'.repeat(64000)
+  assert.equal(capPatch(kept), kept)
+  const over = 'b'.repeat(64001)
+  assert.equal(capPatch(over), `${'b'.repeat(64000)}\n...[truncated]`)
   const files = []
   for (let i = 0; i < 21; i++) {
     files.push({ filename: `packages/p${i}.ps1`, patch: 'diff' })
