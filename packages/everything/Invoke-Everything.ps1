@@ -563,7 +563,9 @@ function Get-EverythingMsiArgumentList {
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
-    return @('/i', $InstallerPath, '/qn', '/norestart')
+    # Start-Process joins this list. Quotes keep a TEMP path that contains spaces as one argument.
+    $quotedPath = '"' + $InstallerPath.Replace('"', '""') + '"'
+    return @('/i', $quotedPath, '/qn', '/norestart')
 }
 
 function Test-EverythingMsiSucceeded {

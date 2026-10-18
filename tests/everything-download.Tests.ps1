@@ -5,7 +5,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/everything/Invoke-Everything.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }

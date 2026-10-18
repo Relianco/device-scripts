@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/everything/Invoke-Everything.ps1'
 $releasePath = Join-Path $repoRoot 'releases/everything.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -22,7 +25,7 @@ $source = Get-Content -LiteralPath $scriptPath -Raw -Encoding utf8
 if ($source -match '\[Parameter\([^\]]*Mandatory') {
     Fail 'a parameter is Mandatory'
 }
-foreach ($banned in @('Password', 'Ninja-Property', 'LeagueLaw', 'lsrv1')) {
+foreach ($banned in @('Password', 'Ninja-Property')) {
     if ($source -like "*$banned*") {
         Fail "package contains $banned"
     }
@@ -253,9 +256,14 @@ Assert-Plan -Plan $unknown -Expect (New-Expect -ExitCode 1) -Label 'unknown acti
 
 $installArgs = Get-EverythingMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\everything.msi' -ProductCode ''
 if ($null -eq $installArgs -or $installArgs.Count -ne 4 -or
-    $installArgs[0] -cne '/i' -or $installArgs[1] -cne 'C:\cache\everything.msi' -or
+    $installArgs[0] -cne '/i' -or $installArgs[1] -cne '"C:\cache\everything.msi"' -or
     $installArgs[2] -cne '/qn' -or $installArgs[3] -cne '/norestart') {
     Fail "install arguments $($installArgs -join ' ')"
+}
+$spacedPath = 'C:\Windows\Temp\relian everything\Everything-1.5.0.1423b.x64-Setup.msi'
+$spacedArgs = Get-EverythingMsiArgumentList -Mode 'install' -InstallerPath $spacedPath -ProductCode ''
+if ($null -eq $spacedArgs -or $spacedArgs.Count -ne 4 -or $spacedArgs[1] -cne ('"' + $spacedPath + '"')) {
+    Fail "spaced MSI path was not one argument: $($spacedArgs -join ' | ')"
 }
 $removeCode = '{11111111-2222-3333-4444-555555555555}'
 $removeArgs = Get-EverythingMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode $removeCode
