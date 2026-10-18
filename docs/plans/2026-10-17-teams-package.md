@@ -1,6 +1,6 @@
 # Teams package
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Parallel work uses `docs/worktrees.md`: one worktree and one `lane/` branch per task, and two live lanes never edit the same path.
 
 **Goal:** Add a machine-wide Microsoft Teams package that the existing deploy runner can install, update, repair, uninstall, and reinstall, with a hash-pinned bootstrapper and x64 MSIX.
 
@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Work on branch `teams-package`, cut from `deploy-runner` at `61e6ec4`. Do not commit to `main`. Do not merge pull request 2. Push, and open a pull request with base `deploy-runner`, only when the maintainer asks in the current session.
+- Work on branch `teams-package`, cut from `deploy-runner` at `61e6ec4`. Do not commit to `main`. Do not merge pull request 2. Push, and open a pull request with base `deploy-runner`, only when the maintainer asks in the current session. Parallel tasks follow `docs/worktrees.md`. A worker branch starts at `origin/teams-package` and does not edit a path another live lane has listed.
 - Before stopping, update `docs/STATUS.md` in the same commit as the task, or in its own commit if the task is unfinished. Set the next task, the branch, and what is still uncommitted. Do not write client names, device ids, tokens, or home-directory paths in that file or in any other committed file.
 - Do not run this package on a client device. Do not pass `-Publish`. Machine-specific notes, when they exist, are under `.agents/`. That directory is gitignored. Do not `git add` it.
 - Do not modify `bootstrap.ps1`, `collectors/`, `runner/Invoke-RelianRunner.ps1`, or `packages/action-probe/`.
