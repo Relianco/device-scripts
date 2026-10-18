@@ -20,11 +20,35 @@ machine that has them, read `AGENTS.md`, then `.agents/memory/MEMORY.md`.
   run on the Cloud PC. Teams has not been installed there. The Teams blobs
   have not been uploaded. Do not pass `-Publish`. The installer files stay
   in `releases/cache/`.
-- Next task: move each remaining installer into its own package directory.
+- Next task: move each installer below into its own package directory.
   One `lane/` branch per application, cut from `origin/main`, using
   `docs/worktrees.md`. A lane does not edit `packages/teams/Invoke-Teams.ps1`,
-  `runner/`, or another lane's files.
+  `runner/`, or another lane's files. Copy the behavior. Do not copy a Ninja
+  call, a product key, or a password into this public repository.
 - Do not install an application on a device until the maintainer asks.
+
+## Package queue
+
+Teams is the only package on `main`. These installers are still in the private
+export. Each one becomes `packages/<name>/`, `tests/<name>-*.Tests.ps1`, and
+`releases/<name>.json` after its file hash is verified. Do not invent a hash.
+
+- Sysmon. The export script reads Ninja organization fields. The package must
+  not. The pin belongs in `releases/sysmon.json`.
+- Wazuh agent. The registration password stays off the installer command line.
+- AutoElevate.
+- Everything. The export script reads a server password from the environment.
+  The package must not contain that password.
+- Winget itself.
+- Microsoft 365 Apps, from the Office custom XML installer.
+- WordPerfect. The export script contains a product key. The package must not.
+- Adobe Acrobat update.
+- LastPass browser extension.
+- Thin Manager startup.
+
+Check scripts, report scripts, and one-off uninstall scripts stay out of this
+queue. A generic Winget wrapper is not one application. A lane that needs a
+hash it cannot verify stops and says so.
 
 ## Already on `main`
 
