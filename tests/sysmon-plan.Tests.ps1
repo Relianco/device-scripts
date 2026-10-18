@@ -6,7 +6,7 @@ $scriptPath = Join-Path $repoRoot 'packages/sysmon/Invoke-Sysmon.ps1'
 $releasePath = Join-Path $repoRoot 'releases/sysmon.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
