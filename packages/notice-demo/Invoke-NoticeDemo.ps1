@@ -38,7 +38,7 @@ function Set-NoticeDialogText {
     $idle.Install = $Text
     $subtitle = $fluent.Subtitle
     if ($null -ne $subtitle) {
-        $subtitle.Install = ' '
+        $subtitle.Install = "v$version"
     }
     return $true
 }
@@ -146,10 +146,13 @@ namespace Relian.DialogTheme
                 Paint(window, "SidebarAccentFill", black);
                 Paint(window, "SidebarPanel", black);
                 var subtitle = Find(window, "SubtitleTextBlock") as TextBlock;
+                var titleBlock = Find(window, "AppTitleTextBlock") as TextBlock;
                 if (subtitle != null)
                 {
-                    var text = subtitle.Text ?? string.Empty;
-                    if (string.IsNullOrWhiteSpace(text) || text.IndexOf("Relian", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("App Installation", StringComparison.OrdinalIgnoreCase) >= 0)
+                    var text = (subtitle.Text ?? string.Empty).Trim();
+                    var heading = titleBlock == null ? string.Empty : (titleBlock.Text ?? string.Empty);
+                    var covered = text.Length > 0 && heading.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (string.IsNullOrWhiteSpace(text) || covered || text.IndexOf("Relian", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("App Installation", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         subtitle.Text = string.Empty;
                         subtitle.Visibility = Visibility.Collapsed;
@@ -320,7 +323,7 @@ namespace Relian.DialogTheme
     if (Test-Path -LiteralPath $dll) {
         Remove-Item -LiteralPath $dll -Force
     }
-    Add-Type -TypeDefinition $source -OutputAssembly $dll -ReferencedAssemblies @('System', 'WindowsBase', 'PresentationCore', 'PresentationFramework')
+    Add-Type -TypeDefinition $source -OutputAssembly $dll -ReferencedAssemblies @('System', 'System.Xaml', 'WindowsBase', 'PresentationCore', 'PresentationFramework')
     $fullName = [System.Reflection.AssemblyName]::GetAssemblyName($dll).FullName
     $configPath = "$ClientExe.config"
     [xml]$config = [System.IO.File]::ReadAllText($configPath)
@@ -439,7 +442,7 @@ try {
     } else {
         Write-Output 'Notice text unchanged. The panel will use the toolkit wording.'
     }
-    Show-ADTInstallationWelcome -CloseProcesses @{ Name = 'notepad'; Description = 'Notepad' } -AllowDefer -DeferTimes 1 -Title $title -Subtitle ' '
+    Show-ADTInstallationWelcome -CloseProcesses @{ Name = 'notepad'; Description = 'Notepad' } -AllowDefer -DeferTimes 1 -Title $title -Subtitle "v$version"
     Close-ADTSession -ExitCode 0
     $themeLog = Join-Path $client.DirectoryName 'relian-dialog-theme.log'
     if (Test-Path -LiteralPath $themeLog) {
