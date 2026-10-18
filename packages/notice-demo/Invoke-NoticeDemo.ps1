@@ -63,7 +63,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 
 [assembly: AssemblyVersion("1.0.0.0")]
 
@@ -76,6 +75,7 @@ namespace Relian.DialogTheme
             base.InitializeNewDomain(appDomainInfo);
             try
             {
+                TryLog("manager loaded");
                 var thread = new Thread(Watch);
                 thread.IsBackground = true;
                 thread.Start();
@@ -146,13 +146,10 @@ namespace Relian.DialogTheme
                 Paint(window, "SidebarAccentFill", black);
                 Paint(window, "SidebarPanel", black);
                 var subtitle = Find(window, "SubtitleTextBlock") as TextBlock;
-                var titleBlock = Find(window, "AppTitleTextBlock") as TextBlock;
                 if (subtitle != null)
                 {
                     var text = (subtitle.Text ?? string.Empty).Trim();
-                    var heading = titleBlock == null ? string.Empty : (titleBlock.Text ?? string.Empty);
-                    var covered = text.Length > 0 && heading.IndexOf(text, StringComparison.OrdinalIgnoreCase) >= 0;
-                    if (string.IsNullOrWhiteSpace(text) || covered || text.IndexOf("Relian", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("App Installation", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (text.IndexOf("Relian", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("App Installation", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         subtitle.Text = string.Empty;
                         subtitle.Visibility = Visibility.Collapsed;
@@ -163,22 +160,20 @@ namespace Relian.DialogTheme
                     var icon = Find(window, "SidebarIcon");
                     if (icon != null)
                     {
-                        var source = icon.GetType().GetProperty("Source");
-                        if (source != null && source.CanWrite)
-                        {
-                            source.SetValue(icon, mark, null);
-                        }
-                        icon.Width = 20;
-                        icon.Height = 20;
+                        SetMark(icon, mark);
+                        icon.Width = 18;
+                        icon.Height = 18;
                     }
                 }
             }
-            if (any)
+            if (any && Interlocked.Exchange(ref styledOnce, 1) == 0)
             {
-                TryLog("styled");
+                TryLog(mark == null ? "styled without mark" : "styled");
             }
             return any;
         }
+
+        private static int styledOnce;
 
         private static void Paint(DependencyObject root, string name, Brush brush)
         {
@@ -187,16 +182,56 @@ namespace Relian.DialogTheme
             {
                 return;
             }
+            var opacity = element.GetType().GetProperty("Opacity");
+            if (opacity != null && opacity.CanWrite)
+            {
+                opacity.SetValue(element, 1.0, null);
+            }
             var fill = element.GetType().GetProperty("Fill");
             if (fill != null && fill.CanWrite)
             {
                 fill.SetValue(element, brush, null);
-                return;
             }
             var background = element.GetType().GetProperty("Background");
             if (background != null && background.CanWrite)
             {
                 background.SetValue(element, brush, null);
+            }
+        }
+
+        private static int missingSourceOnce;
+
+        private static void SetMark(FrameworkElement icon, ImageSource mark)
+        {
+            var source = icon.GetType().GetProperty("Source");
+            if (source != null && source.CanWrite)
+            {
+                try
+                {
+                    source.SetValue(icon, mark, null);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    if (Interlocked.Exchange(ref missingSourceOnce, 1) == 0)
+                    {
+                        TryLog(ex.GetType().Name);
+                    }
+                }
+            }
+            var field = icon.GetType().GetField("SourceProperty", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+            if (field == null)
+            {
+                if (Interlocked.Exchange(ref missingSourceOnce, 1) == 0)
+                {
+                    TryLog("sidebar icon has no Source");
+                }
+                return;
+            }
+            var property = field.GetValue(null) as DependencyProperty;
+            if (property != null)
+            {
+                icon.SetValue(property, mark);
             }
         }
 
