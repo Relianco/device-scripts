@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/thin-manager/Invoke-ThinManager.ps1'
 $releasePath = Join-Path $repoRoot 'releases/thin-manager.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message = 'assertion failed')
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
