@@ -89,6 +89,7 @@ test('the prompt is PowerShell rules and names JSON', () => {
 test('the workflow pins gpt-6.1-sol on ubuntu-latest', () => {
   const workflow = readFileSync(new URL('../../.github/workflows/ai-pr-review.yml', import.meta.url), 'utf8')
   const verify = readFileSync(new URL('../../.github/workflows/pr-verify.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /previous_filename/)
   assert.match(workflow, /MODEL:\s*gpt-6\.1-sol/)
   assert.match(workflow, /runs-on:\s*ubuntu-24\.04/)
   assert.doesNotMatch(workflow, /self-hosted/)

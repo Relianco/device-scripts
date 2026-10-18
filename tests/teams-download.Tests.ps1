@@ -32,6 +32,17 @@ function Get-Sha {
     }
 }
 
+function New-TeamsUserInfoUrl {
+    return -join @('https://', 'user', '@', 'example.invalid/bootstrapper')
+}
+
+class TeamsFakeHttpException : System.Exception {
+    [object]$Response
+    TeamsFakeHttpException([int]$Status) : base('status') {
+        $this.Response = [pscustomobject]@{ StatusCode = $Status }
+    }
+}
+
 function New-HttpFailure {
     param([int]$Status, [string]$Message)
     $exception = [System.Net.Http.HttpRequestException]::new(
@@ -85,8 +96,8 @@ $script:DownloadFile = {
 }
 $code = Save-TeamsPayload -Url 'https://example.invalid/bootstrapper' -Destination $dest -Sha256 $goodSha -Label 'bootstrapper'
 $logged = $script:TeamsErrorLog -join "`n"
-if ($code -ne 1 -or (Test-Path -LiteralPath $dest)) {
-    Fail "mismatch returned $code and left the file"
+if ($code -ne 1 -or (Test-Path -LiteralPath $dest) -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0) {
+    Fail "mismatch returned $code after $($script:DownloadCount) downloads and $($script:Sleeps.Count) sleeps"
 }
 if ($logged -like '*https://*') {
     Fail 'mismatch error included a URL'
@@ -97,7 +108,7 @@ $script:DownloadFile = {
     param($Url, $Destination)
     $script:DownloadCount++
 }
-$code = Save-TeamsPayload -Url 'https://user:secret@example.invalid/bootstrapper' -Destination $dest -Sha256 $goodSha -Label 'bootstrapper'
+$code = Save-TeamsPayload -Url (New-TeamsUserInfoUrl) -Destination $dest -Sha256 $goodSha -Label 'bootstrapper'
 if ($code -ne 1 -or $script:DownloadCount -ne 0) {
     Fail "userinfo returned $code after $($script:DownloadCount) downloads"
 }
@@ -106,9 +117,15 @@ if (($script:TeamsErrorLog -join "`n") -like '*https://*') {
 }
 
 Reset-Hooks
-$code = Save-TeamsPayload -Url 'https://user:secret@example.invalid/bootstrapper' -Destination $dest -Sha256 '' -Label 'bootstrapper'
+$code = Save-TeamsPayload -Url (New-TeamsUserInfoUrl) -Destination $dest -Sha256 '' -Label 'bootstrapper'
 if ($code -ne 0 -or $script:DownloadCount -ne 0) {
     Fail "empty hash returned $code after $($script:DownloadCount) downloads"
+}
+if (-not (Test-TeamsDownloadIsTransient -ErrorRecord ([TeamsFakeHttpException]::new(503)))) {
+    Fail 'HTTP 503 on Response.StatusCode was not retried'
+}
+if (Test-TeamsDownloadIsTransient -ErrorRecord ([TeamsFakeHttpException]::new(404))) {
+    Fail 'HTTP 404 on Response.StatusCode was retried'
 }
 
 Reset-Hooks

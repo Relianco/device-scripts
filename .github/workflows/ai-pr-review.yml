@@ -45,7 +45,7 @@ jobs:
             exit 0
           fi
           files=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${baseline}...${HEAD_SHA}" \
-            --jq '[(.files // [])[].filename] | if length >= 300 then ["__too_many__"] else . end | .[]' 2>/dev/null) || {
+            --jq '[(.files // [])[] | .filename, (.previous_filename // empty)] | if length >= 300 then ["__too_many__"] else . end | .[]' 2>/dev/null) || {
             echo "Compare failed — running the full review."
             exit 0
           }

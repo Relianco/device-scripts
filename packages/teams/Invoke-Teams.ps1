@@ -195,16 +195,34 @@ function Get-TeamsHttpStatus {
     $guard = 0
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
+        $code = $null
         $names = @($current.PSObject.Properties.Name)
         if ($names -contains 'StatusCode' -and $null -ne $current.StatusCode) {
             try {
                 $parsed = [int]$current.StatusCode
                 if ($parsed -ge 100 -and $parsed -le 599) {
-                    return $parsed
+                    $code = $parsed
                 }
             } catch {
-                $parsed = $null
+                $code = $null
             }
+        }
+        if ($null -eq $code -and $names -contains 'Response' -and $null -ne $current.Response) {
+            $response = $current.Response
+            $responseNames = @($response.PSObject.Properties.Name)
+            if ($responseNames -contains 'StatusCode' -and $null -ne $response.StatusCode) {
+                try {
+                    $parsed = [int]$response.StatusCode
+                    if ($parsed -ge 100 -and $parsed -le 599) {
+                        $code = $parsed
+                    }
+                } catch {
+                    $code = $null
+                }
+            }
+        }
+        if ($null -ne $code) {
+            return $code
         }
         $current = $current.InnerException
     }

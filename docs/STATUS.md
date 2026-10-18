@@ -22,9 +22,10 @@ machine that has them, read `AGENTS.md`, then `.agents/memory/MEMORY.md`.
 - Tasks 1 to 6 are committed. `tests/teams-session.Tests.ps1` and
   `tests/run-all.ps1` passed on 2026-10-17. Do not pass `-Publish`. The
   installer files stay in `releases/cache/`.
-- Next: open the pull request with base `deploy-runner` if it is not open
-  yet. After that, uploading the blobs and a client-device run wait for an
-  explicit ask.
+- Pull request 3 is open against `deploy-runner`:
+  <https://github.com/Relianco/device-scripts/pull/3>
+  Do not merge it until the maintainer asks. Uploading the blobs and a
+  client-device run wait for an explicit ask.
 
 ## Already on `deploy-runner`
 

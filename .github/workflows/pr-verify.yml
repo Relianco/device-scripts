@@ -34,7 +34,7 @@ jobs:
           curl -fsSL -o /tmp/packages-microsoft-prod.deb "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb"
           sudo dpkg -i /tmp/packages-microsoft-prod.deb
           sudo apt-get update
-          sudo apt-get install -y powershell
+          sudo apt-get install -y powershell librsvg2-bin
           pwsh -NoProfile -Command 'Write-Output $PSVersionTable.PSVersion.ToString()'
 
       - name: Run the PowerShell suite
