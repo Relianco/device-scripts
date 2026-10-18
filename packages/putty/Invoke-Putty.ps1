@@ -57,8 +57,16 @@ function Get-PuttyPlan {
         [string]$Action,
         [string]$PinVersion,
         [string]$InstalledVersion,
-        [string]$MarkerVersion
+        [string]$MarkerVersion,
+        [string]$InstallerSha256 = $script:InstallerSha256
     )
+
+    # An empty hash disables every action, including Uninstall and Reinstall.
+    # This is before planning, so a bad pin or Reinstall cannot exit 1 first.
+    # Do not download, install, uninstall, or change the marker.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return New-PuttyPlan -ExitCode 0
+    }
 
     # An empty pin disables the package, including Uninstall.
     # Do not download or change the marker.
@@ -77,7 +85,7 @@ function Get-PuttyPlan {
     $installed = Convert-PuttyVersionText -Text $InstalledVersion
     $marker = Convert-PuttyVersionText -Text $MarkerVersion
 
-    # Uninstall does not compare versions and does not need the installer hash.
+    # Uninstall does not compare versions.
     if ($Action -eq 'Uninstall') {
         $present = -not [string]::IsNullOrWhiteSpace($InstalledVersion)
         $hasMarker = -not [string]::IsNullOrWhiteSpace($MarkerVersion)
@@ -284,13 +292,13 @@ function Save-PuttyPayload {
         [string]$CancelPath
     )
 
-    # Userinfo is rejected even when the hash is empty. Empty hash downloads nothing.
+    # An empty hash is success and does not download. Userinfo is still refused when a hash is present.
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
     if (Test-PuttyUrlHasUserInfo -Url $Url) {
         Add-PuttyError -Message "refusing a URL that contains userinfo for $Label"
         return 1
-    }
-    if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        return 0
     }
 
     $expected = $Sha256.Trim().ToLowerInvariant()
@@ -619,7 +627,7 @@ function Invoke-PuttyAction {
         return 1
     }
     $marker = Read-PuttyMarkerVersion -Root $MarkerRoot
-    $plan = Get-PuttyPlan -Action $Action -PinVersion $PinVersion -InstalledVersion $installed -MarkerVersion $marker
+    $plan = Get-PuttyPlan -Action $Action -PinVersion $PinVersion -InstalledVersion $installed -MarkerVersion $marker -InstallerSha256 $InstallerSha256
     if ($null -ne $plan.ExitCode) {
         return [int]$plan.ExitCode
     }

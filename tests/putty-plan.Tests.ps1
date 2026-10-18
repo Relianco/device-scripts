@@ -210,6 +210,15 @@ Assert-Plan -Plan $uninstallWhitespace -Expect (New-Expect -ExitCode 0) -Label '
 $reinstall = Get-PuttyPlan -Action 'Reinstall' -PinVersion '1.0.0.0' -InstalledVersion '1.0.0.0' -MarkerVersion '1.0.0.0'
 Assert-Plan -Plan $reinstall -Expect (New-Expect -ExitCode 1) -Label 'Reinstall'
 
+$uninstallEmptyHash = Get-PuttyPlan -Action 'Uninstall' -PinVersion '2.0.0.0' -InstalledVersion '2.0.0.0' -MarkerVersion '2.0.0.0' -InstallerSha256 ''
+Assert-Plan -Plan $uninstallEmptyHash -Expect (New-Expect -ExitCode 0) -Label 'Uninstall empty hash plan'
+
+$reinstallWhitespaceHash = Get-PuttyPlan -Action 'Reinstall' -PinVersion '2.0.0.0' -InstalledVersion '2.0.0.0' -MarkerVersion '2.0.0.0' -InstallerSha256 '   '
+Assert-Plan -Plan $reinstallWhitespaceHash -Expect (New-Expect -ExitCode 0) -Label 'Reinstall whitespace hash plan'
+
+$installBadPinEmptyHash = Get-PuttyPlan -Action 'Install' -PinVersion 'nope' -InstalledVersion '2.0.0.0' -MarkerVersion '2.0.0.0' -InstallerSha256 ''
+Assert-Plan -Plan $installBadPinEmptyHash -Expect (New-Expect -ExitCode 0) -Label 'empty hash before planning error'
+
 $repairRows = @(
     @{
         Label = 'Repair missing app'
@@ -430,8 +439,26 @@ try {
     Reset-PuttyCase
     Set-Marker '2.0.0.0'
     $script:InstalledVersion = '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-PuttyUserInfoUrl)
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'Uninstall empty hash'
+
+    Reset-PuttyCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-PuttyUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'Uninstall empty hash with userinfo'
+
+    Reset-PuttyCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Reinstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'Reinstall empty hash'
+
+    Reset-PuttyCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion 'nope' -InstallerSha256 '' -InstallerUrl (New-PuttyUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'empty hash ignores userinfo'
 
     Reset-PuttyCase
     Set-Marker '2.0.0.0'
