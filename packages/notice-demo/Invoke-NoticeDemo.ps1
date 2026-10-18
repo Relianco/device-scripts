@@ -165,6 +165,7 @@ namespace Relian.DialogTheme
                         icon.Height = 18;
                     }
                 }
+                WhitenBlackButtons(window, white);
             }
             if (any && Interlocked.Exchange(ref styledOnce, 1) == 0)
             {
@@ -196,6 +197,73 @@ namespace Relian.DialogTheme
             if (background != null && background.CanWrite)
             {
                 background.SetValue(element, brush, null);
+            }
+        }
+
+        private static void WhitenBlackButtons(Window window, Brush white)
+        {
+            foreach (var name in new[] { "ButtonLeft", "ButtonMiddle", "ButtonRight" })
+            {
+                var button = Find(window, name) as Button;
+                if (button == null || !ButtonLooksBlack(button))
+                {
+                    continue;
+                }
+                button.Foreground = white;
+                WhitenText(button, white);
+            }
+        }
+
+        private static bool ButtonLooksBlack(Button button)
+        {
+            return LooksBlack(button.Background) || LooksBlack(button.BorderBrush) || AnyBlackFill(button);
+        }
+
+        private static bool AnyBlackFill(DependencyObject node)
+        {
+            var border = node as Border;
+            if (border != null && LooksBlack(border.Background))
+            {
+                return true;
+            }
+            var count = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < count; i++)
+            {
+                if (AnyBlackFill(VisualTreeHelper.GetChild(node, i)))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool LooksBlack(Brush brush)
+        {
+            var solid = brush as SolidColorBrush;
+            if (solid == null)
+            {
+                return false;
+            }
+            var color = solid.Color;
+            return color.A > 200 && color.R < 40 && color.G < 40 && color.B < 40;
+        }
+
+        private static void WhitenText(DependencyObject node, Brush white)
+        {
+            var block = node as TextBlock;
+            if (block != null)
+            {
+                block.Foreground = white;
+            }
+            var access = node as AccessText;
+            if (access != null)
+            {
+                access.Foreground = white;
+            }
+            var count = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < count; i++)
+            {
+                WhitenText(VisualTreeHelper.GetChild(node, i), white);
             }
         }
 
@@ -280,17 +348,18 @@ namespace Relian.DialogTheme
                     {
                         continue;
                     }
-                    var onAccent = label.IndexOf("OnAccent", StringComparison.OrdinalIgnoreCase) >= 0;
+                    var lightText = label.IndexOf("OnAccent", StringComparison.OrdinalIgnoreCase) >= 0
+                        || label.IndexOf("Foreground", StringComparison.OrdinalIgnoreCase) >= 0;
                     try
                     {
                         var value = dictionary[key];
                         if (value is SolidColorBrush)
                         {
-                            dictionary[key] = onAccent ? (object)white : black;
+                            dictionary[key] = lightText ? (object)white : black;
                         }
                         else if (value is Color)
                         {
-                            dictionary[key] = onAccent ? (object)Colors.White : Colors.Black;
+                            dictionary[key] = lightText ? (object)Colors.White : Colors.Black;
                         }
                     }
                     catch
