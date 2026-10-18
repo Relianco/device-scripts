@@ -3,7 +3,7 @@ Cross-platform scripts for automated device data collection, hardware benchmarki
 
 ## Agents
 
-Engineering status for a new session is [docs/STATUS.md](docs/STATUS.md). Parallel agents use [docs/worktrees.md](docs/worktrees.md): one worktree per branch, and two lanes do not edit the same file. `AGENTS.md` and `.agents/` stay on the machine that is doing the work. Git ignores both, so a GitHub checkout does not include them.
+Engineering status for a new session is [docs/STATUS.md](docs/STATUS.md). Parallel agents use [docs/worktrees.md](docs/worktrees.md): one worktree per branch, and two lanes do not edit the same file. Secret scanning is betterleaks 1.8.1, policy [`.betterleaks.toml`](.betterleaks.toml), local command `scripts/scan-secrets.sh`. `AGENTS.md` and `.agents/` stay on the machine that is doing the work. Git ignores both, so a GitHub checkout does not include them.
 
 ## Deploy runner
 

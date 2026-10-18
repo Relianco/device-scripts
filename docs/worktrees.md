@@ -59,3 +59,17 @@ A rebase conflict means the file lists overlapped. Stop that lane, give the
 file to one branch, and replay the other change onto the new tip.
 
 Workers may push `lane/<name>`. They do not push `teams-package`.
+
+## Before you push
+
+Run `scripts/scan-secrets.sh` in the worktree. It scans commits that are not
+on `origin/teams-package` with betterleaks 1.8.1 and `.betterleaks.toml`.
+
+Once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+That runs the same scan before `git push`. CI runs it again. A missing
+local binary does not skip CI.

@@ -42,7 +42,7 @@ GitHub-hosted `ubuntu-24.04`. There is no self-hosted runner in this repo.
 
 - `pr-verify.yml` installs PowerShell and runs `pwsh -NoProfile -File tests/run-all.ps1`, then `node --test scripts/ci/ai-pr-review.test.mjs`.
 - `ai-pr-review.yml` reviews a same-repository pull request with `gpt-6.1-sol`. A docs-only push posts `AI review skipped for this push:` and does not call the model again.
-- `secret-scan.yml` runs betterleaks 1.8.1 on the pull request delta. The policy is generated in the job. The only allowlist is the exact fixture value `secret` in PowerShell tests.
+- `secret-scan.yml` runs betterleaks 1.8.1 on the pull request delta. The policy is `.betterleaks.toml`. A pull request uses the copy on the base commit when that commit has one. The only allowlist is the exact fixture value `secret` in PowerShell tests. `scripts/scan-secrets.sh` runs the same scan locally. `.githooks/pre-push` runs it before a push after `git config core.hooksPath .githooks`.
 
 ## While you work
 
