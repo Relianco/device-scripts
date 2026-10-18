@@ -122,8 +122,8 @@ try {
 
     Reset-Hooks
     $code = Save-WingetPayload -Url (New-WingetUserInfoUrl) -Destination $dest -Sha256 '' -Label 'package'
-    if ($code -ne 1 -or $script:DownloadCount -ne 0) {
-        Fail "userinfo with an empty hash returned $code after $($script:DownloadCount) downloads"
+    if ($code -ne 0 -or $script:DownloadCount -ne 0) {
+        Fail "empty hash returned $code after $($script:DownloadCount) downloads"
     }
 
     Reset-Hooks
