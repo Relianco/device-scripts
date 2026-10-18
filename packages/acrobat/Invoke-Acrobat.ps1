@@ -391,12 +391,12 @@ function Save-AcrobatPayload {
         [string]$CancelPath
     )
 
+    # An empty hash is success and does not download. Userinfo is still refused when a hash is present.
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
     if (Test-AcrobatUrlHasUserInfo -Url $Url) {
         Add-AcrobatError -Message "refusing a URL that contains userinfo for $Label"
-        return 1
-    }
-    if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        Add-AcrobatError -Message "missing hash for $Label"
         return 1
     }
 
@@ -640,6 +640,9 @@ function Invoke-AcrobatAction {
     }
 
     if ($plan.RunInstaller) {
+        if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+            return 0
+        }
         if (Test-AcrobatCancelled -CancelPath $CancelPath) {
             return 130
         }

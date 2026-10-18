@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/acrobat/Invoke-Acrobat.ps1'
 $recordPath = Join-Path $repoRoot 'releases/acrobat.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -18,13 +21,32 @@ if (-not (Test-Path -LiteralPath $recordPath)) {
     Fail 'releases/acrobat.json does not exist'
 }
 
+function Test-AcrobatReleaseHash {
+    param([string]$Hash)
+    # -match is case-insensitive. A pin is 64 lowercase hex characters, and one repeated nibble is a placeholder.
+    if ($Hash -cnotmatch '^[0-9a-f]{64}$') {
+        return $false
+    }
+    if ($Hash -cmatch '^(.)\1{63}$') {
+        return $false
+    }
+    return $true
+}
+
 $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
 $pinnedUrl = 'https://trials.adobe.com/AdobeProducts/APRO/Acrobat_HelpX/win32/Acrobat_DC_Web_x64_WWMUI.zip'
 if ([string]$record.installerUrl -cne $pinnedUrl) {
     Fail 'installer URL is not the Acrobat enterprise zip'
 }
-if ([string]$record.installerSha256 -notmatch '^[0-9a-f]{64}$') {
-    Fail 'installerSha256 is not 64 lowercase hex characters'
+$hashText = [string]$record.installerSha256
+if (-not (Test-AcrobatReleaseHash -Hash $hashText)) {
+    Fail 'installerSha256 is not a 64-character lowercase hex pin'
+}
+if (Test-AcrobatReleaseHash -Hash ('0' * 64)) {
+    Fail '64 zeros were accepted as a pin'
+}
+if (Test-AcrobatReleaseHash -Hash $hashText.ToUpperInvariant()) {
+    Fail 'an uppercase hash was accepted as a pin'
 }
 if ([int64]$record.installerSize -ne 1699354397) {
     Fail "installerSize '$($record.installerSize)' is not the measured byte size"

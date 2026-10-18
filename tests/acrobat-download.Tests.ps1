@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/acrobat/Invoke-Acrobat.ps1'
 $recordPath = Join-Path $repoRoot 'releases/acrobat.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -156,6 +159,24 @@ Reset-Hooks
 $code = [int](Invoke-AcrobatAction -Action 'Install' -PinVersion '1.0.0.0' -Edition 'Standard' -InstalledVersion '' -MarkerText '' -InstallerUrl (New-AcrobatUserInfoUrl) -InstallerSha256 $goodSha -CancelPath '' -MarkerRoot $root -Products @())
 if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:SetupCount -ne 0) {
     Fail "userinfo action returned $code after $($script:DownloadCount) downloads"
+}
+
+Reset-Hooks
+$code = [int](Save-AcrobatPayload -Url (New-AcrobatUserInfoUrl) -Destination $dest -Sha256 '' -Label 'installer')
+if ($code -ne 0 -or $script:DownloadCount -ne 0 -or (Test-Path -LiteralPath $dest)) {
+    Fail "empty hash returned $code after $($script:DownloadCount) downloads"
+}
+
+Reset-Hooks
+$code = [int](Save-AcrobatPayload -Url 'https://example.invalid/acrobat.zip' -Destination $dest -Sha256 '   ' -Label 'installer')
+if ($code -ne 0 -or $script:DownloadCount -ne 0) {
+    Fail "blank hash returned $code after $($script:DownloadCount) downloads"
+}
+
+Reset-Hooks
+$code = [int](Invoke-AcrobatAction -Action 'Install' -PinVersion '1.0.0.0' -Edition 'Pro' -InstalledVersion '' -MarkerText '' -InstallerUrl $InstallerUrl -InstallerSha256 '' -CancelPath '' -MarkerRoot $root -Products @())
+if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:SetupCount -ne 0) {
+    Fail "empty hash action returned $code downloads $($script:DownloadCount) setup $($script:SetupCount)"
 }
 
 if (-not (Test-AcrobatDownloadIsTransient -ErrorRecord ([AcrobatFakeHttpException]::new(503)))) {
