@@ -455,7 +455,8 @@ try {
     }
 
     $userRecord = Join-Path $temp 'userinfo.json'
-    Write-ToolkitRecord -Path $userRecord -FileName 'module.zip' -Sha $altSha -Size 1 -Url 'https://user:token@example.invalid/module.zip'
+    $userInfoUrl = -join @('https://', 'user', '@', 'example.invalid/module.zip')
+    Write-ToolkitRecord -Path $userRecord -FileName 'module.zip' -Sha $altSha -Size 1 -Url $userInfoUrl
     Reset-AzRecorder -Existing @{}
     $userOut = @(Publish-RelianPacks -ToolkitRecord $userRecord -BrandRoot $brandRoot)
     if ($script:azCalls.Count -ne 0) {

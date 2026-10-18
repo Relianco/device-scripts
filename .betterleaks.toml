@@ -8,9 +8,12 @@ title = "device-scripts"
 useDefault = true
 
 [[allowlists]]
-description = "Teams download history used the fake userinfo password secret. Exact value only, and only in PowerShell tests."
+description = "Download tests and the runner plan used the fake userinfo passwords secret and token. Exact values only."
 targetRules = ["generic-credential-uri"]
 condition = "AND"
 regexTarget = "secret"
-paths = ['''(^|/)tests/.*\.Tests\.ps1$''']
-regexes = ['''^secret$''']
+paths = [
+  '''(^|/)tests/.*\.Tests\.ps1$''',
+  '''(^|/)docs/plans/.*\.md$''',
+]
+regexes = ['''^secret$''', '''^token$''']

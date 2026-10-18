@@ -146,7 +146,7 @@ Order:
 Tests replace the three scriptblocks. They must assert:
 
 - Empty `BrandPackSha256` returns 0 and `DownloadFile` is not called.
-- A URL `https://user:token@github.com/Relianco/device-scripts` returns 1 and `DownloadFile` is not called.
+- A URL with non-empty userinfo returns 1 and `DownloadFile` is not called.
 - A hash mismatch returns 1 and `InvokePackage` is not called.
 - Uppercase SHA256 matching the fixture returns 0 and `InvokePackage` is called once for `Install`.
 - `Reinstall` calls `InvokePackage` twice, `Uninstall` then `Install`, and skips the second call when the first returns 1.

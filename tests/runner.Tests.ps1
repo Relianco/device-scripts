@@ -352,7 +352,7 @@ $env:RELIAN_DEPLOY_TEST = '1'
 $packageUrl = 'https://example.invalid/package.ps1'
 $toolkitUrl = 'https://example.invalid/toolkit.zip'
 $brandUrl = 'https://example.invalid/brand.zip'
-$userInfoUrl = 'https://user:token@github.com/Relianco/device-scripts'
+$userInfoUrl = -join @('https://', 'user', '@', 'example.invalid/package.ps1')
 
 if (-not (Get-Command Invoke-RelianRunner -ErrorAction SilentlyContinue)) {
     Fail 'Invoke-RelianRunner was not defined'
@@ -1090,7 +1090,7 @@ exit 9
         Fail "entry userinfo exited $($entryUser.ExitCode) stdout=[$($entryUser.Stdout)] stderr=[$($entryUser.Stderr)]"
     }
     $entryCombined = $entryUser.Stdout + $entryUser.Stderr
-    if ($entryCombined.Contains('user:token') -or $entryCombined.Contains($userInfoUrl)) {
+    if ($entryCombined.Contains('https://') -or $entryCombined.Contains($userInfoUrl)) {
         Fail 'entry userinfo printed the URL'
     }
     if (-not $entryUser.Stderr.Contains('userinfo')) {

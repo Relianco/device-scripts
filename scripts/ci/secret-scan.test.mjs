@@ -12,9 +12,11 @@ test('the local policy and the CI fallback allow only the fixture value secret',
 
   assert.match(policy, /useDefault = true/)
   assert.match(policy, /\^secret\$/)
+  assert.match(policy, /\^token\$/)
   assert.match(workflow, /git show "\$\{base\}:\.betterleaks\.toml"/)
   assert.match(workflow, /useDefault = true/)
   assert.match(workflow, /\^secret\$/)
+  assert.match(workflow, /\^token\$/)
   assert.match(hook, /betterleaks git/)
   assert.match(hook, /\.betterleaks\.toml/)
   assert.match(scan, /betterleaks git/)

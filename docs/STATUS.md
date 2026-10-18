@@ -22,10 +22,12 @@ machine that has them, read `AGENTS.md`, then `.agents/memory/MEMORY.md`.
 - Tasks 1 to 6 are committed. `tests/teams-session.Tests.ps1` and
   `tests/run-all.ps1` passed on 2026-10-17. Do not pass `-Publish`. The
   installer files stay in `releases/cache/`.
-- Pull request 3 is open against `deploy-runner`:
-  <https://github.com/Relianco/device-scripts/pull/3>
-  Do not merge it until the maintainer asks. Uploading the blobs and a
-  client-device run wait for an explicit ask.
+- Pull request 3 merged into `deploy-runner` on 2026-10-17.
+- Pull request 2 carries this branch to `main`. Merge it only after its
+  PowerShell suite, betterleaks scan, and `gpt-6.1-sol` review are green.
+  Uploading the Teams blobs and a client-device run wait for an explicit ask.
+- Next task after that merge: move each application into its own package
+  directory, using `docs/worktrees.md` so lanes do not edit the same file.
 
 ## Already on `deploy-runner`
 
