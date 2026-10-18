@@ -24,11 +24,15 @@ Rules for code the diff adds or changes:
 - A committed file must not contain a secret, a token, a password, a client name, a device id, or a home-directory path.
 - A URL with userinfo (scheme://user@host) must exit 1 before any download.
 - An empty hash must exit 0 and must not download.
+- An empty hash exits 0 for every action, including Uninstall, and downloads nothing.
 - A hash mismatch must exit 1, must not be retried, and must not run the package.
 - Retries are only for timeout, connection, or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Three attempts. Any other HTTP status is one attempt.
+- SecureConnectionError is a connection failure and is retryable. Do not report it.
+- The OpenAI client may retry HTTP 409 and 425 once. Do not report that single retry.
 - A new test must fail on the old behavior. A test with no assertion is a defect.
 - The runner and a package must not call the NinjaOne API.
 - Parameter blocks are not Mandatory. A Mandatory parameter prompts when the file is dot-sourced.
+- Mandatory is a defect only on parameters of a package entry script. A Mandatory parameter on a test helper is not a defect.
 - curl and az arguments are an array, or they are written inline. Arguments stored in one scalar string are a defect, because zsh does not word-split that string.
 - The Teams package must not contain disableAutoUpdate, MsRdcWebRTCSvc, or Reset-AppxPackage.
 - A pin hash is 64 lowercase hex characters. Do not treat a placeholder hash as valid.
