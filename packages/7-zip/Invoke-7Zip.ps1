@@ -325,13 +325,14 @@ function Save-7ZipPayload {
         [string]$CancelPath
     )
 
-    # Userinfo is rejected even when the hash is empty. Empty hash downloads nothing.
+    # An empty hash downloads nothing, even when the URL contains userinfo.
+    # A non-empty hash still refuses userinfo before any download.
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
     if (Test-7ZipUrlHasUserInfo -Url $Url) {
         Add-7ZipError -Message "refusing a URL that contains userinfo for $Label"
         return 1
-    }
-    if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        return 0
     }
     if (-not (Test-7ZipPinHash -Sha256 $Sha256)) {
         Add-7ZipError -Message "invalid hash for $Label"

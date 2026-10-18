@@ -122,7 +122,7 @@ try {
 
     Reset-Hooks
     $code = Save-7ZipPayload -Url (New-7ZipUserInfoUrl) -Destination $dest -Sha256 '' -Label 'installer'
-    if ($code -ne 1 -or $script:DownloadCount -ne 0) {
+    if ($code -ne 0 -or $script:DownloadCount -ne 0) {
         Fail "userinfo with an empty hash returned $code after $($script:DownloadCount) downloads"
     }
 
