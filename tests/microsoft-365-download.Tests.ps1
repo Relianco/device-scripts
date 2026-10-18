@@ -126,7 +126,7 @@ try {
 
     Reset-Hooks
     $code = Save-Microsoft365Payload -Url (New-Microsoft365UserInfoUrl) -Destination $dest -Sha256 '' -Label 'office deployment tool'
-    if ($code -ne 1 -or $script:DownloadCount -ne 0) {
+    if ($code -ne 0 -or $script:DownloadCount -ne 0) {
         Fail "userinfo with an empty hash returned $code after $($script:DownloadCount) downloads"
     }
 

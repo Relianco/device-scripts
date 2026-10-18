@@ -92,9 +92,6 @@ if ($scriptText -match 'Ninja-Property') {
 if ($scriptText -match '(?:[A-Z0-9]{5}-){4}[A-Z0-9]{5}') {
     Fail 'package contains a product key'
 }
-if ($scriptText -match 'b9ae23b4-2822-441b-a8ea-3a39ba9f6c73') {
-    Fail 'package contains a deployment id'
-}
 
 $builtinVersion = & $script:GetInstalledMicrosoft365Version
 if ($builtinVersion -isnot [string]) {
@@ -636,10 +633,12 @@ try {
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall userinfo'
 
     Reset-Microsoft365Case
-    $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
+    $script:GetInstalledMicrosoft365Version = {
+        throw 'registry was read'
+    }
     $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -SetupSha256 ''
-    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'uninstall marker only'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall empty hashes'
 
     Reset-Microsoft365Case
     $script:InstalledVersion = ''

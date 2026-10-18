@@ -300,13 +300,13 @@ function Save-Microsoft365Payload {
         [string]$CancelPath
     )
 
-    # Userinfo is rejected even when the hash is empty. Empty hash downloads nothing.
+    # An empty hash is success and does not download. Userinfo is still refused when a hash is present.
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
     if (Test-Microsoft365UrlHasUserInfo -Url $Url) {
         Add-Microsoft365Error -Message "refusing a URL that contains userinfo for $Label"
         return 1
-    }
-    if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        return 0
     }
     if (-not (Test-Microsoft365PinHash -Sha256 $Sha256)) {
         Add-Microsoft365Error -Message "refusing a placeholder hash for $Label"
@@ -751,6 +751,11 @@ function Invoke-Microsoft365Action {
         [string]$CancelPath,
         [string]$MarkerRoot
     )
+
+    # An empty pin hash disables every action before registry, download, setup, or marker changes.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256) -or [string]::IsNullOrWhiteSpace($SetupSha256)) {
+        return 0
+    }
 
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-Microsoft365DefaultMarkerRoot
