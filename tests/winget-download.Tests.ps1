@@ -160,6 +160,14 @@ try {
     if (-not (Test-WingetDownloadIsTransient -ErrorRecord $dns)) {
         Fail 'DNS failure was not retried'
     }
+    $secure = [System.Net.Http.HttpRequestException]::new([System.Net.Http.HttpRequestError]::SecureConnectionError, 'tls', $null, $null)
+    if ((Test-WingetDownloadIsTransient -ErrorRecord $secure) -ne $true) {
+        Fail 'SecureConnectionError was not retried'
+    }
+    $authentication = [System.Net.Http.HttpRequestException]::new([System.Net.Http.HttpRequestError]::UserAuthenticationError, 'auth', $null, $null)
+    if (Test-WingetDownloadIsTransient -ErrorRecord $authentication) {
+        Fail 'a non-transport error was retried'
+    }
     if (Test-WingetDownloadIsTransient -ErrorRecord ([System.Exception]::new('nope'))) {
         Fail 'a generic failure was retried'
     }
