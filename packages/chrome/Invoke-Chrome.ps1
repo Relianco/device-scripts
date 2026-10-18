@@ -234,13 +234,15 @@ function Test-ChromeTransientTransport {
         'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
         'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
     )
+    # SecureConnectionError is an allowed connection failure and stays retryable.
     $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
     $current = $Exception
     $guard = 0
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
+        # A bare TaskCanceledException is ordinary cancellation. Invoke-WebRequest
+        # reports a timeout as that type with an inner TimeoutException.
         if ($current -is [System.TimeoutException] -or
-            $current -is [System.Threading.Tasks.TaskCanceledException] -or
             $current -is [System.Net.Sockets.SocketException]) {
             return $true
         }

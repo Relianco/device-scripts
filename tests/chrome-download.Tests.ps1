@@ -5,7 +5,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/chrome/Invoke-Chrome.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -142,8 +145,15 @@ try {
     if (-not (Test-ChromeDownloadIsTransient -ErrorRecord ([System.TimeoutException]::new('timed out')))) {
         Fail 'timeout was not retried'
     }
-    if (-not (Test-ChromeDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+    $timeoutCancel = [System.Threading.Tasks.TaskCanceledException]::new(
+        'The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.',
+        [System.TimeoutException]::new('The operation was canceled.')
+    )
+    if (-not (Test-ChromeDownloadIsTransient -ErrorRecord $timeoutCancel)) {
+        Fail 'timeout cancellation was not retried'
+    }
+    if (Test-ChromeDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('canceled'))) {
+        Fail 'ordinary cancellation was retried'
     }
     $socket = [System.Net.Sockets.SocketException]::new()
     if (-not (Test-ChromeDownloadIsTransient -ErrorRecord $socket)) {
