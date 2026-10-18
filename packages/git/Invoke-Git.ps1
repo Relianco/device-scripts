@@ -290,13 +290,13 @@ function Save-GitPayload {
         [string]$CancelPath
     )
 
-    # Userinfo is rejected even when the hash is empty. Empty hash downloads nothing.
+    # An empty hash is success and does not download. Userinfo is still refused when a hash is present.
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
     if (Test-GitUrlHasUserInfo -Url $Url) {
         Add-GitError -Message "refusing a URL that contains userinfo for $Label"
         return 1
-    }
-    if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        return 0
     }
 
     $expected = $Sha256.Trim().ToLowerInvariant()
