@@ -1,0 +1,313 @@
+/**
+ * Pull-request review for PowerShell device scripts.
+ * Zero dependencies. The workflow pins MODEL to gpt-6.1-sol.
+ * A missing or unentitled model fails the job. This script does not
+ * substitute another model.
+ */
+
+import { pathToFileURL } from 'node:url'
+
+export const DELIVERY_PREFIXES = [
+  'Code review by ChatGPT',
+  'LGTM',
+  'AI review skipped for this push:',
+]
+
+export const NOT_PERFORMED_PREFIX = 'AI review NOT performed:'
+
+export const DEFAULT_MODEL = 'gpt-6.1-sol'
+
+export const PROMPT = `You review one file from a pull request of PowerShell device-deployment scripts.
+Report defects a maintainer must fix before merge. Skip style and naming.
+
+Rules for code the diff adds or changes:
+- A committed file must not contain a secret, a token, a password, a client name, a device id, or a home-directory path.
+- A URL with userinfo (scheme://user@host) must exit 1 before any download.
+- An empty hash must exit 0 and must not download.
+- A hash mismatch must exit 1, must not be retried, and must not run the package.
+- Retries are only for timeout, connection, or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Three attempts. Any other HTTP status is one attempt.
+- A new test must fail on the old behavior. A test with no assertion is a defect.
+- The runner and a package must not call the NinjaOne API.
+- Parameter blocks are not Mandatory. A Mandatory parameter prompts when the file is dot-sourced.
+- curl and az arguments are an array, or they are written inline. Arguments stored in one scalar string are a defect, because zsh does not word-split that string.
+- The Teams package must not contain disableAutoUpdate, MsRdcWebRTCSvc, or Reset-AppxPackage.
+- A pin hash is 64 lowercase hex characters. Do not treat a placeholder hash as valid.
+
+Reply with one JSON object and no other text:
+{"findings":[{"line":1,"body":"what happens at runtime, then the fix"}]}
+Use an empty findings array when the file has no defect.`
+
+const REVIEW_EXT = new Set(['.ps1', '.json', '.yml', '.yaml', '.mjs', '.js', '.toml'])
+const TRANSIENT = new Set([408, 409, 425, 429, 500, 502, 503, 504])
+
+export function parseModelList(value) {
+  const names = String(value ?? '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+  return names.length > 0 ? names : [DEFAULT_MODEL]
+}
+
+export function primaryModel(value) {
+  return parseModelList(value)[0]
+}
+
+export function isDocsPath(filename) {
+  if (filename === 'LICENSE') return true
+  if (filename.startsWith('docs/')) return true
+  return filename.endsWith('.md')
+}
+
+export function isReviewablePath(filename) {
+  if (!filename || isDocsPath(filename)) return false
+  const base = filename.split('/').pop()
+  const dot = base.lastIndexOf('.')
+  if (dot < 0) return false
+  return REVIEW_EXT.has(base.slice(dot).toLowerCase())
+}
+
+export function capPatch(patch, max = 8000) {
+  const text = patch || ''
+  if (text.length <= max) return text
+  return `${text.slice(0, max)}\n...[truncated]`
+}
+
+export function selectReviewFiles(files, { limit = 20, maxPatch = 8000 } = {}) {
+  const reviewable = []
+  const skipped = []
+  for (const file of files) {
+    if (!isReviewablePath(file.filename) || !file.patch) {
+      skipped.push(file.filename)
+      continue
+    }
+    reviewable.push({
+      filename: file.filename,
+      patch: capPatch(file.patch, maxPatch),
+      truncated: String(file.patch).length > maxPatch,
+    })
+  }
+  return {
+    kept: reviewable.slice(0, limit),
+    omitted: reviewable.slice(limit).map((file) => file.filename),
+    skipped,
+  }
+}
+
+export function parseFindings(content) {
+  let parsed
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    throw new Error('review JSON parse failed')
+  }
+  if (!parsed || !Array.isArray(parsed.findings)) {
+    throw new Error('findings array missing')
+  }
+  return parsed.findings
+    .map((finding) => ({
+      line: Number.isInteger(finding.line) && finding.line > 0 ? finding.line : 1,
+      body: String(finding.body || '').trim(),
+    }))
+    .filter((finding) => finding.body.length > 0)
+}
+
+export function buildReviewBody({ findings, omitted, model }) {
+  const omittedNote = omitted.length > 0
+    ? `\n\nNot sent, over the 20-file cap: ${omitted.join(', ')}`
+    : ''
+  if (findings.length === 0) {
+    return `LGTM 👍\n\nReviewed with ${model}. No defects to fix before merge.${omittedNote}`
+  }
+  const lines = findings.map((finding) => `- ${finding.path}:${finding.line} ${finding.body}`)
+  return `Code review by ChatGPT\n\n${lines.join('\n')}${omittedNote}`
+}
+
+export function notPerformedBody(filenames) {
+  const names = filenames.length > 0 ? filenames.join(', ') : '(none)'
+  return `${NOT_PERFORMED_PREFIX} no reviewable source files. Files: ${names}`
+}
+
+export function isModelUnavailable(status, body) {
+  return String(body || '').includes('model_not_found') || status === 404
+}
+
+export async function postCompletion({
+  endpoint,
+  apiKey,
+  model,
+  messages,
+  fetchImpl = globalThis.fetch,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+}) {
+  const url = `${String(endpoint).replace(/\/$/, '')}/chat/completions`
+  const payload = JSON.stringify({
+    model,
+    messages,
+    response_format: { type: 'json_object' },
+    max_completion_tokens: 2000,
+  })
+  let lastError = null
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    let response
+    try {
+      response = await fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: payload,
+      })
+    } catch (error) {
+      lastError = error
+      if (attempt === 1) {
+        await sleep(1000)
+        continue
+      }
+      throw error
+    }
+    const text = await response.text()
+    if (response.ok) {
+      let parsed
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        throw new Error('completion body is not JSON')
+      }
+      const content = parsed?.choices?.[0]?.message?.content
+      if (typeof content !== 'string' || content.trim() === '') {
+        throw new Error('completion content missing')
+      }
+      return content
+    }
+    if (isModelUnavailable(response.status, text) || response.status === 401 || response.status === 403) {
+      const error = new Error(`openai ${response.status}${String(text).includes('model_not_found') ? ' model_not_found' : ''}`)
+      error.status = response.status
+      throw error
+    }
+    if (TRANSIENT.has(response.status) && attempt === 1) {
+      await sleep(1000)
+      continue
+    }
+    const error = new Error(`openai ${response.status}`)
+    error.status = response.status
+    lastError = error
+    throw error
+  }
+  throw lastError ?? new Error('completion failed')
+}
+
+async function github(path, { method = 'GET', body, token }) {
+  const response = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'relian-device-scripts-review',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const text = await response.text()
+  if (!response.ok) {
+    throw new Error(`github ${method} ${path} ${response.status} ${text.slice(0, 300)}`)
+  }
+  return text ? JSON.parse(text) : null
+}
+
+async function listPullFiles(prNumber, token) {
+  const files = []
+  for (let page = 1; page <= 10; page++) {
+    const batch = await github(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${prNumber}/files?per_page=100&page=${page}`, { token })
+    if (!Array.isArray(batch) || batch.length === 0) break
+    files.push(...batch)
+    if (batch.length < 100) break
+  }
+  return files
+}
+
+async function postReview({ prNumber, headSha, body, token }) {
+  await github(`/repos/${process.env.GITHUB_REPOSITORY}/pulls/${prNumber}/reviews`, {
+    method: 'POST',
+    token,
+    body: { commit_id: headSha, event: 'COMMENT', body },
+  })
+}
+
+export function messagesFor(file) {
+  return [
+    { role: 'system', content: 'You reply with JSON only.' },
+    { role: 'user', content: `${PROMPT}\n\nFile: ${file.filename}\n\n${file.patch}` },
+  ]
+}
+
+export async function reviewPullRequest({
+  prNumber,
+  headSha,
+  token,
+  endpoint,
+  apiKey,
+  model,
+  fetchImpl,
+  sleep,
+  listFiles = listPullFiles,
+  post = postReview,
+}) {
+  const files = await listFiles(prNumber, token)
+  const selected = selectReviewFiles(files)
+  if (selected.kept.length === 0) {
+    const body = notPerformedBody(files.map((file) => file.filename))
+    await post({ prNumber, headSha, body, token })
+    const error = new Error(body)
+    error.exitCode = 1
+    throw error
+  }
+  const findings = []
+  for (const file of selected.kept) {
+    const content = await postCompletion({
+      endpoint,
+      apiKey,
+      model,
+      messages: messagesFor(file),
+      fetchImpl,
+      sleep,
+    })
+    for (const finding of parseFindings(content)) {
+      findings.push({ path: file.filename, line: finding.line, body: finding.body })
+    }
+  }
+  const body = buildReviewBody({ findings, omitted: selected.omitted, model })
+  await post({ prNumber, headSha, body, token })
+  return body
+}
+
+async function main() {
+  const token = process.env.GITHUB_TOKEN
+  const apiKey = process.env.OPENAI_API_KEY
+  const endpoint = process.env.OPENAI_API_ENDPOINT || 'https://api.openai.com/v1'
+  const prNumber = process.env.PR_NUMBER
+  const headSha = process.env.HEAD_SHA
+  const model = primaryModel(process.env.MODEL)
+  if (!token || !apiKey || !prNumber || !headSha) {
+    throw new Error('GITHUB_TOKEN, OPENAI_API_KEY, PR_NUMBER, and HEAD_SHA are required')
+  }
+  if (model !== DEFAULT_MODEL && String(process.env.MODEL || '').trim() === '') {
+    throw new Error('MODEL resolved empty')
+  }
+  await reviewPullRequest({
+    prNumber,
+    headSha,
+    token,
+    endpoint,
+    apiKey,
+    model,
+  })
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
+if (isMain) {
+  main().catch((error) => {
+    console.error(error.message)
+    process.exit(error.exitCode || 1)
+  })
+}

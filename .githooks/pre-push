@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Pre-push secret guard. Scans the commits about to be pushed with betterleaks.
+# CI runs the same policy and is the hard gate. Enable once per clone:
+#   git config core.hooksPath .githooks
+# Bypass a false positive with: git push --no-verify
+set -euo pipefail
+
+if ! command -v betterleaks >/dev/null 2>&1; then
+  echo "[pre-push] betterleaks not installed. Skipping the local scan. CI still enforces it."
+  echo "[pre-push] install: https://github.com/betterleaks/betterleaks/releases"
+  exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+config="$root/.betterleaks.toml"
+if [ ! -f "$config" ]; then
+  echo "[pre-push] missing .betterleaks.toml. Blocking the push."
+  exit 1
+fi
+
+zero="0000000000000000000000000000000000000000"
+baseline=""
+for candidate in origin/teams-package origin/deploy-runner origin/main; do
+  if git rev-parse --verify -q "$candidate" >/dev/null 2>&1; then
+    baseline="$candidate"
+    break
+  fi
+done
+
+status=0
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ "$local_sha" = "$zero" ] && continue
+  if [ "$remote_sha" = "$zero" ]; then
+    base=""
+    if [ -n "$baseline" ]; then
+      base="$(git merge-base "$baseline" "$local_sha" 2>/dev/null || true)"
+    fi
+    if [ -n "$base" ]; then
+      range="${base}..${local_sha}"
+    else
+      range="$local_sha"
+    fi
+  else
+    range="${remote_sha}..${local_sha}"
+  fi
+  if ! first="$(git rev-list -n1 "$range" 2>/dev/null)"; then
+    echo "[pre-push] cannot resolve range ${range}. Blocking the push."
+    status=1
+    continue
+  fi
+  [ -z "$first" ] && continue
+  echo "[pre-push] scanning ${range}"
+  if ! betterleaks git "$root" -c "$config" --no-banner --redact --log-opts="$range"; then
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "[pre-push] BLOCKED: betterleaks found a secret in the commits you are pushing."
+  echo "[pre-push] Remove it and rewrite that commit before pushing."
+  exit 1
+fi
