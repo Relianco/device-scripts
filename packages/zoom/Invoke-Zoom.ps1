@@ -228,6 +228,31 @@ function Get-ZoomHttpStatus {
     return $null
 }
 
+function Test-ZoomSocketIsRetryable {
+    param($Exception)
+    # SocketException() keeps the last native error. Only connection and DNS codes are retried.
+    if ($Exception -isnot [System.Net.Sockets.SocketException]) {
+        return $false
+    }
+    $code = [int]$Exception.SocketErrorCode
+    $retryable = @(
+        [int][System.Net.Sockets.SocketError]::ConnectionAborted,
+        [int][System.Net.Sockets.SocketError]::ConnectionRefused,
+        [int][System.Net.Sockets.SocketError]::ConnectionReset,
+        [int][System.Net.Sockets.SocketError]::HostDown,
+        [int][System.Net.Sockets.SocketError]::HostNotFound,
+        [int][System.Net.Sockets.SocketError]::HostUnreachable,
+        [int][System.Net.Sockets.SocketError]::NetworkDown,
+        [int][System.Net.Sockets.SocketError]::NetworkReset,
+        [int][System.Net.Sockets.SocketError]::NetworkUnreachable,
+        [int][System.Net.Sockets.SocketError]::NoData,
+        [int][System.Net.Sockets.SocketError]::NoRecovery,
+        [int][System.Net.Sockets.SocketError]::TimedOut,
+        [int][System.Net.Sockets.SocketError]::TryAgain
+    )
+    return $retryable -contains $code
+}
+
 function Test-ZoomTransientTransport {
     param($Exception)
     $webTransient = @(
@@ -239,9 +264,8 @@ function Test-ZoomTransientTransport {
     $guard = 0
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
-        if ($current -is [System.TimeoutException] -or
-            $current -is [System.Threading.Tasks.TaskCanceledException] -or
-            $current -is [System.Net.Sockets.SocketException]) {
+        # Cancellation is not a timeout. A timeout is a TimeoutException, including one nested inside TaskCanceledException.
+        if ($current -is [System.TimeoutException] -or (Test-ZoomSocketIsRetryable -Exception $current)) {
             return $true
         }
         if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {

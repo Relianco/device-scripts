@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/zoom/Invoke-Zoom.ps1'
 $releasePath = Join-Path $repoRoot 'releases/zoom.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'zoom plan test failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }

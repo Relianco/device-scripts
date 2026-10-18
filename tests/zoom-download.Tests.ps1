@@ -5,7 +5,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/zoom/Invoke-Zoom.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'zoom download test failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -142,16 +145,29 @@ try {
     if (-not (Test-ZoomDownloadIsTransient -ErrorRecord ([System.TimeoutException]::new('timed out')))) {
         Fail 'timeout was not retried'
     }
-    if (-not (Test-ZoomDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+    $timeout = [System.TimeoutException]::new('The operation has timed out.')
+    $timedOut = [System.Threading.Tasks.TaskCanceledException]::new('canceled', $timeout)
+    if (-not (Test-ZoomDownloadIsTransient -ErrorRecord $timedOut)) {
+        Fail 'a timeout cancellation was not retried'
     }
-    $socket = [System.Net.Sockets.SocketException]::new()
-    if (-not (Test-ZoomDownloadIsTransient -ErrorRecord $socket)) {
-        Fail 'socket failure was not retried'
+    if (Test-ZoomDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out'))) {
+        Fail 'ordinary cancellation was retried'
     }
-    $wrapped = [System.Exception]::new('wrapped', $socket)
+    $connection = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionRefused)
+    if (-not (Test-ZoomDownloadIsTransient -ErrorRecord $connection)) {
+        Fail 'connection failure was not retried'
+    }
+    $wrapped = [System.Exception]::new('wrapped', $connection)
     if (-not (Test-ZoomDownloadIsTransient -ErrorRecord $wrapped)) {
-        Fail 'wrapped socket failure was not retried'
+        Fail 'wrapped connection failure was not retried'
+    }
+    $dnsSocket = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::HostNotFound)
+    if (-not (Test-ZoomDownloadIsTransient -ErrorRecord $dnsSocket)) {
+        Fail 'DNS socket failure was not retried'
+    }
+    $unrelated = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::AddressAlreadyInUse)
+    if (Test-ZoomDownloadIsTransient -ErrorRecord $unrelated) {
+        Fail 'an unrelated socket error was retried'
     }
     $dns = [System.Net.WebException]::new('dns', [System.Net.WebExceptionStatus]::NameResolutionFailure)
     if (-not (Test-ZoomDownloadIsTransient -ErrorRecord $dns)) {
@@ -198,7 +214,7 @@ try {
         $script:DownloadCount++
         $script:Attempt++
         if ($script:Attempt -eq 1) {
-            throw [System.Net.Sockets.SocketException]::new()
+            throw [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionRefused)
         }
         [System.IO.File]::WriteAllBytes($Destination, $good)
     }
