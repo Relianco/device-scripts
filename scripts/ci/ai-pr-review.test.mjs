@@ -84,6 +84,15 @@ test('the prompt is PowerShell rules and names JSON', () => {
   assert.match(PROMPT, /hash mismatch/)
   assert.match(PROMPT, /NinjaOne/)
   assert.doesNotMatch(PROMPT, /Nuxt/)
+  const skip = [
+    'SecureConnectionError is a connection failure and is retryable. Do not report it.',
+    'The OpenAI client may retry HTTP 409 and 425 once. Do not report that single retry.',
+    'Mandatory is a defect only on parameters of a package entry script. A Mandatory parameter on a test helper is not a defect.',
+    'An empty hash exits 0 for every action, including Uninstall, and downloads nothing.',
+  ]
+  for (const sentence of skip) {
+    assert.equal(PROMPT.includes(sentence), true)
+  }
 })
 
 test('the workflow pins gpt-6.1-sol on ubuntu-latest', () => {
