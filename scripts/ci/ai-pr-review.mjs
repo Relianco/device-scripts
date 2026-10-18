@@ -72,13 +72,13 @@ export function isReviewablePath(filename) {
   return REVIEW_EXT.has(base.slice(dot).toLowerCase())
 }
 
-export function capPatch(patch, max = 8000) {
+export function capPatch(patch, max = 64000) {
   const text = patch || ''
   if (text.length <= max) return text
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-export function selectReviewFiles(files, { limit = 20, maxPatch = 8000 } = {}) {
+export function selectReviewFiles(files, { limit = 20, maxPatch = 64000 } = {}) {
   const reviewable = []
   const skipped = []
   for (const file of files) {

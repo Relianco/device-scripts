@@ -42,9 +42,9 @@ test('markdown and docs are skipped and PowerShell is reviewed', () => {
   assert.deepEqual(selected.skipped, ['docs/STATUS.md', 'brand/logo.bin'])
 })
 
-test('a patch longer than 8000 characters is capped and the 21st file is omitted', () => {
-  assert.equal(capPatch('a'.repeat(8001)).length < 8100, true)
-  assert.match(capPatch('a'.repeat(8001)), /truncated/)
+test('a patch longer than 64000 characters is capped and the 21st file is omitted', () => {
+  assert.equal(capPatch('a'.repeat(64001)).length < 64100, true)
+  assert.match(capPatch('a'.repeat(64001)), /truncated/)
   const files = []
   for (let i = 0; i < 21; i++) {
     files.push({ filename: `packages/p${i}.ps1`, patch: 'diff' })
