@@ -64,6 +64,10 @@ $chromeId = 'a' * 32
 $otherId = 'b' * 32
 $firefoxId = 'example@example.invalid'
 $otherFirefoxId = 'other@example.invalid'
+$chromePin = 'chrome-' + $chromeId
+$edgePin = 'edge-' + $chromeId
+$bravePin = 'brave-' + $chromeId
+$firefoxPin = 'firefox-' + $firefoxId
 $chromeUrl = 'https://clients2.google.com/service/update2/crx'
 $edgeUrl = 'https://edge.microsoft.com/extensionwebstorebase/v1/crx'
 $braveUrl = 'https://clients2.google.com/service/update2/crx'
@@ -210,7 +214,8 @@ try {
                 $beforeOthers[$name] = Format-Forcelist -Items $store.$name
             }
         }
-        $code = Invoke-Case -Store $store -ActionName 'Install' -Pin '1.2.3' -BrowserName $case.Name -Id $chromeId -Url 'https://evil.example/crx'
+        $pin = $case.Name.ToLowerInvariant() + '-' + $chromeId
+        $code = Invoke-Case -Store $store -ActionName 'Install' -Pin $pin -BrowserName $case.Name -Id $chromeId -Url 'https://evil.example/crx'
         if ($code -ne 0) {
             Fail "$($case.Name) install exited $code"
         }
@@ -237,7 +242,7 @@ try {
             Fail "$($case.Name) marker was not written"
         }
         $markerText = [System.IO.File]::ReadAllText($marker)
-        if ($markerText -cne '1.2.3') {
+        if ($markerText -cne $pin) {
             Fail "$($case.Name) marker text '$markerText'"
         }
         if ([string]$added[0].Data -like '*evil.example*') {
@@ -265,7 +270,7 @@ try {
 
     $store = New-CaseStore
     $store.FirefoxPolicyFile = $firefoxFile
-    $code = Invoke-Case -Store $store -ActionName 'Update' -Pin '1.2.3' -BrowserName 'Firefox' -Id $firefoxId
+    $code = Invoke-Case -Store $store -ActionName 'Update' -Pin $firefoxPin -BrowserName 'Firefox' -Id $firefoxId
     if ($code -ne 0) {
         Fail "Firefox update exited $code"
     }
@@ -299,11 +304,11 @@ try {
     $badId = New-CaseStore
     Add-Forcelist -Store $badId -BrowserName 'Chrome' -Name '1' -Data ($otherId + ';' + $chromeUrl)
     $badBefore = Format-Store -Store $badId
-    $code = Invoke-Case -Store $badId -ActionName 'Install' -Pin '1.2.3' -BrowserName 'Chrome' -Id ('q' * 32)
+    $code = Invoke-Case -Store $badId -ActionName 'Install' -Pin $chromePin -BrowserName 'Chrome' -Id ('q' * 32)
     if ($code -ne 1 -or (Format-Store -Store $badId) -cne $badBefore) {
         Fail "bad id exited $code and changed policy"
     }
-    $code = Invoke-Case -Store $badId -ActionName 'Install' -Pin '1.2.3' -BrowserName 'Firefox' -Id 'not-an-id'
+    $code = Invoke-Case -Store $badId -ActionName 'Install' -Pin $firefoxPin -BrowserName 'Firefox' -Id 'not-an-id'
     if ($code -ne 1 -or (Format-Store -Store $badId) -cne $badBefore) {
         Fail "bad firefox id exited $code and changed policy"
     }
@@ -315,9 +320,10 @@ try {
             'https://example.invalid/addon.xpi',
             'https://addons.mozilla.org.example.invalid/addon.xpi',
             'http://addons.mozilla.org/firefox/downloads/latest/example@example.invalid/latest.xpi',
-            (-join @('https://', 'user', '@', 'addons.mozilla.org/firefox/downloads/latest/example@example.invalid/latest.xpi'))
+            (-join @('https://', 'user', '@', 'addons.mozilla.org/firefox/downloads/latest/example@example.invalid/latest.xpi')),
+            'https://addons.mozilla.org/firefox/downloads/latest/example@example.invalid/latest.xpi?src=dp'
         )) {
-        $code = Invoke-Case -Store $badUrl -ActionName 'Install' -Pin '1.2.3' -BrowserName 'Firefox' -Id $firefoxId -Url $url
+        $code = Invoke-Case -Store $badUrl -ActionName 'Install' -Pin $firefoxPin -BrowserName 'Firefox' -Id $firefoxId -Url $url
         $now = [System.IO.File]::ReadAllBytes($firefoxFile)
         $same = ($now.Length -eq $badUrlBytes.Length)
         if ($same) {
@@ -344,7 +350,7 @@ try {
     Write-BrowserExtensionMarker -Path $chromeMarker -PinVersion '1.2.3'
     Write-BrowserExtensionMarker -Path $edgeMarker -PinVersion '9.9.9'
     Write-BrowserExtensionMarker -Path $firefoxMarker -PinVersion '1.2.3'
-    $code = Invoke-Case -Store $uninstall -ActionName 'Uninstall' -Pin '1.2.3' -BrowserName 'Chrome' -Id $chromeId
+    $code = Invoke-Case -Store $uninstall -ActionName 'Uninstall' -Pin $chromePin -BrowserName 'Chrome' -Id $chromeId
     if ($code -ne 0) {
         Fail "uninstall exited $code"
     }
@@ -367,7 +373,7 @@ try {
         Fail 'Chrome uninstall removed the Firefox extension'
     }
 
-    $code = Invoke-Case -Store $uninstall -ActionName 'Uninstall' -Pin '1.2.3' -BrowserName 'Firefox' -Id $firefoxId
+    $code = Invoke-Case -Store $uninstall -ActionName 'Uninstall' -Pin $firefoxPin -BrowserName 'Firefox' -Id $firefoxId
     if ($code -ne 0) {
         Fail "Firefox uninstall exited $code"
     }
@@ -406,7 +412,7 @@ try {
     $unknownStore = New-CaseStore
     Add-Forcelist -Store $unknownStore -BrowserName 'Chrome' -Name '1' -Data ($chromeId + ';' + $chromeUrl)
     $unknownBefore = Format-Store -Store $unknownStore
-    $code = Invoke-Case -Store $unknownStore -ActionName 'Install' -Pin '1.2.3' -BrowserName 'Opera' -Id $chromeId
+    $code = Invoke-Case -Store $unknownStore -ActionName 'Install' -Pin $chromePin -BrowserName 'Opera' -Id $chromeId
     if ($code -ne 1 -or (Format-Store -Store $unknownStore) -cne $unknownBefore) {
         Fail "unknown browser exited $code"
     }
@@ -417,7 +423,7 @@ try {
     $previousCancel = $env:RELIAN_DEPLOY_CANCEL
     try {
         $env:RELIAN_DEPLOY_CANCEL = '1'
-        $code = Invoke-Case -Store $cancelStore -ActionName 'Install' -Pin '1.2.3' -BrowserName 'Chrome' -Id $chromeId
+        $code = Invoke-Case -Store $cancelStore -ActionName 'Install' -Pin $chromePin -BrowserName 'Chrome' -Id $chromeId
         if ($code -ne 130 -or (Format-Store -Store $cancelStore) -cne $cancelBefore) {
             Fail "RELIAN_DEPLOY_CANCEL exited $code"
         }
@@ -431,7 +437,7 @@ try {
 
     $cancelPath = Join-Path $temp 'cancel.flag'
     [System.IO.File]::WriteAllText($cancelPath, '1', $utf8)
-    $code = Invoke-Case -Store $cancelStore -ActionName 'Update' -Pin '1.2.3' -BrowserName 'Edge' -Id $chromeId -Cancel $cancelPath
+    $code = Invoke-Case -Store $cancelStore -ActionName 'Update' -Pin $edgePin -BrowserName 'Edge' -Id $chromeId -Cancel $cancelPath
     if ($code -ne 130 -or (Format-Store -Store $cancelStore) -cne $cancelBefore) {
         Fail "CancelPath exited $code"
     }
@@ -441,7 +447,7 @@ try {
 
     $repair = New-CaseStore
     Add-Forcelist -Store $repair -BrowserName 'Edge' -Name '4' -Data ($otherId + ';' + $edgeUrl)
-    $code = Invoke-Case -Store $repair -ActionName 'Repair' -Pin '1.2.3' -BrowserName 'Edge' -Id $chromeId
+    $code = Invoke-Case -Store $repair -ActionName 'Repair' -Pin $edgePin -BrowserName 'Edge' -Id $chromeId
     if ($code -ne 0) {
         Fail "repair missing exited $code"
     }
@@ -449,7 +455,7 @@ try {
     if ($repaired.Count -ne 1 -or [string]$repaired[0].Data -cne ($chromeId + ';' + $edgeUrl)) {
         Fail 'repair did not write the missing Edge entry'
     }
-    $code = Invoke-Case -Store $repair -ActionName 'Repair' -Pin '1.2.3' -BrowserName 'Edge' -Id $chromeId
+    $code = Invoke-Case -Store $repair -ActionName 'Repair' -Pin $edgePin -BrowserName 'Edge' -Id $chromeId
     $repairedAgain = @($repair.Edge | Where-Object { ([string]$_.Data).StartsWith($chromeId + ';', [System.StringComparison]::Ordinal) })
     if ($code -ne 0 -or $repairedAgain.Count -ne 1) {
         Fail 'repair duplicated an existing entry'
@@ -462,7 +468,7 @@ try {
     $reinstall = New-CaseStore
     Add-Forcelist -Store $reinstall -BrowserName 'Brave' -Name '1' -Data ($otherId + ';' + $braveUrl)
     $reinstallBefore = Format-Store -Store $reinstall
-    $code = Invoke-Case -Store $reinstall -ActionName 'Reinstall' -Pin '1.2.3' -BrowserName 'Brave' -Id $chromeId
+    $code = Invoke-Case -Store $reinstall -ActionName 'Reinstall' -Pin $bravePin -BrowserName 'Brave' -Id $chromeId
     if ($code -ne 1 -or (Format-Store -Store $reinstall) -cne $reinstallBefore) {
         Fail "reinstall exited $code"
     }
@@ -489,13 +495,83 @@ try {
     [System.IO.File]::WriteAllText($corrupt, '{', $utf8)
     $corruptStore = New-CaseStore
     $corruptStore.FirefoxPolicyFile = $corrupt
-    $code = Invoke-Case -Store $corruptStore -ActionName 'Install' -Pin '1.2.3' -BrowserName 'Firefox' -Id $firefoxId
+    $code = Invoke-Case -Store $corruptStore -ActionName 'Install' -Pin $firefoxPin -BrowserName 'Firefox' -Id $firefoxId
     if ($code -ne 1 -or [System.IO.File]::ReadAllText($corrupt) -cne '{') {
         Fail "corrupt policies.json exited $code"
     }
 
     if ($firefoxBefore.Length -eq 0) {
         Fail 'firefox seed was empty'
+    }
+
+    $pinRoot = Join-Path $temp 'pin-only'
+    New-Item -ItemType Directory -Path $pinRoot -Force | Out-Null
+    $pinOnly = @(
+        @{ Name = 'Chrome'; Pin = $chromePin; Id = $chromeId; Value = ($chromeId + ';' + $chromeUrl) }
+        @{ Name = 'Edge'; Pin = $edgePin; Id = $chromeId; Value = ($chromeId + ';' + $edgeUrl) }
+        @{ Name = 'Brave'; Pin = $bravePin; Id = $chromeId; Value = ($chromeId + ';' + $braveUrl) }
+        @{ Name = 'Firefox'; Pin = $firefoxPin; Id = $firefoxId; Value = $firefoxUrl }
+    )
+    foreach ($row in $pinOnly) {
+        $store = New-CaseStore
+        $pinMarkerRoot = Join-Path $pinRoot $row.Name
+        if ($row.Name -eq 'Firefox') {
+            $store.FirefoxPolicyFile = Join-Path $pinRoot 'policies.json'
+        }
+        $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion $row.Pin -MarkerRoot $pinMarkerRoot -Store $store)
+        if ($code -ne 0) {
+            Fail "$($row.Name) pin install exited $code"
+        }
+        if ($row.Name -eq 'Firefox') {
+            $doc = [System.IO.File]::ReadAllText($store.FirefoxPolicyFile) | ConvertFrom-Json
+            $installed = $doc.policies.ExtensionSettings.PSObject.Properties[$row.Id]
+            if ($null -eq $installed -or [string]$installed.Value.install_url -cne $row.Value) {
+                Fail "$($row.Name) pin did not write $($row.Id)"
+            }
+        } else {
+            $added = @($store.($row.Name) | Where-Object { [string]$_.Data -ceq $row.Value })
+            if ($added.Count -ne 1) {
+                Fail "$($row.Name) pin value '$(Format-Forcelist -Items $store.($row.Name))'"
+            }
+        }
+        $marker = Get-BrowserExtensionMarkerPath -Root $pinMarkerRoot -Browser $row.Name -ExtensionId $row.Id
+        if (-not (Test-Path -LiteralPath $marker) -or [System.IO.File]::ReadAllText($marker) -cne $row.Pin) {
+            Fail "$($row.Name) pin marker was not $($row.Pin)"
+        }
+    }
+
+    $untouched = New-CaseStore
+    Add-Forcelist -Store $untouched -BrowserName 'Chrome' -Name '1' -Data ($otherId + ';' + $chromeUrl)
+    $untouchedBefore = Format-Store -Store $untouched
+    $untouchedRoot = Join-Path $pinRoot 'rejected'
+    foreach ($pin in @('1.0.0', ($chromePin + '?hl=en'), ('https://chromewebstore.google.com/detail/name/' + $chromeId + '?hl=en'), ('chrome- ' + $chromeId))) {
+        $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion $pin -MarkerRoot $untouchedRoot -Store $untouched)
+        if ($code -ne 1 -or (Format-Store -Store $untouched) -cne $untouchedBefore) {
+            Fail "pin '$pin' exited $code"
+        }
+        if (Test-Path -LiteralPath $untouchedRoot) {
+            Fail "pin '$pin' wrote a marker"
+        }
+    }
+    $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion '1.0.0' -Browser 'Chrome' -ExtensionId $chromeId -MarkerRoot $untouchedRoot -Store $untouched)
+    if ($code -ne 1 -or (Format-Store -Store $untouched) -cne $untouchedBefore) {
+        Fail "explicit targets did not reject version pin $code"
+    }
+
+    $override = New-CaseStore
+    $overridePin = 'chrome-' + $otherId
+    $overrideRoot = Join-Path $pinRoot 'override'
+    $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion $overridePin -Browser 'Edge' -ExtensionId $chromeId -ExtensionUrl 'https://evil.example/crx' -MarkerRoot $overrideRoot -Store $override)
+    if ($code -ne 0) {
+        Fail "explicit override exited $code"
+    }
+    $overridden = @($override.Edge | Where-Object { [string]$_.Data -ceq ($chromeId + ';' + $edgeUrl) })
+    if ($overridden.Count -ne 1 -or @($override.Chrome).Count -ne 0 -or @($override.Edge).Count -ne 1) {
+        Fail "explicit override wrote '$(Format-Store -Store $override)'"
+    }
+    $overrideMarker = Get-BrowserExtensionMarkerPath -Root $overrideRoot -Browser 'Edge' -ExtensionId $chromeId
+    if (-not (Test-Path -LiteralPath $overrideMarker) -or [System.IO.File]::ReadAllText($overrideMarker) -cne $overridePin) {
+        Fail 'explicit override marker did not keep the pin'
     }
 } finally {
     $env:RELIAN_DEPLOY_CANCEL = $null

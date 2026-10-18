@@ -3,6 +3,8 @@
 # Chromium forcelist values use that browser's fixed update URL. The caller
 # cannot choose the update host. Firefox force_installed needs an install URL
 # on addons.mozilla.org. This package does not download the extension.
+# PinVersion is browser-id with no spaces: chrome, edge, brave, or firefox,
+# a hyphen, then the extension id. Explicit Browser and ExtensionId win.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
@@ -139,7 +141,71 @@ function Test-BrowserExtensionMozillaUrl {
     if (-not [string]::IsNullOrEmpty($uri.UserInfo)) {
         return $false
     }
+    if (-not [string]::IsNullOrEmpty($uri.Query) -or $Url.Contains('?')) {
+        return $false
+    }
     return $true
+}
+
+function Convert-BrowserExtensionPin {
+    param([string]$PinVersion)
+    $text = [string]$PinVersion
+    if ([string]::IsNullOrWhiteSpace($text) -or $text -match '\s') {
+        return $null
+    }
+    # Ninja rejects & | ; $ > < ` ! in the parameter string. A query string
+    # uses ? and &. The id itself still has to pass the browser check below.
+    $blocked = '&|;$><`!?'.ToCharArray()
+    if ($text.IndexOfAny($blocked) -ge 0) {
+        return $null
+    }
+    $dash = $text.IndexOf('-')
+    if ($dash -le 0 -or $dash -ge ($text.Length - 1)) {
+        return $null
+    }
+    $prefix = $text.Substring(0, $dash)
+    $extensionId = $text.Substring($dash + 1)
+    $info = $null
+    foreach ($browser in @(Get-BrowserExtensionBrowsers)) {
+        if ($browser.Name.ToLowerInvariant() -ceq $prefix) {
+            $info = $browser
+            break
+        }
+    }
+    if ($null -eq $info) {
+        return $null
+    }
+    if (-not (Test-BrowserExtensionId -Browser $info.Name -ExtensionId $extensionId)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        Browser     = [string]$info.Name
+        ExtensionId = $extensionId
+    }
+}
+
+function Resolve-BrowserExtensionSelection {
+    param(
+        [string]$PinVersion,
+        [string]$Browser,
+        [string]$ExtensionId
+    )
+    $parsed = Convert-BrowserExtensionPin -PinVersion $PinVersion
+    if ($null -eq $parsed) {
+        return $null
+    }
+    $browserName = [string]$parsed.Browser
+    $resolvedId = [string]$parsed.ExtensionId
+    if (-not [string]::IsNullOrWhiteSpace($Browser)) {
+        $browserName = $Browser
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExtensionId)) {
+        $resolvedId = $ExtensionId
+    }
+    return [pscustomobject]@{
+        Browser     = $browserName
+        ExtensionId = $resolvedId
+    }
 }
 
 function Get-BrowserExtensionFirefoxInstallUrl {
@@ -224,6 +290,12 @@ function Get-BrowserExtensionPlan {
     if ([string]::IsNullOrWhiteSpace($PinVersion)) {
         return New-BrowserExtensionPlan -ExitCode 0
     }
+    $selected = Resolve-BrowserExtensionSelection -PinVersion $PinVersion -Browser $Browser -ExtensionId $ExtensionId
+    if ($null -eq $selected) {
+        return New-BrowserExtensionPlan -ExitCode 1
+    }
+    $Browser = [string]$selected.Browser
+    $ExtensionId = [string]$selected.ExtensionId
     if ($Action -eq 'Reinstall') {
         return New-BrowserExtensionPlan -ExitCode 1
     }
@@ -687,6 +759,12 @@ function Invoke-BrowserExtensionPolicy {
     if ($null -eq $Store) {
         return 1
     }
+    $selected = Resolve-BrowserExtensionSelection -PinVersion $PinVersion -Browser $Browser -ExtensionId $ExtensionId
+    if ($null -eq $selected) {
+        return 1
+    }
+    $Browser = [string]$selected.Browser
+    $ExtensionId = [string]$selected.ExtensionId
 
     $planArgs = @{
         Action       = $Action
@@ -704,6 +782,9 @@ function Invoke-BrowserExtensionPolicy {
     $info = Get-BrowserExtensionBrowser -Name $Browser
     if ($null -eq $info) {
         return 1
+    }
+    if ($info.Kind -eq 'Firefox' -and $Store.UseRegistry -and [string]::IsNullOrWhiteSpace([string]$Store.FirefoxPolicyFile)) {
+        $Store.FirefoxPolicyFile = Get-BrowserExtensionFirefoxPolicyPath
     }
 
     if ($info.Kind -eq 'Firefox' -and -not [string]::IsNullOrWhiteSpace([string]$Store.FirefoxPolicyFile)) {
@@ -824,10 +905,19 @@ if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
 
 $store = New-BrowserExtensionPolicyStore
 $store.UseRegistry = $true
-$selected = Get-BrowserExtensionBrowser -Name $Browser
+$resolvedBrowser = $Browser
+$resolvedId = $ExtensionId
+if (-not [string]::IsNullOrWhiteSpace($PinVersion)) {
+    $pinTarget = Resolve-BrowserExtensionSelection -PinVersion $PinVersion -Browser $Browser -ExtensionId $ExtensionId
+    if ($null -ne $pinTarget) {
+        $resolvedBrowser = [string]$pinTarget.Browser
+        $resolvedId = [string]$pinTarget.ExtensionId
+    }
+}
+$selected = Get-BrowserExtensionBrowser -Name $resolvedBrowser
 if ($null -ne $selected -and $selected.Kind -eq 'Firefox') {
     $store.FirefoxPolicyFile = Get-BrowserExtensionFirefoxPolicyPath
 }
 
-$code = [int](Invoke-BrowserExtensionPolicy -Action $Action -PinVersion $PinVersion -Browser $Browser -ExtensionId $ExtensionId -ExtensionUrl $ExtensionUrl -CancelPath $CancelPath -MarkerRoot $MarkerRoot -Store $store)
+$code = [int](Invoke-BrowserExtensionPolicy -Action $Action -PinVersion $PinVersion -Browser $resolvedBrowser -ExtensionId $resolvedId -ExtensionUrl $ExtensionUrl -CancelPath $CancelPath -MarkerRoot $MarkerRoot -Store $store)
 exit $code
