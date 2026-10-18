@@ -1,0 +1,11 @@
+{
+  "name": "QuickLook",
+  "platform": "Windows",
+  "version": "4.5.0.0",
+  "file": "QuickLook-4.5.0.msi",
+  "url": "https://github.com/QL-Win/QuickLook/releases/download/4.5.0/QuickLook-4.5.0.msi",
+  "sha256": "130f601eab7c388025351312f949749adebc6429b1042bd2001ac32a17a2748c",
+  "size": 94425456,
+  "hashAlgorithm": "SHA256",
+  "source": "https://github.com/QL-Win/QuickLook/releases/tag/4.5.0"
+}
