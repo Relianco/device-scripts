@@ -83,7 +83,7 @@ function Get-GitPlan {
     $installed = Convert-GitVersionText -Text $InstalledVersion
     $marker = Convert-GitVersionText -Text $MarkerVersion
 
-    # Uninstall does not compare versions and does not need the installer hash.
+    # Uninstall does not compare versions. Invoke-GitAction refuses an empty hash.
     if ($Action -eq 'Uninstall') {
         $present = -not [string]::IsNullOrWhiteSpace($InstalledVersion)
         $hasMarker = -not [string]::IsNullOrWhiteSpace($MarkerVersion)
@@ -648,6 +648,11 @@ function Invoke-GitAction {
         [string]$MarkerRoot
     )
 
+    # An empty hash succeeds before registry, plan, download, uninstall, or the marker.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return 0
+    }
+
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-GitDefaultMarkerRoot
     }
@@ -672,10 +677,6 @@ function Invoke-GitAction {
     $cache = ''
     try {
         if ($plan.RunInstaller -eq 'install') {
-            # An empty hash downloads nothing and does not start setup, including Repair.
-            if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
-                return 0
-            }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-git-' + [guid]::NewGuid().ToString('n'))
             New-Item -ItemType Directory -Path $cache -Force | Out-Null
             $installerPath = Join-Path $cache 'Git-2.56.0.2-64-bit.exe'
@@ -705,7 +706,6 @@ function Invoke-GitAction {
         }
 
         if ($plan.RunInstaller -eq 'uninstall') {
-            # Uninstall does not download. An empty hash does not block it.
             if (Test-GitCancelled -CancelPath $CancelPath) {
                 return 130
             }

@@ -543,7 +543,7 @@ try {
     Reset-GitCase
     Set-Marker '9.0.0.0'
     $script:InstalledVersion = '9.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion ''
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '9.0.0.0' -Label 'Uninstall empty pin'
     Assert-Log -Absent $true -Label 'Uninstall empty pin'
 
@@ -579,7 +579,7 @@ try {
     Reset-GitCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-GitUserInfoUrl)
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerUrl (New-GitUserInfoUrl)
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 1 -MarkerAbsent $true -Label 'uninstall'
     if ($script:SetupCalls[0].Mode -cne 'uninstall' -or $script:SetupCalls[0].UninstallPath -cne $script:UninstallPath) {
         Fail 'uninstall did not pass the uninstall program'
@@ -589,7 +589,7 @@ try {
     Reset-GitCase
     $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'uninstall marker only'
     Assert-Log -Expected "Uninstall`n" -Label 'uninstall marker only'
 
@@ -597,7 +597,7 @@ try {
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
     $script:UninstallPath = ''
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall missing program'
     Assert-Log -Absent $true -Label 'uninstall missing program'
 
@@ -706,7 +706,7 @@ try {
 
     Reset-GitCase
     $script:InstalledVersion = ''
-    foreach ($action in @('Install', 'Update', 'Repair')) {
+    foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
         Reset-GitCase
         $script:InstalledVersion = ''
         Set-Marker '9.0.0.0'
@@ -720,6 +720,13 @@ try {
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 '   '
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'whitespace hash'
     Assert-Log -Absent $true -Label 'whitespace hash'
+
+    Reset-GitCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'Uninstall whitespace hash'
+    Assert-Log -Absent $true -Label 'Uninstall whitespace hash'
 
     Reset-WebHook
     $directDest = Join-Path (Join-Path $script:Root 'direct') 'payload.exe'
@@ -791,7 +798,7 @@ try {
     Assert-RealCase -Code $code -ExpectCode 1 -ExpectWeb 1 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'WebException hook'
     Assert-Log -Absent $true -Label 'WebException hook'
 
-    foreach ($action in @('Install', 'Update', 'Repair')) {
+    foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
         Reset-GitCase
         Reset-WebHook
         $script:InstalledVersion = ''
@@ -805,12 +812,12 @@ try {
     Reset-WebHook
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-RealCase -Code $code -ExpectCode 0 -ExpectWeb 0 -ExpectSleeps 0 -ExpectSetup 1 -MarkerAbsent $true -Label 'Uninstall empty hash hook'
-    if ($script:SetupCalls[0].Mode -cne 'uninstall' -or $script:SetupCalls[0].UninstallPath -cne $script:UninstallPath) {
-        Fail 'Uninstall empty hash hook did not pass the uninstall program'
+    $script:GetInstalledGitVersion = {
+        throw 'registry unavailable'
     }
-    Assert-Log -Expected "Uninstall`n" -Label 'Uninstall empty hash hook'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-RealCase -Code $code -ExpectCode 0 -ExpectWeb 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'Uninstall empty hash hook'
+    Assert-Log -Absent $true -Label 'Uninstall empty hash hook'
 
     Reset-GitCase
     Reset-WebHook
