@@ -6,7 +6,11 @@ $scriptPath = Join-Path $repoRoot 'packages/wazuh/Invoke-Wazuh.ps1'
 $releasePath = Join-Path $repoRoot 'releases/wazuh.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        [Console]::Error.WriteLine('FAIL missing message')
+        exit 1
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }

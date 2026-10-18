@@ -239,8 +239,8 @@ function Test-WazuhTransientTransport {
     $guard = 0
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
+        # Cancellation is not a timeout. An inner TimeoutException still is.
         if ($current -is [System.TimeoutException] -or
-            $current -is [System.Threading.Tasks.TaskCanceledException] -or
             $current -is [System.Net.Sockets.SocketException]) {
             return $true
         }

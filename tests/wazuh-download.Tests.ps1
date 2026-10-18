@@ -5,7 +5,11 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/wazuh/Invoke-Wazuh.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        [Console]::Error.WriteLine('FAIL missing message')
+        exit 1
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -142,8 +146,32 @@ try {
     if (-not (Test-WazuhDownloadIsTransient -ErrorRecord ([System.TimeoutException]::new('timed out')))) {
         Fail 'timeout was not retried'
     }
-    if (-not (Test-WazuhDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+    if (Test-WazuhDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out'))) {
+        Fail 'task cancel was retried'
+    }
+    $timeoutCancel = [System.Threading.Tasks.TaskCanceledException]::new(
+        'canceled',
+        [System.TimeoutException]::new('timed out')
+    )
+    if (-not (Test-WazuhDownloadIsTransient -ErrorRecord $timeoutCancel)) {
+        Fail 'timeout cancel was not retried'
+    }
+    $cts = [System.Threading.CancellationTokenSource]::new()
+    try {
+        $cts.Cancel()
+        $explicit = [System.Threading.Tasks.TaskCanceledException]::new('canceled', $null, $cts.Token)
+        if (Test-WazuhDownloadIsTransient -ErrorRecord $explicit) {
+            Fail 'caller cancellation was retried'
+        }
+    } finally {
+        $cts.Dispose()
+    }
+    $wrappedCancel = [System.Exception]::new(
+        'wrapped',
+        [System.Threading.Tasks.TaskCanceledException]::new('timed out')
+    )
+    if (Test-WazuhDownloadIsTransient -ErrorRecord $wrappedCancel) {
+        Fail 'wrapped task cancel was retried'
     }
     $socket = [System.Net.Sockets.SocketException]::new()
     if (-not (Test-WazuhDownloadIsTransient -ErrorRecord $socket)) {
