@@ -22,6 +22,7 @@ Report defects a maintainer must fix before merge. Skip style and naming.
 
 Rules for code the diff adds or changes:
 - A committed file must not contain a secret, a token, a password, a client name, a device id, or a home-directory path.
+- Relian is the product name. It is not a client name. Do not report Relian in a namespace, a filename, or UI text.
 - A URL with userinfo (scheme://user@host) must exit 1 before any download.
 - An empty hash must exit 0 and must not download.
 - An empty hash exits 0 for every action, including Uninstall, and downloads nothing.
@@ -36,6 +37,7 @@ Rules for code the diff adds or changes:
 - curl and az arguments are an array, or they are written inline. Arguments stored in one scalar string are a defect, because zsh does not word-split that string.
 - The Teams package must not contain disableAutoUpdate, MsRdcWebRTCSvc, or Reset-AppxPackage.
 - A pin hash is 64 lowercase hex characters. Do not treat a placeholder hash as valid.
+- The user-check package installs nothing. It has no installer sha256. pagePin and codePin are mode labels, not pin hashes. Do not require a 64-character hash in releases/user-check.json.
 
 Reply with one JSON object and no other text:
 {"findings":[{"line":1,"body":"what happens at runtime, then the fix"}]}
@@ -70,13 +72,13 @@ export function isReviewablePath(filename) {
   return REVIEW_EXT.has(base.slice(dot).toLowerCase())
 }
 
-export function capPatch(patch, max = 8000) {
+export function capPatch(patch, max = 64000) {
   const text = patch || ''
   if (text.length <= max) return text
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-export function selectReviewFiles(files, { limit = 20, maxPatch = 8000 } = {}) {
+export function selectReviewFiles(files, { limit = 20, maxPatch = 64000 } = {}) {
   const reviewable = []
   const skipped = []
   for (const file of files) {
