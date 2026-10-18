@@ -5,7 +5,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/browser-extension/Invoke-BrowserExtension.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -105,7 +108,7 @@ $emptyRows = @(
     @{ Label = 'whitespace pin'; Pin = '   ' }
 )
 foreach ($row in $emptyRows) {
-    $plan = Get-Plan -Action 'Install' -Pin $row.Pin -BrowserName 'Opera' -Id 'bad'
+    $plan = Get-Plan -Action 'Install' -Pin $row.Pin -BrowserName '' -Id ''
     Assert-Plan -Plan $plan -Expect (New-Expect -ExitCode 0) -Label $row.Label
 }
 
@@ -229,9 +232,15 @@ $explicitWin = Get-Plan -Action 'Install' -Pin ('chrome-' + $otherId) -BrowserNa
 $explicitExpect = New-Expect -WriteEntry $true -WriteMarker $true -PolicyValue $edgeValue
 Assert-Plan -Plan $explicitWin -Expect $explicitExpect -Label 'explicit browser and id win'
 
+$versionExplicit = Get-Plan -Action 'Install' -Pin '1.0.0' -BrowserName 'Chrome' -Id $chromeId
+$versionExpect = New-Expect -WriteEntry $true -WriteMarker $true -PolicyValue $chromeValue
+Assert-Plan -Plan $versionExplicit -Expect $versionExpect -Label 'explicit browser and id with version pin'
+
+$emptyExplicit = Get-Plan -Action 'Install' -Pin '' -BrowserName 'Edge' -Id $chromeId
+Assert-Plan -Plan $emptyExplicit -Expect $explicitExpect -Label 'explicit browser and id with empty pin'
+
 $rejectedPins = @(
     @{ Label = 'version pin'; Pin = '1.0.0'; BrowserName = ''; Id = '' }
-    @{ Label = 'version pin with explicit browser and id'; Pin = '1.0.0'; BrowserName = 'Chrome'; Id = $chromeId }
     @{ Label = 'uppercase browser pin'; Pin = ('Chrome-' + $chromeId); BrowserName = ''; Id = '' }
     @{ Label = 'pin with a space'; Pin = ('chrome- ' + $chromeId); BrowserName = ''; Id = '' }
     @{ Label = 'pin with a query string'; Pin = ($chromePin + '?hl=en'); BrowserName = ''; Id = '' }

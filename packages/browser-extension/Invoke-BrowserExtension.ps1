@@ -4,7 +4,8 @@
 # cannot choose the update host. Firefox force_installed needs an install URL
 # on addons.mozilla.org. This package does not download the extension.
 # PinVersion is browser-id with no spaces: chrome, edge, brave, or firefox,
-# a hyphen, then the extension id. Explicit Browser and ExtensionId win.
+# a hyphen, then the extension id. Explicit Browser and ExtensionId win even
+# when the pin is empty or does not parse. An empty pin with neither exits 0.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
@@ -191,16 +192,23 @@ function Resolve-BrowserExtensionSelection {
         [string]$ExtensionId
     )
     $parsed = Convert-BrowserExtensionPin -PinVersion $PinVersion
-    if ($null -eq $parsed) {
+    $browserName = ''
+    $resolvedId = ''
+    if ($null -ne $parsed) {
+        $browserName = [string]$parsed.Browser
+        $resolvedId = [string]$parsed.ExtensionId
+    }
+    $browserGiven = -not [string]::IsNullOrWhiteSpace($Browser)
+    $idGiven = -not [string]::IsNullOrWhiteSpace($ExtensionId)
+    if ($browserGiven) {
+        $browserName = $Browser
+    } elseif ($null -eq $parsed) {
         return $null
     }
-    $browserName = [string]$parsed.Browser
-    $resolvedId = [string]$parsed.ExtensionId
-    if (-not [string]::IsNullOrWhiteSpace($Browser)) {
-        $browserName = $Browser
-    }
-    if (-not [string]::IsNullOrWhiteSpace($ExtensionId)) {
+    if ($idGiven) {
         $resolvedId = $ExtensionId
+    } elseif ($null -eq $parsed) {
+        return $null
     }
     return [pscustomobject]@{
         Browser     = $browserName
@@ -287,7 +295,7 @@ function Get-BrowserExtensionPlan {
         [bool]$MarkerPresent
     )
 
-    if ([string]::IsNullOrWhiteSpace($PinVersion)) {
+    if ([string]::IsNullOrWhiteSpace($PinVersion) -and [string]::IsNullOrWhiteSpace($Browser) -and [string]::IsNullOrWhiteSpace($ExtensionId)) {
         return New-BrowserExtensionPlan -ExitCode 0
     }
     $selected = Resolve-BrowserExtensionSelection -PinVersion $PinVersion -Browser $Browser -ExtensionId $ExtensionId
@@ -753,7 +761,7 @@ function Invoke-BrowserExtensionPolicy {
         $Store
     )
 
-    if ([string]::IsNullOrWhiteSpace($PinVersion)) {
+    if ([string]::IsNullOrWhiteSpace($PinVersion) -and [string]::IsNullOrWhiteSpace($Browser) -and [string]::IsNullOrWhiteSpace($ExtensionId)) {
         return 0
     }
     if ($null -eq $Store) {

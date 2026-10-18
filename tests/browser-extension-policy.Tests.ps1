@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/browser-extension/Invoke-BrowserExte
 $recordPath = Join-Path $repoRoot 'releases/browser-extension.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     $env:RELIAN_DEPLOY_CANCEL = $null
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
@@ -400,13 +403,27 @@ try {
     $emptyBefore = Format-Store -Store $emptyStore
     $emptyMarkerRoot = Join-Path $temp 'empty-markers'
     foreach ($pin in @('', '   ')) {
-        $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion $pin -Browser 'Brave' -ExtensionId $chromeId -ExtensionUrl '' -CancelPath '' -MarkerRoot $emptyMarkerRoot -Store $emptyStore)
+        $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion $pin -ExtensionUrl '' -CancelPath '' -MarkerRoot $emptyMarkerRoot -Store $emptyStore)
         if ($code -ne 0 -or (Format-Store -Store $emptyStore) -cne $emptyBefore) {
             Fail "empty pin '$pin' exited $code"
         }
         if (Test-Path -LiteralPath $emptyMarkerRoot) {
             Fail "empty pin '$pin' wrote a marker"
         }
+    }
+    $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion '' -Browser 'Brave' -ExtensionId $chromeId -ExtensionUrl '' -CancelPath '' -MarkerRoot $emptyMarkerRoot -Store $emptyStore)
+    if ($code -ne 0) {
+        Fail "empty pin with explicit browser and id exited $code"
+    }
+    $emptyExplicitItems = @($emptyStore.Brave)
+    $emptyKept = @($emptyExplicitItems | Where-Object { [string]$_.Name -eq '1' -and [string]$_.Data -ceq ($otherId + ';' + $braveUrl) })
+    $emptyAdded = @($emptyExplicitItems | Where-Object { [string]$_.Data -ceq ($chromeId + ';' + $braveUrl) })
+    if ($emptyKept.Count -ne 1 -or $emptyAdded.Count -ne 1 -or $emptyExplicitItems.Count -ne 2) {
+        Fail "empty pin with explicit browser and id wrote '$(Format-Forcelist -Items $emptyExplicitItems)'"
+    }
+    $emptyExplicitMarker = Get-BrowserExtensionMarkerPath -Root $emptyMarkerRoot -Browser 'Brave' -ExtensionId $chromeId
+    if (-not (Test-Path -LiteralPath $emptyExplicitMarker) -or [System.IO.File]::ReadAllText($emptyExplicitMarker) -ne '') {
+        Fail 'empty pin with explicit browser and id did not write an empty marker'
     }
 
     $unknownStore = New-CaseStore
@@ -554,8 +571,21 @@ try {
         }
     }
     $code = [int](Invoke-BrowserExtensionPolicy -Action 'Install' -PinVersion '1.0.0' -Browser 'Chrome' -ExtensionId $chromeId -MarkerRoot $untouchedRoot -Store $untouched)
-    if ($code -ne 1 -or (Format-Store -Store $untouched) -cne $untouchedBefore) {
-        Fail "explicit targets did not reject version pin $code"
+    if ($code -ne 0) {
+        Fail "explicit browser and id with version pin exited $code"
+    }
+    $versionItems = @($untouched.Chrome)
+    $versionKept = @($versionItems | Where-Object { [string]$_.Name -eq '1' -and [string]$_.Data -ceq ($otherId + ';' + $chromeUrl) })
+    $versionAdded = @($versionItems | Where-Object { [string]$_.Data -ceq ($chromeId + ';' + $chromeUrl) })
+    if ($versionKept.Count -ne 1 -or $versionAdded.Count -ne 1 -or $versionItems.Count -ne 2) {
+        Fail "explicit browser and id with version pin wrote '$(Format-Forcelist -Items $versionItems)'"
+    }
+    if (@($untouched.Edge).Count -ne 0 -or @($untouched.Brave).Count -ne 0) {
+        Fail 'explicit browser and id with version pin wrote another browser'
+    }
+    $versionMarker = Get-BrowserExtensionMarkerPath -Root $untouchedRoot -Browser 'Chrome' -ExtensionId $chromeId
+    if (-not (Test-Path -LiteralPath $versionMarker) -or [System.IO.File]::ReadAllText($versionMarker) -cne '1.0.0') {
+        Fail 'explicit browser and id with version pin did not keep the pin'
     }
 
     $override = New-CaseStore
