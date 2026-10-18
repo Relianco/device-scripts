@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/vlc/Invoke-Vlc.ps1'
 $releasePath = Join-Path $repoRoot 'releases/vlc.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -429,7 +432,7 @@ try {
     Reset-VlcCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-VlcUserInfoUrl)
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerUrl (New-VlcUserInfoUrl)
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 1 -MarkerAbsent $true -Label 'uninstall'
     $uninstallCall = $script:InstallerCalls[0]
     $uninstallArgs = @($uninstallCall.Arguments)
@@ -443,7 +446,7 @@ try {
     Reset-VlcCase
     $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -MarkerAbsent $true -Label 'uninstall marker only'
 
     Reset-VlcCase
@@ -451,7 +454,7 @@ try {
     Set-Marker '2.0.0.0'
     $script:UninstallPath = ''
     $script:InstallDirectory = ''
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -ExpectMarker '2.0.0.0' -Label 'uninstall missing program'
 
     Reset-VlcCase
@@ -570,10 +573,34 @@ try {
     $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectInstaller 1 -ExpectMarker '2.0.0.0' -Label 'repair installer failure'
 
+    foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
+        Reset-VlcCase
+        $script:InstalledVersion = '2.0.0.0'
+        Set-Marker '2.0.0.0'
+        $code = Invoke-Case -Action $action -PinVersion '2.0.0.0' -InstallerSha256 ''
+        Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -ExpectMarker '2.0.0.0' -Label "$action empty hash"
+    }
+
+    Reset-VlcCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -ExpectMarker '2.0.0.0' -Label 'uninstall whitespace hash'
+
     Reset-VlcCase
     $script:InstalledVersion = ''
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -MarkerAbsent $true -Label 'missing hash'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha.ToUpperInvariant()
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -MarkerAbsent $true -Label 'uppercase hash'
+
+    $placeholders = [System.Collections.Generic.List[string]]::new()
+    $placeholders.Add('0' * 64)
+    $placeholders.Add('a' * 64)
+    foreach ($placeholder in $placeholders) {
+        Reset-VlcCase
+        $script:InstalledVersion = ''
+        $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $placeholder
+        Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectInstaller 0 -MarkerAbsent $true -Label 'placeholder hash'
+    }
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {

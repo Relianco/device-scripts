@@ -5,7 +5,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/vlc/Invoke-Vlc.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'assertion failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -129,6 +132,26 @@ try {
         Fail "empty hash returned $code after $($script:DownloadCount) downloads"
     }
 
+    Reset-Hooks
+    $code = Save-VlcPayload -Url 'https://example.invalid/vlc.exe' -Destination $dest -Sha256 $goodSha.ToUpperInvariant() -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:Sleeps.Count -ne 0) {
+        Fail "uppercase hash returned $code after $($script:DownloadCount) downloads"
+    }
+    if (($script:VlcErrorLog -join "`n") -like '*https://*') {
+        Fail 'uppercase hash error included a URL'
+    }
+
+    $placeholders = [System.Collections.Generic.List[string]]::new()
+    $placeholders.Add('0' * 64)
+    $placeholders.Add('a' * 64)
+    foreach ($placeholder in $placeholders) {
+        Reset-Hooks
+        $code = Save-VlcPayload -Url 'https://example.invalid/vlc.exe' -Destination $dest -Sha256 $placeholder -Label 'installer'
+        if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:Sleeps.Count -ne 0) {
+            Fail "placeholder hash returned $code after $($script:DownloadCount) downloads"
+        }
+    }
+
     foreach ($status in @(408, 429, 500, 502, 503, 504)) {
         if (-not (Test-VlcDownloadIsTransient -ErrorRecord ([VlcFakeHttpException]::new($status)))) {
             Fail "HTTP $status on Response.StatusCode was not retried"
@@ -143,7 +166,18 @@ try {
         Fail 'timeout was not retried'
     }
     if (-not (Test-VlcDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+        Fail 'timeout cancellation was not retried'
+    }
+    $httpTimeout = [System.Threading.Tasks.TaskCanceledException]::new('The request was canceled due to the configured HttpClient.Timeout of 100 seconds elapsing.')
+    if (-not (Test-VlcDownloadIsTransient -ErrorRecord $httpTimeout)) {
+        Fail 'httpclient timeout was not retried'
+    }
+    $wrappedTimeout = [System.Threading.Tasks.TaskCanceledException]::new('A task was canceled.', [System.TimeoutException]::new('The operation has timed out.'))
+    if (-not (Test-VlcDownloadIsTransient -ErrorRecord $wrappedTimeout)) {
+        Fail 'wrapped timeout was not retried'
+    }
+    if (Test-VlcDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('A task was canceled.'))) {
+        Fail 'task cancel was retried'
     }
     $socket = [System.Net.Sockets.SocketException]::new()
     if (-not (Test-VlcDownloadIsTransient -ErrorRecord $socket)) {

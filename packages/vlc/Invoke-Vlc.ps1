@@ -76,7 +76,7 @@ function Get-VlcPlan {
     $installed = Convert-VlcVersionText -Text $InstalledVersion
     $marker = Convert-VlcVersionText -Text $MarkerVersion
 
-    # Uninstall does not compare versions and does not need the installer hash.
+    # Uninstall does not compare versions. Invoke-VlcAction refuses an empty hash.
     if ($Action -eq 'Uninstall') {
         $present = -not [string]::IsNullOrWhiteSpace($InstalledVersion)
         $hasMarker = -not [string]::IsNullOrWhiteSpace($MarkerVersion)
@@ -229,6 +229,22 @@ function Get-VlcHttpStatus {
     return $null
 }
 
+function Test-VlcCancellationIsTimeout {
+    param($Exception)
+    # HttpClient reports a timeout as TaskCanceledException. A caller cancel uses the same type.
+    if ($Exception -isnot [System.OperationCanceledException]) {
+        return $false
+    }
+    $message = [string]$Exception.Message
+    if ($message.IndexOf('timeout', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+    if ($message.IndexOf('timed out', [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+    return $false
+}
+
 function Test-VlcTransientTransport {
     param($Exception)
     $webTransient = @(
@@ -241,8 +257,10 @@ function Test-VlcTransientTransport {
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
         if ($current -is [System.TimeoutException] -or
-            $current -is [System.Threading.Tasks.TaskCanceledException] -or
             $current -is [System.Net.Sockets.SocketException]) {
+            return $true
+        }
+        if (Test-VlcCancellationIsTimeout -Exception $current) {
             return $true
         }
         if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
@@ -275,6 +293,20 @@ function Test-VlcDownloadIsTransient {
     return [bool](Test-VlcTransientTransport -Exception $exception)
 }
 
+function Test-VlcSha256Text {
+    param([string]$Sha256)
+    $text = ([string]$Sha256).Trim()
+    # -cnotmatch is case-sensitive. -notmatch would accept uppercase hex.
+    if ($text -cnotmatch '^[0-9a-f]{64}$') {
+        return $false
+    }
+    # A repeated nibble is a placeholder, including 64 zeroes and 64 a's.
+    if ($text -ceq ($text.Substring(0, 1) * 64)) {
+        return $false
+    }
+    return $true
+}
+
 function Save-VlcPayload {
     param(
         [string]$Url,
@@ -292,8 +324,12 @@ function Save-VlcPayload {
     if ([string]::IsNullOrWhiteSpace($Sha256)) {
         return 0
     }
+    if (-not (Test-VlcSha256Text -Sha256 $Sha256)) {
+        Add-VlcError -Message "invalid hash for $Label"
+        return 1
+    }
 
-    $expected = $Sha256.Trim().ToLowerInvariant()
+    $expected = $Sha256.Trim()
     $delays = @(5, 20)
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         if (Test-VlcCancelled -CancelPath $CancelPath) {
@@ -676,6 +712,11 @@ function Invoke-VlcAction {
         [string]$MarkerRoot
     )
 
+    # An empty hash disables every action, including Uninstall. Do not download or run an installer.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return 0
+    }
+
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-VlcDefaultMarkerRoot
     }
@@ -699,10 +740,6 @@ function Invoke-VlcAction {
     $cache = ''
     try {
         if ($plan.RunInstaller -eq 'install') {
-            if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
-                Add-VlcError -Message 'missing hash for installer'
-                return 1
-            }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-vlc-' + [guid]::NewGuid().ToString('n'))
             New-Item -ItemType Directory -Path $cache -Force | Out-Null
             $installerPath = Join-Path $cache 'vlc-3.0.24-win64.exe'
