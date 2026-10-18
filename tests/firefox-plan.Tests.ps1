@@ -5,9 +5,54 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/firefox/Invoke-Firefox.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
+}
+
+function Test-FirefoxParameterMandatory {
+    param($Parameter)
+    foreach ($attribute in $Parameter.Attributes) {
+        if ($attribute.TypeName.Name -ne 'Parameter') {
+            continue
+        }
+        foreach ($named in $attribute.NamedArguments) {
+            if ($named.ArgumentName -ne 'Mandatory') {
+                continue
+            }
+            # [Parameter(Mandatory)] omits the value. The AST flag is ExpressionOmitted.
+            # ArgumentOmitted is not a property; honor it only when the runtime has it.
+            $omitted = $named.ExpressionOmitted
+            if ($named.PSObject.Properties.Name -contains 'ArgumentOmitted' -and $named.ArgumentOmitted) {
+                $omitted = $true
+            }
+            if ($omitted) {
+                return $true
+            }
+            $argument = $named.Argument
+            if ($null -eq $argument) {
+                continue
+            }
+            $text = [string]$argument.Extent.Text
+            if ($text -match '(?i)^\s*\$true\s*$') {
+                return $true
+            }
+            if ($argument -is [System.Management.Automation.Language.ConstantExpressionAst]) {
+                $value = $argument.Value
+                if ($value -is [bool]) {
+                    if ($value) { return $true }
+                    continue
+                }
+                if (($value -is [int] -or $value -is [long] -or $value -is [double] -or $value -is [decimal]) -and ([double]$value) -ne 0) {
+                    return $true
+                }
+            }
+        }
+    }
+    return $false
 }
 
 if (-not (Test-Path -LiteralPath $scriptPath)) {
@@ -28,17 +73,13 @@ foreach ($parameter in $ast.ParamBlock.Parameters) {
     if ($parameter.StaticType.FullName -ne 'System.String') {
         Fail "$name is not a plain string"
     }
+    if (Test-FirefoxParameterMandatory -Parameter $parameter) {
+        Fail "$name is Mandatory"
+    }
     foreach ($attribute in $parameter.Attributes) {
         $attributeName = $attribute.TypeName.Name
         if ($attributeName -eq 'ValidateSet' -or $attributeName -eq 'ValidateNotNull') {
             Fail "$name has $attributeName"
-        }
-        if ($attributeName -eq 'Parameter') {
-            foreach ($named in $attribute.NamedArguments) {
-                if ($named.ArgumentName -eq 'Mandatory' -and $named.Expression.Extent.Text -match 'true') {
-                    Fail "$name is Mandatory"
-                }
-            }
         }
     }
 }
@@ -47,6 +88,32 @@ foreach ($name in $expectedParams) {
         Fail "missing parameter $name"
     }
 }
+
+function Assert-MandatorySample {
+    param(
+        [string]$Source,
+        [bool]$Expect,
+        [string]$Label
+    )
+    $sampleTokens = $null
+    $sampleErrors = $null
+    $sampleAst = [System.Management.Automation.Language.Parser]::ParseInput($Source, [ref]$sampleTokens, [ref]$sampleErrors)
+    if ($sampleErrors.Count -gt 0 -or $null -eq $sampleAst.ParamBlock -or $sampleAst.ParamBlock.Parameters.Count -lt 1) {
+        Fail "could not parse $Label"
+    }
+    $flagged = Test-FirefoxParameterMandatory -Parameter $sampleAst.ParamBlock.Parameters[0]
+    if ($flagged -ne $Expect) {
+        if ($Expect) {
+            Fail "$Label was accepted"
+        }
+        Fail "$Label was rejected"
+    }
+}
+
+Assert-MandatorySample -Source 'param([Parameter(Mandatory)][string]$Name)' -Expect $true -Label 'shorthand Mandatory'
+Assert-MandatorySample -Source 'param([Parameter(Mandatory=$true)][string]$Name)' -Expect $true -Label 'explicit Mandatory'
+Assert-MandatorySample -Source 'param([Parameter(Mandatory=1)][string]$Name)' -Expect $true -Label 'numeric Mandatory'
+Assert-MandatorySample -Source 'param([Parameter(Mandatory=$false)][string]$Name)' -Expect $false -Label 'disabled Mandatory'
 
 $source = [System.IO.File]::ReadAllText($scriptPath)
 if ($source -match 'Stop-Process') {

@@ -327,8 +327,7 @@ function Save-FirefoxPayload {
         return 1
     }
     if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        Add-FirefoxError -Message "missing hash for $Label"
-        return 1
+        return 0
     }
 
     $expected = $Sha256.Trim().ToLowerInvariant()
@@ -649,6 +648,10 @@ function Invoke-FirefoxAction {
             $downloaded = [int](Save-FirefoxPayload -Url $InstallerUrl -Destination $msiPath -Sha256 $InstallerSha256 -Label 'installer' -CancelPath $CancelPath)
             if ($downloaded -ne 0) {
                 return $downloaded
+            }
+            # An empty hash returns 0 and writes no file. Do not start msiexec.
+            if (-not (Test-Path -LiteralPath $msiPath)) {
+                return 0
             }
             if (Test-FirefoxCancelled -CancelPath $CancelPath) {
                 return 130

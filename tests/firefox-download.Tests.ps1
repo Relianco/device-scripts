@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/firefox/Invoke-Firefox.ps1'
 $pinPath = Join-Path $repoRoot 'releases/firefox.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -166,7 +169,7 @@ if (($script:FirefoxErrorLog -join "`n") -like '*https://*') {
 
 Reset-Hooks
 $code = Save-FirefoxPayload -Url $plainUrl -Destination $dest -Sha256 '' -Label 'installer'
-if ($code -ne 1 -or $script:DownloadCount -ne 0) {
+if ($code -ne 0 -or $script:DownloadCount -ne 0 -or (Test-Path -LiteralPath $dest)) {
     Fail "empty hash returned $code after $($script:DownloadCount) downloads"
 }
 
@@ -300,6 +303,29 @@ $script:DownloadFile = {
 $cancelCode = Invoke-Install -Url $plainUrl -Sha $goodSha -Cancel $cancelFile
 if ($cancelCode -ne 130 -or $script:DownloadCount -ne 0 -or $script:InstallerModes.Count -ne 0) {
     Fail "cancel action returned $cancelCode downloads $($script:DownloadCount) installer $($script:InstallerModes.Count)"
+}
+
+Reset-Hooks
+$script:DownloadFile = {
+    param($Url, $Destination)
+    $script:DownloadCount++
+    [System.IO.File]::WriteAllBytes($Destination, $good)
+}
+$emptyInstall = Invoke-Install -Url $plainUrl -Sha ''
+if ($emptyInstall -ne 0 -or $script:DownloadCount -ne 0 -or $script:InstallerModes.Count -ne 0) {
+    Fail "empty hash install returned $emptyInstall downloads $($script:DownloadCount) installer $($script:InstallerModes.Count)"
+}
+
+Reset-Hooks
+$script:InstalledNow = '158.0'
+$script:DownloadFile = {
+    param($Url, $Destination)
+    $script:DownloadCount++
+    [System.IO.File]::WriteAllBytes($Destination, $good)
+}
+$emptyUninstall = [int](Invoke-FirefoxAction -Action 'Uninstall' -PinVersion '158.0' -InstallerUrl $plainUrl -InstallerSha256 '' -CancelPath '' -MarkerRoot $root)
+if ($emptyUninstall -ne 0 -or $script:DownloadCount -ne 0) {
+    Fail "empty hash uninstall returned $emptyUninstall downloads $($script:DownloadCount) modes $($script:InstallerModes -join ',')"
 }
 
 Remove-Item -LiteralPath $root -Recurse -Force
