@@ -7,7 +7,7 @@ $releasePath = Join-Path $repoRoot 'releases/microsoft-365.json'
 $configPath = Join-Path $repoRoot 'packages/microsoft-365/configuration.xml'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -34,6 +34,7 @@ foreach ($command in @(
         'Get-Microsoft365InstallConfiguration',
         'Get-Microsoft365RemoveConfiguration',
         'Test-Microsoft365DownloadIsTransient',
+        'Test-Microsoft365PinHash',
         'Test-Microsoft365SetupPath'
     )) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
@@ -74,6 +75,14 @@ if ([int64]$release.setupSize -ne 7194464) {
 }
 if ($InstallerUrl -cne [string]$release.sourceUrl -or $InstallerSha256 -cne [string]$release.sha256 -or $SetupSha256 -cne [string]$release.setupSha256) {
     Fail 'script defaults do not match releases/microsoft-365.json'
+}
+if (-not (Test-Microsoft365PinHash -Sha256 $pinnedSha) -or -not (Test-Microsoft365PinHash -Sha256 $pinnedSetupSha)) {
+    Fail 'pinned Office Deployment Tool hash was rejected'
+}
+foreach ($placeholder in @('placeholder', ('0' * 64), ('f' * 64), ('deadbeef' * 8))) {
+    if (Test-Microsoft365PinHash -Sha256 $placeholder) {
+        Fail 'a placeholder hash was accepted'
+    }
 }
 
 $scriptText = Get-Content -LiteralPath $scriptPath -Raw -Encoding utf8
@@ -747,12 +756,29 @@ try {
     Reset-Microsoft365Case
     $script:InstalledVersion = ''
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'missing hash'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'missing hash'
 
     Reset-Microsoft365Case
     $script:InstalledVersion = ''
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -SetupSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'missing setup hash'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'missing setup hash'
+
+    Reset-Microsoft365Case
+    $script:InstalledVersion = ''
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ('0' * 64)
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'placeholder installer hash'
+    if (($script:Microsoft365ErrorLog -join "`n") -notlike '*placeholder*') {
+        Fail 'placeholder installer hash error did not name a placeholder'
+    }
+
+    Reset-Microsoft365Case
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -SetupSha256 ('deadbeef' * 8)
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'placeholder setup hash'
+    if (($script:Microsoft365ErrorLog -join "`n") -notlike '*placeholder*') {
+        Fail 'placeholder setup hash error did not name a placeholder'
+    }
 
     Reset-Microsoft365Case
     $script:InstalledVersion = ''
@@ -784,8 +810,14 @@ try {
     Reset-Microsoft365Case
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall empty installer hash'
+
+    Reset-Microsoft365Case
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
     $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -SetupSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall missing setup hash'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectExpand 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall empty setup hash'
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {

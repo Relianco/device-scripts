@@ -278,6 +278,19 @@ function Test-Microsoft365DownloadIsTransient {
     return [bool](Test-Microsoft365TransientTransport -Exception $exception)
 }
 
+function Test-Microsoft365PinHash {
+    param([string]$Sha256)
+    $text = ([string]$Sha256).Trim().ToLowerInvariant()
+    if ($text -notmatch '^[0-9a-f]{64}$') {
+        return $false
+    }
+    # All zeros, any repeated nibble, and deadbeef are placeholders, not file pins.
+    if ($text -match '^(.)\1{63}$' -or $text -eq ('deadbeef' * 8)) {
+        return $false
+    }
+    return $true
+}
+
 function Save-Microsoft365Payload {
     param(
         [string]$Url,
@@ -294,6 +307,10 @@ function Save-Microsoft365Payload {
     }
     if ([string]::IsNullOrWhiteSpace($Sha256)) {
         return 0
+    }
+    if (-not (Test-Microsoft365PinHash -Sha256 $Sha256)) {
+        Add-Microsoft365Error -Message "refusing a placeholder hash for $Label"
+        return 1
     }
 
     $expected = $Sha256.Trim().ToLowerInvariant()
@@ -772,9 +789,13 @@ function Invoke-Microsoft365Action {
                     return 1
                 }
             }
-            # Both hashes are required. Uninstall runs the same pinned setup.exe.
+            # An empty hash disables the package, including Uninstall. Do not download.
+            # A placeholder is not a pin. Do not download it and do not run setup.
             if ([string]::IsNullOrWhiteSpace($InstallerSha256) -or [string]::IsNullOrWhiteSpace($SetupSha256)) {
-                Add-Microsoft365Error -Message 'missing hash for setup.exe'
+                return 0
+            }
+            if (-not (Test-Microsoft365PinHash -Sha256 $InstallerSha256) -or -not (Test-Microsoft365PinHash -Sha256 $SetupSha256)) {
+                Add-Microsoft365Error -Message 'refusing a placeholder hash'
                 return 1
             }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-microsoft-365-' + [guid]::NewGuid().ToString('n'))

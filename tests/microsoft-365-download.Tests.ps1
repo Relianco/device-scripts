@@ -5,7 +5,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/microsoft-365/Invoke-Microsoft365.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -40,6 +40,13 @@ class Microsoft365FakeHttpException : System.Exception {
     [object]$Response
     Microsoft365FakeHttpException([int]$Status) : base('status') {
         $this.Response = [pscustomobject]@{ StatusCode = $Status }
+    }
+}
+
+class Microsoft365TransportException : System.Exception {
+    [string]$HttpRequestError
+    Microsoft365TransportException([string]$Kind) : base('transport') {
+        $this.HttpRequestError = $Kind
     }
 }
 
@@ -129,6 +136,17 @@ try {
         Fail "empty hash returned $code after $($script:DownloadCount) downloads"
     }
 
+    foreach ($placeholder in @('placeholder', ('0' * 64), ('f' * 64), ('deadbeef' * 8))) {
+        Reset-Hooks
+        $code = Save-Microsoft365Payload -Url 'https://example.invalid/officedeploymenttool.exe' -Destination $dest -Sha256 $placeholder -Label 'office deployment tool'
+        if ($code -ne 1 -or $script:DownloadCount -ne 0 -or (Test-Path -LiteralPath $dest)) {
+            Fail "placeholder hash returned $code after $($script:DownloadCount) downloads"
+        }
+        if (($script:Microsoft365ErrorLog -join "`n") -notlike '*placeholder*') {
+            Fail 'placeholder hash error did not name a placeholder'
+        }
+    }
+
     foreach ($status in @(408, 429, 500, 502, 503, 504)) {
         if (-not (Test-Microsoft365DownloadIsTransient -ErrorRecord ([Microsoft365FakeHttpException]::new($status)))) {
             Fail "HTTP $status on Response.StatusCode was not retried"
@@ -159,6 +177,9 @@ try {
     }
     if (Test-Microsoft365DownloadIsTransient -ErrorRecord ([System.Exception]::new('nope'))) {
         Fail 'a generic failure was retried'
+    }
+    if (-not (Test-Microsoft365DownloadIsTransient -ErrorRecord ([Microsoft365TransportException]::new('SecureConnectionError')))) {
+        Fail 'SecureConnectionError was not retried'
     }
 
     Reset-Hooks
