@@ -1,0 +1,173 @@
+name: AI PR review
+
+# Same shape as the website AI review: opened + synchronize, same-repo only,
+# a docs-only skip that still posts a review, a preflight that fails on a bad
+# key or an unentitled model, and a delivery check. The runner is
+# ubuntu-24.04. The model is gpt-6.1-sol. The prompt lives in
+# scripts/ci/ai-pr-review.mjs and is about PowerShell deploy scripts.
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    timeout-minutes: 30
+    env:
+      OPENAI_API_ENDPOINT: https://api.openai.com/v1
+      MODEL: gpt-6.1-sol
+    steps:
+      - name: Gate — skip re-review when the push delta is docs-only
+        id: gate
+        if: ${{ github.event.action == 'synchronize' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -u
+          baseline=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ai-pr-review.yml/runs?status=success&event=pull_request&branch=${HEAD_BRANCH}&per_page=10" \
+            --jq "[.workflow_runs[].head_sha | select(. != \"${HEAD_SHA}\")][0] // empty" 2>/dev/null) || baseline=""
+          if [ -z "$baseline" ]; then
+            echo "No previously-reviewed head found — running the full review."
+            exit 0
+          fi
+          files=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${baseline}...${HEAD_SHA}" \
+            --jq '[(.files // [])[] | .filename, (.previous_filename // empty)] | if length >= 300 then ["__too_many__"] else . end | .[]' 2>/dev/null) || {
+            echo "Compare failed — running the full review."
+            exit 0
+          }
+          if [ "$files" = "__too_many__" ] || [ -z "$files" ]; then
+            echo "Push delta is empty or too large to classify — running the full review."
+            exit 0
+          fi
+          while IFS= read -r f; do
+            case "$f" in
+              *.md|docs/*|LICENSE) ;;
+              *)
+                echo "Non-doc change in push delta ($f) — running the full review."
+                exit 0 ;;
+            esac
+          done <<< "$files"
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          reason="the delta vs the previously-reviewed head (\`${baseline}\`) is docs-only (\`**/*.md\`, \`docs/**\`, \`LICENSE\`). The prior review verdict stands for the unchanged code."
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+            -f event=COMMENT -f commit_id="${HEAD_SHA}" \
+            -f body="AI review skipped for this push: ${reason}" \
+            || echo "::warning::Could not post the skip notice review."
+
+      - name: Preflight — OpenAI usable (key valid + funded)
+        if: ${{ steps.gate.outputs.skip != 'true' }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -u
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::OPENAI_API_KEY secret is empty or unset. Set the repo secret, then re-run."
+            exit 1
+          fi
+          : > "$RUNNER_TEMP/oai.json"
+          probe_model="${MODEL%%,*}"
+          jq -n --arg model "$probe_model" '{model:$model, messages:[{role:"user", content:"Reply with JSON {\"ok\":true}"}], max_completion_tokens:16, response_format:{type:"json_object"}}' > "$RUNNER_TEMP/oai-req.json"
+          http=$(curl -sS --connect-timeout 10 --max-time 30 -o "$RUNNER_TEMP/oai.json" -w '%{http_code}' \
+            "${OPENAI_API_ENDPOINT}/chat/completions" \
+            -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            --data-binary @"$RUNNER_TEMP/oai-req.json") || true
+          http="${http:-000}"
+          if grep -qi 'model_not_found' "$RUNNER_TEMP/oai.json"; then
+            echo "::error::OpenAI preflight: reviewer model ${probe_model} is unavailable (HTTP ${http} model_not_found). Update MODEL in this workflow. The key was not the failure."
+            exit 1
+          fi
+          if [ "$http" = "401" ] || [ "$http" = "403" ] || grep -qiE 'invalid_api_key|account_deactivated' "$RUNNER_TEMP/oai.json"; then
+            echo "::error::OpenAI rejected the key (HTTP ${http})."
+            exit 1
+          fi
+          if grep -qi 'insufficient_quota' "$RUNNER_TEMP/oai.json"; then
+            echo "::error::OpenAI balance or quota is exhausted. The AI review will not run."
+            exit 1
+          fi
+          if [ "$http" = "200" ]; then
+            echo "OpenAI reachable. Key accepted. Model ${probe_model} answered."
+            exit 0
+          fi
+          case "$http" in
+            000|408|409|425|429|5??)
+              echo "::warning::OpenAI preflight HTTP ${http} (transient). Proceeding to the review step." ;;
+            *)
+              echo "::error::OpenAI preflight HTTP ${http}. The reviewer model or the request was rejected."
+              exit 1 ;;
+          esac
+
+      - name: Check out the reviewer
+        if: ${{ steps.gate.outputs.skip != 'true' }}
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Review the PR changeset
+        if: ${{ steps.gate.outputs.skip != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_API_ENDPOINT: ${{ env.OPENAI_API_ENDPOINT }}
+          MODEL: ${{ env.MODEL }}
+        run: node scripts/ci/ai-pr-review.mjs
+
+      - name: Verify the review was delivered at the head SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          delivered=""
+          read_ok=""
+          for attempt in 1 2 3; do
+            if delivered=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" \
+              --jq '.[]
+                    | (.body // "") as $body
+                    | select(.user.login == "github-actions[bot]" and .commit_id == env.HEAD_SHA
+                             and (($body | startswith("Code review by ChatGPT"))
+                                  or ($body | startswith("LGTM"))
+                                  or ($body | startswith("AI review skipped for this push:"))))
+                    | ($body[0:60] | gsub("\n"; " "))'); then
+              read_ok=1
+              [ -n "$delivered" ] && break
+            fi
+            [ "$attempt" = 3 ] || sleep 3
+          done
+          if [ -z "$read_ok" ]; then
+            echo "::error::Could not list the reviews of PR #${PR_NUMBER} after 3 attempts."
+            exit 1
+          fi
+          if [ -n "$delivered" ]; then
+            echo "AI review delivered at head ${HEAD_SHA}:"
+            printf '%s\n' "$delivered"
+            exit 0
+          fi
+          if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and .commit_id == env.HEAD_SHA
+                               and ((.body // "") | startswith("AI review NOT performed:")))
+                      | .id' | grep -q .; then
+            echo "::error::The reviewer found nothing reviewable at head ${HEAD_SHA}. No code was reviewed, so this check is red."
+            exit 1
+          fi
+          echo "::error::No AI review is pinned to head ${HEAD_SHA}."
+          exit 1

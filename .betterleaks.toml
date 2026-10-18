@@ -1,0 +1,16 @@
+# Secret-scanning policy for device-scripts. CI and the local pre-push hook
+# both use this file. On a pull request, CI prefers the copy on the base
+# commit so the pull request cannot weaken the rules and hide a secret.
+
+title = "device-scripts"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Teams download history used the fake userinfo password secret. Exact value only, and only in PowerShell tests."
+targetRules = ["generic-credential-uri"]
+condition = "AND"
+regexTarget = "secret"
+paths = ['''(^|/)tests/.*\.Tests\.ps1$''']
+regexes = ['''^secret$''']

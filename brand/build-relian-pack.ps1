@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$BlackSvg = '/home/kverbr/Develop/Relian/web/www-rebased/layers/shared/public/images/logo/relian-logo-black.svg',
-    [string]$WhiteSvg = '/home/kverbr/Develop/Relian/web/www-rebased/layers/shared/public/images/logo/relian-logo-white.svg',
+    [string]$BlackSvg = (Join-Path $PSScriptRoot 'logos/relian-logo-black.svg'),
+    [string]$WhiteSvg = (Join-Path $PSScriptRoot 'logos/relian-logo-white.svg'),
     [string]$Destination = (Join-Path (Split-Path -Parent $PSScriptRoot) 'brand/relian'),
     [string]$OutZip = (Join-Path (Split-Path -Parent $PSScriptRoot) 'brand/out/relian-brand.zip')
 )

@@ -3,8 +3,8 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $build = Join-Path $repoRoot 'brand/build-relian-pack.ps1'
-$blackSrc = '/home/kverbr/Develop/Relian/web/www-rebased/layers/shared/public/images/logo/relian-logo-black.svg'
-$whiteSrc = '/home/kverbr/Develop/Relian/web/www-rebased/layers/shared/public/images/logo/relian-logo-white.svg'
+$blackSrc = Join-Path $repoRoot 'brand/logos/relian-logo-black.svg'
+$whiteSrc = Join-Path $repoRoot 'brand/logos/relian-logo-white.svg'
 $expectedBlackSha256 = 'c521b7fefcef44f9d9eec85a0cade62ebe3701224fbff4ec54904618d27c9d12'
 $expectedEntries = @(
     'Config/config.psd1'

@@ -1,1 +1,6 @@
 brand/out/
+releases/cache/
+.agents/
+.worktrees/
+AGENTS.md
+CLAUDE.md

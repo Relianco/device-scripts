@@ -1,0 +1,44 @@
+name: PR verify
+
+# PowerShell floor for this repo. The website's pr-verify runs typecheck,
+# lint, and vitest on its own runner labels. This repo has no Node app, so
+# the floor is the pwsh suite plus the reviewer unit tests, on ubuntu-24.04.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PowerShell tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install PowerShell
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          curl -fsSL -o /tmp/packages-microsoft-prod.deb "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb"
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y powershell librsvg2-bin
+          pwsh -NoProfile -Command 'Write-Output $PSVersionTable.PSVersion.ToString()'
+
+      - name: Run the PowerShell suite
+        run: pwsh -NoProfile -File tests/run-all.ps1
+
+      - name: Run the reviewer unit tests
+        run: node --test scripts/ci/ai-pr-review.test.mjs scripts/ci/secret-scan.test.mjs
