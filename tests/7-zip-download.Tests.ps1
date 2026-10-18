@@ -178,6 +178,12 @@ try {
     if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $hostNotFound)) {
         Fail 'socket DNS failure was not retried'
     }
+    foreach ($socketName in @('TimedOut', 'ConnectionReset', 'ConnectionAborted')) {
+        $socketError = [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::$socketName)
+        if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $socketError)) {
+            Fail "$socketName was not retried"
+        }
+    }
     $inUse = [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::AddressAlreadyInUse)
     if (Test-7ZipDownloadIsTransient -ErrorRecord $inUse) {
         Fail 'address already in use was retried'

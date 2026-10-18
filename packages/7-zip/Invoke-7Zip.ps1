@@ -245,15 +245,16 @@ function Test-7ZipSocketIsTransient {
     if ($Exception -isnot [System.Net.Sockets.SocketException]) {
         return $false
     }
-    # ConnectionRefused and HostNotFound only. AddressAlreadyInUse is not retried.
+    # Timeout, connection, and DNS only. AddressAlreadyInUse is not retried.
     $code = $Exception.SocketErrorCode
-    if ($code -eq [System.Net.Sockets.SocketError]::ConnectionRefused) {
-        return $true
-    }
-    if ($code -eq [System.Net.Sockets.SocketError]::HostNotFound) {
-        return $true
-    }
-    return $false
+    $retry = @(
+        [System.Net.Sockets.SocketError]::TimedOut,
+        [System.Net.Sockets.SocketError]::ConnectionReset,
+        [System.Net.Sockets.SocketError]::ConnectionAborted,
+        [System.Net.Sockets.SocketError]::ConnectionRefused,
+        [System.Net.Sockets.SocketError]::HostNotFound
+    )
+    return $retry -contains $code
 }
 
 function Test-7ZipTransientTransport {
@@ -657,6 +658,12 @@ function Invoke-7ZipAction {
     }
     if (-not (Test-7ZipPinHash -Sha256 $InstallerSha256)) {
         Add-7ZipError -Message 'invalid hash for installer'
+        return 1
+    }
+    # Uninstall does not download, so it does not read the URL.
+    # Install, Update, and Repair reject userinfo before planning, even when no file is needed.
+    if ($Action -ne 'Uninstall' -and (Test-7ZipUrlHasUserInfo -Url $InstallerUrl)) {
+        Add-7ZipError -Message 'refusing a URL that contains userinfo for installer'
         return 1
     }
 

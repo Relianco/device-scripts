@@ -442,6 +442,15 @@ try {
     }
 
     Reset-7ZipCase
+    $script:InstalledVersion = '3.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerUrl (New-7ZipUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'vendor newer userinfo'
+    if (($script:7ZipErrorLog -join "`n") -notlike '*userinfo*') {
+        Fail 'vendor newer userinfo error did not name userinfo'
+    }
+
+    Reset-7ZipCase
     $script:InstalledVersion = '26.05'
     Set-Marker '26.4.0.0'
     $code = Invoke-Case -Action 'Install' -PinVersion '26.04.00.0'
