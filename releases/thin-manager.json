@@ -1,0 +1,6 @@
+{
+  "name": "Thin Manager startup",
+  "startupShortcut": "RelianThinManager.lnk",
+  "installerFile": null,
+  "note": "There is no installer file. This package creates the common Startup shortcut and does not download Thin Manager."
+}
