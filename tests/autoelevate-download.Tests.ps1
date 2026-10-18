@@ -145,16 +145,29 @@ try {
     if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord ([System.TimeoutException]::new('timed out')))) {
         Fail 'timeout was not retried'
     }
-    if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+    $timeout = [System.TimeoutException]::new('The operation has timed out.')
+    $timedOut = [System.Threading.Tasks.TaskCanceledException]::new('canceled after the timeout', $timeout)
+    if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord $timedOut)) {
+        Fail 'timeout cancellation was not retried'
     }
-    $socket = [System.Net.Sockets.SocketException]::new()
-    if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord $socket)) {
-        Fail 'socket failure was not retried'
+    if (Test-AutoElevateDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('A task was canceled.'))) {
+        Fail 'ordinary cancellation was retried'
     }
-    $wrapped = [System.Exception]::new('wrapped', $socket)
+    $connection = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionRefused)
+    if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord $connection)) {
+        Fail 'connection socket failure was not retried'
+    }
+    $dnsSocket = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::HostNotFound)
+    if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord $dnsSocket)) {
+        Fail 'DNS socket failure was not retried'
+    }
+    $wrapped = [System.Exception]::new('wrapped', $connection)
     if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord $wrapped)) {
         Fail 'wrapped socket failure was not retried'
+    }
+    $unrelated = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::AccessDenied)
+    if (Test-AutoElevateDownloadIsTransient -ErrorRecord $unrelated) {
+        Fail 'unrelated socket failure was retried'
     }
     $dns = [System.Net.WebException]::new('dns', [System.Net.WebExceptionStatus]::NameResolutionFailure)
     if (-not (Test-AutoElevateDownloadIsTransient -ErrorRecord $dns)) {
@@ -201,7 +214,7 @@ try {
         $script:DownloadCount++
         $script:Attempt++
         if ($script:Attempt -eq 1) {
-            throw [System.Net.Sockets.SocketException]::new()
+            throw [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionRefused)
         }
         [System.IO.File]::WriteAllBytes($Destination, $good)
     }
