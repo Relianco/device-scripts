@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/7-zip/Invoke-7Zip.ps1'
 $releasePath = Join-Path $repoRoot 'releases/7-zip.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'test failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
