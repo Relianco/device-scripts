@@ -57,6 +57,15 @@ if ([string]$release.arch -cne 'x64' -or [string]$release.file -cne '7z2604-x64.
 if ($InstallerUrl -cne [string]$release.sourceUrl -or $InstallerSha256 -cne [string]$release.sha256) {
     Fail 'script defaults do not match releases/7-zip.json'
 }
+if (-not (Test-7ZipPinHash -Sha256 $pinnedSha)) {
+    Fail 'pinned sha256 is not a lowercase pin'
+}
+if (Test-7ZipPinHash -Sha256 $pinnedSha.ToUpperInvariant()) {
+    Fail 'uppercase pin was accepted'
+}
+if ((Test-7ZipPinHash -Sha256 ('0' * 64)) -or (Test-7ZipPinHash -Sha256 ('a' * 64)) -or (Test-7ZipPinHash -Sha256 ('f' * 64))) {
+    Fail 'placeholder pin was accepted'
+}
 $scriptText = Get-Content -LiteralPath $scriptPath -Raw -Encoding utf8
 if ($scriptText -match 'Ninja-Property-Get|Ninja-Property-Set|NinjaOne') {
     Fail 'script calls Ninja'
@@ -437,24 +446,49 @@ try {
     Reset-7ZipCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-7ZipUserInfoUrl)
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerUrl (New-7ZipUserInfoUrl)
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 1 -MarkerAbsent $true -Label 'uninstall'
     if ($script:MsiCalls[0].Mode -cne 'uninstall' -or $script:MsiCalls[0].ProductCode -cne $script:ProductCode) {
         Fail 'uninstall did not pass the product code'
     }
 
     Reset-7ZipCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $script:GetInstalled7ZipVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-7ZipUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'uninstall empty hash'
+
+    Reset-7ZipCase
+    $script:InstalledVersion = ''
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'uninstall marker only'
+
+    Reset-7ZipCase
     $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
     $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'uninstall marker only'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'uninstall marker empty hash'
 
     Reset-7ZipCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
     $script:ProductCode = ''
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'uninstall missing product code'
+
+    Reset-7ZipCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Nope' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'empty hash unknown action'
+
+    Reset-7ZipCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Nope' -PinVersion '2.0.0.0'
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label 'unknown action'
 
     Reset-7ZipCase
     $script:InstalledVersion = ''
@@ -565,9 +599,27 @@ try {
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectMsi 1 -ExpectMarker '2.0.0.0' -Label 'msiexec failure'
 
     Reset-7ZipCase
-    $script:InstalledVersion = ''
+    Set-Marker '9.0.0.0'
+    $script:InstalledVersion = '1.0.0.0'
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'missing hash'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '9.0.0.0' -Label 'empty hash'
+
+    Reset-7ZipCase
+    Set-Marker '1.0.0.0'
+    $script:InstalledVersion = '1.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha.ToUpperInvariant()
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '1.0.0.0' -Label 'uppercase hash'
+    if (($script:7ZipErrorLog -join "`n") -notlike '*invalid hash*') {
+        Fail 'uppercase hash did not report an invalid hash'
+    }
+
+    foreach ($placeholder in @('0', 'a', 'f')) {
+        Reset-7ZipCase
+        Set-Marker '2.0.0.0'
+        $script:InstalledVersion = '2.0.0.0'
+        $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ($placeholder * 64)
+        Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '2.0.0.0' -Label "placeholder $placeholder"
+    }
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {

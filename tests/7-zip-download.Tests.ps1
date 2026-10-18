@@ -132,6 +132,20 @@ try {
         Fail "empty hash returned $code after $($script:DownloadCount) downloads"
     }
 
+    Reset-Hooks
+    $code = Save-7ZipPayload -Url 'https://example.invalid/7zip.msi' -Destination $dest -Sha256 $goodSha.ToUpperInvariant() -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 0) {
+        Fail "uppercase hash returned $code after $($script:DownloadCount) downloads"
+    }
+
+    foreach ($placeholder in @('0', 'a', 'f')) {
+        Reset-Hooks
+        $code = Save-7ZipPayload -Url 'https://example.invalid/7zip.msi' -Destination $dest -Sha256 ($placeholder * 64) -Label 'installer'
+        if ($code -ne 1 -or $script:DownloadCount -ne 0) {
+            Fail "placeholder $placeholder returned $code after $($script:DownloadCount) downloads"
+        }
+    }
+
     foreach ($status in @(408, 429, 500, 502, 503, 504)) {
         if (-not (Test-7ZipDownloadIsTransient -ErrorRecord ([SevenZipFakeHttpException]::new($status)))) {
             Fail "HTTP $status on Response.StatusCode was not retried"
@@ -145,20 +159,53 @@ try {
     if (-not (Test-7ZipDownloadIsTransient -ErrorRecord ([System.TimeoutException]::new('timed out')))) {
         Fail 'timeout was not retried'
     }
-    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+    if (Test-7ZipDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out'))) {
+        Fail 'a bare task cancel was retried'
+    }
+    $wrappedTimeout = [System.Threading.Tasks.TaskCanceledException]::new('canceled', [System.TimeoutException]::new('timed out'))
+    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $wrappedTimeout)) {
+        Fail 'task cancel wrapping a timeout was not retried'
     }
     $socket = [System.Net.Sockets.SocketException]::new()
-    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $socket)) {
-        Fail 'socket failure was not retried'
+    if (Test-7ZipDownloadIsTransient -ErrorRecord $socket) {
+        Fail 'a bare socket failure was retried'
     }
-    $wrapped = [System.Exception]::new('wrapped', $socket)
+    $refused = [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::ConnectionRefused)
+    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $refused)) {
+        Fail 'connection refused was not retried'
+    }
+    $hostNotFound = [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::HostNotFound)
+    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $hostNotFound)) {
+        Fail 'socket DNS failure was not retried'
+    }
+    $inUse = [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::AddressAlreadyInUse)
+    if (Test-7ZipDownloadIsTransient -ErrorRecord $inUse) {
+        Fail 'address already in use was retried'
+    }
+    $wrapped = [System.Exception]::new('wrapped', $refused)
     if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $wrapped)) {
-        Fail 'wrapped socket failure was not retried'
+        Fail 'wrapped connection refused was not retried'
+    }
+    $wrappedInUse = [System.Exception]::new('wrapped', $inUse)
+    if (Test-7ZipDownloadIsTransient -ErrorRecord $wrappedInUse) {
+        Fail 'wrapped address already in use was retried'
     }
     $dns = [System.Net.WebException]::new('dns', [System.Net.WebExceptionStatus]::NameResolutionFailure)
     if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $dns)) {
         Fail 'DNS failure was not retried'
+    }
+    $webTimeout = [System.Net.WebException]::new('timeout', [System.Net.WebExceptionStatus]::Timeout)
+    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $webTimeout)) {
+        Fail 'web timeout was not retried'
+    }
+    $secure = [System.Net.Http.HttpRequestException]::new(
+        [System.Net.Http.HttpRequestError]::SecureConnectionError,
+        'secure',
+        $null,
+        $null
+    )
+    if (-not (Test-7ZipDownloadIsTransient -ErrorRecord $secure)) {
+        Fail 'secure connection failure was not retried'
     }
     if (Test-7ZipDownloadIsTransient -ErrorRecord ([System.Exception]::new('nope'))) {
         Fail 'a generic failure was retried'
@@ -201,13 +248,51 @@ try {
         $script:DownloadCount++
         $script:Attempt++
         if ($script:Attempt -eq 1) {
-            throw [System.Net.Sockets.SocketException]::new()
+            throw [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::ConnectionRefused)
         }
         [System.IO.File]::WriteAllBytes($Destination, $good)
     }
     $code = Save-7ZipPayload -Url 'https://example.invalid/7zip.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
     if ($code -ne 0 -or $script:DownloadCount -ne 2 -or $script:Sleeps.Count -ne 1 -or $script:Sleeps[0] -ne 5) {
         Fail "socket then success returned $code after $($script:DownloadCount) downloads sleeps $($script:Sleeps -join ',')"
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        throw [System.Net.Sockets.SocketException]::new([System.Net.Sockets.SocketError]::AddressAlreadyInUse)
+    }
+    $code = Save-7ZipPayload -Url 'https://example.invalid/7zip.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0) {
+        Fail "address in use returned $code after $($script:DownloadCount) downloads and $($script:Sleeps.Count) sleeps"
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        throw [System.Threading.Tasks.TaskCanceledException]::new('timed out')
+    }
+    $code = Save-7ZipPayload -Url 'https://example.invalid/7zip.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0) {
+        Fail "bare task cancel returned $code after $($script:DownloadCount) downloads and $($script:Sleeps.Count) sleeps"
+    }
+
+    Reset-Hooks
+    $script:Attempt = 0
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        $script:Attempt++
+        if ($script:Attempt -eq 1) {
+            throw [System.Threading.Tasks.TaskCanceledException]::new('canceled', [System.TimeoutException]::new('timed out'))
+        }
+        [System.IO.File]::WriteAllBytes($Destination, $good)
+    }
+    $code = Save-7ZipPayload -Url 'https://example.invalid/7zip.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 0 -or $script:DownloadCount -ne 2 -or $script:Sleeps.Count -ne 1 -or $script:Sleeps[0] -ne 5) {
+        Fail "wrapped timeout returned $code after $($script:DownloadCount) downloads sleeps $($script:Sleeps -join ',')"
     }
 
     Reset-Hooks

@@ -240,20 +240,36 @@ function Get-7ZipHttpStatus {
     return $null
 }
 
+function Test-7ZipSocketIsTransient {
+    param($Exception)
+    if ($Exception -isnot [System.Net.Sockets.SocketException]) {
+        return $false
+    }
+    # ConnectionRefused and HostNotFound only. AddressAlreadyInUse is not retried.
+    $code = $Exception.SocketErrorCode
+    if ($code -eq [System.Net.Sockets.SocketError]::ConnectionRefused) {
+        return $true
+    }
+    if ($code -eq [System.Net.Sockets.SocketError]::HostNotFound) {
+        return $true
+    }
+    return $false
+}
+
 function Test-7ZipTransientTransport {
     param($Exception)
     $webTransient = @(
         'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
         'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
     )
+    # SecureConnectionError is a connection failure and stays retryable.
     $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
     $current = $Exception
     $guard = 0
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
-        if ($current -is [System.TimeoutException] -or
-            $current -is [System.Threading.Tasks.TaskCanceledException] -or
-            $current -is [System.Net.Sockets.SocketException]) {
+        # A bare TaskCanceledException is not a timeout. Retry only when a TimeoutException is inside it.
+        if ($current -is [System.TimeoutException] -or (Test-7ZipSocketIsTransient -Exception $current)) {
             return $true
         }
         if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
@@ -286,6 +302,20 @@ function Test-7ZipDownloadIsTransient {
     return [bool](Test-7ZipTransientTransport -Exception $exception)
 }
 
+function Test-7ZipPinHash {
+    param([string]$Sha256)
+    $text = $Sha256.Trim()
+    # -cnotmatch is case-sensitive, so uppercase hex is not a pin.
+    if ($text -cnotmatch '^[0-9a-f]{64}$') {
+        return $false
+    }
+    # 64 identical nibbles, including 64 zeros or 64 a's, is a placeholder.
+    if ($text -cnotmatch '^(.)\1{63}$') {
+        return $true
+    }
+    return $false
+}
+
 function Save-7ZipPayload {
     param(
         [string]$Url,
@@ -303,8 +333,12 @@ function Save-7ZipPayload {
     if ([string]::IsNullOrWhiteSpace($Sha256)) {
         return 0
     }
+    if (-not (Test-7ZipPinHash -Sha256 $Sha256)) {
+        Add-7ZipError -Message "invalid hash for $Label"
+        return 1
+    }
 
-    $expected = $Sha256.Trim().ToLowerInvariant()
+    $expected = $Sha256.Trim()
     $delays = @(5, 20)
     for ($attempt = 1; $attempt -le 3; $attempt++) {
         if (Test-7ZipCancelled -CancelPath $CancelPath) {
@@ -615,6 +649,15 @@ function Invoke-7ZipAction {
         [string]$MarkerRoot
     )
 
+    # Empty hash disables every action, including Uninstall, before validation or any change.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return 0
+    }
+    if (-not (Test-7ZipPinHash -Sha256 $InstallerSha256)) {
+        Add-7ZipError -Message 'invalid hash for installer'
+        return 1
+    }
+
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-7ZipDefaultMarkerRoot
     }
@@ -638,10 +681,6 @@ function Invoke-7ZipAction {
     $cache = ''
     try {
         if ($plan.RunInstaller -eq 'install') {
-            if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
-                Add-7ZipError -Message 'missing hash for installer'
-                return 1
-            }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-7zip-' + [guid]::NewGuid().ToString('n'))
             New-Item -ItemType Directory -Path $cache -Force | Out-Null
             $installerPath = Join-Path $cache '7z2604-x64.msi'
