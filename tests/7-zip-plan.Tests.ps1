@@ -269,9 +269,13 @@ Assert-Plan -Plan $unknown -Expect (New-Expect -ExitCode 1) -Label 'unknown acti
 
 $installArgs = Get-7ZipMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\7zip.msi' -ProductCode ''
 if ($null -eq $installArgs -or $installArgs.Count -ne 4 -or
-    $installArgs[0] -cne '/i' -or $installArgs[1] -cne 'C:\cache\7zip.msi' -or
+    $installArgs[0] -cne '/i' -or $installArgs[1] -cne '"C:\cache\7zip.msi"' -or
     $installArgs[2] -cne '/qn' -or $installArgs[3] -cne '/norestart') {
     Fail "install arguments $($installArgs -join ' ')"
+}
+$spacedArgs = Get-7ZipMsiArgumentList -Mode 'install' -InstallerPath 'C:\Program Files\7-Zip\7zip.msi' -ProductCode ''
+if ($null -eq $spacedArgs -or $spacedArgs[1] -cne '"C:\Program Files\7-Zip\7zip.msi"') {
+    Fail "spaced installer path was $($spacedArgs -join ' ')"
 }
 $removeCode = '{11111111-2222-3333-4444-555555555555}'
 $removeArgs = Get-7ZipMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode $removeCode

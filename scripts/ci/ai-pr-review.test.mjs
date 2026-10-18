@@ -91,6 +91,9 @@ test('the prompt is PowerShell rules and names JSON', () => {
     'The OpenAI client may retry HTTP 409 and 425 once. Do not report that single retry.',
     'Mandatory is a defect only on parameters of a package entry script. A Mandatory parameter on a test helper is not a defect.',
     'An empty hash exits 0 for every action, including Uninstall, and downloads nothing.',
+    'An empty hash exits 0 before the URL is read, including when the URL contains userinfo. Do not require that rejection when the hash is empty.',
+    'Uninstall does not download. A present hash with a userinfo URL does not block uninstall.',
+    'An MSI install path must be one quoted argument so a path that contains spaces is not split.',
   ]
   for (const sentence of skip) {
     assert.equal(PROMPT.includes(sentence), true)

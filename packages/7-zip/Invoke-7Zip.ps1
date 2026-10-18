@@ -570,7 +570,8 @@ function Get-7ZipMsiArgumentList {
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
-    return @('/i', $InstallerPath, '/qn', '/norestart')
+    # Start-Process joins ArgumentList with spaces. Quotes keep a path with spaces as one argument.
+    return @('/i', ('"{0}"' -f $InstallerPath), '/qn', '/norestart')
 }
 
 function Test-7ZipMsiSucceeded {
@@ -749,6 +750,11 @@ function Invoke-7ZipAction {
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
+}
+
+# An empty hash is a no-op before parameter validation. The URL is not read.
+if ($PSBoundParameters.ContainsKey('InstallerSha256') -and [string]::IsNullOrWhiteSpace($InstallerSha256)) {
+    exit 0
 }
 
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
