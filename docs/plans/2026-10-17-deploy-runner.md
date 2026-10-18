@@ -1,5 +1,7 @@
 # Deploy runner and Relian brand pack
 
+> Finished and merged to `main` on 2026-10-17. Read `docs/STATUS.md`. The "do not push" line below is the record of how this plan was written.
+
 Spec for the first Relian software-deploy runner. There is no separate spec document. This plan is the authority.
 
 The runner lives in this public repo. PSAppDeployToolkit 4.1.8 and the Relian brand pack are published as content-addressed blobs. A NinjaOne copy of the runner downloads one package script from this repo and the two blobs, checks each SHA256, and runs the package. Client branding later is another brand zip and different pins. This version publishes only the Relian pack.

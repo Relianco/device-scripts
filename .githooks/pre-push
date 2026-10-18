@@ -20,7 +20,7 @@ fi
 
 zero="0000000000000000000000000000000000000000"
 baseline=""
-for candidate in origin/teams-package origin/deploy-runner origin/main; do
+for candidate in origin/main origin/deploy-runner origin/teams-package; do
   if git rev-parse --verify -q "$candidate" >/dev/null 2>&1; then
     baseline="$candidate"
     break

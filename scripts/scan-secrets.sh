@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scan this branch with the committed betterleaks policy.
-# Default range: commits not on origin/teams-package (then deploy-runner, then main).
+# Default range: commits not on origin/main (then deploy-runner, then teams-package).
 # Pass "history" to scan every commit reachable from HEAD.
 set -euo pipefail
 
@@ -19,7 +19,7 @@ if [ "${1:-}" = "history" ]; then
 fi
 
 baseline=""
-for candidate in origin/teams-package origin/deploy-runner origin/main; do
+for candidate in origin/main origin/deploy-runner origin/teams-package; do
   if git rev-parse --verify -q "$candidate" >/dev/null 2>&1; then
     baseline="$candidate"
     break

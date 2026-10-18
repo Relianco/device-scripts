@@ -20,5 +20,6 @@ test('the local policy and the CI fallback allow only the fixture value secret',
   assert.match(hook, /betterleaks git/)
   assert.match(hook, /\.betterleaks\.toml/)
   assert.match(scan, /betterleaks git/)
-  assert.match(scan, /origin\/teams-package/)
+  assert.match(scan, /for candidate in origin\/main origin\/deploy-runner origin\/teams-package/)
+  assert.match(hook, /for candidate in origin\/main origin\/deploy-runner origin\/teams-package/)
 })

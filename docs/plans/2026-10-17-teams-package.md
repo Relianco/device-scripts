@@ -1,5 +1,7 @@
 # Teams package
 
+> Finished. Pull request 3 and pull request 2 merged on 2026-10-17. This package is on `main`. Read `docs/STATUS.md` for the next task. The branch rules below are the record of how this package was built.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Parallel work uses `docs/worktrees.md`: one worktree and one `lane/` branch per task, and two live lanes never edit the same path.
 
 **Goal:** Add a machine-wide Microsoft Teams package that the existing deploy runner can install, update, repair, uninstall, and reinstall, with a hash-pinned bootstrapper and x64 MSIX.
@@ -241,4 +243,4 @@ The script's executed path, which tests assert by reading the source:
 
 ## Controller after Task 6
 
-Uploading the blobs and any run on a client device are controller steps. They are not implementer tasks. Pull request 2 stays open. A pull request for this branch, when the maintainer asks, uses base `deploy-runner`.
+Uploading the blobs and any run on a device are controller steps. They are not implementer tasks. Both pull requests merged on 2026-10-17. The blobs are still not uploaded.
