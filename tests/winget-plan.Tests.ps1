@@ -590,17 +590,41 @@ try {
     Reset-WingetCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -Sha ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 1 -MarkerAbsent $true -ExpectLog 'Uninstall' -Label 'uninstall'
     if ($script:AppxCalls[0].Mode -cne 'uninstall') {
         Fail 'uninstall did not remove App Installer'
     }
 
     Reset-WingetCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $script:GetInstalledWingetVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -Sha '' -PackageUrl (New-WingetUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '2.0.0.0' -Label 'uninstall empty hash'
+    if (($script:WingetErrorLog -join "`n") -like '*userinfo*') {
+        Fail 'uninstall empty hash failed because of userinfo'
+    }
+
+    Reset-WingetCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $script:GetInstalledWingetVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -Sha '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '2.0.0.0' -Label 'uninstall whitespace hash'
+
+    Reset-WingetCase
     $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -Sha ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -MarkerAbsent $true -ExpectLog 'Uninstall' -Label 'uninstall marker only'
+
+    Reset-WingetCase
+    $script:InstalledVersion = ''
+    Set-Marker '2.0.0.0'
+    $script:GetInstalledWingetVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -Sha ''
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '2.0.0.0' -Label 'uninstall marker empty hash'
 
     Reset-WingetCase
     $script:InstalledVersion = '2.0.0.0'
@@ -613,7 +637,7 @@ try {
             })
         return 1
     }
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -Sha ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 1 -ExpectMarker '2.0.0.0' -Label 'uninstall failed'
 
     Reset-WingetCase
@@ -655,6 +679,16 @@ try {
     $script:InstalledVersion = '2.0.0.0'
     $code = Invoke-Case -Action 'Reinstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '2.0.0.0' -Label 'Reinstall'
+
+    Reset-WingetCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $script:GetInstalledWingetVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Reinstall' -PinVersion '2.0.0.0' -Sha '' -PackageUrl (New-WingetUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '2.0.0.0' -Label 'Reinstall empty hash'
+    if (($script:WingetErrorLog -join "`n") -like '*userinfo*') {
+        Fail 'Reinstall empty hash failed because of userinfo'
+    }
 
     Reset-WingetCase
     $script:InstalledVersion = ''
@@ -729,9 +763,43 @@ try {
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 3 -ExpectSleeps 0 -ExpectAppx 1 -ExpectMarker '2.0.0.0' -Label 'provision failure'
 
     Reset-WingetCase
-    $script:InstalledVersion = ''
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -Sha ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -MarkerAbsent $true -Label 'missing hash'
+    Set-Marker '9.0.0.0'
+    $script:InstalledVersion = '1.0.0.0'
+    $script:GetInstalledWingetVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -Sha '' -PackageUrl (New-WingetUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '9.0.0.0' -Label 'empty hash'
+    if (($script:WingetErrorLog -join "`n") -like '*userinfo*') {
+        Fail 'empty hash failed because of userinfo'
+    }
+
+    Reset-WingetCase
+    Set-Marker '9.0.0.0'
+    $script:GetInstalledWingetVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -Sha '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '9.0.0.0' -Label 'whitespace hash'
+
+    foreach ($blank in @(
+            @{ Label = 'package'; Kind = 'file'; Index = 0 }
+            @{ Label = 'license'; Kind = 'file'; Index = 1 }
+            @{ Label = 'dependencies'; Kind = 'file'; Index = 2 }
+            @{ Label = 'dependency'; Kind = 'dep'; Index = 0 }
+        )) {
+        foreach ($action in @('Install', 'Uninstall', 'Reinstall')) {
+            Reset-WingetCase
+            Set-Marker '4.0.0.0'
+            $script:InstalledVersion = '4.0.0.0'
+            $script:GetInstalledWingetVersion = { throw 'registry failed' }
+            $files = New-WingetTestFiles
+            $deps = New-WingetTestDependencies
+            if ($blank.Kind -eq 'file') {
+                $files[$blank.Index].Sha256 = '   '
+            } else {
+                $deps[$blank.Index].Sha256 = ''
+            }
+            $code = [int](Invoke-WingetAction -DeploymentType $action -Action $action -PinVersion '2.0.0.0' -CancelPath '' -MarkerRoot $script:MarkerRoot -Files $files -Dependencies $deps)
+            Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectAppx 0 -ExpectMarker '4.0.0.0' -Label "$action blank $($blank.Label)"
+        }
+    }
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {

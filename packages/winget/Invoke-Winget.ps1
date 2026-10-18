@@ -77,7 +77,7 @@ function Get-WingetPlan {
     $installed = Convert-WingetVersionText -Text $InstalledVersion
     $marker = Convert-WingetVersionText -Text $MarkerVersion
 
-    # Uninstall does not compare versions and does not need the installer hash.
+    # Uninstall does not compare versions. An empty hash never reaches this plan.
     if ($Action -eq 'Uninstall') {
         $present = -not [string]::IsNullOrWhiteSpace($InstalledVersion)
         $hasMarker = -not [string]::IsNullOrWhiteSpace($MarkerVersion)
@@ -501,6 +501,26 @@ function Test-WingetLeafName {
     return $true
 }
 
+function Test-WingetHashDisabled {
+    param(
+        $Files,
+        $Dependencies
+    )
+    # An empty hash disables the package. It is not a missing-pin or userinfo error.
+    foreach ($role in @('package', 'license', 'dependencies')) {
+        $file = Get-WingetFileByRole -Files $Files -Role $role
+        if ($null -ne $file -and [string]::IsNullOrWhiteSpace([string]$file.Sha256)) {
+            return $true
+        }
+    }
+    foreach ($pin in @($Dependencies)) {
+        if ($null -ne $pin -and [string]::IsNullOrWhiteSpace([string]$pin.Sha256)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Test-WingetPinsReady {
     param(
         $Files,
@@ -830,14 +850,20 @@ function Invoke-WingetAction {
         $Dependencies
     )
 
-    if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
-        $MarkerRoot = Get-WingetDefaultMarkerRoot
-    }
     if (-not $PSBoundParameters.ContainsKey('Files') -or $null -eq $Files) {
         $Files = @(Get-WingetPinnedFiles)
     }
     if (-not $PSBoundParameters.ContainsKey('Dependencies') -or $null -eq $Dependencies) {
         $Dependencies = @(Get-WingetDependencyFiles)
+    }
+    # Empty or whitespace hash: success for every action, including Uninstall
+    # and Reinstall. Do this before a registry read, download, install,
+    # uninstall, or marker change. Do not fail an empty hash for userinfo.
+    if (Test-WingetHashDisabled -Files $Files -Dependencies $Dependencies) {
+        return 0
+    }
+    if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
+        $MarkerRoot = Get-WingetDefaultMarkerRoot
     }
 
     $installed = ''
