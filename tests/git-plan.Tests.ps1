@@ -35,6 +35,19 @@ if ($scriptText -match 'git config' -or $scriptText -match '/o:') {
 $env:RELIAN_DEPLOY_TEST = '1'
 . $scriptPath
 
+$script:RealDownloadFile = $script:DownloadFile
+if ($script:RealDownloadFile -isnot [scriptblock]) {
+    Fail 'download hook is not a scriptblock'
+}
+$downloadText = $script:RealDownloadFile.ToString()
+foreach ($needle in @('param($Url, $Destination)', 'Invoke-WebRequest', '-OutFile', '-UseBasicParsing')) {
+    if (-not $downloadText.Contains($needle)) {
+        Fail "download hook is missing $needle"
+    }
+}
+$script:WebCalls = [System.Collections.Generic.List[object]]::new()
+$script:WebThrow = $null
+
 foreach ($command in @(
         'Get-GitPlan',
         'Invoke-GitAction',
@@ -298,6 +311,38 @@ $quoted = Get-GitUninstallExe -Text '"C:\Program Files\Git\unins000.exe" /SILENT
 if ($quoted -cne 'C:\Program Files\Git\unins000.exe') {
     Fail "uninstall program '$quoted'"
 }
+$emptyExe = Get-GitUninstallExe -Text ''
+if ($emptyExe -cne '') {
+    Fail "empty uninstall text returned '$emptyExe'"
+}
+$blankExe = Get-GitUninstallExe -Text '   '
+if ($blankExe -cne '') {
+    Fail "blank uninstall text returned '$blankExe'"
+}
+$missingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('git-missing-' + [guid]::NewGuid().ToString('n'))
+$missingExe = Join-Path $missingRoot 'unins000.exe'
+if (Test-Path -LiteralPath $missingExe) {
+    Fail 'missing uninstall path already exists'
+}
+$missingResult = Get-GitUninstallExe -Text ('"' + $missingExe + '" /SILENT')
+if ($missingResult -cne $missingExe) {
+    Fail "missing uninstall path '$missingResult'"
+}
+$existingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('git-existing-' + [guid]::NewGuid().ToString('n'))
+New-Item -ItemType Directory -Path $existingRoot -Force | Out-Null
+try {
+    $existingExe = Join-Path $existingRoot 'unins000.exe'
+    [System.IO.File]::WriteAllText($existingExe, 'x')
+    $existingResult = Get-GitUninstallExe -Text ('"' + $existingExe + '" /SILENT')
+    if ($existingResult -cne $existingExe) {
+        Fail "existing uninstall path '$existingResult'"
+    }
+    if (-not (Test-Path -LiteralPath $existingExe)) {
+        Fail 'existing uninstall path is not a file'
+    }
+} finally {
+    Remove-Item -LiteralPath $existingRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 $script:GoodBytes = $utf8.GetBytes('git-installer')
@@ -442,6 +487,50 @@ function Assert-Log {
     if ($text -cne $Expected) {
         Fail "$Label log '$text' expected '$Expected'"
     }
+}
+
+function Reset-WebHook {
+    $script:WebCalls = [System.Collections.Generic.List[object]]::new()
+    $script:WebThrow = $null
+    $script:DownloadFile = $script:RealDownloadFile
+}
+
+function Assert-RealCase {
+    param(
+        [int]$Code,
+        [int]$ExpectCode,
+        [int]$ExpectWeb,
+        [int]$ExpectSleeps,
+        [int]$ExpectSetup,
+        [string]$ExpectMarker = '',
+        [bool]$MarkerAbsent = $false,
+        [string]$Label
+    )
+    Assert-Case -Code $Code -ExpectCode $ExpectCode -ExpectDownloads 0 -ExpectSleeps $ExpectSleeps -ExpectSetup $ExpectSetup -ExpectMarker $ExpectMarker -MarkerAbsent $MarkerAbsent -Label $Label
+    if ($script:WebCalls.Count -ne $ExpectWeb) {
+        Fail "$Label requests $($script:WebCalls.Count) expected $ExpectWeb"
+    }
+}
+
+# Stands in for the network. The real download hook must call this; CI does not download the installer.
+function Invoke-WebRequest {
+    param(
+        [string]$Uri,
+        [string]$OutFile,
+        [switch]$UseBasicParsing
+    )
+    if ($null -eq $script:WebCalls) {
+        $script:WebCalls = [System.Collections.Generic.List[object]]::new()
+    }
+    $script:WebCalls.Add([pscustomobject]@{
+            Uri             = [string]$Uri
+            OutFile         = [string]$OutFile
+            UseBasicParsing = [bool]$UseBasicParsing
+        })
+    if ($null -ne $script:WebThrow) {
+        throw $script:WebThrow
+    }
+    [System.IO.File]::WriteAllBytes($OutFile, $script:GoodBytes)
 }
 
 try {
@@ -631,6 +720,115 @@ try {
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 '   '
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'whitespace hash'
     Assert-Log -Absent $true -Label 'whitespace hash'
+
+    Reset-WebHook
+    $directDest = Join-Path (Join-Path $script:Root 'direct') 'payload.exe'
+    & $script:RealDownloadFile -Url 'https://example.invalid/Git-2.56.0.2-64-bit.exe' -Destination $directDest
+    if ($script:WebCalls.Count -ne 1) {
+        Fail "real download hook made $($script:WebCalls.Count) requests"
+    }
+    if ($script:WebCalls[0].Uri -cne 'https://example.invalid/Git-2.56.0.2-64-bit.exe') {
+        Fail "real download hook URI '$($script:WebCalls[0].Uri)'"
+    }
+    if ($script:WebCalls[0].OutFile -cne $directDest) {
+        Fail "real download hook outfile '$($script:WebCalls[0].OutFile)'"
+    }
+    if (-not $script:WebCalls[0].UseBasicParsing) {
+        Fail 'real download hook omitted UseBasicParsing'
+    }
+    if (-not (Test-Path -LiteralPath $directDest)) {
+        Fail 'real download hook wrote no file'
+    }
+    $directBytes = [System.IO.File]::ReadAllBytes($directDest)
+    if ($directBytes.Length -ne $script:GoodBytes.Length) {
+        Fail "real download hook wrote $($directBytes.Length) bytes"
+    }
+    for ($i = 0; $i -lt $directBytes.Length; $i++) {
+        if ($directBytes[$i] -ne $script:GoodBytes[$i]) {
+            Fail 'real download hook wrote unexpected bytes'
+        }
+    }
+
+    Reset-WebHook
+    $script:WebThrow = [System.Net.WebException]::new('protocol', [System.Net.WebExceptionStatus]::ProtocolError)
+    $webDest = Join-Path (Join-Path $script:Root 'direct') 'web-exception.exe'
+    $sawWeb = $false
+    try {
+        & $script:RealDownloadFile -Url 'https://example.invalid/Git-2.56.0.2-64-bit.exe' -Destination $webDest
+    } catch [System.Net.WebException] {
+        $sawWeb = $true
+    } catch {
+        Fail "real download hook threw $($_.Exception.GetType().FullName)"
+    }
+    if (-not $sawWeb) {
+        Fail 'real download hook swallowed WebException'
+    }
+    if (Test-Path -LiteralPath $webDest) {
+        Fail 'WebException hook wrote a file'
+    }
+    if ($script:WebCalls.Count -ne 1 -or -not $script:WebCalls[0].UseBasicParsing) {
+        Fail "WebException hook made $($script:WebCalls.Count) requests"
+    }
+
+    Reset-GitCase
+    Reset-WebHook
+    $script:InstalledVersion = ''
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    Assert-RealCase -Code $code -ExpectCode 0 -ExpectWeb 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'install hook'
+    if ($script:WebCalls[0].Uri -cne 'https://example.invalid/Git-2.56.0.2-64-bit.exe' -or -not $script:WebCalls[0].UseBasicParsing) {
+        Fail "install hook request '$($script:WebCalls[0].Uri)'"
+    }
+    if ($script:SetupCalls[0].Mode -cne 'install' -or -not $script:SetupCalls[0].InstallerExisted) {
+        Fail 'install hook did not run the downloaded file'
+    }
+    Assert-Log -Expected "Install`n" -Label 'install hook'
+
+    Reset-GitCase
+    Reset-WebHook
+    $script:WebThrow = [System.Net.WebException]::new('protocol', [System.Net.WebExceptionStatus]::ProtocolError)
+    $script:InstalledVersion = ''
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    Assert-RealCase -Code $code -ExpectCode 1 -ExpectWeb 1 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'WebException hook'
+    Assert-Log -Absent $true -Label 'WebException hook'
+
+    foreach ($action in @('Install', 'Update', 'Repair')) {
+        Reset-GitCase
+        Reset-WebHook
+        $script:InstalledVersion = ''
+        Set-Marker '9.0.0.0'
+        $code = Invoke-Case -Action $action -PinVersion '2.0.0.0' -InstallerSha256 ''
+        Assert-RealCase -Code $code -ExpectCode 0 -ExpectWeb 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '9.0.0.0' -Label "$action empty hash hook"
+        Assert-Log -Absent $true -Label "$action empty hash hook"
+    }
+
+    Reset-GitCase
+    Reset-WebHook
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-RealCase -Code $code -ExpectCode 0 -ExpectWeb 0 -ExpectSleeps 0 -ExpectSetup 1 -MarkerAbsent $true -Label 'Uninstall empty hash hook'
+    if ($script:SetupCalls[0].Mode -cne 'uninstall' -or $script:SetupCalls[0].UninstallPath -cne $script:UninstallPath) {
+        Fail 'Uninstall empty hash hook did not pass the uninstall program'
+    }
+    Assert-Log -Expected "Uninstall`n" -Label 'Uninstall empty hash hook'
+
+    Reset-GitCase
+    Reset-WebHook
+    $script:InstalledVersion = ''
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerUrl (New-GitUserInfoUrl)
+    Assert-RealCase -Code $code -ExpectCode 1 -ExpectWeb 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'userinfo hook'
+    if (($script:GitErrorLog -join "`n") -notlike '*userinfo*') {
+        Fail 'userinfo hook error did not name userinfo'
+    }
+    Assert-Log -Absent $true -Label 'userinfo hook'
+
+    Reset-GitCase
+    Reset-WebHook
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Reinstall' -PinVersion '2.0.0.0'
+    Assert-RealCase -Code $code -ExpectCode 1 -ExpectWeb 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'Reinstall hook'
+    Assert-Log -Absent $true -Label 'Reinstall hook'
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {
