@@ -244,13 +244,22 @@ function Test-PuttyTransientTransport {
         'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
     )
     $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    # SocketException() keeps the last native error. Only these connection and DNS codes are retried.
+    $socketTransient = @(
+        [System.Net.Sockets.SocketError]::TimedOut,
+        [System.Net.Sockets.SocketError]::ConnectionReset,
+        [System.Net.Sockets.SocketError]::ConnectionRefused,
+        [System.Net.Sockets.SocketError]::HostNotFound
+    )
     $current = $Exception
     $guard = 0
     while ($null -ne $current -and $guard -lt 8) {
         $guard++
-        if ($current -is [System.TimeoutException] -or
-            $current -is [System.Threading.Tasks.TaskCanceledException] -or
-            $current -is [System.Net.Sockets.SocketException]) {
+        # A bare TaskCanceledException is cancellation. A timeout is a TimeoutException, including one nested inside it.
+        if ($current -is [System.TimeoutException]) {
+            return $true
+        }
+        if ($current -is [System.Net.Sockets.SocketException] -and $socketTransient -contains $current.SocketErrorCode) {
             return $true
         }
         if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {

@@ -166,23 +166,115 @@ try {
     if (-not (Test-PuttyDownloadIsTransient -ErrorRecord ([System.TimeoutException]::new('timed out')))) {
         Fail 'timeout was not retried'
     }
-    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out')))) {
-        Fail 'task cancel was not retried'
+    $timeoutCancel = [System.Threading.Tasks.TaskCanceledException]::new(
+        'canceled',
+        [System.TimeoutException]::new('timed out')
+    )
+    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $timeoutCancel)) {
+        Fail 'a timeout cancellation was not retried'
     }
-    $socket = [System.Net.Sockets.SocketException]::new()
-    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $socket)) {
-        Fail 'socket failure was not retried'
+    $wrappedTimeoutCancel = [System.Exception]::new('wrapped', $timeoutCancel)
+    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $wrappedTimeoutCancel)) {
+        Fail 'a wrapped timeout cancellation was not retried'
     }
-    $wrapped = [System.Exception]::new('wrapped', $socket)
+    if (Test-PuttyDownloadIsTransient -ErrorRecord ([System.Threading.Tasks.TaskCanceledException]::new('timed out'))) {
+        Fail 'ordinary cancellation was retried'
+    }
+    $wrappedCancel = [System.Exception]::new(
+        'wrapped',
+        [System.Threading.Tasks.TaskCanceledException]::new('timed out')
+    )
+    if (Test-PuttyDownloadIsTransient -ErrorRecord $wrappedCancel) {
+        Fail 'wrapped ordinary cancellation was retried'
+    }
+    $cts = [System.Threading.CancellationTokenSource]::new()
+    try {
+        $cts.Cancel()
+        $explicit = [System.Threading.Tasks.TaskCanceledException]::new('canceled', $null, $cts.Token)
+        if (Test-PuttyDownloadIsTransient -ErrorRecord $explicit) {
+            Fail 'caller cancellation was retried'
+        }
+    } finally {
+        $cts.Dispose()
+    }
+    foreach ($socketError in @(
+            [System.Net.Sockets.SocketError]::TimedOut,
+            [System.Net.Sockets.SocketError]::ConnectionReset,
+            [System.Net.Sockets.SocketError]::ConnectionRefused,
+            [System.Net.Sockets.SocketError]::HostNotFound
+        )) {
+        $retryableSocket = [System.Net.Sockets.SocketException]::new([int]$socketError)
+        if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $retryableSocket)) {
+            Fail "socket $socketError was not retried"
+        }
+    }
+    $parameterless = [System.Net.Sockets.SocketException]::new()
+    if (Test-PuttyDownloadIsTransient -ErrorRecord $parameterless) {
+        Fail 'a parameterless socket failure was retried'
+    }
+    $wrappedParameterless = [System.Exception]::new('wrapped', $parameterless)
+    if (Test-PuttyDownloadIsTransient -ErrorRecord $wrappedParameterless) {
+        Fail 'a wrapped parameterless socket failure was retried'
+    }
+    $inUse = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::AddressAlreadyInUse)
+    if (Test-PuttyDownloadIsTransient -ErrorRecord $inUse) {
+        Fail 'AddressAlreadyInUse was retried'
+    }
+    $connection = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionRefused)
+    $wrapped = [System.Exception]::new('wrapped', $connection)
     if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $wrapped)) {
-        Fail 'wrapped socket failure was not retried'
+        Fail 'wrapped connection failure was not retried'
     }
     $dns = [System.Net.WebException]::new('dns', [System.Net.WebExceptionStatus]::NameResolutionFailure)
     if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $dns)) {
         Fail 'DNS failure was not retried'
     }
+    $connect = [System.Net.WebException]::new('connect', [System.Net.WebExceptionStatus]::ConnectFailure)
+    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $connect)) {
+        Fail 'connect failure was not retried'
+    }
+    $webTimeout = [System.Net.WebException]::new('timeout', [System.Net.WebExceptionStatus]::Timeout)
+    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $webTimeout)) {
+        Fail 'web timeout was not retried'
+    }
+    $protocol = [System.Net.WebException]::new('protocol', [System.Net.WebExceptionStatus]::ProtocolError)
+    if (Test-PuttyDownloadIsTransient -ErrorRecord $protocol) {
+        Fail 'web protocol error was retried'
+    }
     if (Test-PuttyDownloadIsTransient -ErrorRecord ([System.Exception]::new('nope'))) {
         Fail 'a generic failure was retried'
+    }
+    foreach ($requestError in @(
+            [System.Net.Http.HttpRequestError]::NameResolutionError,
+            [System.Net.Http.HttpRequestError]::ConnectionError,
+            [System.Net.Http.HttpRequestError]::ResponseEnded
+        )) {
+        $request = [System.Net.Http.HttpRequestException]::new($requestError, 'transient', $null, $null)
+        if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $request)) {
+            Fail "$requestError was not retried"
+        }
+    }
+    $certificateText = [System.Net.Http.HttpRequestException]::new(
+        [System.Net.Http.HttpRequestError]::ConnectionError,
+        'The remote certificate is invalid according to the validation procedure.',
+        $null,
+        $null
+    )
+    if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $certificateText)) {
+        Fail 'ConnectionError was skipped because the message mentioned a certificate'
+    }
+    foreach ($requestError in @(
+            [System.Net.Http.HttpRequestError]::InvalidResponse,
+            [System.Net.Http.HttpRequestError]::HttpProtocolError
+        )) {
+        $request = [System.Net.Http.HttpRequestException]::new($requestError, 'not transient', $null, $null)
+        if (Test-PuttyDownloadIsTransient -ErrorRecord $request) {
+            Fail "$requestError was retried"
+        }
+    }
+    $genericRequest = [System.Net.Http.HttpRequestException]::new('connection failed')
+    if (Test-PuttyDownloadIsTransient -ErrorRecord $genericRequest) {
+        Fail 'a generic HttpRequestException was retried'
     }
     $secure = New-SecureConnectionFailure
     if (-not (Test-PuttyDownloadIsTransient -ErrorRecord $secure)) {
@@ -230,13 +322,65 @@ try {
         $script:DownloadCount++
         $script:Attempt++
         if ($script:Attempt -eq 1) {
-            throw [System.Net.Sockets.SocketException]::new()
+            throw [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionRefused)
         }
         [System.IO.File]::WriteAllBytes($Destination, $good)
     }
     $code = Save-PuttyPayload -Url 'https://example.invalid/putty.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
     if ($code -ne 0 -or $script:DownloadCount -ne 2 -or $script:Sleeps.Count -ne 1 -or $script:Sleeps[0] -ne 5) {
         Fail "socket then success returned $code after $($script:DownloadCount) downloads sleeps $($script:Sleeps -join ',')"
+    }
+
+    Reset-Hooks
+    $script:Attempt = 0
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        $script:Attempt++
+        if ($script:Attempt -eq 1) {
+            throw [System.Threading.Tasks.TaskCanceledException]::new(
+                'canceled',
+                [System.TimeoutException]::new('timed out')
+            )
+        }
+        [System.IO.File]::WriteAllBytes($Destination, $good)
+    }
+    $code = Save-PuttyPayload -Url 'https://example.invalid/putty.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 0 -or $script:DownloadCount -ne 2 -or $script:Sleeps.Count -ne 1 -or $script:Sleeps[0] -ne 5) {
+        Fail "timeout cancellation then success returned $code after $($script:DownloadCount) downloads sleeps $($script:Sleeps -join ',')"
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        throw [System.Threading.Tasks.TaskCanceledException]::new('timed out')
+    }
+    $code = Save-PuttyPayload -Url 'https://example.invalid/putty.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0) {
+        Fail "ordinary cancellation returned $code after $($script:DownloadCount) downloads and $($script:Sleeps.Count) sleeps"
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        throw [System.Net.Sockets.SocketException]::new()
+    }
+    $code = Save-PuttyPayload -Url 'https://example.invalid/putty.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0) {
+        Fail "parameterless socket returned $code after $($script:DownloadCount) downloads and $($script:Sleeps.Count) sleeps"
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        throw [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::AddressAlreadyInUse)
+    }
+    $code = Save-PuttyPayload -Url 'https://example.invalid/putty.msi' -Destination $dest -Sha256 $goodSha -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0) {
+        Fail "AddressAlreadyInUse returned $code after $($script:DownloadCount) downloads and $($script:Sleeps.Count) sleeps"
     }
 
     Reset-Hooks
