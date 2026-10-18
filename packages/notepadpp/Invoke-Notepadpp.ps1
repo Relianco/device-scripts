@@ -79,7 +79,7 @@ function Get-NotepadppPlan {
     $installed = Convert-NotepadppVersionText -Text $InstalledVersion
     $marker = Convert-NotepadppVersionText -Text $MarkerVersion
 
-    # Uninstall does not compare versions and does not need the installer hash.
+    # Uninstall does not compare versions. An empty hash never reaches this plan.
     if ($Action -eq 'Uninstall') {
         $present = -not [string]::IsNullOrWhiteSpace($InstalledVersion)
         $hasMarker = -not [string]::IsNullOrWhiteSpace($MarkerVersion)
@@ -282,7 +282,15 @@ function Test-NotepadppPlaceholderHash {
     if ([string]::IsNullOrWhiteSpace($Sha256)) {
         return $false
     }
-    $candidate = $Sha256.Trim().ToLowerInvariant()
+    $candidate = $Sha256.Trim()
+    # Case-sensitive: a pin is 64 lowercase hex characters. Reject uppercase
+    # before any ToLowerInvariant. Do not fold case and then validate.
+    foreach ($char in $candidate.ToCharArray()) {
+        $code = [int]$char
+        if ($code -ge 65 -and $code -le 90) {
+            return $true
+        }
+    }
     if ($candidate.Length -ne 64) {
         return $true
     }
@@ -311,14 +319,15 @@ function Save-NotepadppPayload {
         [string]$CancelPath
     )
 
-    # Userinfo is rejected even when the hash is empty. Empty hash downloads nothing.
+    # An empty hash exits 0 and does not look at the URL.
+    # A non-empty hash with userinfo still exits 1 before any download.
     # A placeholder, including 64 identical characters, is rejected before any download.
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return 0
+    }
     if (Test-NotepadppUrlHasUserInfo -Url $Url) {
         Add-NotepadppError -Message "refusing a URL that contains userinfo for $Label"
         return 1
-    }
-    if ([string]::IsNullOrWhiteSpace($Sha256)) {
-        return 0
     }
     if (Test-NotepadppPlaceholderHash -Sha256 $Sha256) {
         Add-NotepadppError -Message "refusing a placeholder hash for $Label"
@@ -642,6 +651,12 @@ function Invoke-NotepadppAction {
         [string]$MarkerRoot
     )
 
+    # Empty or whitespace hash: success for every action, including Uninstall
+    # and Reinstall. Do this before planning or a registry read that can fail.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return 0
+    }
+
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-NotepadppDefaultMarkerRoot
     }
@@ -666,10 +681,6 @@ function Invoke-NotepadppAction {
     $cache = ''
     try {
         if ($plan.RunInstaller -eq 'install') {
-            if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
-                Add-NotepadppError -Message 'missing hash for installer'
-                return 1
-            }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-notepadpp-' + [guid]::NewGuid().ToString('n'))
             New-Item -ItemType Directory -Path $cache -Force | Out-Null
             $installerPath = Join-Path $cache 'npp.8.9.8.1.Installer.x64.exe'

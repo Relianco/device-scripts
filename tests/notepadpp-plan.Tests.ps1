@@ -74,6 +74,9 @@ $script:PinnedSha = [string]$release.sha256
 if (Test-NotepadppPlaceholderHash -Sha256 $script:PinnedSha) {
     Fail 'pinned sha256 was treated as a placeholder'
 }
+if (-not (Test-NotepadppPlaceholderHash -Sha256 $script:PinnedSha.ToUpperInvariant())) {
+    Fail 'uppercase pin was accepted'
+}
 if (-not (Test-NotepadppPlaceholderHash -Sha256 ('a' * 64))) {
     Fail '64 identical characters were accepted'
 }
@@ -521,7 +524,7 @@ try {
     Reset-NotepadppCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-NotepadppUserInfoUrl)
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerUrl (New-NotepadppUserInfoUrl)
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 1 -MarkerAbsent $true -Label 'uninstall'
     if ($script:SetupCalls[0].Mode -cne 'uninstall' -or $script:SetupCalls[0].UninstallPath -cne $script:UninstallPath) {
         Fail 'uninstall did not pass the uninstall program'
@@ -529,17 +532,40 @@ try {
     Assert-Log -Expected "Uninstall`n" -Label 'uninstall'
 
     Reset-NotepadppCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-NotepadppUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall empty hash'
+    Assert-Log -Absent $true -Label 'uninstall empty hash'
+
+    Reset-NotepadppCase
+    $script:InstalledVersion = '2.0.0.0'
+    Set-Marker '2.0.0.0'
+    $script:GetInstalledNotepadppVersion = { throw 'registry failed' }
+    $script:GetNotepadppUninstallPath = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall whitespace hash'
+    Assert-Log -Absent $true -Label 'uninstall whitespace hash'
+
+    Reset-NotepadppCase
+    $script:InstalledVersion = ''
+    Set-Marker '2.0.0.0'
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'uninstall marker only'
+    Assert-Log -Expected "Uninstall`n" -Label 'uninstall marker only'
+
+    Reset-NotepadppCase
     $script:InstalledVersion = ''
     Set-Marker '2.0.0.0'
     $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'uninstall marker only'
-    Assert-Log -Expected "Uninstall`n" -Label 'uninstall marker only'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall marker empty hash'
+    Assert-Log -Absent $true -Label 'uninstall marker empty hash'
 
     Reset-NotepadppCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
     $script:UninstallPath = ''
-    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    $code = Invoke-Case -Action 'Uninstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'uninstall missing program'
     Assert-Log -Absent $true -Label 'uninstall missing program'
 
@@ -588,6 +614,13 @@ try {
     $code = Invoke-Case -Action 'Reinstall' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'Reinstall'
     Assert-Log -Absent $true -Label 'Reinstall'
+
+    Reset-NotepadppCase
+    Set-Marker '2.0.0.0'
+    $script:InstalledVersion = '2.0.0.0'
+    $code = Invoke-Case -Action 'Reinstall' -PinVersion '2.0.0.0' -InstallerSha256 ''
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '2.0.0.0' -Label 'Reinstall empty hash'
+    Assert-Log -Absent $true -Label 'Reinstall empty hash'
 
     Reset-NotepadppCase
     $script:InstalledVersion = ''
@@ -669,10 +702,24 @@ try {
     Assert-Log -Absent $true -Label 'setup exit 5'
 
     Reset-NotepadppCase
+    Set-Marker '9.0.0.0'
     $script:InstalledVersion = ''
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ''
-    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'missing hash'
-    Assert-Log -Absent $true -Label 'missing hash'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 '' -InstallerUrl (New-NotepadppUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '9.0.0.0' -Label 'empty hash install'
+    Assert-Log -Absent $true -Label 'empty hash install'
+
+    Reset-NotepadppCase
+    Set-Marker '9.0.0.0'
+    $script:GetInstalledNotepadppVersion = { throw 'registry failed' }
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 '   '
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -ExpectMarker '9.0.0.0' -Label 'whitespace hash install'
+    Assert-Log -Absent $true -Label 'whitespace hash install'
+
+    Reset-NotepadppCase
+    $script:InstalledVersion = ''
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha.ToUpperInvariant()
+    Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'uppercase hash'
+    Assert-Log -Absent $true -Label 'uppercase hash'
 
     $placeholders = @(
         @{ Label = '64 a'; Hash = ('a' * 64) }

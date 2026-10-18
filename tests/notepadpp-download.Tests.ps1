@@ -42,6 +42,9 @@ if ($InstallerSha256 -cne $pinnedSha) {
 if (Test-NotepadppPlaceholderHash -Sha256 $pinnedSha) {
     Fail 'pinned sha256 was treated as a placeholder'
 }
+if (-not (Test-NotepadppPlaceholderHash -Sha256 $pinnedSha.ToUpperInvariant())) {
+    Fail 'uppercase pin was accepted'
+}
 
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 function Get-Sha {
@@ -141,8 +144,11 @@ try {
 
     Reset-Hooks
     $code = Save-NotepadppPayload -Url (New-NotepadppUserInfoUrl) -Destination $dest -Sha256 '' -Label 'installer'
-    if ($code -ne 1 -or $script:DownloadCount -ne 0) {
+    if ($code -ne 0 -or $script:DownloadCount -ne 0) {
         Fail "userinfo with an empty hash returned $code after $($script:DownloadCount) downloads"
+    }
+    if (($script:NotepadppErrorLog -join "`n").Length -gt 0) {
+        Fail 'empty hash inspected the URL'
     }
 
     Reset-Hooks
@@ -152,9 +158,26 @@ try {
     }
 
     Reset-Hooks
-    $code = Save-NotepadppPayload -Url 'https://example.invalid/npp.exe' -Destination $dest -Sha256 '   ' -Label 'installer'
+    $code = Save-NotepadppPayload -Url (New-NotepadppUserInfoUrl) -Destination $dest -Sha256 '   ' -Label 'installer'
     if ($code -ne 0 -or $script:DownloadCount -ne 0) {
         Fail "whitespace hash returned $code after $($script:DownloadCount) downloads"
+    }
+    if (($script:NotepadppErrorLog -join "`n").Length -gt 0) {
+        Fail 'whitespace hash inspected the URL'
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        [System.IO.File]::WriteAllBytes($Destination, $good)
+    }
+    $code = Save-NotepadppPayload -Url 'https://example.invalid/npp.exe' -Destination $dest -Sha256 $goodSha.ToUpperInvariant() -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:Sleeps.Count -ne 0 -or (Test-Path -LiteralPath $dest)) {
+        Fail "uppercase hash returned $code after $($script:DownloadCount) downloads"
+    }
+    if (-not (Test-NotepadppPlaceholderHash -Sha256 $goodSha.ToUpperInvariant())) {
+        Fail 'uppercase hash was accepted'
     }
 
     $placeholders = @(
