@@ -7,21 +7,31 @@ $releasePath = Join-Path $repoRoot 'releases/user-check.json'
 $fixtureCode = 'k7m2'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        [Console]::Error.WriteLine('FAIL missing failure message')
+        exit 1
+    }
     $safe = [regex]::Replace($Message, '(?i)(/home|/Users|[A-Za-z]:\\Users)\\[^\s\]]+', 'USER')
     [Console]::Error.WriteLine("FAIL $safe")
     exit 1
 }
 
 function Assert-Same {
-    param($Actual, $Expected, [Parameter(Mandatory)][string]$Label)
+    param($Actual, $Expected, [string]$Label)
+    if ([string]::IsNullOrWhiteSpace($Label)) {
+        Fail 'Assert-Same missing label'
+    }
     if ($Actual -ne $Expected) {
         Fail "$Label was [$Actual] expected [$Expected]"
     }
 }
 
 function Assert-True {
-    param($Value, [Parameter(Mandatory)][string]$Label)
+    param($Value, [string]$Label)
+    if ([string]::IsNullOrWhiteSpace($Label)) {
+        Fail 'Assert-True missing label'
+    }
     if (-not $Value) {
         Fail $Label
     }
@@ -34,7 +44,10 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
 $source = [System.IO.File]::ReadAllText($scriptPath)
 
 function Assert-SourceHas {
-    param([Parameter(Mandatory)][string]$Needle)
+    param([string]$Needle)
+    if ([string]::IsNullOrWhiteSpace($Needle)) {
+        Fail 'Assert-SourceHas missing needle'
+    }
     if ($source.IndexOf($Needle, [System.StringComparison]::Ordinal) -lt 0) {
         Fail "source missing $Needle"
     }
@@ -85,6 +98,13 @@ $startAt = $source.IndexOf('Start-Process -FilePath (Get-UserCheckSignInUrl)', [
 $pageOpenAt = $source.IndexOf('Microsoft sign-in page opened.', [System.StringComparison]::Ordinal)
 if ($pageGuardAt -lt 0 -or $startAt -lt 0 -or $pageOpenAt -lt 0 -or $pageGuardAt -gt $startAt -or $startAt -gt $pageOpenAt) {
     Fail 'the sign-in page can open before Open is chosen'
+}
+$pageParse = '$parsed = Get-UserCheckPromptResult -Result $prompt'
+$pageParseAt = $source.IndexOf($pageParse, [System.StringComparison]::Ordinal)
+$openGuard = "if (`$parsed.TimedOut -or `$parsed.Button -ne 'Open')"
+$openGuardAt = $source.IndexOf($openGuard, [System.StringComparison]::Ordinal)
+if ($pageParseAt -lt 0 -or $openGuardAt -lt 0 -or $pageParseAt -gt $openGuardAt -or $openGuardAt -gt $startAt) {
+    Fail 'Cancel, Confirm, or a timeout can open the sign-in page'
 }
 
 $timeoutAt = $source.IndexOf('Code check timed out.', [System.StringComparison]::Ordinal)
@@ -211,14 +231,23 @@ function Invoke-Package {
 
 function Assert-Run {
     param(
-        [Parameter(Mandatory)][string[]]$ArgumentList,
-        [Parameter(Mandatory)][int]$ExitCode,
+        [string[]]$ArgumentList,
+        [int]$ExitCode,
         [string]$StdOutHas,
         [string]$StdErrHas,
         [string[]]$StdOutLacks,
         [string[]]$StdErrLacks,
-        [Parameter(Mandatory)][string]$Label
+        [string]$Label
     )
+    if ($null -eq $ArgumentList) {
+        Fail 'Assert-Run missing argument list'
+    }
+    if (-not $PSBoundParameters.ContainsKey('ExitCode')) {
+        Fail 'Assert-Run missing exit code'
+    }
+    if ([string]::IsNullOrWhiteSpace($Label)) {
+        Fail 'Assert-Run missing label'
+    }
     $run = Invoke-Package -ArgumentList $ArgumentList
     if ($run.ExitCode -ne $ExitCode) {
         Fail "$Label exited $($run.ExitCode)"
