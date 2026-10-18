@@ -640,6 +640,7 @@ try {
     }
 }
 
+Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST' -ErrorAction SilentlyContinue
 $emptyOutput = & pwsh -NoProfile -File $scriptPath -DeploymentType 'Install' -Action 'Install' -PinVersion ''
 if ($LASTEXITCODE -ne 0) {
     Fail "empty PinVersion process exited $LASTEXITCODE"
