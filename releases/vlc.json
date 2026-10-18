@@ -1,0 +1,9 @@
+{
+  "name": "VLC media player",
+  "arch": "x64",
+  "sourceUrl": "https://get.videolan.org/vlc/3.0.24/win64/vlc-3.0.24-win64.exe",
+  "file": "vlc-3.0.24-win64.exe",
+  "sha256": "d711e1e1fe52052748c39080c7dce63f6b7e4c315efedf1774a3f1957b782ff3",
+  "size": 46269360,
+  "version": "3.0.24"
+}

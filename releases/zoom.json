@@ -1,0 +1,9 @@
+{
+  "name": "Zoom Workplace (64-bit)",
+  "arch": "x64",
+  "sourceUrl": "https://cdn.zoom.us/prod/7.2.1.48556/x64/ZoomInstallerFull.msi",
+  "file": "ZoomInstallerFull.msi",
+  "sha256": "b0dac9fa5237d2e18144ca723644460e7cc26675e5d3db0f89fdfe47ad8c429b",
+  "size": 220297216,
+  "version": "7.2.48556"
+}
