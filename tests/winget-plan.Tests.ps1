@@ -112,6 +112,78 @@ if ($builtinVersion -isnot [string]) {
     Fail 'version hook did not return a string'
 }
 
+$savedWingetDownload = $script:DownloadFile
+$savedWingetDelay = $script:RetryDelay
+$savedWingetVersion = $script:GetInstalledWingetVersion
+$savedWingetExpand = $script:ExpandDependencies
+$savedWingetAppx = $script:InvokeAppx
+$script:HookCalls = [System.Collections.Generic.List[string]]::new()
+$smokeUtf8 = [System.Text.UTF8Encoding]::new($false)
+$script:SmokeBytes = $smokeUtf8.GetBytes('winget-smoke')
+$smokeHasher = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $smokeSha = ([System.BitConverter]::ToString($smokeHasher.ComputeHash($script:SmokeBytes))).Replace('-', '').ToLowerInvariant()
+} finally {
+    $smokeHasher.Dispose()
+}
+$smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('winget-smoke-' + [guid]::NewGuid().ToString('n'))
+New-Item -ItemType Directory -Path $smokeRoot -Force | Out-Null
+$script:GetInstalledWingetVersion = {
+    $script:HookCalls.Add('version')
+    return ''
+}
+$script:RetryDelay = {
+    param($Seconds)
+    $script:HookCalls.Add('sleep')
+}
+$script:DownloadFile = {
+    param($Url, $Destination)
+    $script:HookCalls.Add('download')
+    [System.IO.File]::WriteAllBytes($Destination, $script:SmokeBytes)
+}
+$script:ExpandDependencies = {
+    param($ZipPath, $Destination, $Pins)
+    $script:HookCalls.Add('expand')
+    foreach ($pin in @($Pins)) {
+        [System.IO.File]::WriteAllBytes((Join-Path $Destination ([string]$pin.File)), $script:SmokeBytes)
+    }
+}
+$script:InvokeAppx = {
+    param($Mode, $PackagePath, $LicensePath, $DependencyPaths)
+    $script:HookCalls.Add(('appx:' + [string]$Mode))
+    return 0
+}
+$smokeFiles = @(
+    [pscustomobject]@{ Role = 'package'; File = 'app.msixbundle'; Url = 'https://example.invalid/winget.msixbundle'; Sha256 = $smokeSha; Size = [int64]1; Version = '1.0.0.0' }
+    [pscustomobject]@{ Role = 'license'; File = 'license.xml'; Url = 'https://example.invalid/license.xml'; Sha256 = $smokeSha; Size = [int64]1; Version = '1.0.0.0' }
+    [pscustomobject]@{ Role = 'dependencies'; File = 'deps.zip'; Url = 'https://example.invalid/deps.zip'; Sha256 = $smokeSha; Size = [int64]1; Version = '1.0.0.0' }
+)
+$smokeDeps = @(
+    [pscustomobject]@{ Role = 'dependency'; File = 'a.appx'; Path = 'x64/a.appx'; Url = 'https://example.invalid/deps.zip'; Sha256 = $smokeSha; Size = [int64]1; Version = '1.0.0.0' }
+    [pscustomobject]@{ Role = 'dependency'; File = 'b.appx'; Path = 'x64/b.appx'; Url = 'https://example.invalid/deps.zip'; Sha256 = $smokeSha; Size = [int64]1; Version = '1.0.0.0' }
+    [pscustomobject]@{ Role = 'dependency'; File = 'c.appx'; Path = 'x64/c.appx'; Url = 'https://example.invalid/deps.zip'; Sha256 = $smokeSha; Size = [int64]1; Version = '1.0.0.0' }
+)
+try {
+    $smokeCode = [int](Invoke-WingetAction -DeploymentType 'Install' -Action 'Install' -PinVersion '2.0.0.0' -CancelPath '' -MarkerRoot $smokeRoot -Files $smokeFiles -Dependencies $smokeDeps)
+    if ($smokeCode -ne 0) {
+        Fail "smoke exit $smokeCode expected 0"
+    }
+    $smokeSequence = @($script:HookCalls) -join ','
+    if ($smokeSequence -cne 'version,download,download,download,expand,appx:install,version') {
+        Fail "smoke calls '$smokeSequence' expected 'version,download,download,download,expand,appx:install,version'"
+    }
+} finally {
+    $script:DownloadFile = $savedWingetDownload
+    $script:RetryDelay = $savedWingetDelay
+    $script:GetInstalledWingetVersion = $savedWingetVersion
+    $script:ExpandDependencies = $savedWingetExpand
+    $script:InvokeAppx = $savedWingetAppx
+    $script:HookCalls = [System.Collections.Generic.List[string]]::new()
+    if (Test-Path -LiteralPath $smokeRoot) {
+        Remove-Item -LiteralPath $smokeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Assert-Plan {
     param(
         $Plan,
