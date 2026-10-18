@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/winget/Invoke-Winget.ps1'
 $releasePath = Join-Path $repoRoot 'releases/winget.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'unspecified failure'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
