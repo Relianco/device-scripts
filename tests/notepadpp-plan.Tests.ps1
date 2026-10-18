@@ -6,7 +6,10 @@ $scriptPath = Join-Path $repoRoot 'packages/notepadpp/Invoke-Notepadpp.ps1'
 $releasePath = Join-Path $repoRoot 'releases/notepadpp.json'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -36,7 +39,10 @@ foreach ($command in @(
         'Get-NotepadppInstallArgumentList',
         'Get-NotepadppUninstallArgumentList',
         'Get-NotepadppUninstallExe',
-        'Test-NotepadppDownloadIsTransient'
+        'Test-NotepadppDownloadIsTransient',
+        'Test-NotepadppPlaceholderHash',
+        'Get-NotepadppHelpText',
+        'Invoke-NotepadppEntry'
     )) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         Fail "$command was not defined"
@@ -63,6 +69,13 @@ if ([string]$release.arch -cne 'x64' -or [string]$release.file -cne 'npp.8.9.8.1
 }
 if ($InstallerUrl -cne [string]$release.sourceUrl -or $InstallerSha256 -cne [string]$release.sha256) {
     Fail 'script defaults do not match releases/notepadpp.json'
+}
+$script:PinnedSha = [string]$release.sha256
+if (Test-NotepadppPlaceholderHash -Sha256 $script:PinnedSha) {
+    Fail 'pinned sha256 was treated as a placeholder'
+}
+if (-not (Test-NotepadppPlaceholderHash -Sha256 ('a' * 64))) {
+    Fail '64 identical characters were accepted'
 }
 if ($scriptText -notlike "*$pinnedUrl*" -or $scriptText -notlike "*$pinnedSha*") {
     Fail 'installer URL or sha256 is not inlined'
@@ -285,6 +298,9 @@ try {
 } finally {
     $sha.Dispose()
 }
+if (Test-NotepadppPlaceholderHash -Sha256 $script:GoodSha) {
+    Fail 'fixture sha256 was treated as a placeholder'
+}
 
 function New-NotepadppUserInfoUrl {
     return -join @('https://', 'user', '@', 'example.invalid/npp.exe')
@@ -350,7 +366,7 @@ function Invoke-Case {
         [string]$Action,
         [string]$PinVersion,
         [string]$InstallerUrl = 'https://example.invalid/npp.exe',
-        [string]$InstallerSha256 = $script:GoodSha,
+        [string]$InstallerSha256 = $script:PinnedSha,
         [string]$CancelPath = ''
     )
     return [int](Invoke-NotepadppAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot)
@@ -423,6 +439,49 @@ function Assert-Log {
     }
 }
 
+function Invoke-NotepadppFile {
+    param([string[]]$ArgumentList)
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = 'pwsh'
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = $repoRoot
+    $psi.ArgumentList.Add('-NoProfile')
+    $psi.ArgumentList.Add('-NonInteractive')
+    $psi.ArgumentList.Add('-File')
+    $psi.ArgumentList.Add($scriptPath)
+    foreach ($arg in @($ArgumentList)) {
+        $psi.ArgumentList.Add([string]$arg)
+    }
+    if ($psi.Environment.ContainsKey('RELIAN_DEPLOY_TEST')) {
+        [void]$psi.Environment.Remove('RELIAN_DEPLOY_TEST')
+    }
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    try {
+        [void]$proc.Start()
+        $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+        $stderrTask = $proc.StandardError.ReadToEndAsync()
+        if (-not $proc.WaitForExit(20000)) {
+            try {
+                $proc.Kill($true)
+            } catch {
+                try { $proc.Kill() } catch { }
+            }
+            Fail 'help process timed out'
+        }
+        return [pscustomobject]@{
+            ExitCode = $proc.ExitCode
+            Stdout   = $stdoutTask.Result
+            Stderr   = $stderrTask.Result
+        }
+    } finally {
+        $proc.Dispose()
+    }
+}
+
 try {
     Reset-NotepadppCase
     Set-Marker '9.0.0.0'
@@ -446,7 +505,7 @@ try {
         $script:DownloadCount++
         [System.IO.File]::WriteAllBytes($Destination, $utf8.GetBytes('other-bytes'))
     }
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:PinnedSha
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'hash mismatch'
     Assert-Log -Absent $true -Label 'hash mismatch'
 
@@ -486,7 +545,7 @@ try {
 
     Reset-NotepadppCase
     $script:InstalledVersion = ''
-    $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'Repair missing'
     if ($script:SetupCalls[0].Mode -cne 'install' -or -not $script:SetupCalls[0].InstallerExisted) {
         Fail 'Repair missing did not run the installer file'
@@ -496,7 +555,7 @@ try {
     Reset-NotepadppCase
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
-    $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'Repair present'
     if ($script:SetupCalls[0].Mode -cne 'install') {
         Fail 'Repair present did not run the installer again'
@@ -513,7 +572,7 @@ try {
     Reset-NotepadppCase
     $script:InstalledVersion = '1.0.0.0'
     Set-Marker '1.0.0.0'
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'older install'
     Assert-Log -Expected "Install`n" -Label 'older install'
 
@@ -546,7 +605,7 @@ try {
 
     Reset-NotepadppCase
     $script:InstalledVersion = ''
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -CancelPath (Join-Path $script:Root 'missing-cancel')
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha -CancelPath (Join-Path $script:Root 'missing-cancel')
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'missing cancel path'
     Assert-Log -Expected "Install`n" -Label 'missing cancel path'
 
@@ -558,7 +617,7 @@ try {
         [System.IO.File]::WriteAllBytes($Destination, $script:GoodBytes)
         $env:RELIAN_DEPLOY_CANCEL = '1'
     }
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 130 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'cancel before setup'
     Assert-Log -Absent $true -Label 'cancel before setup'
 
@@ -574,7 +633,7 @@ try {
         $env:RELIAN_DEPLOY_CANCEL = '1'
         return 0
     }
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'cancel during setup'
     Assert-Log -Expected "Install`n" -Label 'cancel during setup'
 
@@ -589,7 +648,7 @@ try {
             })
         return 1
     }
-    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -MarkerAbsent $true -Label 'setup failure'
     Assert-Log -Absent $true -Label 'setup failure'
 
@@ -605,7 +664,7 @@ try {
             })
         return 5
     }
-    $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0'
+    $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0' -InstallerSha256 $script:GoodSha
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectSetup 1 -ExpectMarker '2.0.0.0' -Label 'setup exit 5'
     Assert-Log -Absent $true -Label 'setup exit 5'
 
@@ -614,6 +673,72 @@ try {
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 ''
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label 'missing hash'
     Assert-Log -Absent $true -Label 'missing hash'
+
+    $placeholders = @(
+        @{ Label = '64 a'; Hash = ('a' * 64) }
+        @{ Label = '64 A'; Hash = ('A' * 64) }
+        @{ Label = '64 zero'; Hash = ('0' * 64) }
+        @{ Label = '64 f'; Hash = ('f' * 64) }
+        @{ Label = '64 F'; Hash = ('F' * 64) }
+        @{ Label = '64 g'; Hash = ('g' * 64) }
+        @{ Label = 'word'; Hash = 'placeholder' }
+        @{ Label = 'short hex'; Hash = ('ab' * 31) }
+    )
+    foreach ($row in $placeholders) {
+        Reset-NotepadppCase
+        $script:InstalledVersion = ''
+        $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerSha256 $row.Hash
+        Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectSetup 0 -MarkerAbsent $true -Label "placeholder $($row.Label)"
+        if (($script:NotepadppErrorLog -join "`n") -notlike '*placeholder*') {
+            Fail "placeholder $($row.Label) error did not name placeholder"
+        }
+        Assert-Log -Absent $true -Label "placeholder $($row.Label)"
+    }
+
+    Reset-NotepadppCase
+    Set-Marker '9.0.0.0'
+    $script:InstalledVersion = ''
+    $helpBound = @{
+        DeploymentType   = 'Install'
+        Action           = 'Install'
+        PinVersion       = '8.9.8.1'
+        InstallerUrl     = 'https://example.invalid/npp.exe'
+        InstallerSha256  = $script:PinnedSha
+    }
+    $helpEntry = Invoke-NotepadppEntry -Help -DeploymentType 'Install' -Action 'Install' -PinVersion '8.9.8.1' -InstallerUrl 'https://example.invalid/npp.exe' -InstallerSha256 $script:PinnedSha -MarkerRoot $script:MarkerRoot -Bound $helpBound
+    if ([int]$helpEntry.ExitCode -ne 0) {
+        Fail "help entry exited $($helpEntry.ExitCode)"
+    }
+    if ([string]$helpEntry.Help -cne (Get-NotepadppHelpText)) {
+        Fail 'help entry text did not match'
+    }
+    if ($script:DownloadCount -ne 0 -or $script:SetupCalls.Count -ne 0) {
+        Fail 'help entry downloaded or ran the installer'
+    }
+    $helpMarker = ([System.IO.File]::ReadAllText((Join-Path $script:MarkerRoot 'marker.txt'))).Trim()
+    if ($helpMarker -cne '9.0.0.0') {
+        Fail 'help entry changed the marker'
+    }
+
+    $helpProc = Invoke-NotepadppFile -ArgumentList @(
+        '-Help',
+        '-DeploymentType', 'Install',
+        '-Action', 'Install',
+        '-PinVersion', '8.9.8.1',
+        '-InstallerUrl', 'https://example.invalid/npp.exe',
+        '-InstallerSha256', $script:PinnedSha
+    )
+    $helpOut = ([string]$helpProc.Stdout).Replace("`r`n", "`n").Trim()
+    $helpErr = ([string]$helpProc.Stderr).Trim()
+    if ([int]$helpProc.ExitCode -ne 0) {
+        Fail "help exited $($helpProc.ExitCode): $helpErr"
+    }
+    if ($helpOut -cne (Get-NotepadppHelpText)) {
+        Fail "help output '$helpOut'"
+    }
+    if ($helpErr -like '*download*' -or $helpErr -like '*installer*') {
+        Fail "help wrote '$helpErr'"
+    }
 } finally {
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) {

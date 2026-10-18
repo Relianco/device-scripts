@@ -5,7 +5,10 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repoRoot 'packages/notepadpp/Invoke-Notepadpp.ps1'
 
 function Fail {
-    param([Parameter(Mandatory)][string]$Message)
+    param([string]$Message)
+    if ([string]::IsNullOrWhiteSpace($Message)) {
+        $Message = 'failed'
+    }
     [Console]::Error.WriteLine("FAIL $Message")
     exit 1
 }
@@ -19,6 +22,25 @@ $env:RELIAN_DEPLOY_TEST = '1'
 
 if (-not (Get-Command Save-NotepadppPayload -ErrorAction SilentlyContinue)) {
     Fail 'Save-NotepadppPayload was not defined'
+}
+if (-not (Get-Command Test-NotepadppPlaceholderHash -ErrorAction SilentlyContinue)) {
+    Fail 'Test-NotepadppPlaceholderHash was not defined'
+}
+
+$releasePath = Join-Path $repoRoot 'releases/notepadpp.json'
+if (-not (Test-Path -LiteralPath $releasePath)) {
+    Fail 'releases/notepadpp.json does not exist'
+}
+$release = Get-Content -LiteralPath $releasePath -Raw -Encoding utf8 | ConvertFrom-Json
+$pinnedSha = [string]$release.sha256
+if ($pinnedSha -cne '26f3bcced788fadbac4e7e577b430ea2ce6060cf3bcad993ef4612ecd7d743da') {
+    Fail 'sha256 does not match the downloaded installer'
+}
+if ($InstallerSha256 -cne $pinnedSha) {
+    Fail 'script defaults do not match releases/notepadpp.json'
+}
+if (Test-NotepadppPlaceholderHash -Sha256 $pinnedSha) {
+    Fail 'pinned sha256 was treated as a placeholder'
 }
 
 $utf8 = [System.Text.UTF8Encoding]::new($false)
@@ -129,6 +151,58 @@ try {
         Fail "empty hash returned $code after $($script:DownloadCount) downloads"
     }
 
+    Reset-Hooks
+    $code = Save-NotepadppPayload -Url 'https://example.invalid/npp.exe' -Destination $dest -Sha256 '   ' -Label 'installer'
+    if ($code -ne 0 -or $script:DownloadCount -ne 0) {
+        Fail "whitespace hash returned $code after $($script:DownloadCount) downloads"
+    }
+
+    $placeholders = @(
+        @{ Label = '64 a'; Hash = ('a' * 64) }
+        @{ Label = '64 A'; Hash = ('A' * 64) }
+        @{ Label = '64 zero'; Hash = ('0' * 64) }
+        @{ Label = '64 f'; Hash = ('f' * 64) }
+        @{ Label = '64 F'; Hash = ('F' * 64) }
+        @{ Label = '64 g'; Hash = ('g' * 64) }
+        @{ Label = 'word'; Hash = 'placeholder' }
+        @{ Label = 'short hex'; Hash = ('ab' * 31) }
+    )
+    foreach ($row in $placeholders) {
+        if (-not (Test-NotepadppPlaceholderHash -Sha256 $row.Hash)) {
+            Fail "$($row.Label) was not a placeholder"
+        }
+        Reset-Hooks
+        $script:DownloadFile = {
+            param($Url, $Destination)
+            $script:DownloadCount++
+            [System.IO.File]::WriteAllBytes($Destination, $good)
+        }
+        $code = Save-NotepadppPayload -Url 'https://example.invalid/npp.exe' -Destination $dest -Sha256 $row.Hash -Label 'installer'
+        if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:Sleeps.Count -ne 0 -or (Test-Path -LiteralPath $dest)) {
+            Fail "$($row.Label) returned $code after $($script:DownloadCount) downloads"
+        }
+        if (($script:NotepadppErrorLog -join "`n") -notlike '*placeholder*') {
+            Fail "$($row.Label) error did not name placeholder"
+        }
+        if (($script:NotepadppErrorLog -join "`n") -like '*https://*') {
+            Fail "$($row.Label) error included a URL"
+        }
+    }
+
+    Reset-Hooks
+    $script:DownloadFile = {
+        param($Url, $Destination)
+        $script:DownloadCount++
+        [System.IO.File]::WriteAllBytes($Destination, $good)
+    }
+    $code = Save-NotepadppPayload -Url 'https://example.invalid/npp.exe' -Destination $dest -Sha256 $pinnedSha -Label 'installer'
+    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:Sleeps.Count -ne 0 -or (Test-Path -LiteralPath $dest)) {
+        Fail "pinned sha mismatch returned $code after $($script:DownloadCount) downloads"
+    }
+    if (($script:NotepadppErrorLog -join "`n") -like '*placeholder*') {
+        Fail 'pinned sha256 was refused as a placeholder'
+    }
+
     foreach ($status in @(408, 429, 500, 502, 503, 504)) {
         if (-not (Test-NotepadppDownloadIsTransient -ErrorRecord ([NotepadppFakeHttpException]::new($status)))) {
             Fail "HTTP $status on Response.StatusCode was not retried"
@@ -159,6 +233,24 @@ try {
     }
     if (Test-NotepadppDownloadIsTransient -ErrorRecord ([System.Exception]::new('nope'))) {
         Fail 'a generic failure was retried'
+    }
+    $secure = [System.Net.Http.HttpRequestException]::new(
+        [System.Net.Http.HttpRequestError]::SecureConnectionError,
+        'tls',
+        $null,
+        $null
+    )
+    if (-not (Test-NotepadppDownloadIsTransient -ErrorRecord $secure)) {
+        Fail 'SecureConnectionError was not retried'
+    }
+    $auth = [System.Net.Http.HttpRequestException]::new(
+        [System.Net.Http.HttpRequestError]::UserAuthenticationError,
+        'auth',
+        $null,
+        $null
+    )
+    if (Test-NotepadppDownloadIsTransient -ErrorRecord $auth) {
+        Fail 'UserAuthenticationError was retried'
     }
 
     Reset-Hooks

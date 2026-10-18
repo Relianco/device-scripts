@@ -10,7 +10,8 @@ param(
     [string]$InstallerUrl = 'https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.8.1/npp.8.9.8.1.Installer.x64.exe',
     [string]$InstallerSha256 = '26f3bcced788fadbac4e7e577b430ea2ce6060cf3bcad993ef4612ecd7d743da',
     [string]$CancelPath = '',
-    [string]$MarkerRoot = ''
+    [string]$MarkerRoot = '',
+    [switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
@@ -276,6 +277,31 @@ function Test-NotepadppDownloadIsTransient {
     return [bool](Test-NotepadppTransientTransport -Exception $exception)
 }
 
+function Test-NotepadppPlaceholderHash {
+    param([string]$Sha256)
+    if ([string]::IsNullOrWhiteSpace($Sha256)) {
+        return $false
+    }
+    $candidate = $Sha256.Trim().ToLowerInvariant()
+    if ($candidate.Length -ne 64) {
+        return $true
+    }
+    $identical = $true
+    $first = [int][char]$candidate[0]
+    foreach ($char in $candidate.ToCharArray()) {
+        $code = [int]$char
+        if ($code -ne $first) {
+            $identical = $false
+        }
+        $isDigit = $code -ge 48 -and $code -le 57
+        $isLower = $code -ge 97 -and $code -le 102
+        if (-not $isDigit -and -not $isLower) {
+            return $true
+        }
+    }
+    return $identical
+}
+
 function Save-NotepadppPayload {
     param(
         [string]$Url,
@@ -286,12 +312,17 @@ function Save-NotepadppPayload {
     )
 
     # Userinfo is rejected even when the hash is empty. Empty hash downloads nothing.
+    # A placeholder, including 64 identical characters, is rejected before any download.
     if (Test-NotepadppUrlHasUserInfo -Url $Url) {
         Add-NotepadppError -Message "refusing a URL that contains userinfo for $Label"
         return 1
     }
     if ([string]::IsNullOrWhiteSpace($Sha256)) {
         return 0
+    }
+    if (Test-NotepadppPlaceholderHash -Sha256 $Sha256) {
+        Add-NotepadppError -Message "refusing a placeholder hash for $Label"
+        return 1
     }
 
     $expected = $Sha256.Trim().ToLowerInvariant()
@@ -711,25 +742,58 @@ function Invoke-NotepadppAction {
     }
 }
 
+function Get-NotepadppHelpText {
+    return "Notepad++ package`nActions: Install, Update, Repair, Uninstall.`nReinstall is not supported.`nHelp exits 0 and does not download or run the installer."
+}
+
+function Invoke-NotepadppEntry {
+    param(
+        [switch]$Help,
+        [string]$DeploymentType,
+        [string]$Action,
+        [string]$PinVersion,
+        [string]$InstallerUrl,
+        [string]$InstallerSha256,
+        [string]$CancelPath,
+        [string]$MarkerRoot,
+        $Bound
+    )
+
+    if ($Help) {
+        return [pscustomobject]@{
+            ExitCode = 0
+            Help     = (Get-NotepadppHelpText)
+        }
+    }
+    foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
+        $present = $false
+        if ($null -ne $Bound -and $Bound.ContainsKey($name)) {
+            $present = $true
+        }
+        if (-not $present) {
+            [Console]::Error.WriteLine("missing parameter $name")
+            return [pscustomobject]@{ ExitCode = 1; Help = '' }
+        }
+    }
+    try {
+        $notepadppExit = [int](Invoke-NotepadppAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot)
+        return [pscustomobject]@{ ExitCode = $notepadppExit; Help = '' }
+    } catch {
+        $detail = [string]$_.Exception.Message
+        if ($detail -match '://') {
+            $detail = 'notepad++ package failed'
+        }
+        [Console]::Error.WriteLine($detail)
+        return [pscustomobject]@{ ExitCode = 1; Help = '' }
+    }
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
-foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
-    if (-not $PSBoundParameters.ContainsKey($name)) {
-        [Console]::Error.WriteLine("missing parameter $name")
-        exit 1
-    }
+$entry = Invoke-NotepadppEntry -Help:$Help -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot -Bound $PSBoundParameters
+if (-not [string]::IsNullOrWhiteSpace([string]$entry.Help)) {
+    Write-Output ([string]$entry.Help)
 }
-
-try {
-    $notepadppExit = [int](Invoke-NotepadppAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot)
-    exit $notepadppExit
-} catch {
-    $detail = [string]$_.Exception.Message
-    if ($detail -match '://') {
-        $detail = 'notepad++ package failed'
-    }
-    [Console]::Error.WriteLine($detail)
-    exit 1
-}
+exit [int]$entry.ExitCode
