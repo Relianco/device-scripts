@@ -215,13 +215,21 @@ $dnsSocket = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.
 if (-not (Test-QuickLookDownloadIsTransient -ErrorRecord $dnsSocket)) {
     Fail 'DNS socket failure was not retried'
 }
+$socketTimeout = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::TimedOut)
+if (-not (Test-QuickLookDownloadIsTransient -ErrorRecord $socketTimeout)) {
+    Fail 'socket timeout was not retried'
+}
+$reset = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::ConnectionReset)
+if (-not (Test-QuickLookDownloadIsTransient -ErrorRecord $reset)) {
+    Fail 'connection reset was not retried'
+}
 $unrelated = [System.Net.Sockets.SocketException]::new([int][System.Net.Sockets.SocketError]::AddressAlreadyInUse)
 if (Test-QuickLookDownloadIsTransient -ErrorRecord $unrelated) {
     Fail 'an unrelated socket error was retried'
 }
 $bareSocket = [System.Net.Sockets.SocketException]::new()
 if (Test-QuickLookDownloadIsTransient -ErrorRecord $bareSocket) {
-    Fail 'a bare socket error was retried'
+    Fail 'a parameterless socket error was retried'
 }
 $dns = [System.Net.WebException]::new('dns', [System.Net.WebExceptionStatus]::NameResolutionFailure)
 if (-not (Test-QuickLookDownloadIsTransient -ErrorRecord $dns)) {

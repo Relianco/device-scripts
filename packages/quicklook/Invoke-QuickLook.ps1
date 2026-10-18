@@ -218,12 +218,14 @@ function Get-QuickLookHttpStatus {
 
 function Test-QuickLookSocketIsRetryable {
     param($Exception)
-    # SocketException() keeps the last native error. Only connection refused and DNS are retried.
+    # SocketException() keeps the last native error. Only refused, reset, timeout, and DNS are retried.
     if ($Exception -isnot [System.Net.Sockets.SocketException]) {
         return $false
     }
     $code = $Exception.SocketErrorCode
     return $code -eq [System.Net.Sockets.SocketError]::ConnectionRefused -or
+        $code -eq [System.Net.Sockets.SocketError]::ConnectionReset -or
+        $code -eq [System.Net.Sockets.SocketError]::TimedOut -or
         $code -eq [System.Net.Sockets.SocketError]::HostNotFound
 }
 
