@@ -26,6 +26,9 @@ Rules for code the diff adds or changes:
 - A URL with userinfo (scheme://user@host) must exit 1 before any download.
 - An empty hash must exit 0 and must not download.
 - An empty hash exits 0 for every action, including Uninstall, and downloads nothing.
+- An empty hash exits 0 before the URL is read, including when the URL contains userinfo. Do not require that rejection when the hash is empty.
+- Uninstall does not download. A present hash with a userinfo URL does not block uninstall.
+- An MSI install path must be one quoted argument so a path that contains spaces is not split.
 - A hash mismatch must exit 1, must not be retried, and must not run the package.
 - Retries are only for timeout, connection, or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Three attempts. Any other HTTP status is one attempt.
 - SecureConnectionError is a connection failure and is retryable. Do not report it.
