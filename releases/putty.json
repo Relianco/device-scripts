@@ -1,0 +1,9 @@
+{
+  "name": "PuTTY",
+  "arch": "x64",
+  "sourceUrl": "https://the.earth.li/~sgtatham/putty/0.85/w64/putty-64bit-0.85-installer.msi",
+  "file": "putty-64bit-0.85-installer.msi",
+  "sha256": "2213ebacf962b709411d654a40087508a694756bc4e41c5a1c24ad86596b2511",
+  "size": 3846144,
+  "version": "0.85.0.0"
+}
