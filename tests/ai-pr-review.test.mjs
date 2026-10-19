@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import {
   DEFAULT_MODEL,
   DELIVERY_PREFIXES,
+  INCOMPLETE_PREFIX,
   NOT_PERFORMED_PREFIX,
   PROMPT,
   buildReviewBody,
@@ -15,6 +16,7 @@ import {
   parseModelList,
   postCompletion,
   primaryModel,
+  reviewPullRequest,
   selectReviewFiles,
 } from '../scripts/ci/ai-pr-review.mjs'
 
@@ -54,6 +56,67 @@ test('a patch longer than 64000 characters is capped and the 21st file is omitte
   const selected = selectReviewFiles(files)
   assert.equal(selected.kept.length, 20)
   assert.deepEqual(selected.omitted, ['windows/packages/p20.ps1'])
+  const body = buildReviewBody({
+    findings: [],
+    omitted: selected.omitted,
+    model: DEFAULT_MODEL,
+  })
+  assert.equal(body.startsWith('LGTM'), false)
+  assert.equal(body.startsWith(INCOMPLETE_PREFIX), true)
+  assert.match(body, /windows\/packages\/p20\.ps1/)
+})
+
+test('a withheld diff and a truncated patch are not LGTM', async () => {
+  const withheld = selectReviewFiles([
+    { filename: 'windows/packages/hidden.ps1', changes: 4, patch: null },
+    { filename: 'windows/runner/Invoke-RelianRunner.ps1', changes: 0, patch: null },
+    { filename: 'README.md', changes: 3, patch: 'diff' },
+  ])
+  assert.deepEqual(withheld.unread, ['windows/packages/hidden.ps1'])
+  assert.deepEqual(withheld.skipped, ['windows/runner/Invoke-RelianRunner.ps1', 'README.md'])
+  assert.equal(withheld.kept.length, 0)
+
+  const huge = selectReviewFiles([
+    { filename: 'windows/packages/huge.ps1', changes: 1, patch: 'd'.repeat(64001) },
+  ])
+  assert.deepEqual(huge.truncated, ['windows/packages/huge.ps1'])
+  const partial = buildReviewBody({
+    findings: [],
+    omitted: huge.omitted,
+    unread: huge.unread,
+    truncated: huge.truncated,
+    model: DEFAULT_MODEL,
+  })
+  assert.equal(partial.startsWith('LGTM'), false)
+  assert.equal(partial.startsWith(INCOMPLETE_PREFIX), true)
+  assert.match(partial, /windows\/packages\/huge\.ps1/)
+
+  const withFindings = buildReviewBody({
+    findings: [{ path: 'a.ps1', line: 1, body: 'The mismatch still runs the package.' }],
+    omitted: ['b.ps1'],
+    model: DEFAULT_MODEL,
+  })
+  assert.equal(withFindings.startsWith(DELIVERY_PREFIXES[0]), true)
+  assert.equal(withFindings.startsWith('LGTM'), false)
+
+  let posted = ''
+  const body = await reviewPullRequest({
+    prNumber: 1,
+    headSha: 'abc',
+    token: 't',
+    endpoint: 'https://example.test/v1',
+    apiKey: 'k',
+    model: DEFAULT_MODEL,
+    listFiles: async () => [{ filename: 'windows/packages/hidden.ps1', changes: 4, patch: null }],
+    post: async ({ body: reviewBody }) => {
+      posted = reviewBody
+    },
+  })
+  assert.equal(body, posted)
+  assert.equal(body.startsWith(INCOMPLETE_PREFIX), true)
+  assert.equal(body.startsWith('LGTM'), false)
+  assert.equal(body.startsWith(NOT_PERFORMED_PREFIX), false)
+  assert.match(body, /windows\/packages\/hidden\.ps1/)
 })
 
 test('review bodies use the delivery prefixes and a nothing-reviewable body does not', () => {

@@ -146,7 +146,8 @@ jobs:
                     | select(.user.login == "github-actions[bot]" and .commit_id == env.HEAD_SHA
                              and (($body | startswith("Code review by ChatGPT"))
                                   or ($body | startswith("LGTM"))
-                                  or ($body | startswith("AI review skipped for this push:"))))
+                                  or ($body | startswith("AI review skipped for this push:"))
+                                  or ($body | startswith("AI review incomplete:"))))
                     | ($body[0:60] | gsub("\n"; " "))'); then
               read_ok=1
               [ -n "$delivered" ] && break
