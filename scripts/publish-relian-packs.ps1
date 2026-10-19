@@ -3,8 +3,8 @@
 [CmdletBinding()]
 param(
     [switch]$Publish,
-    [string]$BrandRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'brand/relian'),
-    [string]$ToolkitRecord = (Join-Path (Split-Path -Parent $PSScriptRoot) 'releases/psadt.json')
+    [string]$BrandRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/brand/relian'),
+    [string]$ToolkitRecord = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/releases/psadt.json')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -207,8 +207,8 @@ function Publish-RelianPacks {
     [CmdletBinding()]
     param(
         [switch]$Publish,
-        [string]$BrandRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'brand/relian'),
-        [string]$ToolkitRecord = (Join-Path (Split-Path -Parent $PSScriptRoot) 'releases/psadt.json')
+        [string]$BrandRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/brand/relian'),
+        [string]$ToolkitRecord = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/releases/psadt.json')
     )
 
     $script:ExitCode = 1

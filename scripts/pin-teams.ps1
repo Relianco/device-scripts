@@ -2,7 +2,7 @@
 # defines the pin checks and does not download.
 [CmdletBinding()]
 param(
-    [string]$RecordPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'releases/teams.json')
+    [string]$RecordPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/releases/teams.json')
 )
 
 $ErrorActionPreference = 'Stop'
