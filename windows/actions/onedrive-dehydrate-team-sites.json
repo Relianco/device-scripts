@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "onedrive-dehydrate-team-sites",
+  "title": "Dehydrate OneDrive team sites",
+  "description": "Sets DehydrateSyncedTeamSites to 1. The key is created when it is missing.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Policies\\Microsoft\\OneDrive",
+      "name": "DehydrateSyncedTeamSites",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}

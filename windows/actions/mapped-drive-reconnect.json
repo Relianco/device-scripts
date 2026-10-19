@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "mapped-drive-reconnect",
+  "title": "Reconnect mapped drives at sign-in",
+  "description": "Sets RestoreConnection to 1. The key is created when it is missing.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SYSTEM\\CurrentControlSet\\Control\\NetworkProvider",
+      "name": "RestoreConnection",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}

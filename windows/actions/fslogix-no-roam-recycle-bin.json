@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "fslogix-no-roam-recycle-bin",
+  "title": "Keep the recycle bin off the FSLogix profile",
+  "description": "Sets RoamRecycleBin to 0.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\FSLogix\\Apps",
+      "name": "RoamRecycleBin",
+      "type": "dword",
+      "value": 0
+    }
+  ]
+}
