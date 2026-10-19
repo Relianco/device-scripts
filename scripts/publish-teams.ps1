@@ -3,8 +3,8 @@
 [CmdletBinding()]
 param(
     [switch]$Publish,
-    [string]$RecordPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'releases/teams.json'),
-    [string]$CacheRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'releases/cache')
+    [string]$RecordPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/releases/teams.json'),
+    [string]$CacheRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) 'windows/releases/cache')
 )
 
 $ErrorActionPreference = 'Stop'

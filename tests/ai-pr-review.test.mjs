@@ -30,16 +30,16 @@ test('markdown and docs are skipped and PowerShell is reviewed', () => {
   assert.equal(isDocsPath('docs/STATUS.md'), true)
   assert.equal(isDocsPath('LICENSE'), true)
   assert.equal(isReviewablePath('README.md'), false)
-  assert.equal(isReviewablePath('packages/teams/Invoke-Teams.ps1'), true)
-  assert.equal(isReviewablePath('releases/teams.json'), true)
+  assert.equal(isReviewablePath('windows/packages/teams/Invoke-Teams.ps1'), true)
+  assert.equal(isReviewablePath('windows/releases/teams.json'), true)
   assert.equal(isReviewablePath('.github/workflows/pr-verify.yml'), true)
   const selected = selectReviewFiles([
     { filename: 'docs/STATUS.md', patch: 'diff' },
-    { filename: 'runner/Invoke-RelianRunner.ps1', patch: 'diff --git' },
-    { filename: 'brand/logo.bin', patch: null },
+    { filename: 'windows/runner/Invoke-RelianRunner.ps1', patch: 'diff --git' },
+    { filename: 'windows/brand/logo.bin', patch: null },
   ])
-  assert.deepEqual(selected.kept.map((file) => file.filename), ['runner/Invoke-RelianRunner.ps1'])
-  assert.deepEqual(selected.skipped, ['docs/STATUS.md', 'brand/logo.bin'])
+  assert.deepEqual(selected.kept.map((file) => file.filename), ['windows/runner/Invoke-RelianRunner.ps1'])
+  assert.deepEqual(selected.skipped, ['docs/STATUS.md', 'windows/brand/logo.bin'])
 })
 
 test('a patch longer than 64000 characters is capped and the 21st file is omitted', () => {
@@ -49,11 +49,11 @@ test('a patch longer than 64000 characters is capped and the 21st file is omitte
   assert.equal(capPatch(over), `${'b'.repeat(64000)}\n...[truncated]`)
   const files = []
   for (let i = 0; i < 21; i++) {
-    files.push({ filename: `packages/p${i}.ps1`, patch: 'diff' })
+    files.push({ filename: `windows/packages/p${i}.ps1`, patch: 'diff' })
   }
   const selected = selectReviewFiles(files)
   assert.equal(selected.kept.length, 20)
-  assert.deepEqual(selected.omitted, ['packages/p20.ps1'])
+  assert.deepEqual(selected.omitted, ['windows/packages/p20.ps1'])
 })
 
 test('review bodies use the delivery prefixes and a nothing-reviewable body does not', () => {
@@ -87,7 +87,7 @@ test('the prompt is PowerShell rules and names JSON', () => {
   assert.match(PROMPT, /NinjaOne/)
   assert.doesNotMatch(PROMPT, /Nuxt/)
   assert.match(PROMPT, /Relian is the product name\. It is not a client name\. Do not report Relian in a namespace, a filename, or UI text\./)
-  assert.match(PROMPT, /The user-check package installs nothing\. It has no installer sha256\. pagePin and codePin are mode labels, not pin hashes\. Do not require a 64-character hash in releases\/user-check\.json\./)
+  assert.match(PROMPT, /The user-check package installs nothing\. It has no installer sha256\. pagePin and codePin are mode labels, not pin hashes\. Do not require a 64-character hash in windows\/releases\/user-check\.json\./)
   const skip = [
     'SecureConnectionError is a connection failure and is retryable. Do not report it.',
     'The OpenAI client may retry HTTP 409 and 425 once. Do not report that single retry.',

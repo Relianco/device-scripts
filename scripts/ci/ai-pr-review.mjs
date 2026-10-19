@@ -40,7 +40,7 @@ Rules for code the diff adds or changes:
 - curl and az arguments are an array, or they are written inline. Arguments stored in one scalar string are a defect, because zsh does not word-split that string.
 - The Teams package must not contain disableAutoUpdate, MsRdcWebRTCSvc, or Reset-AppxPackage.
 - A pin hash is 64 lowercase hex characters. Do not treat a placeholder hash as valid.
-- The user-check package installs nothing. It has no installer sha256. pagePin and codePin are mode labels, not pin hashes. Do not require a 64-character hash in releases/user-check.json.
+- The user-check package installs nothing. It has no installer sha256. pagePin and codePin are mode labels, not pin hashes. Do not require a 64-character hash in windows/releases/user-check.json.
 
 Reply with one JSON object and no other text:
 {"findings":[{"line":1,"body":"what happens at runtime, then the fix"}]}

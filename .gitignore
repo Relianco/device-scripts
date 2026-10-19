@@ -1,5 +1,5 @@
-brand/out/
-releases/cache/
+windows/brand/out/
+windows/releases/cache/
 .agents/
 .worktrees/
 AGENTS.md
