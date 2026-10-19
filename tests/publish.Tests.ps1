@@ -319,7 +319,7 @@ function Assert-Readme {
     if (-not $text.StartsWith("# device-scripts`n")) {
         Fail 'README title changed'
     }
-    $description = 'Cross-platform scripts for automated device data collection, hardware benchmarking, and endpoint management. Run via bootstrap or standalone.'
+    $description = 'NinjaOne installs software by pasting `runner/Invoke-RelianRunner.ps1`. That file is the installer. `bootstrap.ps1` loads an inventory collector. It is not the installer.'
     if (-not $text.Contains($description)) {
         Fail 'README description removed'
     }

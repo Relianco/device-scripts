@@ -16,7 +16,7 @@ import {
   postCompletion,
   primaryModel,
   selectReviewFiles,
-} from './ai-pr-review.mjs'
+} from '../scripts/ci/ai-pr-review.mjs'
 
 test('an empty MODEL pin is gpt-6.1-sol and a second name is not the primary', () => {
   assert.deepEqual(parseModelList(''), [DEFAULT_MODEL])
@@ -103,8 +103,8 @@ test('the prompt is PowerShell rules and names JSON', () => {
 })
 
 test('the workflow pins gpt-6.1-sol on ubuntu-latest', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/ai-pr-review.yml', import.meta.url), 'utf8')
-  const verify = readFileSync(new URL('../../.github/workflows/pr-verify.yml', import.meta.url), 'utf8')
+  const workflow = readFileSync(new URL('../.github/workflows/ai-pr-review.yml', import.meta.url), 'utf8')
+  const verify = readFileSync(new URL('../.github/workflows/pr-verify.yml', import.meta.url), 'utf8')
   assert.match(workflow, /previous_filename/)
   assert.match(workflow, /MODEL:\s*gpt-6\.1-sol/)
   assert.match(workflow, /runs-on:\s*ubuntu-24\.04/)
@@ -117,6 +117,9 @@ test('the workflow pins gpt-6.1-sol on ubuntu-latest', () => {
   assert.equal(workflow.includes(NOT_PERFORMED_PREFIX), true)
   assert.match(verify, /runs-on:\s*ubuntu-24\.04/)
   assert.match(verify, /tests\/run-all\.ps1/)
+  assert.match(verify, /tests\/ai-pr-review\.test\.mjs/)
+  assert.match(verify, /tests\/secret-scan\.test\.mjs/)
+  assert.doesNotMatch(verify, /scripts\/ci\/.*\.test\.mjs/)
   assert.doesNotMatch(verify, /self-hosted/)
 })
 
