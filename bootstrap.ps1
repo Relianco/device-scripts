@@ -1,17 +1,23 @@
 <#
 .SYNOPSIS
-    Relian Bootstrap Script for NinjaOne
-    Downloads and executes collector scripts from a Git repository.
+    Relian collector loader for NinjaOne.
+    Downloads one inventory script and runs it.
 
 .DESCRIPTION
-    This is the ONE script uploaded to NinjaOne. When executed, it:
+    This is not the software installer. The installer pasted into NinjaOne
+    is runner/Invoke-RelianRunner.ps1. This script only runs a collector.
+
+    When executed, it:
     1. Reads the git deploy token from NinjaOne org custom field
-    2. Downloads the requested script from the Git repository
-    3. Executes the script
+    2. Downloads the requested collector from this repo
+    3. Executes that collector
     4. Reports execution status back via custom fields
 
+    It follows the named branch, checks no file hash, and can put the git
+    token in the download URL.
+
 .PARAMETER ScriptName
-    Required. The relative path of the script to execute (e.g., "collectors/cpu-benchmark")
+    Required. The relative path of the collector to execute (e.g., "collectors/cpu-benchmark")
 
 .PARAMETER RepoUrl
     Optional. Git repository URL. Defaults to the Relian device-scripts repo.
