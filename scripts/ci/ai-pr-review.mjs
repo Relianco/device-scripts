@@ -7,10 +7,13 @@
 
 import { pathToFileURL } from 'node:url'
 
+export const INCOMPLETE_PREFIX = 'AI review incomplete:'
+
 export const DELIVERY_PREFIXES = [
   'Code review by ChatGPT',
   'LGTM',
   'AI review skipped for this push:',
+  INCOMPLETE_PREFIX,
 ]
 
 export const NOT_PERFORMED_PREFIX = 'AI review NOT performed:'
@@ -84,21 +87,31 @@ export function capPatch(patch, max = 64000) {
 export function selectReviewFiles(files, { limit = 20, maxPatch = 64000 } = {}) {
   const reviewable = []
   const skipped = []
+  const unread = []
   for (const file of files) {
-    if (!isReviewablePath(file.filename) || !file.patch) {
+    if (!isReviewablePath(file.filename)) {
       skipped.push(file.filename)
       continue
     }
+    if (!file.patch) {
+      if (Number(file.changes) > 0) unread.push(file.filename)
+      else skipped.push(file.filename)
+      continue
+    }
+    const patch = String(file.patch)
     reviewable.push({
       filename: file.filename,
-      patch: capPatch(file.patch, maxPatch),
-      truncated: String(file.patch).length > maxPatch,
+      patch: capPatch(patch, maxPatch),
+      truncated: patch.length > maxPatch,
     })
   }
+  const kept = reviewable.slice(0, limit)
   return {
-    kept: reviewable.slice(0, limit),
+    kept,
     omitted: reviewable.slice(limit).map((file) => file.filename),
     skipped,
+    unread,
+    truncated: kept.filter((file) => file.truncated).map((file) => file.filename),
   }
 }
 
@@ -120,15 +133,31 @@ export function parseFindings(content) {
     .filter((finding) => finding.body.length > 0)
 }
 
-export function buildReviewBody({ findings, omitted, model }) {
-  const omittedNote = omitted.length > 0
-    ? `\n\nNot sent, over the 20-file cap: ${omitted.join(', ')}`
-    : ''
+function coverageNotes({ omitted = [], unread = [], truncated = [] }) {
+  const notes = []
+  if (omitted.length > 0) {
+    notes.push(`Not sent, over the 20-file cap: ${omitted.join(', ')}`)
+  }
+  if (unread.length > 0) {
+    notes.push(`Diff withheld, so the file was not read: ${unread.join(', ')}`)
+  }
+  if (truncated.length > 0) {
+    notes.push(`Patch truncated, so the file was not fully read: ${truncated.join(', ')}`)
+  }
+  return notes
+}
+
+export function buildReviewBody({ findings, omitted = [], unread = [], truncated = [], model }) {
+  const notes = coverageNotes({ omitted, unread, truncated })
+  const note = notes.length > 0 ? `\n\n${notes.join('\n\n')}` : ''
+  if (findings.length === 0 && notes.length === 0) {
+    return `LGTM 👍\n\nReviewed with ${model}. No defects to fix before merge.`
+  }
   if (findings.length === 0) {
-    return `LGTM 👍\n\nReviewed with ${model}. No defects to fix before merge.${omittedNote}`
+    return `${INCOMPLETE_PREFIX} the model did not read every changed file. No defect was reported in the files it did read.${note}`
   }
   const lines = findings.map((finding) => `- ${finding.path}:${finding.line} ${finding.body}`)
-  return `Code review by ChatGPT\n\n${lines.join('\n')}${omittedNote}`
+  return `Code review by ChatGPT\n\n${lines.join('\n')}${note}`
 }
 
 export function notPerformedBody(filenames) {
@@ -264,6 +293,17 @@ export async function reviewPullRequest({
 }) {
   const files = await listFiles(prNumber, token)
   const selected = selectReviewFiles(files)
+  if (selected.kept.length === 0 && selected.unread.length > 0) {
+    const body = buildReviewBody({
+      findings: [],
+      omitted: selected.omitted,
+      unread: selected.unread,
+      truncated: selected.truncated,
+      model,
+    })
+    await post({ prNumber, headSha, body, token })
+    return body
+  }
   if (selected.kept.length === 0) {
     const body = notPerformedBody(files.map((file) => file.filename))
     await post({ prNumber, headSha, body, token })
@@ -285,7 +325,13 @@ export async function reviewPullRequest({
       findings.push({ path: file.filename, line: finding.line, body: finding.body })
     }
   }
-  const body = buildReviewBody({ findings, omitted: selected.omitted, model })
+  const body = buildReviewBody({
+    findings,
+    omitted: selected.omitted,
+    unread: selected.unread,
+    truncated: selected.truncated,
+    model,
+  })
   await post({ prNumber, headSha, body, token })
   return body
 }
