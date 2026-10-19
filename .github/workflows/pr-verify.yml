@@ -41,4 +41,4 @@ jobs:
         run: pwsh -NoProfile -File tests/run-all.ps1
 
       - name: Run the reviewer unit tests
-        run: node --test scripts/ci/ai-pr-review.test.mjs scripts/ci/secret-scan.test.mjs
+        run: node --test tests/ai-pr-review.test.mjs tests/secret-scan.test.mjs

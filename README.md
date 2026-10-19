@@ -26,3 +26,4 @@ The runner is `runner/Invoke-RelianRunner.ps1`. Paste that file into NinjaOne. E
 - `brand/` is the source of the Relian dialog pack.
 - `collectors/` and `bootstrap.ps1` are the inventory path.
 - `scripts/` holds the pin and publish tools.
+- `tests/` holds the PowerShell suite and the reviewer unit tests.
