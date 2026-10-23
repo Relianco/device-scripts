@@ -32,7 +32,9 @@ foreach ($command in @(
         'Test-PrinterTcpCatalogSignature',
         'Test-PrinterTcpOuterSignature',
         'Get-PrinterTcpPnpUtilArgumentList',
+        'Get-PrinterTcpExpandArgumentList',
         'Get-PrinterTcpSfxArgumentList',
+        'Find-PrinterTcpStagedInf',
         'Get-PrinterTcpPortSettings',
         'Find-PrinterTcpDriverInf',
         'Get-PrinterTcpModel',
@@ -258,8 +260,20 @@ if ($port.Name -cne 'IP_192.0.2.10' -or $port.PrinterHostAddress -cne '192.0.2.1
 }
 
 $pnp = @(Get-PrinterTcpPnpUtilArgumentList -InfPath 'C:\driver-extract\BROHL17A.INF')
-if ($pnp.Count -ne 2 -or $pnp[0] -cne '/add-driver' -or $pnp[1] -cne 'C:\driver-extract\BROHL17A.INF') {
+if ($pnp.Count -ne 2 -or $pnp[0] -cne '/add-driver' -or $pnp[1] -cne '"C:\driver-extract\BROHL17A.INF"') {
     Fail "pnputil arguments $($pnp -join ' ')"
+}
+$pnpSpace = @(Get-PrinterTcpPnpUtilArgumentList -InfPath 'C:\driver extract\BROHL17A.INF')
+if ($pnpSpace.Count -ne 2 -or $pnpSpace[1] -cne '"C:\driver extract\BROHL17A.INF"') {
+    Fail "quoted pnputil arguments $($pnpSpace -join ' ')"
+}
+$expand = @(Get-PrinterTcpExpandArgumentList -CabPath 'C:\Temp\a.cab' -Destination 'C:\Temp\out')
+if ($expand.Count -ne 3 -or $expand[0] -cne '-F:*' -or $expand[1] -cne '"C:\Temp\a.cab"' -or $expand[2] -cne '"C:\Temp\out"') {
+    Fail "expand arguments $($expand -join ' ')"
+}
+$expandSpace = @(Get-PrinterTcpExpandArgumentList -CabPath 'C:\Temp\driver extract\a.cab' -Destination 'C:\Temp\driver extract')
+if ($expandSpace.Count -ne 3 -or $expandSpace[1] -cne '"C:\Temp\driver extract\a.cab"' -or $expandSpace[2] -cne '"C:\Temp\driver extract"') {
+    Fail "quoted expand arguments $($expandSpace -join ' ')"
 }
 if ($null -ne (Get-PrinterTcpPnpUtilArgumentList -InfPath 'C:\driver-extract\FAX\KOUWNJ1_.inf')) {
     Fail 'pnputil arguments were built for FAX'
@@ -303,6 +317,27 @@ try {
     [System.IO.File]::WriteAllText((Join-Path $onlyFax 'FAX/KOUWNJ1_.inf'), 'inf')
     if (-not [string]::IsNullOrWhiteSpace((Find-PrinterTcpDriverInf -Root $onlyFax -InfName 'KOUWNJ1_.inf'))) {
         Fail 'FAX inf was selected'
+    }
+    $store = Join-Path $findRoot 'store'
+    $olderDir = Join-Path $store 'older'
+    $newerDir = Join-Path $store 'newer'
+    New-Item -ItemType Directory -Path $olderDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $newerDir -Force | Out-Null
+    $olderInf = Join-Path $olderDir 'BROHL17A.INF'
+    $newerInf = Join-Path $newerDir 'BROHL17A.INF'
+    [System.IO.File]::WriteAllText($olderInf, 'old')
+    [System.IO.File]::WriteAllText($newerInf, 'new')
+    [System.IO.File]::SetLastWriteTimeUtc($olderInf, [datetime]::UtcNow.AddMinutes(-10))
+    [System.IO.File]::SetLastWriteTimeUtc($newerInf, [datetime]::UtcNow)
+    $staged = Find-PrinterTcpStagedInf -Root $store -InfName 'brohl17a.inf'
+    if ($staged -cne $newerInf) {
+        Fail "staged inf '$staged'"
+    }
+    if (-not [string]::IsNullOrWhiteSpace((Find-PrinterTcpStagedInf -Root $store -InfName 'missing.inf'))) {
+        Fail 'missing staged inf was returned'
+    }
+    if (-not [string]::IsNullOrWhiteSpace((Find-PrinterTcpStagedInf -Root '' -InfName 'BROHL17A.INF'))) {
+        Fail 'empty store root returned an inf'
     }
 } finally {
     if (Test-Path -LiteralPath $findRoot) {
@@ -704,6 +739,12 @@ function Reset-Case {
     $script:LivePrinters = [System.Collections.Generic.List[object]]::new()
     $script:LivePorts = [System.Collections.Generic.List[object]]::new()
     $script:DriverNames = [System.Collections.Generic.List[string]]::new()
+    $script:StagedQueries = [System.Collections.Generic.List[string]]::new()
+    $script:FindStagedInf = {
+        param($InfName)
+        $script:StagedQueries.Add([string]$InfName)
+        return 'C:\Windows\System32\DriverStore\FileRepository\staged\' + [string]$InfName
+    }
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:MarkerRoot) {
         Remove-Item -LiteralPath $script:MarkerRoot -Recurse -Force
@@ -950,9 +991,13 @@ try {
     if ($script:PnpPaths.Count -ne 1 -or $script:PnpPaths[0] -notlike '*BROHL17A.INF*') {
         Fail 'Brother pnputil path was wrong'
     }
+    $stagedInf = 'C:\Windows\System32\DriverStore\FileRepository\staged\BROHL17A.INF'
     if ($script:DriverCalls.Count -ne 1 -or $script:DriverCalls[0].Name -cne 'Brother HL-L2370DW series' -or
-        $script:DriverCalls[0].InfPath -cne $script:PnpPaths[0]) {
-        Fail 'Brother driver was not registered from the checked INF'
+        $script:DriverCalls[0].InfPath -cne $stagedInf -or $script:DriverCalls[0].InfPath -ceq $script:PnpPaths[0]) {
+        Fail 'Brother driver was not registered from the driver store INF'
+    }
+    if ($script:StagedQueries.Count -ne 1 -or $script:StagedQueries[0] -cne 'BROHL17A.INF') {
+        Fail 'staged inf lookup did not use the model inf name'
     }
     $pnpArgs = @(Get-PrinterTcpPnpUtilArgumentList -InfPath $script:PnpPaths[0])
     if ($pnpArgs -contains '/install') {

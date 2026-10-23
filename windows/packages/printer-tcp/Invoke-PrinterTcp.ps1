@@ -1135,6 +1135,12 @@ function Find-PrinterTcpCatalogFile {
     return ''
 }
 
+function Get-PrinterTcpQuotedArgument {
+    param([string]$Value)
+    # Start-Process joins ArgumentList with spaces. Quotes keep one path as one argument.
+    return '"{0}"' -f $Value
+}
+
 function Get-PrinterTcpPnpUtilArgumentList {
     param([string]$InfPath)
     if ([string]::IsNullOrWhiteSpace($InfPath)) {
@@ -1144,7 +1150,49 @@ function Get-PrinterTcpPnpUtilArgumentList {
         return $null
     }
     # add-driver only. Do not pass the switch that installs device nodes.
-    return @('/add-driver', $InfPath)
+    return @('/add-driver', (Get-PrinterTcpQuotedArgument -Value $InfPath))
+}
+
+function Get-PrinterTcpExpandArgumentList {
+    param(
+        [string]$CabPath,
+        [string]$Destination
+    )
+    if ([string]::IsNullOrWhiteSpace($CabPath) -or [string]::IsNullOrWhiteSpace($Destination)) {
+        return $null
+    }
+    return @(
+        '-F:*',
+        (Get-PrinterTcpQuotedArgument -Value $CabPath),
+        (Get-PrinterTcpQuotedArgument -Value $Destination)
+    )
+}
+
+function Find-PrinterTcpStagedInf {
+    param(
+        [string]$Root,
+        [string]$InfName
+    )
+    if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($InfName)) {
+        return ''
+    }
+    if (-not (Test-Path -LiteralPath $Root)) {
+        return ''
+    }
+    $options = [System.IO.EnumerationOptions]::new()
+    $options.RecurseSubdirectories = $true
+    $options.IgnoreInaccessible = $true
+    $options.MatchCasing = [System.IO.MatchCasing]::CaseInsensitive
+    $newestPath = ''
+    $newestTime = [datetime]::MinValue
+    foreach ($path in [System.IO.Directory]::EnumerateFiles($Root, $InfName, $options)) {
+        $when = [System.IO.File]::GetLastWriteTimeUtc($path)
+        if ([string]::IsNullOrEmpty($newestPath) -or $when -gt $newestTime) {
+            $newestPath = $path
+            $newestTime = $when
+        }
+    }
+    return $newestPath
 }
 
 function Get-PrinterTcpSfxArgumentList {
@@ -1300,9 +1348,21 @@ $script:AddPrinterDriver = {
     if (-not (Get-Command -Name 'Add-PrinterDriver' -ErrorAction SilentlyContinue)) {
         throw 'Add-PrinterDriver is not available'
     }
-    # pnputil stages the package. The spooler still needs the driver name from this INF.
+    # InfPath is the copy in the driver store. The extracted INF is not that path.
     Add-PrinterDriver -Name $Name -InfPath $InfPath
     return 0
+}
+
+$script:FindStagedInf = {
+    param($InfName)
+    if ($env:RELIAN_DEPLOY_TEST -eq '1') {
+        throw 'refusing to search the driver store while a test is running'
+    }
+    $root = ''
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $root = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
+    }
+    return Find-PrinterTcpStagedInf -Root $root -InfName ([string]$InfName)
 }
 
 $script:SetPrinter = {
@@ -1354,7 +1414,11 @@ $script:ExpandCab = {
     if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
         $exe = Join-Path $env:SystemRoot 'System32\expand.exe'
     }
-    $process = Start-Process -FilePath $exe -ArgumentList @('-F:*', $CabPath, $Destination) -Wait -PassThru -WindowStyle Hidden
+    $argumentList = Get-PrinterTcpExpandArgumentList -CabPath $CabPath -Destination $Destination
+    if ($null -eq $argumentList) {
+        throw 'missing expand arguments'
+    }
+    $process = Start-Process -FilePath $exe -ArgumentList $argumentList -Wait -PassThru -WindowStyle Hidden
     if ($null -eq $process -or [int]$process.ExitCode -ne 0) {
         throw 'cabinet expand failed'
     }
@@ -1454,7 +1518,12 @@ function Invoke-PrinterTcpEnsureDriver {
         Add-PrinterTcpError -Message "pnputil add-driver failed for $($Model.Id)"
         return 1
     }
-    $added = & $script:AddPrinterDriver -Name ([string]$Model.DriverName) -InfPath $infPath
+    $staged = [string](& $script:FindStagedInf -InfName ([string]$Model.Inf))
+    if ([string]::IsNullOrWhiteSpace($staged)) {
+        Add-PrinterTcpError -Message "staged driver inf missing for $($Model.Id)"
+        return 1
+    }
+    $added = & $script:AddPrinterDriver -Name ([string]$Model.DriverName) -InfPath $staged
     if ($null -eq $added -or [int]$added -ne 0) {
         Add-PrinterTcpError -Message "add-printer driver failed for $($Model.Id)"
         return 1
