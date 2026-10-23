@@ -1,0 +1,29 @@
+{
+  "name": "printer-tcp",
+  "drivers": [
+    {
+      "id": "BrotherHlL2370Dw",
+      "driverName": "Brother HL-L2370DW series",
+      "sourceUrl": "https://catalog.s.download.windowsupdate.com/d/msdownload/update/driver/drvs/2019/08/498d2e8b-35d3-4e32-b214-b33facc5756c_461156f49788809b4b143a833e7b6aeedc2822f1.cab",
+      "file": "498d2e8b-35d3-4e32-b214-b33facc5756c_461156f49788809b4b143a833e7b6aeedc2822f1.cab",
+      "sha256": "725cd890e7c7ba08f85b14c86256fad6d7606eb8b582f957eab0659b98b2c0e8",
+      "size": 19139543,
+      "version": "1.6.0.0",
+      "inf": "BROHL17A.INF",
+      "catalog": "BROHL17A.CAT",
+      "stage": "Cab"
+    },
+    {
+      "id": "KonicaUniversalPcl",
+      "driverName": "KONICA MINOLTA Universal PCL",
+      "sourceUrl": "https://cscsupportftp.mykonicaminolta.com/DownloadFile/Download.ashx?fileversionid=43620&productid=1801",
+      "file": "KM_UPD_pcl6_win64_v391203eit100_WHQL_efigs_ja_sc_tc_ko_inst.exe",
+      "sha256": "30cf9b9bd9a1517ab835efe6200a7aa2b5c4850e58fdffe220297ff0501c6e71",
+      "size": 32858888,
+      "version": "3.9.1203.500",
+      "inf": "KOUWNJ1_.inf",
+      "catalog": "KOUWNJ1_.CAT",
+      "stage": "SevenZipSfx"
+    }
+  ]
+}
