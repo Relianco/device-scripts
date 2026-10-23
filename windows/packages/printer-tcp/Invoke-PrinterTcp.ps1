@@ -1097,16 +1097,39 @@ function Invoke-PrinterTcpInfLayout {
 function Test-PrinterTcpCatalogSignature {
     param(
         [string]$Status,
-        [string]$Subject
+        [string]$Subject,
+        [string[]]$ChainStatus = @(),
+        [bool]$HasTimestamp = $false
     )
     if ($Status -ceq 'Valid') {
         return $true
     }
-    # The Konica catalog leaf is expired and untimestamped.
-    if ($Status -ceq 'NotTimeValid' -and $Subject.Contains('Microsoft Windows Hardware Compatibility Publisher')) {
-        return $true
+    # SignatureStatus has no NotTimeValid member. Expiration is a chain flag.
+    # Only an untimestamped WHQL catalog may pass when that is the chain's only failure.
+    if ($HasTimestamp) {
+        return $false
     }
-    return $false
+    if ($Status -cne 'UnknownError' -and $Status -cne 'NotTrusted') {
+        return $false
+    }
+    if ([string]::IsNullOrWhiteSpace($Subject) -or -not $Subject.Contains('Microsoft Windows Hardware Compatibility Publisher')) {
+        return $false
+    }
+    $sawExpired = $false
+    foreach ($flag in @($ChainStatus)) {
+        if ([string]::IsNullOrWhiteSpace($flag)) {
+            continue
+        }
+        if ($flag -ceq 'NotTimeNested') {
+            continue
+        }
+        if ($flag -ceq 'NotTimeValid') {
+            $sawExpired = $true
+            continue
+        }
+        return $false
+    }
+    return $sawExpired
 }
 
 function Test-PrinterTcpOuterSignature {
@@ -1276,11 +1299,55 @@ function Get-PrinterTcpSfxArgumentList {
     return @('-y', ('-o' + $target))
 }
 
+function Get-PrinterTcpChainStatusNames {
+    param($Certificate)
+    if ($null -eq $Certificate) {
+        return @()
+    }
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+    [void]$chain.Build($Certificate)
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($entry in @($chain.ChainStatus)) {
+        if ($null -eq $entry) {
+            continue
+        }
+        $text = [string]$entry.Status
+        if ([string]::IsNullOrWhiteSpace($text) -or $text -ceq 'NoError') {
+            continue
+        }
+        foreach ($part in $text.Split(',')) {
+            $name = $part.Trim()
+            if (-not [string]::IsNullOrWhiteSpace($name) -and -not $names.Contains($name)) {
+                $names.Add($name)
+            }
+        }
+    }
+    return ,$names.ToArray()
+}
+
 function Get-PrinterTcpSignatureParts {
     param($Signature)
+    $chain = @()
+    $hasTimestamp = $false
+    if ($null -ne $Signature) {
+        $props = @($Signature.PSObject.Properties.Name)
+        if ($props -contains 'ChainStatus' -and $null -ne $Signature.ChainStatus) {
+            foreach ($flag in @($Signature.ChainStatus)) {
+                if (-not [string]::IsNullOrWhiteSpace([string]$flag)) {
+                    $chain += [string]$flag
+                }
+            }
+        }
+        if ($props -contains 'HasTimestamp') {
+            $hasTimestamp = [bool]$Signature.HasTimestamp
+        }
+    }
     return [pscustomobject]@{
-        Status  = [string](Get-PrinterTcpField -Object $Signature -Names @('Status', 'status'))
-        Subject = [string](Get-PrinterTcpField -Object $Signature -Names @('Subject', 'subject'))
+        Status       = [string](Get-PrinterTcpField -Object $Signature -Names @('Status', 'status'))
+        Subject      = [string](Get-PrinterTcpField -Object $Signature -Names @('Subject', 'subject'))
+        ChainStatus  = $chain
+        HasTimestamp = $hasTimestamp
     }
 }
 
@@ -1472,12 +1539,21 @@ $script:GetAuthenticodeSignature = {
     }
     $sig = Get-AuthenticodeSignature -LiteralPath $Path
     $subject = ''
+    $chainStatus = @()
+    $hasTimestamp = $false
     if ($null -ne $sig.SignerCertificate) {
         $subject = [string]$sig.SignerCertificate.Subject
+        $chainStatus = @(Get-PrinterTcpChainStatusNames -Certificate $sig.SignerCertificate)
+    }
+    $sigProps = @($sig.PSObject.Properties.Name)
+    if ($sigProps -contains 'TimeStamperCertificate' -and $null -ne $sig.TimeStamperCertificate) {
+        $hasTimestamp = $true
     }
     return [pscustomobject]@{
-        Status  = [string]$sig.Status
-        Subject = $subject
+        Status       = [string]$sig.Status
+        Subject      = $subject
+        ChainStatus  = $chainStatus
+        HasTimestamp = $hasTimestamp
     }
 }
 
@@ -1580,7 +1656,7 @@ function Invoke-PrinterTcpEnsureDriver {
         return 1
     }
     $catalogSig = Get-PrinterTcpSignatureParts -Signature (& $script:GetAuthenticodeSignature -Path $catalog)
-    if (-not (Test-PrinterTcpCatalogSignature -Status $catalogSig.Status -Subject $catalogSig.Subject)) {
+    if (-not (Test-PrinterTcpCatalogSignature -Status $catalogSig.Status -Subject $catalogSig.Subject -ChainStatus @($catalogSig.ChainStatus) -HasTimestamp ([bool]$catalogSig.HasTimestamp))) {
         Add-PrinterTcpError -Message "catalog signature rejected for $($Model.Id)"
         return 1
     }

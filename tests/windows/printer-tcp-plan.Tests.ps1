@@ -30,6 +30,7 @@ foreach ($command in @(
         'Save-PrinterTcpPayload',
         'Test-PrinterTcpDownloadIsTransient',
         'Test-PrinterTcpCatalogSignature',
+        'Get-PrinterTcpChainStatusNames',
         'Test-PrinterTcpOuterSignature',
         'Get-PrinterTcpPnpUtilArgumentList',
         'Get-PrinterTcpExpandArgumentList',
@@ -175,16 +176,34 @@ if (-not (Test-PrinterTcpCatalogSignature -Status 'Valid' -Subject 'CN=Anything'
     Fail 'Valid catalog was rejected'
 }
 $whql = 'CN=Microsoft Windows Hardware Compatibility Publisher, O=Microsoft Corporation, C=US'
-if (-not (Test-PrinterTcpCatalogSignature -Status 'NotTimeValid' -Subject $whql)) {
-    Fail 'expired WHQL catalog was rejected'
+if (Test-PrinterTcpCatalogSignature -Status 'NotTimeValid' -Subject $whql) {
+    Fail 'NotTimeValid is not a signature status'
 }
-if (Test-PrinterTcpCatalogSignature -Status 'NotTimeValid' -Subject 'CN=KONICA MINOLTA') {
-    Fail 'NotTimeValid without the WHQL publisher was accepted'
+if (-not (Test-PrinterTcpCatalogSignature -Status 'UnknownError' -Subject $whql -ChainStatus @('NotTimeValid'))) {
+    Fail 'expired untimestamped WHQL catalog was rejected'
+}
+if (-not (Test-PrinterTcpCatalogSignature -Status 'NotTrusted' -Subject $whql -ChainStatus @('NotTimeValid', 'NotTimeNested'))) {
+    Fail 'NotTrusted expired WHQL catalog was rejected'
+}
+if (Test-PrinterTcpCatalogSignature -Status 'UnknownError' -Subject 'CN=KONICA MINOLTA' -ChainStatus @('NotTimeValid')) {
+    Fail 'expired catalog without the WHQL publisher was accepted'
+}
+if (Test-PrinterTcpCatalogSignature -Status 'UnknownError' -Subject $whql -ChainStatus @('NotTimeValid', 'UntrustedRoot')) {
+    Fail 'expired WHQL catalog with another chain failure was accepted'
+}
+if (Test-PrinterTcpCatalogSignature -Status 'UnknownError' -Subject $whql -ChainStatus @('NotTimeValid') -HasTimestamp $true) {
+    Fail 'timestamped expired catalog was accepted'
+}
+if (Test-PrinterTcpCatalogSignature -Status 'HashMismatch' -Subject $whql -ChainStatus @('NotTimeValid')) {
+    Fail 'hash mismatch was accepted because the chain expired'
 }
 foreach ($status in @('NotSigned', 'HashMismatch', 'NotTrusted', 'UnknownError')) {
     if (Test-PrinterTcpCatalogSignature -Status $status -Subject $whql) {
         Fail "catalog status $status was accepted"
     }
+}
+if (@(Get-PrinterTcpChainStatusNames -Certificate $null).Count -ne 0) {
+    Fail 'null certificate produced chain status'
 }
 
 $microsoftSubject = 'CN=Microsoft Code Signing PCA 2011, O=Microsoft Corporation, C=US'
@@ -944,7 +963,12 @@ function Reset-Case {
             if ($norm.Contains('/Win_x64/') -and $norm -notmatch '/FAX/|/V4/|/WebView2/' -and (Test-Path -LiteralPath $dll)) {
                 $script:LayoutOk = $true
             }
-            return [pscustomobject]@{ Status = 'NotTimeValid'; Subject = $whql }
+            return [pscustomobject]@{
+                Status       = 'UnknownError'
+                Subject      = $whql
+                ChainStatus  = @('NotTimeValid')
+                HasTimestamp = $false
+            }
         }
         if ($Path -like '*.exe') {
             return [pscustomobject]@{ Status = 'Valid'; Subject = 'CN=KONICA MINOLTA, O=KONICA MINOLTA' }
