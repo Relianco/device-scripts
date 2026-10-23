@@ -1179,16 +1179,16 @@ function Find-PrinterTcpStagedInf {
     if (-not (Test-Path -LiteralPath $Root)) {
         return ''
     }
-    $options = [System.IO.EnumerationOptions]::new()
-    $options.RecurseSubdirectories = $true
-    $options.IgnoreInaccessible = $true
-    $options.MatchCasing = [System.IO.MatchCasing]::CaseInsensitive
+    # Windows PowerShell 5.1 has no EnumerationOptions. SilentlyContinue skips a directory the search cannot read.
     $newestPath = ''
     $newestTime = [datetime]::MinValue
-    foreach ($path in [System.IO.Directory]::EnumerateFiles($Root, $InfName, $options)) {
-        $when = [System.IO.File]::GetLastWriteTimeUtc($path)
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue)) {
+        if (-not [string]::Equals($file.Name, $InfName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        $when = $file.LastWriteTimeUtc
         if ([string]::IsNullOrEmpty($newestPath) -or $when -gt $newestTime) {
-            $newestPath = $path
+            $newestPath = [string]$file.FullName
             $newestTime = $when
         }
     }
