@@ -14,6 +14,8 @@ import {
   notPerformedBody,
   parseFindings,
   parseModelList,
+  MAX_COMPLETION_TOKENS,
+  messageText,
   postCompletion,
   primaryModel,
   reviewPullRequest,
@@ -214,7 +216,7 @@ test('model_not_found fails without a second model and a 503 is retried once', a
     fetchImpl: async (_url, init) => {
       calls += 1
       const sent = JSON.parse(init.body)
-      assert.equal(sent.max_completion_tokens, 2000)
+      assert.equal(sent.max_completion_tokens, MAX_COMPLETION_TOKENS)
       assert.equal(sent.max_tokens, undefined)
       assert.equal(sent.model, DEFAULT_MODEL)
       assert.equal(init.headers.Authorization, 'Bearer test-key')
@@ -230,4 +232,49 @@ test('model_not_found fails without a second model and a 503 is retried once', a
   })
   assert.equal(calls, 2)
   assert.match(content, /findings/)
+})
+
+test('an empty completion is retried once and a text part is accepted', async () => {
+  assert.equal(messageText({ content: [{ type: 'text', text: '{"findings":[]}' }] }), '{"findings":[]}')
+  let calls = 0
+  const content = await postCompletion({
+    endpoint: 'https://api.openai.com/v1',
+    apiKey: 'test-key',
+    model: DEFAULT_MODEL,
+    messages: [],
+    sleep: async () => {},
+    fetchImpl: async () => {
+      calls += 1
+      if (calls === 1) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '' } }] }),
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: '{"findings":[]}' }] } }] }),
+      }
+    },
+  })
+  assert.equal(calls, 2)
+  assert.match(content, /findings/)
+
+  await assert.rejects(
+    () => postCompletion({
+      endpoint: 'https://api.openai.com/v1',
+      apiKey: 'test-key',
+      model: DEFAULT_MODEL,
+      messages: [],
+      sleep: async () => {},
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: null, refusal: 'no' } }] }),
+      }),
+    }),
+    /finish_reason=length; keys=content,refusal/,
+  )
 })
