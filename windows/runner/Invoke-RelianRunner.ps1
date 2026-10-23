@@ -11,7 +11,8 @@ param(
     [ValidateSet('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall')]
     [string]$Action,
     [string]$PinVersion,
-    [AllowEmptyString()][string]$CancelPath
+    [AllowEmptyString()][string]$CancelPath,
+    [AllowEmptyString()][string]$PackageArguments = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -213,13 +214,92 @@ function Remove-RelianDirectory {
     }
 }
 
+function ConvertFrom-RelianPackageArguments {
+    param([AllowEmptyString()][string]$PackageArguments)
+
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    if ($PackageArguments -eq '') {
+        # A bare return enumerates the list. The comma returns the list object.
+        return ,$pairs
+    }
+    foreach ($unit in $PackageArguments.ToCharArray()) {
+        $code = [int]$unit
+        $digit = $code -ge 48 -and $code -le 57
+        $upper = $code -ge 65 -and $code -le 90
+        $lower = $code -ge 97 -and $code -le 122
+        $symbol = $code -eq 43 -or $code -eq 47 -or $code -eq 61
+        if (-not ($digit -or $upper -or $lower -or $symbol)) {
+            throw 'invalid package arguments'
+        }
+    }
+    try {
+        $bytes = [Convert]::FromBase64String($PackageArguments)
+    } catch {
+        throw 'invalid package arguments'
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw 'invalid package arguments'
+    }
+    try {
+        $json = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    } catch {
+        throw 'invalid package arguments'
+    }
+    if (-not $json.TrimStart().StartsWith('{')) {
+        throw 'invalid package arguments'
+    }
+    try {
+        $parsed = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+    } catch {
+        throw 'invalid package arguments'
+    }
+    if ($null -eq $parsed -or $parsed -isnot [System.Management.Automation.PSCustomObject]) {
+        throw 'invalid package arguments'
+    }
+    $reserved = @(
+        'DeploymentType', 'Action', 'PinVersion', 'CancelPath', 'MarkerRoot',
+        'PackageUrl', 'PackageSha256', 'ToolkitUrl', 'ToolkitSha256',
+        'BrandPackUrl', 'BrandPackSha256', 'PackageArguments'
+    )
+    foreach ($prop in $parsed.PSObject.Properties) {
+        $value = $prop.Value
+        if ($null -eq $value) {
+            throw 'invalid package arguments'
+        }
+        if ($value -isnot [string]) {
+            throw 'invalid package arguments'
+        }
+        $name = [string]$prop.Name
+        if (-not [regex]::IsMatch($name, '\A[A-Za-z][A-Za-z0-9]{0,63}\z')) {
+            throw 'invalid package arguments'
+        }
+        foreach ($banned in $reserved) {
+            if ($name.Equals($banned, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'invalid package arguments'
+            }
+        }
+        foreach ($unit in $value.ToCharArray()) {
+            $code = [int]$unit
+            if ($code -lt 32 -or $code -eq 34) {
+                throw 'invalid package arguments'
+            }
+        }
+        [void]$pairs.Add([pscustomobject]@{
+            Name = $name
+            Value = [string]$value
+        })
+    }
+    return ,$pairs
+}
+
 function Invoke-RelianPackageSequence {
     param(
         [Parameter(Mandatory)][string]$ScriptPath,
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][string]$PinVersion,
         [Parameter(Mandatory)][string]$WorkRoot,
-        [AllowEmptyString()][string]$CancelPath = ''
+        [AllowEmptyString()][string]$CancelPath = '',
+        [System.Collections.Generic.List[object]]$PackageParameters
     )
 
     # Reinstall is one uninstall followed by one install. Do not pass Action Reinstall.
@@ -245,7 +325,7 @@ function Invoke-RelianPackageSequence {
         if (Test-RelianCancelled -CancelPath $CancelPath) {
             return 130
         }
-        $result = & $script:InvokePackage -ScriptPath $ScriptPath -DeploymentType $step.DeploymentType -Action $step.Action -PinVersion $PinVersion -WorkRoot $WorkRoot
+        $result = & $script:InvokePackage -ScriptPath $ScriptPath -DeploymentType $step.DeploymentType -Action $step.Action -PinVersion $PinVersion -WorkRoot $WorkRoot -PackageParameters $PackageParameters
         if ($null -eq $result) {
             return 1
         }
@@ -300,7 +380,7 @@ $script:TestCancel = {
 # Executable is this host process. Windows PowerShell 5.1 has no pwsh on PATH
 # and rejects -WorkingDirectory. The package path is absolute.
 $script:InvokePackage = {
-    param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)
+    param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot, $PackageParameters)
     $hostPath = $null
     $current = [System.Diagnostics.Process]::GetCurrentProcess()
     if ($null -ne $current.MainModule) {
@@ -309,7 +389,22 @@ $script:InvokePackage = {
     if ([string]::IsNullOrWhiteSpace($hostPath)) {
         $hostPath = (Get-Process -Id $PID).Path
     }
-    & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $ScriptPath -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion | Out-Host
+    # $null adds no arguments. @($null) would add one empty pair.
+    $childArgs = [System.Collections.Generic.List[string]]::new()
+    foreach ($token in @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', [string]$ScriptPath,
+            '-DeploymentType', [string]$DeploymentType, '-Action', [string]$Action, '-PinVersion', [string]$PinVersion
+        )) {
+        [void]$childArgs.Add($token)
+    }
+    if ($null -ne $PackageParameters) {
+        foreach ($pair in $PackageParameters) {
+            [void]$childArgs.Add('-' + [string]$pair.Name)
+            [void]$childArgs.Add([string]$pair.Value)
+        }
+    }
+    $argList = $childArgs.ToArray()
+    & $hostPath @argList | Out-Host
     return [int]$LASTEXITCODE
 }
 
@@ -327,7 +422,8 @@ function Invoke-RelianRunner {
         [ValidateSet('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall')]
         [string]$Action,
         [Parameter(Mandatory)][string]$PinVersion,
-        [AllowEmptyString()][string]$CancelPath = ''
+        [AllowEmptyString()][string]$CancelPath = '',
+        [AllowEmptyString()][string]$PackageArguments = ''
     )
 
     foreach ($url in @($PackageUrl, $ToolkitUrl, $BrandPackUrl)) {
@@ -335,6 +431,13 @@ function Invoke-RelianRunner {
             Write-RelianRunnerError 'refusing a URL that contains userinfo'
             return 1
         }
+    }
+
+    try {
+        $packageParameters = ConvertFrom-RelianPackageArguments -PackageArguments $PackageArguments
+    } catch {
+        Write-RelianRunnerError 'invalid package arguments'
+        return 1
     }
 
     if ([string]::IsNullOrWhiteSpace($PackageSha256) -or
@@ -390,7 +493,7 @@ function Invoke-RelianRunner {
             [void](& $script:ExpandArchive -Path $brandFile -Destination $work)
             $scriptPath = Join-Path $work 'Invoke-Package.ps1'
             [System.IO.File]::Copy($packageFile, $scriptPath, $true)
-            $exitCode = [int](Invoke-RelianPackageSequence -ScriptPath $scriptPath -Action $Action -PinVersion $PinVersion -WorkRoot $work -CancelPath $CancelPath)
+            $exitCode = [int](Invoke-RelianPackageSequence -ScriptPath $scriptPath -Action $Action -PinVersion $PinVersion -WorkRoot $work -CancelPath $CancelPath -PackageParameters $packageParameters)
         }
     } catch {
         Write-RelianRunnerDetail -Message $_.Exception.Message -Urls @($PackageUrl, $ToolkitUrl, $BrandPackUrl)
