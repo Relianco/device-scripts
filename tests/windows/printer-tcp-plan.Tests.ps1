@@ -216,7 +216,7 @@ if (-not (Test-PrinterTcpQueueName -Name ('A' * 220))) {
 if (Test-PrinterTcpQueueName -Name ('A' * 221)) {
     Fail '221 character name was accepted'
 }
-if (Test-PrinterTcpQueueName -Name ' Front Desk' -or (Test-PrinterTcpQueueName -Name 'Front Desk ')) {
+if ((Test-PrinterTcpQueueName -Name ' Front Desk') -or (Test-PrinterTcpQueueName -Name 'Front Desk ')) {
     Fail 'untrimmed queue name was accepted'
 }
 foreach ($ch in @("`t", "`r", "`n", '|', '\', '/', ':', '*', '?', '"', '<', '>')) {
@@ -430,6 +430,14 @@ function New-UserInfoUrl {
 
 Assert-Plan -Plan (Get-Plan -SourceUrl (New-UserInfoUrl)) -Expect (New-Expect -ExitCode 1) -Label 'userinfo'
 Assert-Plan -Plan (Get-Plan -SourceUrl 'http://example.invalid/driver.cab') -Expect (New-Expect -ExitCode 1) -Label 'http url'
+$savedBrotherSha = [string]$brother.Sha256
+$brother.Sha256 = ''
+foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
+    Assert-Plan -Plan (Get-Plan -Action $action -SourceUrl (New-UserInfoUrl)) -Expect (New-Expect -ExitCode 0) -Label "$action empty hash"
+}
+$brother.Sha256 = '   '
+Assert-Plan -Plan (Get-Plan -Action 'Install' -SourceUrl (New-UserInfoUrl)) -Expect (New-Expect -ExitCode 0) -Label 'whitespace hash'
+$brother.Sha256 = $savedBrotherSha
 
 $create = New-Expect -EnsureDriver $true -CreatePort $true -CreateQueue $true -WriteMarker $true
 foreach ($action in @('Install', 'Update')) {
@@ -460,6 +468,7 @@ $sameHost = @([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.
 Assert-Plan -Plan (Get-Plan -ExistingPorts $sameHost -DriverInstalled $true) -Expect (New-Expect -CreateQueue $true -WriteMarker $true) -Label 'port host matches'
 
 Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort) -Expect (New-Expect -RemoveQueue $true -RemovePort $true -ClearMarker $true) -Label 'Uninstall owned queue'
+Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -SourceUrl (New-UserInfoUrl) -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort) -Expect (New-Expect -RemoveQueue $true -RemovePort $true -ClearMarker $true) -Label 'Uninstall userinfo'
 Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -ExistingPrinters $readyPrinter -ExistingPorts $readyPort) -Expect (New-Expect -ExitCode 0) -Label 'Uninstall unmanaged queue'
 $shared = @(
     (New-Printer -Name 'Front Desk' -DriverName 'Brother HL-L2370DW series' -PortName 'IP_192.0.2.10')
@@ -1090,6 +1099,48 @@ try {
     $code = Invoke-Case -Action 'Reinstall'
     if ($code -ne 1 -or $script:DownloadCount -ne 0 -or @(Read-Marker).Count -ne 0) {
         Fail "Reinstall returned $code"
+    }
+
+    Reset-Case
+    Use-FakePins
+    $brother.Sha256 = ''
+    $brother.SourceUrl = New-UserInfoUrl
+    $code = Invoke-Case
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:AddCalls.Count -ne 0) {
+        Fail "empty hash install returned $code after $($script:DownloadCount) downloads"
+    }
+
+    Reset-Case
+    Use-FakePins
+    $brother.Sha256 = ''
+    $brother.SourceUrl = New-UserInfoUrl
+    $script:DriverNames.Add('Brother HL-L2370DW series')
+    $script:LivePrinters.Add([pscustomobject]@{
+            Name       = 'Front Desk'
+            DriverName = 'Brother HL-L2370DW series'
+            PortName   = 'IP_192.0.2.10'
+        })
+    $script:LivePorts.Add([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.10' })
+    Write-PrinterTcpMarkerName -Root $script:MarkerRoot -Name 'Front Desk' -Address '192.0.2.10' -Model 'BrotherHlL2370Dw'
+    $code = Invoke-Case -Action 'Uninstall'
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:RemovePrinterCalls.Count -ne 0 -or @(Read-Marker).Count -ne 1) {
+        Fail "empty hash uninstall returned $code"
+    }
+
+    Reset-Case
+    Use-FakePins
+    $brother.SourceUrl = New-UserInfoUrl
+    $script:DriverNames.Add('Brother HL-L2370DW series')
+    $script:LivePrinters.Add([pscustomobject]@{
+            Name       = 'Front Desk'
+            DriverName = 'Brother HL-L2370DW series'
+            PortName   = 'IP_192.0.2.10'
+        })
+    $script:LivePorts.Add([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.10' })
+    Write-PrinterTcpMarkerName -Root $script:MarkerRoot -Name 'Front Desk' -Address '192.0.2.10' -Model 'BrotherHlL2370Dw'
+    $code = Invoke-Case -Action 'Uninstall'
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:RemovePrinterCalls.Count -ne 1 -or @(Read-Marker).Count -ne 0) {
+        Fail "userinfo uninstall returned $code"
     }
 
     Reset-Case

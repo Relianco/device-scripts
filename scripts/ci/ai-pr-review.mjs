@@ -232,10 +232,6 @@ export async function postCompletion({
       if (content.trim() !== '') return content
       const reason = choice?.finish_reason || 'none'
       const keys = choice?.message ? Object.keys(choice.message).sort().join(',') : 'none'
-      if (attempt === 1) {
-        await sleep(1000)
-        continue
-      }
       throw new Error(`completion content missing (finish_reason=${reason}; keys=${keys})`)
     }
     if (isModelUnavailable(response.status, text) || response.status === 401 || response.status === 403) {

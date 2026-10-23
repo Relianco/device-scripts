@@ -233,21 +233,29 @@ function Get-PrinterTcpValidationCode {
     if ($null -eq $model) {
         return 1
     }
+    # An empty hash disables every action, including Uninstall and Reinstall.
+    # This is before the URL is read, so userinfo cannot exit 1 first.
+    if ([string]::IsNullOrWhiteSpace([string]$model.Sha256)) {
+        return 0
+    }
     if (-not (Test-PrinterTcpQueueName -Name $PrinterName)) {
         return 1
     }
     if (-not (Test-PrinterTcpIpv4 -Address $PrinterAddress)) {
         return 1
     }
-    $url = $SourceUrl
-    if ([string]::IsNullOrWhiteSpace($url)) {
-        $url = [string]$model.SourceUrl
-    }
-    if (Test-PrinterTcpUrlHasUserInfo -Url $url) {
-        return 1
-    }
-    if (-not (Test-PrinterTcpUrlIsHttps -Url $url)) {
-        return 1
+    # Uninstall does not download. A userinfo URL does not block it.
+    if ($Action -ne 'Uninstall') {
+        $url = $SourceUrl
+        if ([string]::IsNullOrWhiteSpace($url)) {
+            $url = [string]$model.SourceUrl
+        }
+        if (Test-PrinterTcpUrlHasUserInfo -Url $url) {
+            return 1
+        }
+        if (-not (Test-PrinterTcpUrlIsHttps -Url $url)) {
+            return 1
+        }
     }
     # The runner sends Uninstall and then Install. This package does not.
     if ($Action -eq 'Reinstall') {

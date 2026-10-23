@@ -234,34 +234,9 @@ test('model_not_found fails without a second model and a 503 is retried once', a
   assert.match(content, /findings/)
 })
 
-test('an empty completion is retried once and a text part is accepted', async () => {
+test('an empty completion fails immediately and a text part is accepted', async () => {
   assert.equal(messageText({ content: [{ type: 'text', text: '{"findings":[]}' }] }), '{"findings":[]}')
   let calls = 0
-  const content = await postCompletion({
-    endpoint: 'https://api.openai.com/v1',
-    apiKey: 'test-key',
-    model: DEFAULT_MODEL,
-    messages: [],
-    sleep: async () => {},
-    fetchImpl: async () => {
-      calls += 1
-      if (calls === 1) {
-        return {
-          ok: true,
-          status: 200,
-          text: async () => JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '' } }] }),
-        }
-      }
-      return {
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: '{"findings":[]}' }] } }] }),
-      }
-    },
-  })
-  assert.equal(calls, 2)
-  assert.match(content, /findings/)
-
   await assert.rejects(
     () => postCompletion({
       endpoint: 'https://api.openai.com/v1',
@@ -269,12 +244,30 @@ test('an empty completion is retried once and a text part is accepted', async ()
       model: DEFAULT_MODEL,
       messages: [],
       sleep: async () => {},
-      fetchImpl: async () => ({
-        ok: true,
-        status: 200,
-        text: async () => JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: null, refusal: 'no' } }] }),
-      }),
+      fetchImpl: async () => {
+        calls += 1
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: null, refusal: 'no' } }] }),
+        }
+      },
     }),
     /finish_reason=length; keys=content,refusal/,
   )
+  assert.equal(calls, 1)
+
+  const content = await postCompletion({
+    endpoint: 'https://api.openai.com/v1',
+    apiKey: 'test-key',
+    model: DEFAULT_MODEL,
+    messages: [],
+    sleep: async () => {},
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: '{"findings":[]}' }] } }] }),
+    }),
+  })
+  assert.match(content, /findings/)
 })
