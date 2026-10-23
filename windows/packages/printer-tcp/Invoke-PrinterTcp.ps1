@@ -101,6 +101,7 @@ function New-PrinterTcpPlan {
         [string]$PreviousPort = '',
         [bool]$RemoveQueue = $false,
         [bool]$RemovePort = $false,
+        [string]$RemovePortName = '',
         [bool]$WriteMarker = $false,
         [bool]$ClearMarker = $false
     )
@@ -115,6 +116,7 @@ function New-PrinterTcpPlan {
         PreviousPort   = $PreviousPort
         RemoveQueue    = $RemoveQueue
         RemovePort     = $RemovePort
+        RemovePortName = $RemovePortName
         WriteMarker    = $WriteMarker
         ClearMarker    = $ClearMarker
     }
@@ -340,6 +342,58 @@ function Test-PrinterTcpPortUsedByOther {
     return $false
 }
 
+function ConvertTo-PrinterTcpDriverVersion {
+    param($Value)
+    if ($null -eq $Value -or $Value -is [version]) {
+        return $Value
+    }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return $null
+    }
+    if ($text.Contains('.')) {
+        try {
+            return [version]$text
+        } catch {
+            return $null
+        }
+    }
+    # Get-PrinterDriver.DriverVersion is a uint64 of four 16-bit fields.
+    # Windows PowerShell 5.1 has no helper that decodes it.
+    $raw = [uint64]0
+    if (-not [uint64]::TryParse($text, [ref]$raw) -or $raw -eq 0) {
+        return $null
+    }
+    $major = [int](($raw -shr 48) -band 0xFFFF)
+    $minor = [int](($raw -shr 32) -band 0xFFFF)
+    $build = [int](($raw -shr 16) -band 0xFFFF)
+    $revision = [int]($raw -band 0xFFFF)
+    return [version]::new($major, $minor, $build, $revision)
+}
+
+function Format-PrinterTcpDriverVersion {
+    param($Value)
+    $version = ConvertTo-PrinterTcpDriverVersion -Value $Value
+    if ($null -eq $version) {
+        return ''
+    }
+    $build = $version.Build
+    $revision = $version.Revision
+    if ($build -lt 0) { $build = 0 }
+    if ($revision -lt 0) { $revision = 0 }
+    return '{0}.{1}.{2}.{3}' -f $version.Major, $version.Minor, $build, $revision
+}
+
+function Test-PrinterTcpSameDriverVersion {
+    param($Installed, [string]$Pinned)
+    $left = Format-PrinterTcpDriverVersion -Value $Installed
+    $right = Format-PrinterTcpDriverVersion -Value $Pinned
+    if ([string]::IsNullOrWhiteSpace($left) -or [string]::IsNullOrWhiteSpace($right)) {
+        return $false
+    }
+    return [string]::Equals($left, $right, [System.StringComparison]::Ordinal)
+}
+
 function Get-PrinterTcpPlan {
     param(
         [string]$Action,
@@ -351,7 +405,8 @@ function Get-PrinterTcpPlan {
         $MarkerPrinters = $null,
         $ExistingPrinters = $null,
         $ExistingPorts = $null,
-        [bool]$DriverInstalled = $false
+        [bool]$DriverInstalled = $false,
+        $InstalledDriverVersion = ''
     )
 
     $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl)
@@ -370,10 +425,19 @@ function Get-PrinterTcpPlan {
         }
         $printer = Get-PrinterTcpListedPrinter -ExistingPrinters $ExistingPrinters -Name $PrinterName
         $removeQueue = $null -ne $printer
-        $removePort = (Test-PrinterTcpRemovablePortName -PortName $portName) -and
-            (Test-PrinterTcpPortExists -Ports $ExistingPorts -PortName $portName) -and
-            -not (Test-PrinterTcpPortUsedByOther -ExistingPrinters $ExistingPrinters -PrinterName $PrinterName -PortName $portName)
-        return New-PrinterTcpPlan -RemoveQueue $removeQueue -RemovePort $removePort -ClearMarker $true
+        # The argument can name a different address than the one this queue installed.
+        $recordedAddress = [string](Get-PrinterTcpField -Object $entry -Names @('Address', 'address'))
+        $removePortName = ''
+        if (Test-PrinterTcpIpv4 -Address $recordedAddress) {
+            $recordedPort = 'IP_' + $recordedAddress
+            $canRemove = (Test-PrinterTcpRemovablePortName -PortName $recordedPort) -and
+                (Test-PrinterTcpPortExists -Ports $ExistingPorts -PortName $recordedPort) -and
+                -not (Test-PrinterTcpPortUsedByOther -ExistingPrinters $ExistingPrinters -PrinterName $PrinterName -PortName $recordedPort)
+            if ($canRemove) {
+                $removePortName = $recordedPort
+            }
+        }
+        return New-PrinterTcpPlan -RemoveQueue $removeQueue -RemovePort (-not [string]::IsNullOrWhiteSpace($removePortName)) -RemovePortName $removePortName -ClearMarker $true
     }
 
     $printer = Get-PrinterTcpListedPrinter -ExistingPrinters $ExistingPrinters -Name $PrinterName
@@ -382,7 +446,11 @@ function Get-PrinterTcpPlan {
         return New-PrinterTcpPlan -ExitCode 1
     }
 
-    $ensure = -not $DriverInstalled
+    $versionMatches = $false
+    if ($DriverInstalled) {
+        $versionMatches = Test-PrinterTcpSameDriverVersion -Installed $InstalledDriverVersion -Pinned ([string]$model.Version)
+    }
+    $ensure = -not $versionMatches
     if ($Action -eq 'Repair') {
         $ensure = $true
     }
@@ -1291,14 +1359,22 @@ $script:GetInstalledDriverNames = {
     if (-not (Get-Command -Name 'Get-PrinterDriver' -ErrorAction SilentlyContinue)) {
         throw 'Get-PrinterDriver is not available'
     }
-    $names = [System.Collections.Generic.List[string]]::new()
+    $list = [System.Collections.Generic.List[object]]::new()
     foreach ($driver in @(Get-PrinterDriver -ErrorAction Stop)) {
         if ($null -eq $driver) {
             continue
         }
-        $names.Add([string]$driver.Name)
+        $version = $null
+        $props = @($driver.PSObject.Properties.Name)
+        if ($props -contains 'DriverVersion') {
+            $version = $driver.DriverVersion
+        }
+        $list.Add([pscustomobject]@{
+                Name          = [string]$driver.Name
+                DriverVersion = $version
+            })
     }
-    return ,$names.ToArray()
+    return ,$list.ToArray()
 }
 
 function Disable-PrinterTcpPortSnmp {
@@ -1611,16 +1687,30 @@ function Invoke-PrinterTcpAction {
         return 1
     }
     $driverInstalled = $false
-    foreach ($driverName in @($driverNames)) {
-        if ($null -eq $driverName) {
+    $installedVersion = $null
+    foreach ($driver in @($driverNames)) {
+        if ($null -eq $driver) {
             continue
         }
-        if ([string]::Equals([string]$driverName, [string]$model.DriverName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $name = ''
+        $version = $null
+        if ($driver -is [string]) {
+            $name = [string]$driver
+        } else {
+            $name = [string](Get-PrinterTcpField -Object $driver -Names @('Name', 'name'))
+            $driverProps = @($driver.PSObject.Properties.Name)
+            if ($driverProps -contains 'DriverVersion') {
+                $version = $driver.DriverVersion
+            }
+        }
+        if ([string]::Equals($name, [string]$model.DriverName, [System.StringComparison]::OrdinalIgnoreCase)) {
             $driverInstalled = $true
+            $installedVersion = $version
+            break
         }
     }
     $planPrinters = ConvertTo-PrinterTcpPlanPrinters -Printers $livePrinters -Ports $livePorts
-    $plan = Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl '' -MarkerPrinters $markerRead.Printers -ExistingPrinters $planPrinters -ExistingPorts $livePorts -DriverInstalled $driverInstalled
+    $plan = Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl '' -MarkerPrinters $markerRead.Printers -ExistingPrinters $planPrinters -ExistingPorts $livePorts -DriverInstalled $driverInstalled -InstalledDriverVersion $installedVersion
     if ($null -ne $plan.ExitCode) {
         return [int]$plan.ExitCode
     }
@@ -1654,7 +1744,7 @@ function Invoke-PrinterTcpAction {
             [void](& $script:AddPrinter -Name $PrinterName -DriverName ([string]$model.DriverName) -PortName $portSettings.Name)
         }
         if ($plan.RemovePort) {
-            [void](& $script:RemovePrinterPort -Name $portSettings.Name)
+            [void](& $script:RemovePrinterPort -Name ([string]$plan.RemovePortName))
         }
         if ($plan.ClearMarker) {
             Remove-PrinterTcpMarkerName -Root $MarkerRoot -Name $PrinterName

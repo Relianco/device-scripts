@@ -35,6 +35,7 @@ foreach ($command in @(
         'Get-PrinterTcpExpandArgumentList',
         'Get-PrinterTcpSfxArgumentList',
         'Find-PrinterTcpStagedInf',
+        'Test-PrinterTcpSameDriverVersion',
         'Get-PrinterTcpPortSettings',
         'Find-PrinterTcpDriverInf',
         'Get-PrinterTcpModel',
@@ -436,9 +437,10 @@ function Get-Plan {
         $MarkerPrinters = $null,
         $ExistingPrinters = $null,
         $ExistingPorts = $null,
-        [bool]$DriverInstalled = $false
+        [bool]$DriverInstalled = $false,
+        $InstalledDriverVersion = ''
     )
-    return Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl -MarkerPrinters $MarkerPrinters -ExistingPrinters $ExistingPrinters -ExistingPorts $ExistingPorts -DriverInstalled $DriverInstalled
+    return Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl -MarkerPrinters $MarkerPrinters -ExistingPrinters $ExistingPrinters -ExistingPorts $ExistingPorts -DriverInstalled $DriverInstalled -InstalledDriverVersion $InstalledDriverVersion
 }
 
 foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
@@ -479,28 +481,38 @@ foreach ($action in @('Install', 'Update')) {
     Assert-Plan -Plan (Get-Plan -Action $action) -Expect $create -Label "$action missing queue"
 }
 Assert-Plan -Plan (Get-Plan -Action 'Repair') -Expect $create -Label 'Repair missing queue'
-Assert-Plan -Plan (Get-Plan -DriverInstalled $true) -Expect (New-Expect -CreatePort $true -CreateQueue $true -WriteMarker $true) -Label 'driver already installed'
+Assert-Plan -Plan (Get-Plan -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -CreatePort $true -CreateQueue $true -WriteMarker $true) -Label 'driver already installed'
+Assert-Plan -Plan (Get-Plan -DriverInstalled $true -InstalledDriverVersion '1.0.0.0') -Expect (New-Expect -EnsureDriver $true -CreatePort $true -CreateQueue $true -WriteMarker $true) -Label 'driver name with an older version'
 
 $readyMarker = @(New-Marker -Name 'Front Desk' -Address '192.0.2.10' -Model 'BrotherHlL2370Dw')
 $readyPrinter = @(New-Printer -Name 'Front Desk' -DriverName 'Brother HL-L2370DW series' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
 $readyPort = @(New-Port -Name 'IP_192.0.2.10')
-Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -ExitCode 0) -Label 'already installed'
-Assert-Plan -Plan (Get-Plan -Action 'Repair' -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -EnsureDriver $true) -Label 'Repair present'
+Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -ExitCode 0) -Label 'already installed'
+Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -EnsureDriver $true) -Label 'blank installed version'
+Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.0.0.0') -Expect (New-Expect -EnsureDriver $true) -Label 'installed driver version differs'
+$brotherRawPlan = ([uint64]1 -shl 48) -bor ([uint64]6 -shl 32)
+Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion $brotherRawPlan) -Expect (New-Expect -ExitCode 0) -Label 'uint64 installed version matches'
+Assert-Plan -Plan (Get-Plan -Action 'Repair' -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -EnsureDriver $true) -Label 'Repair present'
 
 $unmanaged = @(New-Printer -Name 'Front Desk' -DriverName 'Other Driver' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
 Assert-Plan -Plan (Get-Plan -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -ExitCode 1) -Label 'unmanaged queue'
 Assert-Plan -Plan (Get-Plan -Action 'Repair' -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -ExitCode 1) -Label 'Repair unmanaged queue'
 
 $oldDriver = @(New-Printer -Name 'Front Desk' -DriverName 'Old Driver' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
-Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $oldDriver -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -UpdateQueue $true -PreviousDriver 'Old Driver' -PreviousPort 'IP_192.0.2.10' -WriteMarker $true) -Label 'managed driver differs'
+Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $oldDriver -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -UpdateQueue $true -PreviousDriver 'Old Driver' -PreviousPort 'IP_192.0.2.10' -WriteMarker $true) -Label 'managed driver differs'
 
 $oldAddress = @(New-Marker -Name 'Front Desk' -Address '192.0.2.10' -Model 'BrotherHlL2370Dw')
 $movedPrinter = @(New-Printer -Name 'Front Desk' -DriverName 'Brother HL-L2370DW series' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
-Assert-Plan -Plan (Get-Plan -PrinterAddress '192.0.2.11' -MarkerPrinters $oldAddress -ExistingPrinters $movedPrinter -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -CreatePort $true -UpdateQueue $true -PreviousDriver 'Brother HL-L2370DW series' -PreviousPort 'IP_192.0.2.10' -WriteMarker $true) -Label 'managed address differs'
+Assert-Plan -Plan (Get-Plan -PrinterAddress '192.0.2.11' -MarkerPrinters $oldAddress -ExistingPrinters $movedPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -CreatePort $true -UpdateQueue $true -PreviousDriver 'Brother HL-L2370DW series' -PreviousPort 'IP_192.0.2.10' -WriteMarker $true) -Label 'managed address differs'
 $wrongHost = @([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '198.51.100.20' })
-Assert-Plan -Plan (Get-Plan -ExistingPorts $wrongHost -DriverInstalled $true) -Expect (New-Expect -ExitCode 1) -Label 'port host differs'
+Assert-Plan -Plan (Get-Plan -ExistingPorts $wrongHost -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -ExitCode 1) -Label 'port host differs'
 $sameHost = @([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.10' })
-Assert-Plan -Plan (Get-Plan -ExistingPorts $sameHost -DriverInstalled $true) -Expect (New-Expect -CreateQueue $true -WriteMarker $true) -Label 'port host matches'
+Assert-Plan -Plan (Get-Plan -ExistingPorts $sameHost -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -CreateQueue $true -WriteMarker $true) -Label 'port host matches'
+$konicaMarker = @(New-Marker -Name 'Front Desk' -Address '192.0.2.10' -Model 'KonicaUniversalPcl')
+$konicaPrinter = @(New-Printer -Name 'Front Desk' -DriverName 'KONICA MINOLTA Universal PCL' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
+$konicaRawPlan = ([uint64]3 -shl 48) -bor ([uint64]9 -shl 32) -bor ([uint64]1203 -shl 16) -bor ([uint64]500)
+Assert-Plan -Plan (Get-Plan -PinVersion '3.9.1203.500' -PrinterModel 'KonicaUniversalPcl' -MarkerPrinters $konicaMarker -ExistingPrinters $konicaPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion $konicaRawPlan) -Expect (New-Expect -ExitCode 0) -Label 'Konica uint64 version matches'
+Assert-Plan -Plan (Get-Plan -PinVersion '3.9.1203.500' -PrinterModel 'KonicaUniversalPcl' -MarkerPrinters $konicaMarker -ExistingPrinters $konicaPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '3.9.1203.0') -Expect (New-Expect -EnsureDriver $true) -Label 'Konica version differs'
 
 Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort) -Expect (New-Expect -RemoveQueue $true -RemovePort $true -ClearMarker $true) -Label 'Uninstall owned queue'
 Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -SourceUrl (New-UserInfoUrl) -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort) -Expect (New-Expect -RemoveQueue $true -RemovePort $true -ClearMarker $true) -Label 'Uninstall userinfo'
@@ -511,6 +523,23 @@ $shared = @(
 )
 Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -MarkerPrinters $readyMarker -ExistingPrinters $shared -ExistingPorts $readyPort) -Expect (New-Expect -RemoveQueue $true -ClearMarker $true) -Label 'Uninstall shared port'
 Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -MarkerPrinters $readyMarker -ExistingPorts $readyPort) -Expect (New-Expect -RemovePort $true -ClearMarker $true) -Label 'Uninstall queue already gone'
+$argumentOnly = @(New-Port -Name 'IP_192.0.2.11')
+Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -PrinterAddress '192.0.2.11' -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $argumentOnly) -Expect (New-Expect -RemoveQueue $true -ClearMarker $true) -Label 'Uninstall leaves the argument port'
+$bothPorts = @(
+    (New-Port -Name 'IP_192.0.2.10')
+    (New-Port -Name 'IP_192.0.2.11')
+)
+$sharedRecorded = @(
+    (New-Printer -Name 'Front Desk' -DriverName 'Brother HL-L2370DW series' -PortName 'IP_192.0.2.10')
+    (New-Printer -Name 'South Desk' -DriverName 'Brother HL-L2370DW series' -PortName 'IP_192.0.2.10')
+)
+Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -PrinterAddress '192.0.2.11' -MarkerPrinters $readyMarker -ExistingPrinters $sharedRecorded -ExistingPorts $bothPorts) -Expect (New-Expect -RemoveQueue $true -ClearMarker $true) -Label 'Uninstall shared recorded port'
+$blankAddress = @(New-Marker -Name 'Front Desk' -Address '' -Model 'BrotherHlL2370Dw')
+Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -PrinterAddress '192.0.2.11' -MarkerPrinters $blankAddress -ExistingPrinters $readyPrinter -ExistingPorts $bothPorts) -Expect (New-Expect -RemoveQueue $true -ClearMarker $true) -Label 'Uninstall blank recorded address'
+$ownedMove = Get-Plan -Action 'Uninstall' -PrinterAddress '192.0.2.11' -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $bothPorts
+if (-not [bool]$ownedMove.RemovePort -or [string]$ownedMove.RemovePortName -cne 'IP_192.0.2.10') {
+    Fail "uninstall recorded port '$($ownedMove.RemovePortName)' remove=$($ownedMove.RemovePort)"
+}
 
 class PrinterTcpFakeHttpException : System.Exception {
     [object]$Response
@@ -739,6 +768,7 @@ function Reset-Case {
     $script:LivePrinters = [System.Collections.Generic.List[object]]::new()
     $script:LivePorts = [System.Collections.Generic.List[object]]::new()
     $script:DriverNames = [System.Collections.Generic.List[string]]::new()
+    $script:DriverVersions = @{}
     $script:StagedQueries = [System.Collections.Generic.List[string]]::new()
     $script:FindStagedInf = {
         param($InfName)
@@ -771,7 +801,18 @@ function Reset-Case {
         return ,$script:LivePorts.ToArray()
     }
     $script:GetInstalledDriverNames = {
-        return ,$script:DriverNames.ToArray()
+        $list = [System.Collections.Generic.List[object]]::new()
+        foreach ($name in @($script:DriverNames)) {
+            $version = ''
+            if ($null -ne $script:DriverVersions -and $script:DriverVersions.ContainsKey([string]$name)) {
+                $version = $script:DriverVersions[[string]$name]
+            }
+            $list.Add([pscustomobject]@{
+                    Name          = [string]$name
+                    DriverVersion = $version
+                })
+        }
+        return ,$list.ToArray()
     }
     $script:AddPrinterPort = {
         param($Name, $PrinterHostAddress, $PortNumber, $SnmpEnabled)
@@ -916,8 +957,10 @@ function Reset-Case {
         $leaf = [System.IO.Path]::GetFileName($InfPath)
         if ($leaf -ceq 'KOUWNJ1_.inf') {
             $script:DriverNames.Add('KONICA MINOLTA Universal PCL')
+            $script:DriverVersions['KONICA MINOLTA Universal PCL'] = '3.9.1203.500'
         } else {
             $script:DriverNames.Add('Brother HL-L2370DW series')
+            $script:DriverVersions['Brother HL-L2370DW series'] = '1.6.0.0'
         }
         return 0
     }
@@ -1066,6 +1109,7 @@ try {
     Reset-Case
     Use-FakePins
     $script:DriverNames.Add('Brother HL-L2370DW series')
+    $script:DriverVersions['Brother HL-L2370DW series'] = '1.6.0.0'
     $script:LivePrinters.Add([pscustomobject]@{
             Name       = 'Front Desk'
             DriverName = 'Old Driver'
@@ -1092,6 +1136,7 @@ try {
     Reset-Case
     Use-FakePins
     $script:DriverNames.Add('Brother HL-L2370DW series')
+    $script:DriverVersions['Brother HL-L2370DW series'] = '1.6.0.0'
     $script:LivePrinters.Add([pscustomobject]@{
             Name       = 'Front Desk'
             DriverName = 'Brother HL-L2370DW series'
@@ -1272,6 +1317,64 @@ try {
     $code = Invoke-Case -Action 'Repair'
     if ($code -ne 0 -or $script:DownloadCount -ne 1 -or $script:PnpPaths.Count -ne 1 -or $script:SetCalls.Count -ne 0) {
         Fail "Repair returned $code downloads $($script:DownloadCount) sets $($script:SetCalls.Count)"
+    }
+
+    Reset-Case
+    Use-FakePins
+    $script:LivePrinters.Add([pscustomobject]@{
+            Name       = 'Front Desk'
+            DriverName = 'Brother HL-L2370DW series'
+            PortName   = 'IP_192.0.2.10'
+        })
+    $script:LivePorts.Add([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.10' })
+    $script:LivePorts.Add([pscustomobject]@{ Name = 'IP_192.0.2.11'; HostAddress = '192.0.2.11' })
+    Write-PrinterTcpMarkerName -Root $script:MarkerRoot -Name 'Front Desk' -Address '192.0.2.10' -Model 'BrotherHlL2370Dw'
+    $code = Invoke-Case -Action 'Uninstall' -PrinterAddress '192.0.2.11'
+    if ($code -ne 0 -or $script:RemovePrinterCalls.Count -ne 1 -or @(Read-Marker).Count -ne 0) {
+        Fail "moved uninstall returned $code"
+    }
+    if ($script:RemovePortCalls -notcontains 'IP_192.0.2.10' -or $script:RemovePortCalls -contains 'IP_192.0.2.11') {
+        Fail "moved uninstall removed $($script:RemovePortCalls -join ',')"
+    }
+
+    $brotherRaw = ([uint64]1 -shl 48) -bor ([uint64]6 -shl 32)
+    $konicaRaw = ([uint64]3 -shl 48) -bor ([uint64]9 -shl 32) -bor ([uint64]1203 -shl 16) -bor ([uint64]500)
+    $oldRaw = ([uint64]1 -shl 48)
+    if (-not (Test-PrinterTcpSameDriverVersion -Installed '1.6.0.0' -Pinned '1.6.0.0')) {
+        Fail 'dotted pin did not match itself'
+    }
+    if (-not (Test-PrinterTcpSameDriverVersion -Installed '1.6.0' -Pinned '1.6.0.0')) {
+        Fail 'three-part version did not match the pin'
+    }
+    if (-not (Test-PrinterTcpSameDriverVersion -Installed $brotherRaw -Pinned '1.6.0.0')) {
+        Fail 'uint64 Brother version did not match 1.6.0.0'
+    }
+    if (-not (Test-PrinterTcpSameDriverVersion -Installed ([string]$brotherRaw) -Pinned '1.6.0.0')) {
+        Fail 'decimal Brother version did not match 1.6.0.0'
+    }
+    if (-not (Test-PrinterTcpSameDriverVersion -Installed $konicaRaw -Pinned '3.9.1203.500')) {
+        Fail 'uint64 Konica version did not match 3.9.1203.500'
+    }
+    foreach ($installed in @('', '   ', 'not-a-version', '1.0.0.0', $oldRaw, 0)) {
+        if (Test-PrinterTcpSameDriverVersion -Installed $installed -Pinned '1.6.0.0') {
+            Fail "installed '$installed' counted as the Brother pin"
+        }
+    }
+
+    Reset-Case
+    Use-FakePins
+    $script:DriverNames.Add('Brother HL-L2370DW series')
+    $script:DriverVersions = @{ 'Brother HL-L2370DW series' = '1.0.0.0' }
+    $script:LivePrinters.Add([pscustomobject]@{
+            Name       = 'Front Desk'
+            DriverName = 'Brother HL-L2370DW series'
+            PortName   = 'IP_192.0.2.10'
+        })
+    $script:LivePorts.Add([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.10' })
+    Write-PrinterTcpMarkerName -Root $script:MarkerRoot -Name 'Front Desk' -Address '192.0.2.10' -Model 'BrotherHlL2370Dw'
+    $code = Invoke-Case
+    if ($code -ne 0 -or $script:DownloadCount -ne 1 -or $script:SetCalls.Count -ne 0) {
+        Fail "older installed driver returned $code downloads $($script:DownloadCount) sets $($script:SetCalls.Count)"
     }
 } finally {
     Restore-Models
