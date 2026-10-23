@@ -1259,31 +1259,43 @@ function Get-PrinterTcpExpandArgumentList {
     )
 }
 
+function Get-PrinterTcpFileSha256 {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return ''
+    }
+    $hash = Get-FileHash -LiteralPath $Path -Algorithm SHA256
+    if ($null -eq $hash -or [string]::IsNullOrWhiteSpace([string]$hash.Hash)) {
+        return ''
+    }
+    return ([string]$hash.Hash).ToLowerInvariant()
+}
+
 function Find-PrinterTcpStagedInf {
     param(
         [string]$Root,
-        [string]$InfName
+        [string]$InfName,
+        [string]$Sha256 = ''
     )
-    if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($InfName)) {
+    if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($InfName) -or [string]::IsNullOrWhiteSpace($Sha256)) {
         return ''
     }
     if (-not (Test-Path -LiteralPath $Root)) {
         return ''
     }
+    $want = $Sha256.Trim().ToLowerInvariant()
     # Windows PowerShell 5.1 has no EnumerationOptions. SilentlyContinue skips a directory the search cannot read.
-    $newestPath = ''
-    $newestTime = [datetime]::MinValue
+    # The store can hold another package with the same INF name. Match the extracted file, not the newest timestamp.
     foreach ($file in @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue)) {
         if (-not [string]::Equals($file.Name, $InfName, [System.StringComparison]::OrdinalIgnoreCase)) {
             continue
         }
-        $when = $file.LastWriteTimeUtc
-        if ([string]::IsNullOrEmpty($newestPath) -or $when -gt $newestTime) {
-            $newestPath = [string]$file.FullName
-            $newestTime = $when
+        $got = Get-PrinterTcpFileSha256 -Path ([string]$file.FullName)
+        if ([string]::Equals($got, $want, [System.StringComparison]::Ordinal)) {
+            return [string]$file.FullName
         }
     }
-    return $newestPath
+    return ''
 }
 
 function Get-PrinterTcpSfxArgumentList {
@@ -1497,7 +1509,7 @@ $script:AddPrinterDriver = {
 }
 
 $script:FindStagedInf = {
-    param($InfName)
+    param($InfName, $SourceInf)
     if ($env:RELIAN_DEPLOY_TEST -eq '1') {
         throw 'refusing to search the driver store while a test is running'
     }
@@ -1505,7 +1517,8 @@ $script:FindStagedInf = {
     if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
         $root = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
     }
-    return Find-PrinterTcpStagedInf -Root $root -InfName ([string]$InfName)
+    $sha = Get-PrinterTcpFileSha256 -Path ([string]$SourceInf)
+    return Find-PrinterTcpStagedInf -Root $root -InfName ([string]$InfName) -Sha256 $sha
 }
 
 $script:SetPrinter = {
@@ -1670,7 +1683,7 @@ function Invoke-PrinterTcpEnsureDriver {
         Add-PrinterTcpError -Message "pnputil add-driver failed for $($Model.Id)"
         return 1
     }
-    $staged = [string](& $script:FindStagedInf -InfName ([string]$Model.Inf))
+    $staged = [string](& $script:FindStagedInf -InfName ([string]$Model.Inf) -SourceInf $infPath)
     if ([string]::IsNullOrWhiteSpace($staged)) {
         Add-PrinterTcpError -Message "staged driver inf missing for $($Model.Id)"
         return 1

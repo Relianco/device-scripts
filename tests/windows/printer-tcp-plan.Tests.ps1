@@ -36,6 +36,7 @@ foreach ($command in @(
         'Get-PrinterTcpExpandArgumentList',
         'Get-PrinterTcpSfxArgumentList',
         'Find-PrinterTcpStagedInf',
+        'Get-PrinterTcpFileSha256',
         'Test-PrinterTcpSameDriverVersion',
         'Get-PrinterTcpPortSettings',
         'Find-PrinterTcpDriverInf',
@@ -345,13 +346,24 @@ try {
     New-Item -ItemType Directory -Path $newerDir -Force | Out-Null
     $olderInf = Join-Path $olderDir 'BROHL17A.INF'
     $newerInf = Join-Path $newerDir 'BROHL17A.INF'
-    [System.IO.File]::WriteAllText($olderInf, 'old')
-    [System.IO.File]::WriteAllText($newerInf, 'new')
+    [System.IO.File]::WriteAllText($olderInf, 'pinned-inf')
+    [System.IO.File]::WriteAllText($newerInf, 'other-inf')
     [System.IO.File]::SetLastWriteTimeUtc($olderInf, [datetime]::UtcNow.AddMinutes(-10))
     [System.IO.File]::SetLastWriteTimeUtc($newerInf, [datetime]::UtcNow)
-    $staged = Find-PrinterTcpStagedInf -Root $store -InfName 'brohl17a.inf'
-    if ($staged -cne $newerInf) {
+    if (-not [string]::IsNullOrWhiteSpace((Find-PrinterTcpStagedInf -Root $store -InfName 'brohl17a.inf'))) {
+        Fail 'staged inf was chosen without a hash'
+    }
+    $pinnedSha = (Get-FileHash -LiteralPath $olderInf -Algorithm SHA256).Hash
+    $staged = Find-PrinterTcpStagedInf -Root $store -InfName 'brohl17a.inf' -Sha256 $pinnedSha.ToLowerInvariant()
+    if ($staged -cne $olderInf) {
         Fail "staged inf '$staged'"
+    }
+    $otherSha = (Get-FileHash -LiteralPath $newerInf -Algorithm SHA256).Hash
+    if ((Find-PrinterTcpStagedInf -Root $store -InfName 'brohl17a.inf' -Sha256 $otherSha) -cne $newerInf) {
+        Fail 'other inf hash was not found'
+    }
+    if (-not [string]::IsNullOrWhiteSpace((Find-PrinterTcpStagedInf -Root $store -InfName 'brohl17a.inf' -Sha256 ('a' * 64)))) {
+        Fail 'unmatched inf hash was returned'
     }
     if (-not [string]::IsNullOrWhiteSpace((Find-PrinterTcpStagedInf -Root $store -InfName 'missing.inf'))) {
         Fail 'missing staged inf was returned'
@@ -789,9 +801,11 @@ function Reset-Case {
     $script:DriverNames = [System.Collections.Generic.List[string]]::new()
     $script:DriverVersions = @{}
     $script:StagedQueries = [System.Collections.Generic.List[string]]::new()
+    $script:StagedSources = [System.Collections.Generic.List[string]]::new()
     $script:FindStagedInf = {
-        param($InfName)
+        param($InfName, $SourceInf)
         $script:StagedQueries.Add([string]$InfName)
+        $script:StagedSources.Add([string]$SourceInf)
         return 'C:\Windows\System32\DriverStore\FileRepository\staged\' + [string]$InfName
     }
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
@@ -1065,6 +1079,9 @@ try {
     }
     if ($script:StagedQueries.Count -ne 1 -or $script:StagedQueries[0] -cne 'BROHL17A.INF') {
         Fail 'staged inf lookup did not use the model inf name'
+    }
+    if ($script:StagedSources.Count -ne 1 -or $script:StagedSources[0] -cne $script:PnpPaths[0]) {
+        Fail 'staged inf lookup did not use the extracted inf'
     }
     $pnpArgs = @(Get-PrinterTcpPnpUtilArgumentList -InfPath $script:PnpPaths[0])
     if ($pnpArgs -contains '/install') {
