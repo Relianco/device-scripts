@@ -376,6 +376,53 @@ $script:TestCancel = {
     return [bool](Test-Path -LiteralPath $CancelPath)
 }
 
+function ConvertTo-RelianWindowsCommandLine {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Argument
+    )
+
+    # Quote every argument. A trailing backslash would escape the closing quote.
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($value in @($Argument)) {
+        $text = [string]$value
+        $builder = [System.Text.StringBuilder]::new()
+        [void]$builder.Append('"')
+        $chars = $text.ToCharArray()
+        $index = 0
+        while ($index -lt $chars.Length) {
+            $slashes = 0
+            while ($index -lt $chars.Length -and $chars[$index] -eq '\') {
+                $slashes++
+                $index++
+            }
+            if ($index -ge $chars.Length) {
+                for ($extra = 0; $extra -lt ($slashes * 2); $extra++) {
+                    [void]$builder.Append('\')
+                }
+                break
+            }
+            if ($chars[$index] -eq '"') {
+                for ($extra = 0; $extra -lt (($slashes * 2) + 1); $extra++) {
+                    [void]$builder.Append('\')
+                }
+                [void]$builder.Append('"')
+            } else {
+                for ($extra = 0; $extra -lt $slashes; $extra++) {
+                    [void]$builder.Append('\')
+                }
+                [void]$builder.Append($chars[$index])
+            }
+            $index++
+        }
+        [void]$builder.Append('"')
+        [void]$parts.Add($builder.ToString())
+    }
+    return ($parts -join ' ')
+}
+
 # Child process so a package exit does not end a second reinstall call.
 # Executable is this host process. Windows PowerShell 5.1 has no pwsh on PATH
 # and rejects -WorkingDirectory. The package path is absolute.
@@ -404,6 +451,38 @@ $script:InvokePackage = {
         }
     }
     $argList = $childArgs.ToArray()
+    # Windows PowerShell 5.1 drops an empty argument on a native call.
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $hostPath
+        $startInfo.Arguments = ConvertTo-RelianWindowsCommandLine -Argument $argList
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::new()
+        $proc.StartInfo = $startInfo
+        try {
+            [void]$proc.Start()
+            # Drain both pipes while the child runs. A full pipe would stall it.
+            $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+            $stderrTask = $proc.StandardError.ReadToEndAsync()
+            [void]$proc.WaitForExit()
+            [void]$stdoutTask.Wait()
+            [void]$stderrTask.Wait()
+            $stdoutText = [string]$stdoutTask.Result
+            $stderrText = [string]$stderrTask.Result
+            if (-not [string]::IsNullOrEmpty($stdoutText)) {
+                $stdoutText | Out-Host
+            }
+            if (-not [string]::IsNullOrEmpty($stderrText)) {
+                [Console]::Error.Write($stderrText)
+            }
+            return [int]$proc.ExitCode
+        } finally {
+            $proc.Dispose()
+        }
+    }
     & $hostPath @argList | Out-Host
     return [int]$LASTEXITCODE
 }

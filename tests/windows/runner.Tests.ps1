@@ -460,6 +460,33 @@ foreach ($rejected in @(
 $bomBytes = [byte[]](0xEF, 0xBB, 0xBF) + [System.Text.UTF8Encoding]::new($false).GetBytes('{}')
 Assert-PackageArgumentsRejected -Label 'bom package arguments' -Blob ([Convert]::ToBase64String($bomBytes))
 Assert-PackageArgumentsRejected -Label 'invalid utf8 package arguments' -Blob ([Convert]::ToBase64String([byte[]](0x80)))
+if (-not (Get-Command ConvertTo-RelianWindowsCommandLine -ErrorAction SilentlyContinue)) {
+    Fail 'ConvertTo-RelianWindowsCommandLine was not defined'
+}
+$frontWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @(
+    '-PrinterName', 'Front Desk',
+    '-PrinterAddress', '10.20.30.40',
+    '-PrinterModel', 'BrotherHlL2370Dw'
+)
+if (-not $frontWindowsLine.Contains('"Front Desk"')) {
+    Fail "windows command line missing quoted Front Desk [$frontWindowsLine]"
+}
+$emptyWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('-PrinterName', '')
+if ($emptyWindowsLine -notmatch '(^| )""($| )') {
+    Fail "windows command line missing empty PrinterName token [$emptyWindowsLine]"
+}
+$secretWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('-PrinterName', '-Secret')
+if (-not $secretWindowsLine.Contains('"-Secret"')) {
+    Fail "windows command line did not quote -Secret [$secretWindowsLine]"
+}
+$slashWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('C:\stage\')
+if (-not $slashWindowsLine.Contains('"C:\stage\\"')) {
+    Fail "windows command line did not escape a trailing backslash [$slashWindowsLine]"
+}
+$quoteWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('C:\a"b')
+if (-not $quoteWindowsLine.Contains('"C:\a\"b"')) {
+    Fail "windows command line did not escape a quote [$quoteWindowsLine]"
+}
 foreach ($hookName in @('RetryDelay', 'TestCancel')) {
     $hook = Get-Variable -Name $hookName -Scope Script -ErrorAction SilentlyContinue
     if ($null -eq $hook -or $null -eq $hook.Value -or $hook.Value -isnot [scriptblock]) {
@@ -482,6 +509,12 @@ foreach ($pair in @(
             'Bypass'
             '-File'
             '(Get-Process -Id $PID).Path'
+            '$PSVersionTable.PSVersion.Major -lt 6'
+            'ProcessStartInfo'
+            'UseShellExecute'
+            'RedirectStandardOutput'
+            'RedirectStandardError'
+            'ConvertTo-RelianWindowsCommandLine'
         ) }
 )) {
     if ($pair.Block -isnot [scriptblock]) {
@@ -498,6 +531,12 @@ foreach ($pair in @(
     }
     if ($pair.Name -eq 'InvokePackage' -and $text -match '(?i)-WorkingDirectory') {
         Fail 'InvokePackage passes -WorkingDirectory'
+    }
+    if ($pair.Name -eq 'InvokePackage' -and $text.Contains('ArgumentList')) {
+        Fail 'InvokePackage uses ArgumentList'
+    }
+    if ($pair.Name -eq 'InvokePackage' -and $text.Contains('Start-Process')) {
+        Fail 'InvokePackage uses Start-Process'
     }
 }
 
