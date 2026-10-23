@@ -24,6 +24,9 @@ export const DEFAULT_MODEL = 'gpt-6.1-sol'
 // message on a full package file. The JSON reply itself is small.
 export const MAX_COMPLETION_TOKENS = 16000
 
+// A new package file is one patch. 64000 cut the printer script and its plan test.
+export const MAX_PATCH_CHARS = 96000
+
 export const PROMPT = `You review one file from a pull request of PowerShell device-deployment scripts.
 Report defects a maintainer must fix before merge. Skip style and naming.
 
@@ -82,13 +85,13 @@ export function isReviewablePath(filename) {
   return REVIEW_EXT.has(base.slice(dot).toLowerCase())
 }
 
-export function capPatch(patch, max = 64000) {
+export function capPatch(patch, max = MAX_PATCH_CHARS) {
   const text = patch || ''
   if (text.length <= max) return text
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-export function selectReviewFiles(files, { limit = 20, maxPatch = 64000 } = {}) {
+export function selectReviewFiles(files, { limit = 20, maxPatch = MAX_PATCH_CHARS } = {}) {
   const reviewable = []
   const skipped = []
   const unread = []

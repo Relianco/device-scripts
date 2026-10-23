@@ -8,6 +8,7 @@ import {
   NOT_PERFORMED_PREFIX,
   PROMPT,
   buildReviewBody,
+  MAX_PATCH_CHARS,
   capPatch,
   isDocsPath,
   isReviewablePath,
@@ -46,11 +47,20 @@ test('markdown and docs are skipped and PowerShell is reviewed', () => {
   assert.deepEqual(selected.skipped, ['docs/STATUS.md', 'windows/brand/logo.bin'])
 })
 
-test('a patch longer than 64000 characters is capped and the 21st file is omitted', () => {
-  const kept = 'a'.repeat(64000)
+test('a printer package patch fits and a longer patch is still capped', () => {
+  const printerPatch = 'p'.repeat(72000)
+  const selected = selectReviewFiles([
+    { filename: 'windows/packages/printer-tcp/Invoke-PrinterTcp.ps1', changes: 1, patch: printerPatch },
+  ])
+  assert.equal(selected.truncated.length, 0)
+  assert.equal(selected.kept[0].patch, printerPatch)
+})
+
+test('a patch longer than the cap is capped and the 21st file is omitted', () => {
+  const kept = 'a'.repeat(MAX_PATCH_CHARS)
   assert.equal(capPatch(kept), kept)
-  const over = 'b'.repeat(64001)
-  assert.equal(capPatch(over), `${'b'.repeat(64000)}\n...[truncated]`)
+  const over = 'b'.repeat(MAX_PATCH_CHARS + 1)
+  assert.equal(capPatch(over), `${'b'.repeat(MAX_PATCH_CHARS)}\n...[truncated]`)
   const files = []
   for (let i = 0; i < 21; i++) {
     files.push({ filename: `windows/packages/p${i}.ps1`, patch: 'diff' })
@@ -79,7 +89,7 @@ test('a withheld diff and a truncated patch are not LGTM', async () => {
   assert.equal(withheld.kept.length, 0)
 
   const huge = selectReviewFiles([
-    { filename: 'windows/packages/huge.ps1', changes: 1, patch: 'd'.repeat(64001) },
+    { filename: 'windows/packages/huge.ps1', changes: 1, patch: 'd'.repeat(MAX_PATCH_CHARS + 1) },
   ])
   assert.deepEqual(huge.truncated, ['windows/packages/huge.ps1'])
   const partial = buildReviewBody({
