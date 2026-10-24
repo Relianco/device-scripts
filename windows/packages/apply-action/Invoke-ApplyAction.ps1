@@ -625,6 +625,167 @@ function Invoke-ApplyActionStep {
     return 1
 }
 
+function Get-ApplyActionUndoPath {
+    param([string]$Root)
+    return (Join-Path $Root 'undo.json')
+}
+
+function Remove-ApplyActionUndo {
+    param([string]$Root)
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        return
+    }
+    $path = Get-ApplyActionUndoPath -Root $Root
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force
+    }
+}
+
+# Windows PowerShell 5.1 ConvertTo-Json unwraps a one-element array.
+# Undo files keep "undo" as an array on 5.1 and on pwsh.
+function ConvertTo-ApplyActionJson {
+    param($Value)
+
+    if ($null -eq $Value) {
+        return 'null'
+    }
+    $scalar = $Value -is [string] -or $Value -is [bool] -or $Value -is [byte] -or $Value -is [int16] -or $Value -is [int] -or $Value -is [long] -or $Value -is [uint16] -or $Value -is [uint32] -or $Value -is [uint64] -or $Value -is [decimal] -or $Value -is [double] -or $Value -is [float]
+    if ($scalar) {
+        return (ConvertTo-Json -InputObject $Value -Compress)
+    }
+    if ($Value -is [System.Collections.IList]) {
+        $parts = [System.Collections.Generic.List[string]]::new()
+        foreach ($item in $Value) {
+            [void]$parts.Add((ConvertTo-ApplyActionJson -Value $item))
+        }
+        return ('[' + ($parts.ToArray() -join ',') + ']')
+    }
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($prop in @($Value.PSObject.Properties)) {
+        $name = ConvertTo-Json -InputObject ([string]$prop.Name) -Compress
+        [void]$parts.Add($name + ':' + (ConvertTo-ApplyActionJson -Value $prop.Value))
+    }
+    return ('{' + ($parts.ToArray() -join ',') + '}')
+}
+
+function Write-ApplyActionUndo {
+    param(
+        [string]$Root,
+        [string]$Id,
+        [string]$Hash,
+        $Steps
+    )
+    if (-not (Test-Path -LiteralPath $Root)) {
+        New-Item -ItemType Directory -Path $Root -Force | Out-Null
+    }
+    # A generic list stays one object, so a single step is not unwrapped.
+    $undo = [System.Collections.Generic.List[object]]::new()
+    foreach ($step in @($Steps)) {
+        if ($null -ne $step) {
+            [void]$undo.Add($step)
+        }
+    }
+    $record = [pscustomobject]@{
+        id   = $Id
+        hash = $Hash
+        undo = $undo
+    }
+    $path = Get-ApplyActionUndoPath -Root $Root
+    $utf8 = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText($path, (ConvertTo-ApplyActionJson -Value $record), $utf8)
+}
+
+function Test-ApplyActionDocumentHasUndo {
+    param($Document)
+    if (-not (Test-ApplyActionHasProperty -Object $Document -Name 'undo')) {
+        return $false
+    }
+    if ($null -eq $Document.undo) {
+        return $false
+    }
+    return @($Document.undo).Count -gt 0
+}
+
+function Test-ApplyActionUndoRecord {
+    param(
+        $Record,
+        [string]$Id,
+        [string]$Hash
+    )
+    if ($null -eq $Record -or $Record -is [System.Array]) {
+        return $false
+    }
+    if (-not (Test-ApplyActionHasProperty -Object $Record -Name 'id')) {
+        return $false
+    }
+    if (-not (Test-ApplyActionHasProperty -Object $Record -Name 'hash')) {
+        return $false
+    }
+    if (-not (Test-ApplyActionHasProperty -Object $Record -Name 'undo')) {
+        return $false
+    }
+    if ([string]$Record.id -cne $Id -or [string]$Record.hash -cne $Hash) {
+        return $false
+    }
+    if ($null -eq $Record.undo) {
+        return $false
+    }
+    return $true
+}
+
+function Invoke-ApplyActionUninstall {
+    param(
+        [string]$Id,
+        [string]$Hash,
+        [string]$MarkerRoot,
+        [string]$CancelPath
+    )
+    # Retained at install time. No URL is built and nothing is downloaded.
+    if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
+        $MarkerRoot = Get-ApplyActionDefaultMarkerRoot
+    }
+    $undoPath = Get-ApplyActionUndoPath -Root $MarkerRoot
+    $record = $null
+    $readable = $false
+    if (Test-Path -LiteralPath $undoPath) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($undoPath)
+            $record = $raw | ConvertFrom-Json
+            $readable = $true
+        } catch {
+            $readable = $false
+        }
+    }
+    if (-not $readable -or -not (Test-ApplyActionUndoRecord -Record $record -Id $Id -Hash $Hash)) {
+        Add-ApplyActionError -Message 'uninstall has no undo'
+        return 1
+    }
+    # 5.1 ConvertFrom-Json turns a one-element array into one object.
+    $steps = [System.Collections.Generic.List[object]]::new()
+    foreach ($step in @($record.undo)) {
+        [void]$steps.Add($step)
+    }
+    foreach ($step in $steps) {
+        $problem = Test-ApplyActionStep -Step $step
+        if (-not [string]::IsNullOrWhiteSpace($problem)) {
+            Add-ApplyActionError -Message $problem
+            return 1
+        }
+    }
+    foreach ($step in $steps) {
+        if (Test-ApplyActionCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+        $stepCode = [int](Invoke-ApplyActionStep -Step $step)
+        if ($stepCode -ne 0) {
+            return 1
+        }
+    }
+    Remove-ApplyActionMarker -Root $MarkerRoot
+    Remove-ApplyActionUndo -Root $MarkerRoot
+    return 0
+}
+
 function Invoke-ApplyActionAction {
     param(
         [string]$DeploymentType,
@@ -655,6 +816,10 @@ function Invoke-ApplyActionAction {
         Add-ApplyActionError -Message 'reinstall is split by the runner'
         return 1
     }
+    # Uninstall runs before the URL is built. A userinfo URL does not block it.
+    if ($Action -eq 'Uninstall') {
+        return [int](Invoke-ApplyActionUninstall -Id $pin.Id -Hash $pin.Hash -MarkerRoot $MarkerRoot -CancelPath $CancelPath)
+    }
 
     if ([string]::IsNullOrWhiteSpace($ActionBaseUrl)) {
         $ActionBaseUrl = 'https://raw.githubusercontent.com/Relianco/device-scripts/main/windows/actions'
@@ -679,23 +844,10 @@ function Invoke-ApplyActionAction {
             return 1
         }
 
-        $section = 'steps'
-        if ($Action -eq 'Uninstall') {
-            $hasUndo = $false
-            if (Test-ApplyActionHasProperty -Object $document -Name 'undo') {
-                $hasUndo = @($document.undo).Count -gt 0
-            }
-            if (-not $hasUndo) {
-                Add-ApplyActionError -Message 'uninstall has no undo'
-                return 1
-            }
-            $section = 'undo'
-        }
-
         if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
             $MarkerRoot = Get-ApplyActionDefaultMarkerRoot
         }
-        foreach ($step in @($document.$section)) {
+        foreach ($step in @($document.steps)) {
             if (Test-ApplyActionCancelled -CancelPath $CancelPath) {
                 return 130
             }
@@ -704,10 +856,11 @@ function Invoke-ApplyActionAction {
                 return 1
             }
         }
-        if ($Action -eq 'Uninstall') {
-            Remove-ApplyActionMarker -Root $MarkerRoot
+        Write-ApplyActionMarker -Root $MarkerRoot -Id $pin.Id -Hash $pin.Hash
+        if (Test-ApplyActionDocumentHasUndo -Document $document) {
+            Write-ApplyActionUndo -Root $MarkerRoot -Id $pin.Id -Hash $pin.Hash -Steps $document.undo
         } else {
-            Write-ApplyActionMarker -Root $MarkerRoot -Id $pin.Id -Hash $pin.Hash
+            Remove-ApplyActionUndo -Root $MarkerRoot
         }
         return 0
     } finally {

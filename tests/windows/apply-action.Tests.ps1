@@ -149,7 +149,16 @@ $serviceFail = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","des
 $serviceSkip = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","description":"Service may be absent.","steps":[{"kind":"service","name":"SampleSvc","startup":"disabled","missing":"skip"}]}'
 $withUndo = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","description":"Has undo.","steps":[{"kind":"registry","op":"set","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha","type":"dword","value":1}],"undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha"}]}'
 $userInfoBase = -join @('https://', 'user', '@', 'example.invalid/actions')
+$userPassBase = -join @('https://', 'user', ':', 'pass', '@', 'example.com/actions')
 $plainBase = 'https://example.invalid/actions'
+
+function Write-SampleUndo {
+    param([string]$Hash)
+    $json = '{"id":"sample","hash":"' + $Hash + '","undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha"}]}'
+    $path = Join-Path $markerRoot 'undo.json'
+    [System.IO.File]::WriteAllText($path, $json, $utf8)
+    return $path
+}
 
 try {
     Reset-Hooks
@@ -300,6 +309,9 @@ try {
         return 0
     }
     [System.IO.File]::WriteAllText((Join-Path $markerRoot 'marker.txt'), "old`n", $utf8)
+    $failedUndoPath = Join-Path $markerRoot 'undo.json'
+    $existingUndo = '{"id":"sample","hash":"old","undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Old"}]}'
+    [System.IO.File]::WriteAllText($failedUndoPath, $existingUndo, $utf8)
     $code = Invoke-ApplyActionAction -Action 'Install' -PinVersion ('sample:' + $threeSteps.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
     if ($code -ne 1 -or $script:RegistryWrites.Count -ne 2 -or [string]$script:RegistryWrites[0].Name -ne 'Alpha') {
         Fail "second-step failure returned $code writes=$($script:RegistryWrites.Count)"
@@ -307,6 +319,10 @@ try {
     $markerText = [System.IO.File]::ReadAllText((Join-Path $markerRoot 'marker.txt'))
     if ($markerText -ne "old`n") {
         Fail 'failed step replaced the marker'
+    }
+    $undoText = [System.IO.File]::ReadAllText($failedUndoPath)
+    if ($undoText -ne $existingUndo) {
+        Fail 'failed step replaced undo.json'
     }
 
     Reset-Hooks
@@ -328,8 +344,11 @@ try {
     Reset-Hooks
     $script:PayloadBytes = $oneStep.Bytes
     $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $oneStep.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
-    if ($code -ne 1 -or $script:DownloadCount -ne 1 -or $script:RegistryWrites.Count -ne 0) {
-        Fail "uninstall without undo returned $code"
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 0) {
+        Fail "uninstall without undo returned $code downloads=$($script:DownloadCount)"
+    }
+    if (($script:ApplyActionErrorLog -join "`n") -cne 'uninstall has no undo') {
+        Fail "uninstall without undo error was [$($script:ApplyActionErrorLog -join ' | ')]"
     }
     if (Test-Path -LiteralPath (Join-Path $markerRoot 'marker.txt')) {
         Fail 'uninstall without undo wrote a marker'
@@ -345,6 +364,9 @@ try {
     $markerText = [System.IO.File]::ReadAllText((Join-Path $markerRoot 'marker.txt'))
     if ($markerText -ne $expectedMarker) {
         Fail 'install marker text did not match'
+    }
+    if (Test-Path -LiteralPath (Join-Path $markerRoot 'undo.json')) {
+        Fail 'install without undo wrote undo.json'
     }
     if ([string]$script:RegistryWrites[0].FullPath -ne 'HKLM:\SOFTWARE\Test' -or [string]$script:RegistryWrites[0].Name -ne 'Alpha') {
         Fail 'install wrote the wrong value'
@@ -365,13 +387,124 @@ try {
     }
 
     Reset-Hooks
-    $script:PayloadBytes = $withUndo.Bytes
+    $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
+    $seededUndo = Write-SampleUndo -Hash $withUndo.Sha
     $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
-    if ($code -ne 0 -or $script:RegistryWrites.Count -ne 1 -or [string]$script:RegistryWrites[0].Operation -ne 'remove-value') {
-        Fail "undo returned $code"
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 1 -or [string]$script:RegistryWrites[0].Operation -ne 'remove-value') {
+        Fail "undo returned $code downloads=$($script:DownloadCount) writes=$($script:RegistryWrites.Count)"
     }
-    if (Test-Path -LiteralPath (Join-Path $markerRoot 'marker.txt')) {
-        Fail 'undo left the marker in place'
+    if ((Test-Path -LiteralPath (Join-Path $markerRoot 'marker.txt')) -or (Test-Path -LiteralPath $seededUndo)) {
+        Fail 'undo left the marker or undo file in place'
+    }
+
+    Reset-Hooks
+    $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
+    $seededUndo = Write-SampleUndo -Hash $withUndo.Sha
+    $userPassUri = [Uri]$userPassBase
+    $expectedUser = 'user' + ':' + 'pass'
+    if ($userPassUri.Scheme -cne 'https' -or $userPassUri.Host -cne 'example.com' -or $userPassUri.AbsolutePath -cne '/actions' -or $userPassUri.UserInfo -cne $expectedUser -or -not (Test-ApplyActionUrlHasUserInfo -Url $userPassBase)) {
+        Fail 'undo userinfo fixture is not the sample URL'
+    }
+    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $userPassBase -MarkerRoot $markerRoot
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 1 -or [string]$script:RegistryWrites[0].Operation -ne 'remove-value') {
+        Fail "userinfo undo returned $code downloads=$($script:DownloadCount)"
+    }
+    if ((Test-Path -LiteralPath (Join-Path $markerRoot 'marker.txt')) -or (Test-Path -LiteralPath $seededUndo)) {
+        Fail 'userinfo undo left the marker or undo file in place'
+    }
+
+    Reset-Hooks
+    $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
+    [System.IO.File]::WriteAllText((Join-Path $markerRoot 'marker.txt'), "keep`n", $utf8)
+    $mismatchUndo = Write-SampleUndo -Hash $oneStep.Sha
+    $mismatchText = [System.IO.File]::ReadAllText($mismatchUndo)
+    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 0) {
+        Fail "undo hash mismatch returned $code downloads=$($script:DownloadCount)"
+    }
+    if ([System.IO.File]::ReadAllText((Join-Path $markerRoot 'marker.txt')) -ne "keep`n" -or [System.IO.File]::ReadAllText($mismatchUndo) -ne $mismatchText) {
+        Fail 'undo hash mismatch changed the marker or undo file'
+    }
+
+    Reset-Hooks
+    $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
+    [System.IO.File]::WriteAllText((Join-Path $markerRoot 'marker.txt'), "keep`n", $utf8)
+    $badUndo = Join-Path $markerRoot 'undo.json'
+    $badText = '{"id":"sample","hash":"' + $withUndo.Sha + '","undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha"},{"kind":"firewall"}]}'
+    [System.IO.File]::WriteAllText($badUndo, $badText, $utf8)
+    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 0) {
+        Fail "bad undo step returned $code downloads=$($script:DownloadCount)"
+    }
+    if ([System.IO.File]::ReadAllText((Join-Path $markerRoot 'marker.txt')) -ne "keep`n" -or [System.IO.File]::ReadAllText($badUndo) -ne $badText) {
+        Fail 'bad undo step changed the marker or undo file'
+    }
+
+    Reset-Hooks
+    $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
+    $script:WriteRegistry = {
+        param($Operation, $FullPath, $Name, $Type, $Value)
+        $script:RegistryWrites.Add([pscustomobject]@{ Operation = [string]$Operation })
+        return 1
+    }
+    [System.IO.File]::WriteAllText((Join-Path $markerRoot 'marker.txt'), "keep`n", $utf8)
+    $failedUndo = Write-SampleUndo -Hash $withUndo.Sha
+    $failedText = [System.IO.File]::ReadAllText($failedUndo)
+    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 1) {
+        Fail "failed undo step returned $code downloads=$($script:DownloadCount) writes=$($script:RegistryWrites.Count)"
+    }
+    if ([System.IO.File]::ReadAllText((Join-Path $markerRoot 'marker.txt')) -ne "keep`n" -or [System.IO.File]::ReadAllText($failedUndo) -ne $failedText) {
+        Fail 'failed undo step changed the marker or undo file'
+    }
+
+    Reset-Hooks
+    $script:PayloadBytes = $withUndo.Bytes
+    $code = Invoke-ApplyActionAction -Action 'Install' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
+    if ($code -ne 0 -or $script:DownloadCount -ne 1 -or $script:RegistryWrites.Count -ne 1) {
+        Fail "install with undo returned $code downloads=$($script:DownloadCount)"
+    }
+    $undoPath = Join-Path $markerRoot 'undo.json'
+    if (-not (Test-Path -LiteralPath $undoPath)) {
+        Fail 'install with undo did not write undo.json'
+    }
+    $undoBytes = [System.IO.File]::ReadAllBytes($undoPath)
+    if ($undoBytes.Length -ge 3 -and $undoBytes[0] -eq 239 -and $undoBytes[1] -eq 187 -and $undoBytes[2] -eq 191) {
+        Fail 'undo.json has a BOM'
+    }
+    $undoDoc = [System.IO.File]::ReadAllText($undoPath) | ConvertFrom-Json
+    $undoSteps = @($undoDoc.undo)
+    if ([string]$undoDoc.id -cne 'sample' -or [string]$undoDoc.hash -cne $withUndo.Sha -or $undoSteps.Count -ne 1) {
+        Fail 'undo.json pin or step count does not match'
+    }
+    if ([string]$undoSteps[0].kind -cne 'registry' -or [string]$undoSteps[0].op -cne 'remove-value' -or [string]$undoSteps[0].hive -cne 'HKLM' -or [string]$undoSteps[0].path -cne 'SOFTWARE\Test' -or [string]$undoSteps[0].name -cne 'Alpha') {
+        Fail 'undo.json steps do not match'
+    }
+    $script:DownloadCount = 0
+    $script:DownloadUrls.Clear()
+    $script:RegistryWrites.Clear()
+    $script:ApplyActionErrorLog.Clear()
+    $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
+    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 1 -or [string]$script:RegistryWrites[0].Operation -ne 'remove-value') {
+        Fail "uninstall after install returned $code downloads=$($script:DownloadCount) writes=$($script:RegistryWrites.Count)"
+    }
+    if ((Test-Path -LiteralPath (Join-Path $markerRoot 'marker.txt')) -or (Test-Path -LiteralPath $undoPath)) {
+        Fail 'uninstall after install left the marker or undo file'
+    }
+
+    Reset-Hooks
+    $staleUndo = Join-Path $markerRoot 'undo.json'
+    $staleText = '{"id":"other","hash":"stale","undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Stale"}]}'
+    [System.IO.File]::WriteAllText($staleUndo, $staleText, $utf8)
+    $script:PayloadBytes = $oneStep.Bytes
+    $code = Invoke-ApplyActionAction -Action 'Install' -PinVersion ('sample:' + $oneStep.Sha) -ActionBaseUrl $plainBase -MarkerRoot $markerRoot
+    if ($code -ne 0 -or $script:DownloadCount -ne 1 -or (Test-Path -LiteralPath $staleUndo)) {
+        Fail "install without undo left a stale undo.json code=$code"
+    }
+    $markerText = [System.IO.File]::ReadAllText((Join-Path $markerRoot 'marker.txt'))
+    if ($markerText -ne ('sample ' + $oneStep.Sha + "`n")) {
+        Fail 'install that removed stale undo did not write the marker'
     }
 
     $release = Get-Content -LiteralPath $releasePath -Raw | ConvertFrom-Json
@@ -389,7 +522,7 @@ try {
         'cloud-kerberos-ticket'            = @(@{ Path = 'Software\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters'; Name = 'CloudKerberosTicketRetrievalEnabled'; Value = 1 })
         'teams-avd-media'                  = @(@{ Path = 'SOFTWARE\Microsoft\Teams'; Name = 'IsWVDEnvironment'; Value = 1 })
         'fslogix-cleanup-invalid-sessions' = @(@{ Path = 'SOFTWARE\FSLogix\Apps'; Name = 'CleanupInvalidSessions'; Value = 1 })
-        'fslogix-no-roam-recycle-bin'      = @(@{ Path = 'SOFTWARE\FSLogix\Apps'; Name = 'RoamRecycleBin'; Value = 0 })
+        'fslogix-no-roam-recycle-bin'      = @(@{ Path = 'SOFTWARE\FSLogix\Profiles'; Name = 'RoamRecycleBin'; Value = 0 })
         'azure-ad-sso-zone'                = @(@{ Path = 'Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap\Domains\microsoftazuread-sso.com\autologon'; Name = 'https'; Value = 1 })
         'onedrive-dehydrate-team-sites'    = @(@{ Path = 'SOFTWARE\Policies\Microsoft\OneDrive'; Name = 'DehydrateSyncedTeamSites'; Value = 1 })
         'mapped-drive-reconnect'           = @(@{ Path = 'SYSTEM\CurrentControlSet\Control\NetworkProvider'; Name = 'RestoreConnection'; Value = 1 })

@@ -8,7 +8,7 @@
       "kind": "registry",
       "op": "set",
       "hive": "HKLM",
-      "path": "SOFTWARE\\FSLogix\\Apps",
+      "path": "SOFTWARE\\FSLogix\\Profiles",
       "name": "RoamRecycleBin",
       "type": "dword",
       "value": 0
