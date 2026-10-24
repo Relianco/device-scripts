@@ -532,8 +532,18 @@ $script:InvokePackage = {
         }
     }
     $argList = $childArgs.ToArray()
-    # Windows PowerShell 5.1 drops an empty argument on a native call.
-    if ($PSVersionTable.PSVersion.Major -lt 6) {
+    # 5.1, 7.0-7.2, Legacy, and Windows drop an empty native argument.
+    # A missing preference on 6 or later is Legacy. Standard passes each argument.
+    $useQuotedLine = $PSVersionTable.PSVersion.Major -lt 6
+    if (-not $useQuotedLine) {
+        $argumentMode = 'Legacy'
+        $argumentPreference = Get-Variable -Name 'PSNativeCommandArgumentPassing' -ErrorAction SilentlyContinue
+        if ($null -ne $argumentPreference -and $null -ne $argumentPreference.Value) {
+            $argumentMode = [string]$argumentPreference.Value
+        }
+        $useQuotedLine = $argumentMode -eq 'Legacy' -or $argumentMode -eq 'Windows'
+    }
+    if ($useQuotedLine) {
         $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $hostPath
         $startInfo.Arguments = ConvertTo-RelianWindowsCommandLine -Argument $argList
@@ -593,17 +603,18 @@ function Invoke-RelianRunner {
         }
     }
 
+    # An empty hash exits 0 before package arguments are read.
+    if ([string]::IsNullOrWhiteSpace($PackageSha256) -or
+        [string]::IsNullOrWhiteSpace($ToolkitSha256) -or
+        [string]::IsNullOrWhiteSpace($BrandPackSha256)) {
+        return 0
+    }
+
     try {
         $packageParameters = ConvertFrom-RelianPackageArguments -PackageArguments $PackageArguments
     } catch {
         Write-RelianRunnerError 'invalid package arguments'
         return 1
-    }
-
-    if ([string]::IsNullOrWhiteSpace($PackageSha256) -or
-        [string]::IsNullOrWhiteSpace($ToolkitSha256) -or
-        [string]::IsNullOrWhiteSpace($BrandPackSha256)) {
-        return 0
     }
 
     if (Test-RelianCancelled -CancelPath $CancelPath) {

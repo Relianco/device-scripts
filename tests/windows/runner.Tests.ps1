@@ -519,6 +519,9 @@ foreach ($pair in @(
             '-File'
             '(Get-Process -Id $PID).Path'
             '$PSVersionTable.PSVersion.Major -lt 6'
+            'PSNativeCommandArgumentPassing'
+            'Legacy'
+            'Windows'
             'ProcessStartInfo'
             'UseShellExecute'
             'RedirectStandardOutput'
@@ -1357,7 +1360,7 @@ exit 9
 
     Set-ByteStubs -Payloads $urlPayloads
     $badEmptyHash = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments '!!!!' -BrandPackSha256 ''
-    if ($badEmptyHash -ne 1) {
+    if ($badEmptyHash -ne 0) {
         Fail "invalid package arguments with empty hash returned $badEmptyHash"
     }
     if ($script:downloadUrls.Count -ne 0) {
