@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Thin Manager startup",
+  "publisher": "Relian",
+  "setupFile": "Invoke-ThinManager.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ThinManager.ps1 -DeploymentType Install -Action Install -PinVersion 1.0.0.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ThinManager.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.0.0.0",
+  "detectionScript": "Detect-ThinManager.ps1",
+  "detectReplace": []
+}
