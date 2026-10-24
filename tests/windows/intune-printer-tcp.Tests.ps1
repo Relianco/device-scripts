@@ -95,6 +95,7 @@ for ($i = 0; $i -lt $tokens.Count; $i++) {
     }
 }
 
+# {env:RELIAN_PRINTER_NAME}, {env:RELIAN_PRINTER_ADDRESS}, and {env:RELIAN_PRINTER_MODEL} tokens stay in the command because the packager fills them before upload, and this file must not contain a queue name, address, or model.
 $expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Install -Action Install -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
 $expectedUninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
 $install = [string]$meta.installCommand
@@ -242,8 +243,27 @@ if (-not (Test-RelianPrinterTcpInstalled -Printers @($brotherCase) -PrinterName 
 }
 
 $brotherPort = New-PrinterTcpDetectPrinter -Name $queueName -DriverName $brotherDriver -PortName ('IP_' + $queueAddress)
-if (-not (Test-RelianPrinterTcpInstalled -Printers @($brotherPort) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw')) {
-    Fail 'IP_ port address was absent'
+if (Test-RelianPrinterTcpInstalled -Printers @($brotherPort) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw') {
+    Fail 'IP_ port name alone was present'
+}
+
+$renamedPortName = 'IP_' + $queueAddress
+$renamedPrinter = New-PrinterTcpDetectPrinter -Name $queueName -DriverName $brotherDriver -PortName $renamedPortName
+$renamedPort = [pscustomobject]@{
+    Name               = $renamedPortName
+    PrinterHostAddress = $otherAddress
+}
+if (Test-RelianPrinterTcpInstalled -Printers @($renamedPrinter) -Ports @($renamedPort) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw') {
+    Fail 'a port named for the expected address but aimed elsewhere was present'
+}
+
+$officePrinter = New-PrinterTcpDetectPrinter -Name $queueName -DriverName $brotherDriver -PortName 'OfficePort'
+$officePort = [pscustomobject]@{
+    Name               = 'OfficePort'
+    PrinterHostAddress = $queueAddress
+}
+if (-not (Test-RelianPrinterTcpInstalled -Printers @($officePrinter) -Ports @($officePort) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw')) {
+    Fail 'OfficePort with the expected address was absent'
 }
 
 $konica = New-PrinterTcpDetectPrinter -Name $queueName -DriverName $konicaDriver -HostAddress $queueAddress
@@ -264,4 +284,34 @@ if (Test-RelianPrinterTcpInstalled -Printers @($wrongAddress) -PrinterName $queu
 $unknown = New-PrinterTcpDetectPrinter -Name $queueName -DriverName $brotherDriver -HostAddress $queueAddress
 if (Test-RelianPrinterTcpInstalled -Printers @($unknown) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'OtherModel') {
     Fail 'an unknown model was present'
+}
+
+# The live path consumes @(Get-RelianPrinterTcpLivePrinters). A unary comma
+# inside that function nests the array, so Count is 1 and the element has no Name.
+$consumed = @(Get-RelianPrinterTcpLivePrinters -Found @($brother))
+if ($consumed.Count -ne 1) {
+    Fail 'one matching printer was nested'
+}
+$consumedNames = @($consumed[0].PSObject.Properties.Name)
+if ($consumedNames -notcontains 'Name') {
+    Fail 'one matching printer was nested'
+}
+if (-not (Test-RelianPrinterTcpInstalled -Printers $consumed -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw')) {
+    Fail 'one matching printer was nested'
+}
+
+$otherPrinter = New-PrinterTcpDetectPrinter -Name 'Other Queue' -DriverName 'Other Driver' -HostAddress $otherAddress
+$consumedTwo = @(Get-RelianPrinterTcpLivePrinters -Found @($otherPrinter, $brother))
+if ($consumedTwo.Count -ne 2) {
+    Fail 'two printers were nested'
+}
+
+$liveThrew = $false
+try {
+    Get-RelianPrinterTcpLivePrinters | Out-Null
+} catch {
+    $liveThrew = $true
+}
+if (-not $liveThrew) {
+    Fail 'printer query ran during a test'
 }
