@@ -38,6 +38,7 @@ Rules for code the diff adds or changes:
 - An empty hash exits 0 for every action, including Uninstall, and downloads nothing.
 - An empty hash exits 0 before the URL is read, including when the URL contains userinfo. Do not require that rejection when the hash is empty.
 - Uninstall does not download. A present hash with a userinfo URL does not block uninstall.
+- The Linux and macOS shell runners each download their one package script for every action, including Uninstall. That download is not the retained-action uninstall rule.
 - An MSI install path must be one quoted argument so a path that contains spaces is not split.
 - A hash mismatch must exit 1, must not be retried, and must not run the package.
 - Retries are only for timeout, connection, or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Three attempts. Any other HTTP status is one attempt.
@@ -56,7 +57,7 @@ Reply with one JSON object and no other text:
 {"findings":[{"line":1,"body":"what happens at runtime, then the fix"}]}
 Use an empty findings array when the file has no defect.`
 
-const REVIEW_EXT = new Set(['.ps1', '.json', '.yml', '.yaml', '.mjs', '.js', '.toml'])
+const REVIEW_EXT = new Set(['.ps1', '.json', '.yml', '.yaml', '.mjs', '.js', '.toml', '.sh'])
 const TRANSIENT = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 
 export function parseModelList(value) {

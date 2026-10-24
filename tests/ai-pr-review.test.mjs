@@ -38,6 +38,7 @@ test('markdown and docs are skipped and PowerShell is reviewed', () => {
   assert.equal(isReviewablePath('windows/packages/teams/Invoke-Teams.ps1'), true)
   assert.equal(isReviewablePath('windows/releases/teams.json'), true)
   assert.equal(isReviewablePath('.github/workflows/pr-verify.yml'), true)
+  assert.equal(isReviewablePath('linux/runner/relian-runner.sh'), true)
   const selected = selectReviewFiles([
     { filename: 'docs/STATUS.md', patch: 'diff' },
     { filename: 'windows/runner/Invoke-RelianRunner.ps1', patch: 'diff --git' },
@@ -170,8 +171,15 @@ test('the prompt is PowerShell rules and names JSON', () => {
     'An empty hash exits 0 for every action, including Uninstall, and downloads nothing.',
     'An empty hash exits 0 before the URL is read, including when the URL contains userinfo. Do not require that rejection when the hash is empty.',
     'Uninstall does not download. A present hash with a userinfo URL does not block uninstall.',
+    'The Linux and macOS shell runners each download their one package script for every action, including Uninstall. That download is not the retained-action uninstall rule.',
     'An MSI install path must be one quoted argument so a path that contains spaces is not split.',
   ]
+  const uninstallRule = 'Uninstall does not download. A present hash with a userinfo URL does not block uninstall.'
+  const shellDownload = 'The Linux and macOS shell runners each download their one package script for every action, including Uninstall. That download is not the retained-action uninstall rule.'
+  const uninstallAt = PROMPT.indexOf(uninstallRule)
+  const shellAt = PROMPT.indexOf(shellDownload)
+  assert.equal(uninstallAt >= 0, true)
+  assert.equal(shellAt > uninstallAt, true)
   for (const sentence of skip) {
     assert.equal(PROMPT.includes(sentence), true)
   }
