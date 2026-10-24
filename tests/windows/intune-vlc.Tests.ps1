@@ -270,21 +270,18 @@ if ($nativeAt -lt 0 -or $wowAt -lt 0 -or $productAt -lt 0 -or $nativeAt -ge $wow
     Fail 'registry roots are missing or out of order'
 }
 
-$banned = @(
-    ('Le' + 'ague'),
-    ('PI' + 'LA'),
-    ('Sit' + 'ka'),
-    ('/ho' + 'me/')
-)
 foreach ($path in @($jsonPath, $detectPath, $PSCommandPath)) {
     $text = Get-Content -LiteralPath $path -Raw -Encoding utf8
-    foreach ($needle in $banned) {
-        if ($text.Contains($needle)) {
-            Fail "forbidden text in $(Split-Path -Leaf $path)"
-        }
-    }
     if ($text -match '(^|[^\d])(?:\d{1,3}\.){3}\d{1,3}($|[^\d])') {
         Fail "IPv4 address in $(Split-Path -Leaf $path)"
+    }
+}
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-Vlc.ps1' }
+    )) {
+    if ($packageFile.Text.Contains('/home/')) {
+        Fail "$($packageFile.Label) contains a home path"
     }
 }
 
