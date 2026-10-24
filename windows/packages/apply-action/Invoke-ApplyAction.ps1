@@ -534,7 +534,18 @@ function Write-ApplyActionRegistryReal {
         if (-not (Test-Path -LiteralPath $FullPath)) {
             return 0
         }
-        Remove-ItemProperty -LiteralPath $FullPath -Name $Name -ErrorAction SilentlyContinue
+        # An already-absent value is success. Access denied and other failures are not.
+        try {
+            Remove-ItemProperty -LiteralPath $FullPath -Name $Name -ErrorAction Stop
+        } catch {
+            if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                return 0
+            }
+            if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) {
+                return 0
+            }
+            return 1
+        }
         return 0
     }
     if (-not (Test-Path -LiteralPath $FullPath)) {

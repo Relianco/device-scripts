@@ -148,8 +148,9 @@ $hkcu = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","descriptio
 $serviceFail = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","description":"Service must exist.","steps":[{"kind":"service","name":"SampleSvc","startup":"disabled","state":"stopped","missing":"fail"}]}'
 $serviceSkip = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","description":"Service may be absent.","steps":[{"kind":"service","name":"SampleSvc","startup":"disabled","missing":"skip"}]}'
 $withUndo = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","description":"Has undo.","steps":[{"kind":"registry","op":"set","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha","type":"dword","value":1}],"undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha"}]}'
+$fixtureSecret = [guid]::NewGuid().ToString('n')
 $userInfoBase = -join @('https://', 'user', '@', 'example.invalid/actions')
-$userPassBase = -join @('https://', 'user', ':', 'pass', '@', 'example.com/actions')
+$userPassBase = -join @('https://', 'user', ':', $fixtureSecret, '@', 'example.com/actions')
 $plainBase = 'https://example.invalid/actions'
 
 function Write-SampleUndo {
@@ -401,7 +402,7 @@ try {
     $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
     $seededUndo = Write-SampleUndo -Hash $withUndo.Sha
     $userPassUri = [Uri]$userPassBase
-    $expectedUser = 'user' + ':' + 'pass'
+    $expectedUser = 'user' + ':' + $fixtureSecret
     if ($userPassUri.Scheme -cne 'https' -or $userPassUri.Host -cne 'example.com' -or $userPassUri.AbsolutePath -cne '/actions' -or $userPassUri.UserInfo -cne $expectedUser -or -not (Test-ApplyActionUrlHasUserInfo -Url $userPassBase)) {
         Fail 'undo userinfo fixture is not the sample URL'
     }
@@ -411,6 +412,16 @@ try {
     }
     if ((Test-Path -LiteralPath (Join-Path $markerRoot 'marker.txt')) -or (Test-Path -LiteralPath $seededUndo)) {
         Fail 'userinfo undo left the marker or undo file in place'
+    }
+
+    $notRegistry = Join-Path $root 'not-a-registry-key'
+    New-Item -ItemType Directory -Path $notRegistry -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $notRegistry)) {
+        Fail 'remove-value probe directory was not created'
+    }
+    $removeCode = [int](Write-ApplyActionRegistryReal -Operation 'remove-value' -FullPath $notRegistry -Name 'Alpha')
+    if ($removeCode -ne 1) {
+        Fail "remove-value on a directory returned $removeCode"
     }
 
     Reset-Hooks
