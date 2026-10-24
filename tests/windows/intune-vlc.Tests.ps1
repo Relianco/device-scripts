@@ -234,6 +234,11 @@ $liveAt = $detectText.LastIndexOf('Get-VlcDetectRegistryState')
 if ($guardAt -lt 0 -or $liveAt -lt $guardAt) {
     Fail 'registry is read under the test guard'
 }
+$successAt = $detectText.IndexOf("Write-Output 'Relian VLC media player'")
+$exitOkAt = $detectText.IndexOf('exit 0', [Math]::Max($successAt, 0))
+if ($successAt -lt $guardAt -or $exitOkAt -lt $successAt) {
+    Fail 'success output is missing'
+}
 if ($detectText -match 'Invoke-Vlc') {
     Fail 'detection script references the installer'
 }

@@ -236,6 +236,7 @@ try {
     $detected = $false
 }
 if ($detected) {
+    Write-Output 'Relian VLC media player'
     exit 0
 }
 exit 1
