@@ -177,7 +177,9 @@ try {
 } catch {
     $detected = $false
 }
+# Intune treats exit 0 with an empty stdout as not installed.
 if ($detected) {
+    Write-Output 'Relian Google Chrome'
     exit 0
 }
 exit 1

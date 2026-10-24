@@ -174,6 +174,41 @@ if ($detectText -notmatch 'Set-StrictMode\s+-Version\s+Latest') {
     Fail 'detection script does not set StrictMode'
 }
 
+$successPattern = "(?s)if \(\`$detected\) \{\r?\n    Write-Output 'Relian Google Chrome'\r?\n    exit 0\r?\n\}"
+if ($detectText -notmatch $successPattern) {
+    Fail 'success output was missing'
+}
+$successProbe = Join-Path ([System.IO.Path]::GetTempPath()) ('chrome-detect-success-' + [guid]::NewGuid().ToString('n') + '.ps1')
+$successOutFile = Join-Path ([System.IO.Path]::GetTempPath()) ('chrome-detect-success-out-' + [guid]::NewGuid().ToString('n'))
+$successErrFile = Join-Path ([System.IO.Path]::GetTempPath()) ('chrome-detect-success-err-' + [guid]::NewGuid().ToString('n'))
+$successExit = -1
+try {
+    Set-Content -LiteralPath $successProbe -Value ("`$detected = `$true`n" + $Matches[0] + "`nexit 1`n") -Encoding utf8
+    & pwsh -NoProfile -File $successProbe 1> $successOutFile 2> $successErrFile
+    $successExit = $LASTEXITCODE
+} finally {
+    Remove-Item -LiteralPath $successProbe -Force -ErrorAction SilentlyContinue
+}
+if ($successExit -ne 0) {
+    Fail "success path exited $successExit"
+}
+$successOut = ''
+if (Test-Path -LiteralPath $successOutFile) {
+    $successOut = [string](Get-Content -LiteralPath $successOutFile -Raw -Encoding utf8)
+    Remove-Item -LiteralPath $successOutFile -Force -ErrorAction SilentlyContinue
+}
+$successErr = ''
+if (Test-Path -LiteralPath $successErrFile) {
+    $successErr = [string](Get-Content -LiteralPath $successErrFile -Raw -Encoding utf8)
+    Remove-Item -LiteralPath $successErrFile -Force -ErrorAction SilentlyContinue
+}
+if ($successOut.Trim() -cne 'Relian Google Chrome') {
+    Fail 'success output was missing'
+}
+if (-not [string]::IsNullOrWhiteSpace($successErr)) {
+    Fail 'success path wrote to the error stream'
+}
+
 $env:RELIAN_DEPLOY_TEST = '1'
 . $detectPath
 
@@ -312,15 +347,30 @@ foreach ($root in @(
 if ($registryMissing) {
     $savedTest = $env:RELIAN_DEPLOY_TEST
     $liveExit = -1
+    $liveOutFile = Join-Path ([System.IO.Path]::GetTempPath()) ('chrome-detect-miss-out-' + [guid]::NewGuid().ToString('n'))
+    $liveErrFile = Join-Path ([System.IO.Path]::GetTempPath()) ('chrome-detect-miss-err-' + [guid]::NewGuid().ToString('n'))
     try {
         Remove-Item -Path Env:RELIAN_DEPLOY_TEST -ErrorAction SilentlyContinue
-        & pwsh -NoProfile -File $detectPath
+        & pwsh -NoProfile -File $detectPath 1> $liveOutFile 2> $liveErrFile
         $liveExit = $LASTEXITCODE
     } finally {
         $env:RELIAN_DEPLOY_TEST = $savedTest
     }
+    $liveOut = ''
+    if (Test-Path -LiteralPath $liveOutFile) {
+        $liveOut = [string](Get-Content -LiteralPath $liveOutFile -Raw -Encoding utf8)
+        Remove-Item -LiteralPath $liveOutFile -Force -ErrorAction SilentlyContinue
+    }
+    $liveErr = ''
+    if (Test-Path -LiteralPath $liveErrFile) {
+        $liveErr = [string](Get-Content -LiteralPath $liveErrFile -Raw -Encoding utf8)
+        Remove-Item -LiteralPath $liveErrFile -Force -ErrorAction SilentlyContinue
+    }
     if ($liveExit -ne 1) {
         Fail "missing registry detection exited $liveExit"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($liveOut) -or -not [string]::IsNullOrWhiteSpace($liveErr)) {
+        Fail 'missing registry detection wrote output'
     }
 }
 
