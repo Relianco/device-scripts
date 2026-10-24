@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Zoom Workplace (64-bit)",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Zoom.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Zoom.ps1 -DeploymentType Install -Action Install -PinVersion 7.2.48556",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Zoom.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 7.2.48556",
+  "detectionScript": "Detect-Zoom.ps1",
+  "detectReplace": []
+}
