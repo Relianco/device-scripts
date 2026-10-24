@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Everything",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Everything.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Everything.ps1 -DeploymentType Install -Action Install -PinVersion 1.5.0.1423",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Everything.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.5.0.1423",
+  "detectionScript": "Detect-Everything.ps1",
+  "detectReplace": []
+}
