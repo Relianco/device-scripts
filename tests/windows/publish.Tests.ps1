@@ -339,6 +339,10 @@ function Assert-Readme {
         '130'
         'https://relianpub.blob.core.windows.net/pub/sec/'
         'bootstrap.ps1 remains the collector loader'
+        'windows/packages/printer-tcp/Invoke-PrinterTcp.ps1'
+        'PrinterName'
+        'BrotherHlL2370Dw'
+        'KonicaUniversalPcl'
     )
     $cursor = 0
     foreach ($needle in $needles) {
