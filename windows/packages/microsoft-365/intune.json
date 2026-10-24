@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Microsoft 365 Apps",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Microsoft365.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Microsoft365.ps1 -DeploymentType Install -Action Install -PinVersion 16.0.0.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Microsoft365.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 16.0.0.0",
+  "detectionScript": "Detect-Microsoft365.ps1",
+  "detectReplace": []
+}
