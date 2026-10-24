@@ -522,6 +522,25 @@ function Test-ApplyActionDocument {
     return $null
 }
 
+function Test-ApplyActionRegistryValueAbsent {
+    param($ErrorRecord)
+    if ($ErrorRecord -isnot [System.Management.Automation.ErrorRecord]) {
+        return $false
+    }
+    if ($ErrorRecord.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+        return $true
+    }
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [System.Management.Automation.ItemNotFoundException]) {
+        return $true
+    }
+    # Windows Remove-ItemProperty: PSArgumentException, "Property <name> does not exist at path <path>."
+    if ($exception -is [System.ArgumentException] -and [regex]::IsMatch([string]$exception.Message, '^Property .+ does not exist')) {
+        return $true
+    }
+    return $false
+}
+
 function Write-ApplyActionRegistryReal {
     param(
         [string]$Operation,
@@ -538,10 +557,7 @@ function Write-ApplyActionRegistryReal {
         try {
             Remove-ItemProperty -LiteralPath $FullPath -Name $Name -ErrorAction Stop
         } catch {
-            if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
-                return 0
-            }
-            if ($_.Exception -is [System.Management.Automation.ItemNotFoundException]) {
+            if (Test-ApplyActionRegistryValueAbsent -ErrorRecord $_) {
                 return 0
             }
             return 1

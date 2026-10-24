@@ -150,7 +150,7 @@ $serviceSkip = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","des
 $withUndo = New-Sample -Json '{"schema":1,"id":"sample","title":"Sample","description":"Has undo.","steps":[{"kind":"registry","op":"set","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha","type":"dword","value":1}],"undo":[{"kind":"registry","op":"remove-value","hive":"HKLM","path":"SOFTWARE\\Test","name":"Alpha"}]}'
 $fixtureSecret = [guid]::NewGuid().ToString('n')
 $userInfoBase = -join @('https://', 'user', '@', 'example.invalid/actions')
-$userPassBase = -join @('https://', 'user', ':', $fixtureSecret, '@', 'example.com/actions')
+$userSecretBase = -join @('https://', 'user', ':', $fixtureSecret, '@', 'example.com/actions')
 $plainBase = 'https://example.invalid/actions'
 
 function Write-SampleUndo {
@@ -401,12 +401,12 @@ try {
     Reset-Hooks
     $script:PayloadBytes = $utf8.GetBytes('not-the-undo')
     $seededUndo = Write-SampleUndo -Hash $withUndo.Sha
-    $userPassUri = [Uri]$userPassBase
+    $userSecretUri = [Uri]$userSecretBase
     $expectedUser = 'user' + ':' + $fixtureSecret
-    if ($userPassUri.Scheme -cne 'https' -or $userPassUri.Host -cne 'example.com' -or $userPassUri.AbsolutePath -cne '/actions' -or $userPassUri.UserInfo -cne $expectedUser -or -not (Test-ApplyActionUrlHasUserInfo -Url $userPassBase)) {
+    if ($userSecretUri.Scheme -cne 'https' -or $userSecretUri.Host -cne 'example.com' -or $userSecretUri.AbsolutePath -cne '/actions' -or $userSecretUri.UserInfo -cne $expectedUser -or -not (Test-ApplyActionUrlHasUserInfo -Url $userSecretBase)) {
         Fail 'undo userinfo fixture is not the sample URL'
     }
-    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $userPassBase -MarkerRoot $markerRoot
+    $code = Invoke-ApplyActionAction -Action 'Uninstall' -PinVersion ('sample:' + $withUndo.Sha) -ActionBaseUrl $userSecretBase -MarkerRoot $markerRoot
     if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:RegistryWrites.Count -ne 1 -or [string]$script:RegistryWrites[0].Operation -ne 'remove-value') {
         Fail "userinfo undo returned $code downloads=$($script:DownloadCount)"
     }
@@ -422,6 +422,73 @@ try {
     $removeCode = [int](Write-ApplyActionRegistryReal -Operation 'remove-value' -FullPath $notRegistry -Name 'Alpha')
     if ($removeCode -ne 1) {
         Fail "remove-value on a directory returned $removeCode"
+    }
+
+    $missingMessage = 'Property Alpha does not exist at path HKLM:\SOFTWARE\Test.'
+    $missingException = [System.Management.Automation.PSArgumentException]::new($missingMessage)
+    $missingRecord = [System.Management.Automation.ErrorRecord]::new(
+        $missingException,
+        $missingException.GetType().FullName,
+        [System.Management.Automation.ErrorCategory]::InvalidArgument,
+        'Alpha'
+    )
+    if ($null -eq (Get-Command Test-ApplyActionRegistryValueAbsent -ErrorAction SilentlyContinue) -or -not (Test-ApplyActionRegistryValueAbsent -ErrorRecord $missingRecord)) {
+        Fail 'missing property was not treated as absent'
+    }
+
+    $argumentException = [System.ArgumentException]::new($missingMessage)
+    $argumentRecord = [System.Management.Automation.ErrorRecord]::new(
+        $argumentException,
+        $argumentException.GetType().FullName,
+        [System.Management.Automation.ErrorCategory]::InvalidArgument,
+        'Alpha'
+    )
+    if (-not (Test-ApplyActionRegistryValueAbsent -ErrorRecord $argumentRecord)) {
+        Fail 'argument exception for a missing property was not treated as absent'
+    }
+
+    $otherException = [System.ArgumentException]::new('The property already exists.')
+    $otherRecord = [System.Management.Automation.ErrorRecord]::new(
+        $otherException,
+        $otherException.GetType().FullName,
+        [System.Management.Automation.ErrorCategory]::InvalidArgument,
+        'Alpha'
+    )
+    if (Test-ApplyActionRegistryValueAbsent -ErrorRecord $otherRecord) {
+        Fail 'unrelated argument error was treated as absent'
+    }
+
+    $itemException = [System.Management.Automation.ItemNotFoundException]::new('Cannot find path HKLM:\SOFTWARE\Test because it does not exist.')
+    $itemRecord = [System.Management.Automation.ErrorRecord]::new(
+        $itemException,
+        'PathNotFound',
+        [System.Management.Automation.ErrorCategory]::NotSpecified,
+        'HKLM:\SOFTWARE\Test'
+    )
+    if (-not (Test-ApplyActionRegistryValueAbsent -ErrorRecord $itemRecord)) {
+        Fail 'missing item was not treated as absent'
+    }
+
+    $foundException = [System.Exception]::new('The registry key at the specified path does not exist.')
+    $foundRecord = [System.Management.Automation.ErrorRecord]::new(
+        $foundException,
+        'KeyDoesNotExist',
+        [System.Management.Automation.ErrorCategory]::ObjectNotFound,
+        'HKLM:\SOFTWARE\Test'
+    )
+    if (-not (Test-ApplyActionRegistryValueAbsent -ErrorRecord $foundRecord)) {
+        Fail 'object not found was not treated as absent'
+    }
+
+    $deniedException = [System.UnauthorizedAccessException]::new('Access to the registry key is denied.')
+    $deniedRecord = [System.Management.Automation.ErrorRecord]::new(
+        $deniedException,
+        $deniedException.GetType().FullName,
+        [System.Management.Automation.ErrorCategory]::PermissionDenied,
+        'Alpha'
+    )
+    if (Test-ApplyActionRegistryValueAbsent -ErrorRecord $deniedRecord) {
+        Fail 'access denied was treated as absent'
     }
 
     Reset-Hooks
