@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian PuTTY",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Putty.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Putty.ps1 -DeploymentType Install -Action Install -PinVersion 0.85.0.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Putty.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 0.85.0.0",
+  "detectionScript": "Detect-Putty.ps1",
+  "detectReplace": []
+}
