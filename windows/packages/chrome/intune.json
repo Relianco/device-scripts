@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Google Chrome",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Chrome.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Chrome.ps1 -DeploymentType Install -Action Install -PinVersion 155.0.8059.85",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Chrome.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 155.0.8059.85",
+  "detectionScript": "Detect-Chrome.ps1",
+  "detectReplace": []
+}
