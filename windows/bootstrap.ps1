@@ -370,6 +370,8 @@ function Get-CollectorBootstrapPlan {
             Arguments = $null
         }
     }
+    # Any non-whitespace hash is a pin. The bytes are compared after download.
+    # A short value is a mismatch, not a reason to skip the download.
     if ([string]::IsNullOrWhiteSpace($ScriptSha256)) {
         return [pscustomobject]@{
             ExitCode = 0
