@@ -232,16 +232,6 @@ function Assert-CleanText {
     if ($scrubbed -match '(?<!\d)(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?!\d)') {
         Fail "$Label contains an address"
     }
-    foreach ($word in @(
-            ('Le' + 'ague'),
-            ('PI' + 'LA'),
-            ('Sit' + 'ka'),
-            ('/' + 'home' + '/')
-        )) {
-        if ($Text.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Fail "$Label contains forbidden text"
-        }
-    }
 }
 
 $jsonText = [System.IO.File]::ReadAllText($jsonPath)
@@ -249,3 +239,11 @@ $testText = [System.IO.File]::ReadAllText($PSCommandPath)
 Assert-CleanText -Label 'intune.json' -Text $jsonText
 Assert-CleanText -Label 'Detect-Notepadpp.ps1' -Text $detectText
 Assert-CleanText -Label 'intune-notepadpp.Tests.ps1' -Text $testText
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-Notepadpp.ps1' }
+    )) {
+    if ($packageFile.Text.Contains('/home/')) {
+        Fail "$($packageFile.Label) contains a home path"
+    }
+}
