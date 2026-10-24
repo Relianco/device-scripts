@@ -126,6 +126,15 @@ $exitAt = $detectText.IndexOf('exit ', [System.StringComparison]::Ordinal)
 if ($exitAt -ge 0 -and $exitAt -lt $guardAt) {
     Fail 'detection script exits before the test guard'
 }
+$successLine = "Write-Output 'Relian Notepad++'"
+$successAt = $detectText.IndexOf($successLine, [System.StringComparison]::Ordinal)
+if ($successAt -lt $guardAt) {
+    Fail 'success output is missing'
+}
+$exitZeroAt = $detectText.IndexOf('exit 0', $successAt, [System.StringComparison]::Ordinal)
+if ($exitZeroAt -lt 0) {
+    Fail 'success output is missing'
+}
 
 $env:RELIAN_DEPLOY_TEST = '1'
 . $detectPath

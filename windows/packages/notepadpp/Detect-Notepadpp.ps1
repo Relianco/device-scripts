@@ -150,7 +150,9 @@ try {
 } catch {
     $present = $false
 }
+# Intune treats exit 0 with an empty stdout as not installed.
 if ($present) {
+    Write-Output 'Relian Notepad++'
     exit 0
 }
 exit 1
