@@ -58,11 +58,14 @@ relian_remove_work() {
 relian_should_retry() {
   local code="$1"
   local status="$2"
+  if relian_status_is_http "$status"; then
+    case "$status" in
+      408|429|500|502|503|504) return 0 ;;
+    esac
+    return 1
+  fi
   case "$code" in
     6|7|28|35) return 0 ;;
-  esac
-  case "$status" in
-    408|429|500|502|503|504) return 0 ;;
   esac
   return 1
 }

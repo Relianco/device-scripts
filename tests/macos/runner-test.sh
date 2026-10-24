@@ -830,6 +830,47 @@ test_http_retries() {
   ok
 }
 
+test_status_before_transport_retry() {
+  begin "HTTP 404 and curl exit 28 is one attempt"
+  reset_stubs
+  local log
+  log="$(mktemp)"
+  queue_http 404 28 ""
+  invoke_runner "$log" --package-url "$PKG_URL" --package-sha256 "$FIXTURE_HASH" --action Install --pin-version 1.2.3
+  if [[ "$LAST_CODE" -ne 1 || "$DOWNLOADS" -ne 1 || -s "$log" ]]; then
+    fail "code=$LAST_CODE downloads=$DOWNLOADS"
+  fi
+  expect_sleeps || true
+  ok
+
+  begin "HTTP 500 and curl exit 28 retries once and runs"
+  reset_stubs
+  log="$(mktemp)"
+  queue_http 500 28 ""
+  queue_http 200 0 "$FIXTURE"
+  invoke_runner "$log" --package-url "$PKG_URL" --package-sha256 "$FIXTURE_HASH" --action Install --pin-version 1.2.3
+  if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 2 ]]; then
+    fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
+  fi
+  expect_sleeps 5 || true
+  if [[ "$(cat "$log")" != "deployment=Install action=Install pin=1.2.3" ]]; then
+    fail "log [$(cat "$log" 2>/dev/null || true)]"
+  fi
+  ok
+
+  begin "no HTTP status and curl exit 28 retries once"
+  reset_stubs
+  log="$(mktemp)"
+  queue_http "" 28 ""
+  queue_http 200 0 "$FIXTURE"
+  invoke_runner "$log" --package-url "$PKG_URL" --package-sha256 "$FIXTURE_HASH" --action Install --pin-version 1.2.3
+  if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 2 ]]; then
+    fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
+  fi
+  expect_sleeps 5 || true
+  ok
+}
+
 test_curl_retries() {
   local curl_code
   for curl_code in 6 7 28 35; do
@@ -1071,6 +1112,7 @@ if [[ -f "$RUNNER" && -f "$PACKAGE" ]]; then
   test_userinfo
   test_hash_mismatch
   test_http_retries
+  test_status_before_transport_retry
   test_curl_retries
   test_actions
   test_missing_parameters
