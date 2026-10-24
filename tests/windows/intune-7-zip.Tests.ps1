@@ -150,6 +150,28 @@ foreach ($root in @(
         Fail "detection script misses $root"
     }
 }
+$presentAt = $detectText.LastIndexOf('if ($present) {', [System.StringComparison]::Ordinal)
+if ($presentAt -lt 0) {
+    Fail 'detection success path is missing'
+}
+$afterPresent = $detectText.Substring($presentAt)
+$successExit = $afterPresent.IndexOf('exit 0', [System.StringComparison]::Ordinal)
+if ($successExit -lt 0) {
+    Fail 'detection success path is missing'
+}
+$successBlock = $afterPresent.Substring(0, $successExit)
+if (-not $successBlock.Contains("Write-Output 'Relian 7-Zip'")) {
+    Fail 'detection success path does not write Relian 7-Zip'
+}
+$afterSuccess = $afterPresent.Substring($successExit)
+$failureExit = $afterSuccess.IndexOf('exit 1', [System.StringComparison]::Ordinal)
+if ($failureExit -lt 0) {
+    Fail 'detection failure path is missing'
+}
+$failureBlock = $afterSuccess.Substring(0, $failureExit)
+if ($failureBlock.Contains('Write-Output') -or $failureBlock.Contains('Write-Error') -or $failureBlock.Contains('[Console]::Error')) {
+    Fail 'detection failure path writes output'
+}
 
 $env:RELIAN_DEPLOY_TEST = '1'
 . $detectPath

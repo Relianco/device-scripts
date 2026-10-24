@@ -167,7 +167,9 @@ try {
 } catch {
     $present = $false
 }
+# Intune treats exit 0 with empty stdout as not installed. Stderr is also a failure.
 if ($present) {
+    Write-Output 'Relian 7-Zip'
     exit 0
 }
 exit 1
