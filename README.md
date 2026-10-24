@@ -28,7 +28,7 @@ The runner is `windows/runner/Invoke-RelianRunner.ps1`. Paste that file into Nin
 
 ## Collectors
 
-`windows/bootstrap.ps1` downloads one script from `windows/collectors/` and runs it. The collectors are `cpu-benchmark`, `hardware-inventory`, `network-audit`, and `storage-health`. They write inventory into NinjaOne fields.
+`windows/bootstrap.ps1` downloads one collector by URL and SHA256 and prints that script's JSON on stdout. It does not write a NinjaOne field. An empty hash downloads nothing. The collectors are `cpu-benchmark`, `hardware-inventory`, `network-audit`, and `storage-health`.
 
 ## Layout
 

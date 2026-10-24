@@ -1,13 +1,18 @@
 <#
 .SYNOPSIS
     Relian Network Audit Collector
-    Collects network adapter and connectivity details.
+    Collects network adapter and connectivity details and prints one JSON object.
 
 .DESCRIPTION
     Gathers per-adapter details: name, MAC, status, speed, type, IP config.
     For WiFi: SSID, signal strength, band, protocol.
     Connection type classification (wired, WiFi, VPN, unknown).
-    Writes JSON results to the relian_network_audit NinjaOne custom field.
+    Prints one compressed JSON object on the success stream.
+    Pass -AdapterName to keep one adapter. An empty name keeps every adapter.
+
+.PARAMETER AdapterName
+    Adapter name to keep. Comparison is equality, ordinal and case-insensitive.
+    Empty keeps every adapter.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -15,6 +20,13 @@
     No external module dependencies
     Version: 1.0
 #>
+
+# Script parameters are not Mandatory: a mandatory parameter prompts when this
+# file is dot-sourced under RELIAN_DEPLOY_TEST.
+[CmdletBinding()]
+param(
+    [string]$AdapterName
+)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -111,8 +123,79 @@ function Get-ConnectionType {
     return "unknown"
 }
 
-# Main
-try {
+function New-NetworkAuditResult {
+    param(
+        $Adapters,
+        [AllowEmptyString()][string]$AdapterName = ''
+    )
+
+    $filtered = New-Object System.Collections.Generic.List[object]
+    foreach ($adapter in @($Adapters)) {
+        if ($null -eq $adapter) {
+            continue
+        }
+        if (-not [string]::IsNullOrEmpty($AdapterName)) {
+            $name = [string]$adapter.name
+            if (-not $name.Equals([string]$AdapterName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+        }
+        [void]$filtered.Add($adapter)
+    }
+
+    $dnsServers = New-Object System.Collections.Generic.List[string]
+    $connected = 0
+    $wifi = 0
+    $ethernet = 0
+    foreach ($adapter in $filtered) {
+        if ([string]$adapter.status -eq 'Connected') {
+            $connected = $connected + 1
+        }
+        if ([string]$adapter.type -eq 'WiFi') {
+            $wifi = $wifi + 1
+        }
+        if ([string]$adapter.type -eq 'Ethernet') {
+            $ethernet = $ethernet + 1
+        }
+        if ($null -eq $adapter.dnsServers) {
+            continue
+        }
+        foreach ($dns in @($adapter.dnsServers)) {
+            if ([string]::IsNullOrEmpty([string]$dns)) {
+                continue
+            }
+            $text = [string]$dns
+            if (-not $dnsServers.Contains($text)) {
+                [void]$dnsServers.Add($text)
+            }
+        }
+    }
+
+    $primary = $null
+    if ($dnsServers.Count -gt 0) {
+        $primary = $dnsServers[0]
+    }
+
+    $result = @{
+        adapters       = @($filtered.ToArray())
+        totalAdapters  = $filtered.Count
+        connectedCount = $connected
+        primaryDns     = $primary
+        allDnsServers  = @($dnsServers.ToArray())
+        hasWifi        = ($wifi -gt 0)
+        hasEthernet    = ($ethernet -gt 0)
+        timestamp      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        version        = "1.0"
+    }
+
+    return ($result | ConvertTo-Json -Depth 4 -Compress)
+}
+
+function Invoke-NetworkAudit {
+    param(
+        [AllowEmptyString()][string]$AdapterName = ''
+    )
+
     Write-Status "Relian Network Audit v1.0 starting"
 
     # Get physical network adapters
@@ -216,46 +299,18 @@ try {
         }
     }
 
-    # DNS configuration summary
-    $dnsServers = @()
-    foreach ($a in $adapterList) {
-        if ($a.dnsServers) {
-            foreach ($dns in $a.dnsServers) {
-                if ($dns -and $dnsServers -notcontains $dns) {
-                    $dnsServers += $dns
-                }
-            }
-        }
-    }
-
-    $connectedAdapters = @($adapterList | Where-Object { $_.status -eq "Connected" })
-
-    $result = @{
-        adapters          = $adapterList
-        totalAdapters     = $adapterList.Count
-        connectedCount    = $connectedAdapters.Count
-        primaryDns        = if ($dnsServers.Count -gt 0) { $dnsServers[0] } else { $null }
-        allDnsServers     = $dnsServers
-        hasWifi           = ($adapterList | Where-Object { $_.type -eq "WiFi" }).Count -gt 0
-        hasEthernet       = ($adapterList | Where-Object { $_.type -eq "Ethernet" }).Count -gt 0
-        timestamp         = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-        version           = "1.0"
-    }
-
-    $json = $result | ConvertTo-Json -Depth 4 -Compress
-    Write-Status "Network audit collected: $($json.Length) bytes, $($adapterList.Count) adapters"
-
-    # Write to NinjaOne custom field
-    try {
-        Ninja-Property-Set relian_network_audit $json
-        Write-Status "Network audit written to relian_network_audit custom field"
-    } catch {
-        Write-Status "Could not write to custom field: $_" "WARN"
-        Write-Host "NETWORK_AUDIT_RESULT:$json"
-    }
-
+    $json = New-NetworkAuditResult -Adapters $adapterList -AdapterName $AdapterName
+    Write-Status "Network audit collected: $($json.Length) bytes, $(@($adapterList).Count) adapters"
+    Write-Output $json
     Write-Status "Network audit complete"
+}
 
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+try {
+    Invoke-NetworkAudit -AdapterName ([string]$AdapterName)
 } catch {
     Write-Status "Network audit error: $_" "ERROR"
     Write-Status $_.ScriptStackTrace "ERROR"

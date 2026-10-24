@@ -1,214 +1,557 @@
 <#
 .SYNOPSIS
-    Relian collector loader for NinjaOne.
-    Downloads one inventory script and runs it.
+    Relian collector loader.
+    Downloads one inventory script and prints its JSON.
 
 .DESCRIPTION
     This is not the software installer. The installer pasted into NinjaOne
-    is windows/runner/Invoke-RelianRunner.ps1. This script only runs a collector.
+    is windows/runner/Invoke-RelianRunner.ps1. This script downloads one
+    collector by URL and SHA256 and leaves that script's JSON on stdout.
+    It does not write a NinjaOne field.
 
-    When executed, it:
-    1. Reads the git deploy token from NinjaOne org custom field
-    2. Downloads the requested collector from this repo
-    3. Executes that collector
-    4. Reports execution status back via custom fields
+    An empty hash downloads nothing. A URL with userinfo is refused.
+    Script arguments are a base64 JSON object of string values, forwarded
+    as named parameters.
 
-    It follows the named branch, checks no file hash, and can put the git
-    token in the download URL.
+.PARAMETER ScriptUrl
+    Absolute URL of the collector script.
 
-.PARAMETER ScriptName
-    Required. The relative path of the collector to execute (e.g., "windows/collectors/cpu-benchmark")
+.PARAMETER ScriptSha256
+    Expected SHA256 of the downloaded file. Empty or whitespace downloads nothing.
 
-.PARAMETER RepoUrl
-    Optional. Git repository URL. Defaults to the Relian device-scripts repo.
-
-.PARAMETER Branch
-    Optional. Git branch to use. Defaults to "main".
+.PARAMETER ScriptArguments
+    Optional base64 JSON object. Empty adds no parameters.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
-    Timeout: 5 minutes
     No external module dependencies
 #>
 
+# Script parameters are not Mandatory: a mandatory parameter prompts when this
+# file is dot-sourced under RELIAN_DEPLOY_TEST.
+[CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$ScriptName,
-
-    [Parameter(Mandatory = $false)]
-    [string]$RepoUrl = "https://github.com/Relianco/device-scripts",
-
-    [Parameter(Mandatory = $false)]
-    [string]$Branch = "main"
+    [string]$ScriptUrl,
+    [AllowEmptyString()][string]$ScriptSha256,
+    [AllowEmptyString()][string]$ScriptArguments = ''
 )
 
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$ProgressPreference = 'SilentlyContinue'
 
-# Timeout: 5 minutes
-$TimeoutSeconds = 300
-$StartTime = Get-Date
-
-function Write-Status {
-    param([string]$Message, [string]$Level = "INFO")
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$Level] $timestamp - $Message"
+function Write-CollectorBootstrapError {
+    param([string]$Message)
+    [Console]::Error.WriteLine($Message)
 }
 
-function Test-Timeout {
-    $elapsed = (Get-Date) - $StartTime
-    if ($elapsed.TotalSeconds -ge $TimeoutSeconds) {
-        Write-Status "Execution timeout reached ($TimeoutSeconds seconds)" "ERROR"
-        exit 1
-    }
-}
-
-# Validate script path - prevent directory traversal
-function Test-ScriptPath {
-    param([string]$Path)
-    if ($Path -match '\.\.[\\/]' -or $Path -match '^[\\/]' -or $Path -match '[<>"|?*]') {
-        Write-Status "Invalid script path: contains directory traversal or invalid characters" "ERROR"
-        exit 1
-    }
-    # Ensure it doesn't start with / or \
-    if ($Path.StartsWith('/') -or $Path.StartsWith('\')) {
-        Write-Status "Invalid script path: must be relative" "ERROR"
-        exit 1
-    }
-    return $true
-}
-
-# Main execution
-try {
-    Write-Status "Relian Bootstrap v1.0 starting"
-    Write-Status "Requested script: $ScriptName"
-
-    # Validate script path
-    Test-ScriptPath -Path $ScriptName | Out-Null
-
-    # Ensure .ps1 extension
-    $scriptFile = $ScriptName
-    if (-not $scriptFile.EndsWith('.ps1')) {
-        $scriptFile = "$scriptFile.ps1"
-    }
-
-    # Read deploy token from NinjaOne org custom field
-    $deployToken = $null
+function Test-CollectorBootstrapUrl {
+    param([Parameter(Mandatory)][string]$Url)
     try {
-        $deployToken = Ninja-Property-Get relian_git_deploy_token 2>$null
+        $uri = [Uri]$Url
+        if (-not $uri.IsAbsoluteUri) {
+            return $false
+        }
+        return -not [string]::IsNullOrEmpty($uri.UserInfo)
     } catch {
-        Write-Status "No deploy token found in org custom fields (non-critical for public repos)" "WARN"
+        return $false
     }
+}
 
-    # Create temp directory
-    $tempDir = Join-Path $env:TEMP "relian_scripts_$(Get-Random)"
-    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-    Write-Status "Temp directory: $tempDir"
-
-    $scriptPath = $null
-
-    try {
-        Test-Timeout
-
-        # Try git clone first, fall back to raw URL download
-        $gitAvailable = $false
-        try {
-            $gitVersion = & git --version 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                $gitAvailable = $true
-            }
-        } catch {
-            $gitAvailable = $false
-        }
-
-        if ($gitAvailable) {
-            Write-Status "Git available, cloning repository"
-
-            $cloneUrl = $RepoUrl
-            if ($deployToken) {
-                # Insert token into URL for authentication
-                $cloneUrl = $RepoUrl -replace 'https://', "https://x-access-token:$deployToken@"
-            }
-
-            $cloneDir = Join-Path $tempDir "repo"
-            & git clone --depth 1 --branch $Branch --single-branch $cloneUrl $cloneDir 2>&1 | Out-Null
-
-            if ($LASTEXITCODE -ne 0) {
-                Write-Status "Git clone failed, falling back to direct download" "WARN"
-                $gitAvailable = $false
-            } else {
-                $scriptPath = Join-Path $cloneDir $scriptFile
-            }
-        }
-
-        if (-not $gitAvailable) {
-            Write-Status "Downloading script via direct URL"
-
-            # Build raw URL for the specific file
-            $rawUrl = "$RepoUrl/raw/$Branch/$scriptFile"
-
-            $downloadPath = Join-Path $tempDir (Split-Path $scriptFile -Leaf)
-
-            $headers = @{}
-            if ($deployToken) {
-                $headers["Authorization"] = "token $deployToken"
-            }
-
+function Get-CollectorHttpStatus {
+    param($Exception)
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard = $guard + 1
+        $code = $null
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'StatusCode' -and $null -ne $current.StatusCode) {
             try {
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-                Invoke-WebRequest -Uri $rawUrl -OutFile $downloadPath -Headers $headers -UseBasicParsing
-                $scriptPath = $downloadPath
+                $parsed = [int]$current.StatusCode
+                if ($parsed -ge 100 -and $parsed -le 599) {
+                    $code = $parsed
+                }
             } catch {
-                Write-Status "Failed to download script: $_" "ERROR"
-                exit 1
+                $code = $null
             }
         }
-
-        Test-Timeout
-
-        # Verify script exists
-        if (-not $scriptPath -or -not (Test-Path $scriptPath)) {
-            Write-Status "Script not found at: $scriptPath" "ERROR"
-            exit 1
+        if ($null -eq $code -and $names -contains 'Response' -and $null -ne $current.Response) {
+            $response = $current.Response
+            $responseNames = @($response.PSObject.Properties.Name)
+            if ($responseNames -contains 'StatusCode' -and $null -ne $response.StatusCode) {
+                try {
+                    $parsed = [int]$response.StatusCode
+                    if ($parsed -ge 100 -and $parsed -le 599) {
+                        $code = $parsed
+                    }
+                } catch {
+                    $code = $null
+                }
+            }
         }
-
-        Write-Status "Executing: $scriptFile"
-
-        # Execute the script
-        $scriptOutput = & powershell.exe -ExecutionPolicy Bypass -File $scriptPath 2>&1
-        $scriptExitCode = $LASTEXITCODE
-
-        if ($scriptOutput) {
-            Write-Host $scriptOutput
+        if ($null -ne $code) {
+            return $code
         }
+        $current = $current.InnerException
+    }
+    return $null
+}
 
-        Test-Timeout
+function Test-CollectorTransientTransport {
+    param($Exception)
+    $webTransient = @(
+        'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
+        'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
+    )
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard = $guard + 1
+        if ($current -is [System.TimeoutException] -or
+            $current -is [System.Threading.Tasks.TaskCanceledException] -or
+            $current -is [System.Net.Sockets.SocketException]) {
+            return $true
+        }
+        if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
+            return $true
+        }
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'HttpRequestError' -and $null -ne $current.HttpRequestError -and $requestTransient -contains [string]$current.HttpRequestError) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
 
-        # Write execution metadata to relian_last_collection
-        $collectionData = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+function Test-CollectorDownloadIsTransient {
+    param($ErrorRecord)
+    $exception = $null
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ErrorRecord.Exception
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $exception = $ErrorRecord
+    }
+    if ($null -eq $exception) {
+        return $false
+    }
+    $status = Get-CollectorHttpStatus -Exception $exception
+    if ($null -ne $status) {
+        return @(408, 429, 500, 502, 503, 504) -contains $status
+    }
+    return [bool](Test-CollectorTransientTransport -Exception $exception)
+}
+
+function Invoke-CollectorBootstrapDownload {
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ExpectedSha256
+    )
+
+    # Three attempts. Waits are 5s then 20s. A hash mismatch is not retried.
+    $delays = @(5, 20)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $thrown = $null
         try {
-            Ninja-Property-Set relian_last_collection $collectionData
+            [void](& $script:DownloadCollector -Url $Url -Destination $Destination)
         } catch {
-            Write-Status "Could not update relian_last_collection: $_" "WARN"
+            $thrown = $_
         }
-
-        if ($scriptExitCode -ne 0) {
-            Write-Status "Script exited with code: $scriptExitCode" "ERROR"
-            exit $scriptExitCode
+        $exists = Test-Path -LiteralPath $Destination
+        if ($null -eq $thrown -and $exists) {
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Destination).Hash
+            if ($actual.Equals([string]$ExpectedSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return 0
+            }
+            Write-CollectorBootstrapError 'hash mismatch'
+            return 1
         }
+        $status = $null
+        $transient = $false
+        if ($null -ne $thrown) {
+            $status = Get-CollectorHttpStatus -Exception $thrown.Exception
+            $transient = [bool](Test-CollectorDownloadIsTransient -ErrorRecord $thrown)
+        }
+        if (-not $transient -or $attempt -eq 3) {
+            if ($null -ne $status) {
+                Write-CollectorBootstrapError "download failed with HTTP $status"
+            } elseif ($null -eq $thrown) {
+                Write-CollectorBootstrapError 'download wrote no file'
+            } else {
+                Write-CollectorBootstrapError 'download failed'
+            }
+            return 1
+        }
+        if ($exists) {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        }
+        [void](& $script:RetryDelay -Seconds $delays[$attempt - 1])
+    }
+    Write-CollectorBootstrapError 'download failed'
+    return 1
+}
 
-        Write-Status "Script completed successfully"
+function ConvertFrom-CollectorJsonPairs {
+    param([Parameter(Mandatory)][string]$Json)
+    $text = $Json.Trim()
+    $state = [pscustomobject]@{ Text = $text; N = $text.Length; I = 0 }
+    $pairs = [System.Collections.Generic.List[object]]::new()
 
-    } finally {
-        # Cleanup temp directory
-        if (Test-Path $tempDir) {
-            Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Status "Cleaned up temp directory"
+    $take = {
+        if ($state.I -ge $state.N) { throw 'invalid script arguments' }
+        $ch = $state.Text[$state.I]
+        $state.I = $state.I + 1
+        return $ch
+    }
+    $peek = {
+        if ($state.I -ge $state.N) { return [char]0 }
+        return $state.Text[$state.I]
+    }
+    $skip = {
+        while ($state.I -lt $state.N -and [char]::IsWhiteSpace($state.Text[$state.I])) {
+            $state.I = $state.I + 1
+        }
+    }
+    $readString = {
+        if ((& $take) -ne '"') { throw 'invalid script arguments' }
+        $sb = [System.Text.StringBuilder]::new()
+        while ($true) {
+            if ($state.I -ge $state.N) { throw 'invalid script arguments' }
+            $ch = & $take
+            if ($ch -eq '"') { return $sb.ToString() }
+            if ($ch -ne '\') {
+                if ([int]$ch -lt 32) { throw 'invalid script arguments' }
+                [void]$sb.Append($ch)
+                continue
+            }
+            if ($state.I -ge $state.N) { throw 'invalid script arguments' }
+            $esc = & $take
+            switch ($esc) {
+                '"' { [void]$sb.Append('"'); continue }
+                '\' { [void]$sb.Append('\'); continue }
+                '/' { [void]$sb.Append('/'); continue }
+                'b' { [void]$sb.Append([char]8); continue }
+                'f' { [void]$sb.Append([char]12); continue }
+                'n' { [void]$sb.Append([char]10); continue }
+                'r' { [void]$sb.Append([char]13); continue }
+                't' { [void]$sb.Append([char]9); continue }
+                'u' {
+                    if ($state.I + 4 -gt $state.N) { throw 'invalid script arguments' }
+                    $hex = $state.Text.Substring($state.I, 4)
+                    $state.I = $state.I + 4
+                    $code = 0
+                    if (-not [int]::TryParse($hex, [System.Globalization.NumberStyles]::HexNumber, [cultureinfo]::InvariantCulture, [ref]$code)) {
+                        throw 'invalid script arguments'
+                    }
+                    [void]$sb.Append([char]$code)
+                    continue
+                }
+                default { throw 'invalid script arguments' }
+            }
         }
     }
 
+    & $skip
+    if ((& $take) -ne '{') { throw 'invalid script arguments' }
+    & $skip
+    if ((& $peek) -eq '}') {
+        [void](& $take)
+        & $skip
+        if ($state.I -ne $state.N) { throw 'invalid script arguments' }
+        return ,$pairs
+    }
+    while ($true) {
+        & $skip
+        $name = & $readString
+        & $skip
+        if ((& $take) -ne ':') { throw 'invalid script arguments' }
+        & $skip
+        if ((& $peek) -ne '"') { throw 'invalid script arguments' }
+        $value = & $readString
+        [void]$pairs.Add([pscustomobject]@{ Name = $name; Value = $value })
+        & $skip
+        $sep = & $take
+        if ($sep -eq '}') { break }
+        if ($sep -ne ',') { throw 'invalid script arguments' }
+    }
+    & $skip
+    if ($state.I -ne $state.N) { throw 'invalid script arguments' }
+    return ,$pairs
+}
+
+function ConvertFrom-CollectorScriptArguments {
+    param([AllowEmptyString()][string]$ScriptArguments)
+
+    $pairs = [System.Collections.Generic.List[object]]::new()
+    if ($ScriptArguments -eq '') {
+        # A bare return enumerates the list. The comma returns the list object.
+        return ,$pairs
+    }
+    foreach ($unit in $ScriptArguments.ToCharArray()) {
+        $code = [int]$unit
+        $digit = $code -ge 48 -and $code -le 57
+        $upper = $code -ge 65 -and $code -le 90
+        $lower = $code -ge 97 -and $code -le 122
+        $symbol = $code -eq 43 -or $code -eq 47 -or $code -eq 61
+        if (-not ($digit -or $upper -or $lower -or $symbol)) {
+            throw 'invalid script arguments'
+        }
+    }
+    try {
+        $bytes = [Convert]::FromBase64String($ScriptArguments)
+    } catch {
+        throw 'invalid script arguments'
+    }
+    if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+        throw 'invalid script arguments'
+    }
+    try {
+        $json = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    } catch {
+        throw 'invalid script arguments'
+    }
+    if (-not $json.TrimStart().StartsWith('{')) {
+        throw 'invalid script arguments'
+    }
+    $parsed = ConvertFrom-CollectorJsonPairs -Json $json
+    $reserved = @(
+        'DeploymentType', 'Action', 'PinVersion', 'CancelPath', 'MarkerRoot',
+        'PackageUrl', 'PackageSha256', 'ToolkitUrl', 'ToolkitSha256',
+        'BrandPackUrl', 'BrandPackSha256', 'PackageArguments'
+    )
+    foreach ($prop in $parsed) {
+        $value = $prop.Value
+        if ($null -eq $value) {
+            throw 'invalid script arguments'
+        }
+        if ($value -isnot [string]) {
+            throw 'invalid script arguments'
+        }
+        $name = [string]$prop.Name
+        if (-not [regex]::IsMatch($name, '\A[A-Za-z][A-Za-z0-9]{0,63}\z')) {
+            throw 'invalid script arguments'
+        }
+        foreach ($banned in $reserved) {
+            if ($name.Equals($banned, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'invalid script arguments'
+            }
+        }
+        foreach ($unit in $value.ToCharArray()) {
+            $code = [int]$unit
+            if ($code -lt 32 -or $code -eq 34) {
+                throw 'invalid script arguments'
+            }
+        }
+        [void]$pairs.Add([pscustomobject]@{
+            Name = $name
+            Value = [string]$value
+        })
+    }
+    return ,$pairs
+}
+
+function Get-CollectorBootstrapPlan {
+    param(
+        [string]$ScriptUrl,
+        [AllowEmptyString()][string]$ScriptSha256,
+        [AllowEmptyString()][string]$ScriptArguments = ''
+    )
+
+    if (Test-CollectorBootstrapUrl -Url $ScriptUrl) {
+        Write-CollectorBootstrapError 'refusing a URL that contains userinfo'
+        return [pscustomobject]@{
+            ExitCode = 1
+            Download = $false
+            Arguments = $null
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($ScriptSha256)) {
+        return [pscustomobject]@{
+            ExitCode = 0
+            Download = $false
+            Arguments = $null
+        }
+    }
+    try {
+        $parsed = ConvertFrom-CollectorScriptArguments -ScriptArguments $ScriptArguments
+    } catch {
+        Write-CollectorBootstrapError 'invalid script arguments'
+        return [pscustomobject]@{
+            ExitCode = 1
+            Download = $false
+            Arguments = $null
+        }
+    }
+    return [pscustomobject]@{
+        ExitCode = $null
+        Download = $true
+        Arguments = $parsed
+    }
+}
+
+function ConvertTo-CollectorWindowsCommandLine {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [AllowEmptyString()]
+        [string[]]$Argument
+    )
+
+    # Quote every argument. A trailing backslash would escape the closing quote.
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($value in @($Argument)) {
+        $text = [string]$value
+        $builder = [System.Text.StringBuilder]::new()
+        [void]$builder.Append('"')
+        $chars = $text.ToCharArray()
+        $index = 0
+        while ($index -lt $chars.Length) {
+            $slashes = 0
+            while ($index -lt $chars.Length -and $chars[$index] -eq '\') {
+                $slashes = $slashes + 1
+                $index = $index + 1
+            }
+            if ($index -ge $chars.Length) {
+                for ($extra = 0; $extra -lt ($slashes * 2); $extra++) {
+                    [void]$builder.Append('\')
+                }
+                break
+            }
+            if ($chars[$index] -eq '"') {
+                for ($extra = 0; $extra -lt (($slashes * 2) + 1); $extra++) {
+                    [void]$builder.Append('\')
+                }
+                [void]$builder.Append('"')
+            } else {
+                for ($extra = 0; $extra -lt $slashes; $extra++) {
+                    [void]$builder.Append('\')
+                }
+                [void]$builder.Append($chars[$index])
+            }
+            $index = $index + 1
+        }
+        [void]$builder.Append('"')
+        [void]$parts.Add($builder.ToString())
+    }
+    return ($parts -join ' ')
+}
+
+function Invoke-CollectorBootstrap {
+    [CmdletBinding()]
+    param(
+        [string]$ScriptUrl,
+        [AllowEmptyString()][string]$ScriptSha256,
+        [AllowEmptyString()][string]$ScriptArguments = ''
+    )
+
+    $plan = Get-CollectorBootstrapPlan -ScriptUrl $ScriptUrl -ScriptSha256 $ScriptSha256 -ScriptArguments $ScriptArguments
+    if ($null -ne $plan.ExitCode) {
+        return [int]$plan.ExitCode
+    }
+
+    $stamp = [guid]::NewGuid().ToString('n')
+    $destination = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-collector-' + $stamp + '.ps1')
+    try {
+        $downloadCode = [int](Invoke-CollectorBootstrapDownload -Url $ScriptUrl -Destination $destination -ExpectedSha256 $ScriptSha256)
+        if ($downloadCode -ne 0) {
+            return $downloadCode
+        }
+        return [int](& $script:StartCollector -ScriptPath $destination -Arguments $plan.Arguments)
+    } finally {
+        if (Test-Path -LiteralPath $destination) {
+            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+$script:DownloadCollector = {
+    param($Url, $Destination)
+    $null = Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
+}
+
+$script:RetryDelay = {
+    param($Seconds)
+    Start-Sleep -Seconds $Seconds
+}
+
+# The child inherits this process's stdout. Do not capture that stream.
+$script:StartCollector = {
+    param($ScriptPath, $Arguments)
+    $hostPath = $null
+    $current = [System.Diagnostics.Process]::GetCurrentProcess()
+    if ($null -ne $current.MainModule) {
+        $hostPath = $current.MainModule.FileName
+    }
+    if ([string]::IsNullOrWhiteSpace($hostPath)) {
+        $hostPath = (Get-Process -Id $PID).Path
+    }
+    $childArgs = [System.Collections.Generic.List[string]]::new()
+    foreach ($token in @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', [string]$ScriptPath
+        )) {
+        [void]$childArgs.Add($token)
+    }
+    if ($null -ne $Arguments) {
+        foreach ($pair in $Arguments) {
+            [void]$childArgs.Add('-' + [string]$pair.Name)
+            [void]$childArgs.Add([string]$pair.Value)
+        }
+    }
+    $argList = $childArgs.ToArray()
+    $useQuotedLine = $PSVersionTable.PSVersion.Major -lt 6
+    if (-not $useQuotedLine) {
+        $argumentMode = 'Legacy'
+        $argumentPreference = Get-Variable -Name 'PSNativeCommandArgumentPassing' -ErrorAction SilentlyContinue
+        if ($null -ne $argumentPreference -and $null -ne $argumentPreference.Value) {
+            $argumentMode = [string]$argumentPreference.Value
+        }
+        $useQuotedLine = $argumentMode -eq 'Legacy' -or $argumentMode -eq 'Windows'
+    }
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $hostPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    if ($useQuotedLine) {
+        $startInfo.Arguments = ConvertTo-CollectorWindowsCommandLine -Argument $argList
+    } else {
+        foreach ($token in $argList) {
+            [void]$startInfo.ArgumentList.Add($token)
+        }
+    }
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $startInfo
+    try {
+        [void]$proc.Start()
+        [void]$proc.WaitForExit()
+        return [int]$proc.ExitCode
+    } finally {
+        $proc.Dispose()
+    }
+}
+
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+if (-not $PSBoundParameters.ContainsKey('ScriptUrl') -or -not $PSBoundParameters.ContainsKey('ScriptSha256')) {
+    Write-CollectorBootstrapError 'missing parameter ScriptUrl or ScriptSha256'
+    if ($MyInvocation.InvocationName -ne '.') {
+        exit 1
+    }
+    return
+}
+
+$script:ExitCode = 1
+try {
+    $script:ExitCode = [int](Invoke-CollectorBootstrap @PSBoundParameters)
 } catch {
-    Write-Status "Bootstrap error: $_" "ERROR"
-    Write-Status $_.ScriptStackTrace "ERROR"
-    exit 1
+    Write-CollectorBootstrapError 'collector bootstrap failed'
+    $script:ExitCode = 1
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    exit $script:ExitCode
 }

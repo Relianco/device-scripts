@@ -1,12 +1,18 @@
 <#
 .SYNOPSIS
     Relian Hardware Inventory Collector
-    Collects detailed hardware specs beyond what NinjaOne provides by default.
+    Collects detailed hardware specs and prints one JSON object.
 
 .DESCRIPTION
     Gathers comprehensive hardware data via WMI/CIM queries:
     CPU, Memory DIMMs, Storage, Motherboard, GPU, Network, Battery.
-    Writes JSON results to the relian_hardware_inventory NinjaOne custom field.
+    Prints one compressed JSON object on the success stream.
+    Pass -Section to collect a subset. Omitted or empty means every section.
+    A section that was not requested is null.
+
+.PARAMETER Section
+    Cpu, Memory, Storage, Motherboard, Gpu, Network, or Battery.
+    A value may be repeated. One element may be a comma-separated list.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -14,6 +20,13 @@
     No external module dependencies — uses WMI/CIM only
     Version: 1.0
 #>
+
+# Script parameters are not Mandatory: a mandatory parameter prompts when this
+# file is dot-sourced under RELIAN_DEPLOY_TEST.
+[CmdletBinding()]
+param(
+    [string[]]$Section
+)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -273,36 +286,99 @@ function Get-BatteryDetails {
     }
 }
 
-# Main
-try {
+function Get-HardwareSectionSet {
+    param([string[]]$Section)
+
+    $allowed = @('Cpu', 'Memory', 'Storage', 'Motherboard', 'Gpu', 'Network', 'Battery')
+    $selected = New-Object System.Collections.Generic.List[string]
+    $sawToken = $false
+    if ($null -ne $Section) {
+        foreach ($item in @($Section)) {
+            $sawToken = $true
+            foreach ($part in ([string]$item).Split(',')) {
+                $token = $part.Trim()
+                if ($token.Length -eq 0) {
+                    throw 'invalid hardware section'
+                }
+                $canonical = $null
+                foreach ($name in $allowed) {
+                    if ([string]::Equals($name, $token, [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $canonical = $name
+                        break
+                    }
+                }
+                if ($null -eq $canonical) {
+                    throw 'invalid hardware section'
+                }
+                if (-not $selected.Contains($canonical)) {
+                    [void]$selected.Add($canonical)
+                }
+            }
+        }
+    }
+    if (-not $sawToken) {
+        foreach ($name in $allowed) {
+            [void]$selected.Add($name)
+        }
+    }
+    return @($selected.ToArray())
+}
+
+function Invoke-HardwareInventory {
+    param([string[]]$Section)
+
+    $names = @(Get-HardwareSectionSet -Section $Section)
+    $wanted = @{}
+    foreach ($name in $names) {
+        $wanted[[string]$name] = $true
+    }
+
     Write-Status "Relian Hardware Inventory v1.0 starting"
 
+    $cpu = $null
+    $memory = $null
+    $storage = $null
+    $motherboard = $null
+    $gpu = $null
+    $network = $null
+    $battery = $null
+
+    if ($wanted.ContainsKey('Cpu')) { $cpu = Get-CpuDetails }
+    if ($wanted.ContainsKey('Memory')) { $memory = Get-MemoryDetails }
+    if ($wanted.ContainsKey('Storage')) { $storage = Get-StorageDetails }
+    if ($wanted.ContainsKey('Motherboard')) { $motherboard = Get-MotherboardDetails }
+    if ($wanted.ContainsKey('Gpu')) { $gpu = Get-GpuDetails }
+    if ($wanted.ContainsKey('Network')) { $network = Get-NetworkDetails }
+    if ($wanted.ContainsKey('Battery')) { $battery = Get-BatteryDetails }
+
     $inventory = @{
-        cpu         = Get-CpuDetails
-        memory      = Get-MemoryDetails
-        storage     = Get-StorageDetails
-        motherboard = Get-MotherboardDetails
-        gpu         = Get-GpuDetails
-        network     = Get-NetworkDetails
-        battery     = Get-BatteryDetails
+        cpu         = $cpu
+        memory      = $memory
+        storage     = $storage
+        motherboard = $motherboard
+        gpu         = $gpu
+        network     = $network
+        battery     = $battery
         timestamp   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         version     = "1.0"
     }
 
     $json = $inventory | ConvertTo-Json -Depth 4 -Compress
     Write-Status "Inventory collected: $($json.Length) bytes"
-
-    # Write to NinjaOne custom field
-    try {
-        Ninja-Property-Set relian_hardware_inventory $json
-        Write-Status "Hardware inventory written to relian_hardware_inventory custom field"
-    } catch {
-        Write-Status "Could not write to custom field: $_" "WARN"
-        Write-Host "INVENTORY_RESULT:$json"
-    }
-
+    Write-Output $json
     Write-Status "Hardware inventory complete"
+}
 
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+try {
+    if ($null -eq $Section) {
+        Invoke-HardwareInventory
+    } else {
+        Invoke-HardwareInventory -Section $Section
+    }
 } catch {
     Write-Status "Inventory error: $_" "ERROR"
     Write-Status $_.ScriptStackTrace "ERROR"

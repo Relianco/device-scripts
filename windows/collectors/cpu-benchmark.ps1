@@ -1,12 +1,16 @@
 <#
 .SYNOPSIS
     Relian CPU Benchmark Collector
-    Runs lightweight CPU benchmarks and writes results to NinjaOne custom fields.
+    Runs lightweight CPU benchmarks and prints one JSON object.
 
 .DESCRIPTION
     Performs single-threaded and multi-threaded CPU benchmarks using a prime sieve.
     Normalizes scores to approximate Passmark scale.
-    Writes JSON results to the relian_cpu_benchmark NinjaOne custom field.
+    Prints one compressed JSON object on the success stream.
+    Pass -SkipBenchmark to skip the sieve and emit null scores.
+
+.PARAMETER SkipBenchmark
+    Skip the sieve. Scores are null. CPU information is still collected.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -14,6 +18,13 @@
     Impact: Minimal — CPU spikes are brief (<10s per test)
     Version: 1.0
 #>
+
+# Script parameters are not Mandatory: a mandatory parameter prompts when this
+# file is dot-sourced under RELIAN_DEPLOY_TEST.
+[CmdletBinding()]
+param(
+    [switch]$SkipBenchmark
+)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -149,47 +160,61 @@ function Get-CpuInfo {
     }
 }
 
-# Main
-try {
-    Write-Status "Relian CPU Benchmark v1.0 starting"
+function New-CpuBenchmarkResult {
+    param(
+        $CpuInfo,
+        $SingleThread,
+        $MultiThread
+    )
 
-    # Gather CPU info
-    $cpuInfo = Get-CpuInfo
-    Write-Status "CPU: $($cpuInfo.cpuModel) ($($cpuInfo.cores)C/$($cpuInfo.threads)T)"
-
-    # Run benchmarks
-    $singleScore = Get-SingleThreadScore
-    $multiScore = Get-MultiThreadScore -ThreadCount $cpuInfo.threads
-
-    # Build result JSON
     $result = @{
-        singleThread = $singleScore
-        multiThread  = $multiScore
-        cpuModel     = $cpuInfo.cpuModel
-        cores        = $cpuInfo.cores
-        threads      = $cpuInfo.threads
-        baseClock    = $cpuInfo.baseClock
-        maxClock     = $cpuInfo.maxClock
-        architecture = $cpuInfo.architecture
+        singleThread = $SingleThread
+        multiThread  = $MultiThread
+        cpuModel     = $CpuInfo.cpuModel
+        cores        = $CpuInfo.cores
+        threads      = $CpuInfo.threads
+        baseClock    = $CpuInfo.baseClock
+        maxClock     = $CpuInfo.maxClock
+        architecture = $CpuInfo.architecture
         timestamp    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         version      = "1.0"
     }
 
-    $json = $result | ConvertTo-Json -Compress
-    Write-Status "Results: $json"
+    return ($result | ConvertTo-Json -Compress)
+}
 
-    # Write to NinjaOne custom field
-    try {
-        Ninja-Property-Set relian_cpu_benchmark $json
-        Write-Status "Benchmark results written to relian_cpu_benchmark custom field"
-    } catch {
-        Write-Status "Could not write to custom field: $_" "WARN"
-        # Still output the JSON so it can be captured from stdout
-        Write-Host "BENCHMARK_RESULT:$json"
+function Invoke-CpuBenchmark {
+    param(
+        [switch]$SkipBenchmark
+    )
+
+    Write-Status "Relian CPU Benchmark v1.0 starting"
+    $cpuInfo = Get-CpuInfo
+    Write-Status "CPU: $($cpuInfo.cpuModel) ($($cpuInfo.cores)C/$($cpuInfo.threads)T)"
+
+    $singleScore = $null
+    $multiScore = $null
+    if (-not $SkipBenchmark) {
+        $singleScore = Get-SingleThreadScore
+        $multiScore = Get-MultiThreadScore -ThreadCount $cpuInfo.threads
     }
 
+    $json = New-CpuBenchmarkResult -CpuInfo $cpuInfo -SingleThread $singleScore -MultiThread $multiScore
+    Write-Status "Results: $json"
+    Write-Output $json
     Write-Status "CPU benchmark complete"
+}
 
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+try {
+    if ($SkipBenchmark) {
+        Invoke-CpuBenchmark -SkipBenchmark
+    } else {
+        Invoke-CpuBenchmark
+    }
 } catch {
     Write-Status "Benchmark error: $_" "ERROR"
     Write-Status $_.ScriptStackTrace "ERROR"

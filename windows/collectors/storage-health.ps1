@@ -7,7 +7,12 @@
     Gathers detailed storage health data via CIM/WMI:
     Per-drive model, serial, interface, media type, SMART status,
     SSD wear level, temperature, power-on hours, partition layout.
-    Writes JSON results to the relian_storage_health NinjaOne custom field.
+    Prints one compressed JSON object on the success stream.
+    Pass -DiskNumber to keep one drive. An empty value keeps every drive.
+
+.PARAMETER DiskNumber
+    Disk number to keep. Comparison is equality against the trailing digits
+    of the disk device id. Empty keeps every drive.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -15,6 +20,13 @@
     No external module dependencies — uses CIM/WMI only
     Version: 1.0
 #>
+
+# Script parameters are not Mandatory: a mandatory parameter prompts when this
+# file is dot-sourced under RELIAN_DEPLOY_TEST.
+[CmdletBinding()]
+param(
+    [string]$DiskNumber
+)
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -136,8 +148,61 @@ function Get-ReliabilityData {
     return $reliabilityMap
 }
 
-# Main
-try {
+function New-StorageHealthResult {
+    param(
+        $Drives,
+        [AllowEmptyString()][string]$DiskNumber = ''
+    )
+
+    $filtered = New-Object System.Collections.Generic.List[object]
+    $ok = 0
+    foreach ($drive in @($Drives)) {
+        if ($null -eq $drive) {
+            continue
+        }
+        $number = ''
+        if ($drive.Contains('DiskNumber') -and $null -ne $drive['DiskNumber']) {
+            $number = [string]$drive['DiskNumber']
+        }
+        if (-not [string]::IsNullOrEmpty($DiskNumber)) {
+            if (-not $number.Equals([string]$DiskNumber, [System.StringComparison]::Ordinal)) {
+                continue
+            }
+        }
+        $status = ''
+        if ($drive.Contains('smartStatus') -and $null -ne $drive['smartStatus']) {
+            $status = [string]$drive['smartStatus']
+        }
+        if ($status -eq 'OK') {
+            $ok = $ok + 1
+        }
+
+        $emitted = @{}
+        foreach ($key in @($drive.Keys)) {
+            if ([string]::Equals([string]$key, 'DiskNumber', [System.StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
+            $emitted[$key] = $drive[$key]
+        }
+        [void]$filtered.Add($emitted)
+    }
+
+    $total = $filtered.Count
+    $result = @{
+        drives         = @($filtered.ToArray())
+        totalDrives    = $total
+        healthySummary = "$ok/$total healthy"
+        timestamp      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        version        = "1.0"
+    }
+    return ($result | ConvertTo-Json -Depth 4 -Compress)
+}
+
+function Invoke-StorageHealth {
+    param(
+        [AllowEmptyString()][string]$DiskNumber = ''
+    )
+
     Write-Status "Relian Storage Health v1.0 starting"
 
     $disks = Get-SafeCimInstance -ClassName Win32_DiskDrive
@@ -145,12 +210,9 @@ try {
     $reliabilityData = Get-ReliabilityData
 
     $driveList = @()
-    $healthyCount = 0
-    $totalDrives = 0
 
     if ($disks) {
         foreach ($disk in $disks) {
-            $totalDrives++
 
             # Detect interface
             $interface = "Unknown"
@@ -237,8 +299,6 @@ try {
             # Fallback: NVMe drives are always SSD
             if ($interface -eq "NVMe" -and $mediaType -eq "Unknown") { $mediaType = "SSD" }
 
-            if ($smartStatus -eq "OK") { $healthyCount++ }
-
             $driveEntry = @{
                 model        = ($disk.Model -replace '\s+', ' ').Trim()
                 serial       = ($disk.SerialNumber -replace '\s+', ' ').Trim()
@@ -252,6 +312,7 @@ try {
                 temperatureC = $temperatureC
                 powerOnHours = $powerOnHours
                 partitions   = $partList
+                DiskNumber   = [string]$diskNum
             }
 
             # Only include error counts if available
@@ -262,28 +323,18 @@ try {
         }
     }
 
-    $result = @{
-        drives         = $driveList
-        totalDrives    = $totalDrives
-        healthySummary = "$healthyCount/$totalDrives healthy"
-        timestamp      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-        version        = "1.0"
-    }
-
-    $json = $result | ConvertTo-Json -Depth 4 -Compress
-    Write-Status "Storage health collected: $($json.Length) bytes, $totalDrives drives"
-
-    # Write to NinjaOne custom field
-    try {
-        Ninja-Property-Set relian_storage_health $json
-        Write-Status "Storage health written to relian_storage_health custom field"
-    } catch {
-        Write-Status "Could not write to custom field: $_" "WARN"
-        Write-Host "STORAGE_HEALTH_RESULT:$json"
-    }
-
+    $json = New-StorageHealthResult -Drives $driveList -DiskNumber $DiskNumber
+    Write-Status "Storage health collected: $($json.Length) bytes, $(@($driveList).Count) drives"
+    Write-Output $json
     Write-Status "Storage health collection complete"
+}
 
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
+    return
+}
+
+try {
+    Invoke-StorageHealth -DiskNumber ([string]$DiskNumber)
 } catch {
     Write-Status "Storage health error: $_" "ERROR"
     Write-Status $_.ScriptStackTrace "ERROR"
