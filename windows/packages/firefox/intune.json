@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Mozilla Firefox",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Firefox.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Firefox.ps1 -DeploymentType Install -Action Install -PinVersion 158.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Firefox.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 158.0",
+  "detectionScript": "Detect-Firefox.ps1",
+  "detectReplace": []
+}
