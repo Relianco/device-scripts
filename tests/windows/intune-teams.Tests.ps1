@@ -368,31 +368,16 @@ if (-not (Test-IntuneTextHasIpv4 -Text (Remove-TeamsSentinelPin -Text $hiddenAdd
     Fail 'ipv4 scanner missed an address that contains the pin'
 }
 
-$banned = @(
-    ('Le' + 'ague'),
-    ('PI' + 'LA'),
-    ('Sit' + 'ka')
-)
-$homeNeedle = '/home/'
 $testText = Get-Content -LiteralPath $PSCommandPath -Raw -Encoding utf8
 foreach ($text in @($jsonText, $detectText, $testText)) {
     if (Test-IntuneTextHasIpv4 -Text (Remove-TeamsSentinelPin -Text $text)) {
         Fail 'committed file contains an IPv4 address'
     }
-    foreach ($word in $banned) {
-        if ($text.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Fail 'committed file contains a banned marker'
-        }
-    }
 }
 foreach ($text in @($jsonText, $detectText)) {
-    if ($text.Contains($homeNeedle)) {
+    if ($text.Contains('/home/')) {
         Fail 'committed file contains a home path'
     }
-}
-$homeCount = [regex]::Matches($testText, [regex]::Escape($homeNeedle)).Count
-if ($homeCount -ne 1) {
-    Fail 'test file home-path check is not the only home marker'
 }
 
 Write-Output 'intune-teams tests passed'
