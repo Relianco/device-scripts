@@ -97,6 +97,10 @@ url_query_at() {
   printf '%s%s%s' 'https://example.invalid/noop.sh?x=a' '@' 'b'
 }
 
+url_empty_user() {
+  printf '%s%s%s' 'https://' '@' 'example.org/package.sh'
+}
+
 invoke_runner() {
   local log="$1"
   shift
@@ -404,18 +408,25 @@ define_stubs() {
 
 test_source_defines_functions() {
   begin "sourcing under test does not download"
-  local bin code
+  local bin code sentinel
   bin="$(mktemp -d)"
+  sentinel="$bin/curl-called"
   cat > "$bin/curl" << 'EOF'
 #!/bin/bash
+: > "$CURL_SENTINEL"
 printf 'curl-called\n' >&2
 exit 99
 EOF
   chmod +x "$bin/curl"
   code=0
-  PATH="$bin:$PATH" RELIAN_DEPLOY_TEST=1 bash -c 'source "$1"; type relian_runner_main >/dev/null; type relian_http_get >/dev/null; type relian_sleep >/dev/null' _ "$RUNNER" >/dev/null || code=$?
+  PATH="$bin:$PATH" CURL_SENTINEL="$sentinel" RELIAN_DEPLOY_TEST=1 \
+    bash -c 'source "$1" || exit; type relian_runner_main >/dev/null; type relian_http_get >/dev/null; type relian_sleep >/dev/null' \
+    _ "$RUNNER" >/dev/null || code=$?
   if [[ "$code" -ne 0 ]]; then
     fail "source exited $code"
+  fi
+  if [[ -e "$sentinel" ]]; then
+    fail "source called curl"
   fi
   ok
 }
@@ -639,6 +650,33 @@ test_userinfo() {
   invoke_runner "$log" --package-url "$url" --package-sha256 "$FIXTURE_HASH" --action Install --pin-version 1.2.3
   if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 1 ]]; then
     fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
+  fi
+  ok
+
+  begin "empty userinfo is refused"
+  reset_stubs
+  log="$(mktemp)"
+  url="$(url_empty_user)"
+  invoke_runner "$log" --package-url "$url" --package-sha256 "$FIXTURE_HASH" --action Install --pin-version 1.2.3
+  if [[ "$LAST_CODE" -ne 1 || "$DOWNLOADS" -ne 0 ]]; then
+    fail "code=$LAST_CODE downloads=$DOWNLOADS"
+  fi
+  if [[ "$LAST_ERR" != "refusing a URL that contains userinfo" ]]; then
+    fail "stderr [$LAST_ERR]"
+  fi
+  assert_no_url "$url" || true
+  ok
+
+  begin "blank hash with empty userinfo does not download"
+  reset_stubs
+  log="$(mktemp)"
+  url="$(url_empty_user)"
+  invoke_runner "$log" --package-url "$url" --package-sha256 "" --action Install --pin-version 1.2.3
+  if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
+    fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
+  fi
+  if [[ -s "$log" ]]; then
+    fail "package ran"
   fi
   ok
 }

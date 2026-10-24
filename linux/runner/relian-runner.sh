@@ -12,12 +12,11 @@ relian_is_blank() {
   [[ -z "$value" ]]
 }
 
-# Userinfo is an @ in the authority. An @ in the path or query is not.
+# Userinfo is an @ in the authority, including an empty name. An @ in the path or query is not.
 relian_url_has_userinfo() {
   local url="$1"
   local rest="$url"
   local auth=""
-  local userinfo=""
   case "$url" in
     *://*) ;;
     *) return 1 ;;
@@ -28,11 +27,9 @@ relian_url_has_userinfo() {
   auth="${auth%%\?*}"
   auth="${auth%%#*}"
   case "$auth" in
-    *@*) ;;
-    *) return 1 ;;
+    *@*) return 0 ;;
   esac
-  userinfo="${auth%%@*}"
-  [[ -n "$userinfo" ]]
+  return 1
 }
 
 relian_temp_root() {
