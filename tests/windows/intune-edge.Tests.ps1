@@ -381,6 +381,20 @@ if (-not (Test-EdgeDetectInstalled -Entries @($older, $atPin))) {
     Fail 'an older Edge entry hid the matching Edge entry'
 }
 
+# The live path consumes @(Get-EdgeDetectRegistryEntries). A unary comma
+# inside that function makes this one qualifying entry a nested array.
+$consumed = @(Get-EdgeDetectRegistryEntries -Found @($atPin))
+if ($consumed.Count -ne 1) {
+    Fail 'one Edge uninstall entry was nested'
+}
+$consumedNames = @($consumed[0].PSObject.Properties.Name)
+if ($consumedNames -notcontains 'DisplayName') {
+    Fail 'one Edge uninstall entry was nested'
+}
+if (-not (Test-EdgeDetectInstalled -Entries $consumed)) {
+    Fail 'one Edge uninstall entry was nested'
+}
+
 $registryMissing = $true
 foreach ($root in @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',

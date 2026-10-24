@@ -137,35 +137,40 @@ function Test-EdgeDetectInstalled {
 
 function Get-EdgeDetectRegistryEntries {
     # A missing uninstall key is not installed. It is not an error.
-    $found = New-Object System.Collections.Generic.List[object]
-    $roots = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
-    )
-    foreach ($root in $roots) {
-        $keys = @()
-        try {
-            if (-not (Test-Path -LiteralPath $root)) {
-                continue
-            }
-            $keys = @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)
-        } catch {
-            continue
-        }
-        foreach ($key in $keys) {
-            if ($null -eq $key) {
-                continue
-            }
+    # -Found is the same list the registry walk builds. Tests use it so the
+    # live return is one entry per object, not one nested array.
+    param([object[]]$Found)
+    if (-not $PSBoundParameters.ContainsKey('Found')) {
+        $foundList = New-Object System.Collections.Generic.List[object]
+        $roots = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        )
+        foreach ($root in $roots) {
+            $keys = @()
             try {
-                $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+                if (-not (Test-Path -LiteralPath $root)) {
+                    continue
+                }
+                $keys = @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)
             } catch {
                 continue
             }
-            $found.Add($props)
+            foreach ($key in $keys) {
+                if ($null -eq $key) {
+                    continue
+                }
+                try {
+                    $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+                } catch {
+                    continue
+                }
+                $foundList.Add($props)
+            }
         }
+        $Found = $foundList.ToArray()
     }
-    # The comma keeps an empty or one-item list from being unwrapped.
-    return ,$found.ToArray()
+    return @($Found)
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1') {
