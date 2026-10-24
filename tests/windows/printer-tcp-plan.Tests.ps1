@@ -153,6 +153,48 @@ if ($scriptText -match '(?i)(^|[^A-Za-z0-9])-split([^A-Za-z0-9]|$)') {
 if ($scriptText -match '(?i)(^|[^A-Za-z])-SNMP([^A-Za-z]|$)') {
     Fail 'port creation passes -SNMP'
 }
+if ($scriptText -notmatch 'prnport\.vbs') {
+    Fail 'snmp is not disabled with prnport.vbs'
+}
+if (-not $scriptText.Contains('-md')) {
+    Fail 'snmp disable does not pass -md'
+}
+if ($scriptText.Contains('Set-CimInstance')) {
+    Fail 'snmp disable writes a read-only CIM property'
+}
+if ($scriptText.Contains('Get-CimInstance')) {
+    Fail 'snmp disable reads a printer port with CIM'
+}
+if ($scriptText.Contains('-me')) {
+    Fail 'snmp disable passes -me'
+}
+$prn = @(Get-PrinterTcpPrnPortArgumentList -ScriptPath 'C:\Program Files\prnport.vbs' -PortName 'IP_192.0.2.10')
+if ($prn.Count -ne 6 -or
+    $prn[0] -cne '//nologo' -or
+    $prn[1] -cne '"C:\Program Files\prnport.vbs"' -or
+    $prn[2] -cne '-t' -or
+    $prn[3] -cne '-r' -or
+    $prn[4] -cne '"IP_192.0.2.10"' -or
+    $prn[5] -cne '-md') {
+    Fail "prnport arguments $($prn -join ' ')"
+}
+if (($prn -join ' ').Contains('-me')) {
+    Fail 'prnport arguments enable snmp'
+}
+$emptyScript = Get-PrinterTcpPrnPortArgumentList -ScriptPath '' -PortName 'IP_192.0.2.10'
+if ($null -ne $emptyScript) {
+    Fail 'empty script path did not return null'
+}
+if (($emptyScript -join ' ').Contains('-me')) {
+    Fail 'empty script path contains -me'
+}
+$emptyPort = Get-PrinterTcpPrnPortArgumentList -ScriptPath 'C:\Program Files\prnport.vbs' -PortName ''
+if ($null -ne $emptyPort) {
+    Fail 'empty port name did not return null'
+}
+if (($emptyPort -join ' ').Contains('-me')) {
+    Fail 'empty port name contains -me'
+}
 foreach ($paramName in @('DeploymentType', 'Action', 'PinVersion', 'CancelPath', 'MarkerRoot', 'PrinterName', 'PrinterAddress', 'PrinterModel')) {
     if ($scriptText -notmatch ('\$' + $paramName + '\s*=\s*''''')) {
         Fail "missing empty default for $paramName"
