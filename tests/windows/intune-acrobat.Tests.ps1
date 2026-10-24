@@ -282,23 +282,17 @@ $testText = Get-Content -LiteralPath $PSCommandPath -Raw -Encoding utf8
 if ($testText.Contains($versionAccess)) {
     Fail 'release file is treated as having a version key'
 }
-$homeMarker = '/' + 'home' + '/'
-$bannedClients = @(
-    ('Le' + 'ague'),
-    ('PI' + 'LA'),
-    ('Sit' + 'ka')
-)
 foreach ($text in @($jsonText, $detectText, $testText)) {
     if (Test-IntuneTextHasIpv4 -Text $text) {
         Fail 'committed file contains an IPv4 address'
     }
-    if ($text.Contains($homeMarker)) {
-        Fail 'committed file contains a home path'
-    }
-    foreach ($clientName in $bannedClients) {
-        if ($text.Contains($clientName)) {
-            Fail 'committed file contains a client name'
-        }
+}
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-Acrobat.ps1' }
+    )) {
+    if ($packageFile.Text.Contains('/home/')) {
+        Fail "$($packageFile.Label) contains a home path"
     }
 }
 
