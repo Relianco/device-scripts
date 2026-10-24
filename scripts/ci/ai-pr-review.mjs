@@ -20,6 +20,13 @@ export const NOT_PERFORMED_PREFIX = 'AI review NOT performed:'
 
 export const DEFAULT_MODEL = 'gpt-6.1-sol'
 
+// Reasoning tokens count against this budget. 2000 came back with an empty
+// message on a full package file. The JSON reply itself is small.
+export const MAX_COMPLETION_TOKENS = 16000
+
+// A new package file is one patch. 64000 cut the printer script and its plan test.
+export const MAX_PATCH_CHARS = 96000
+
 export const PROMPT = `You review one file from a pull request of PowerShell device-deployment scripts.
 Report defects a maintainer must fix before merge. Skip style and naming.
 
@@ -78,13 +85,13 @@ export function isReviewablePath(filename) {
   return REVIEW_EXT.has(base.slice(dot).toLowerCase())
 }
 
-export function capPatch(patch, max = 64000) {
+export function capPatch(patch, max = MAX_PATCH_CHARS) {
   const text = patch || ''
   if (text.length <= max) return text
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-export function selectReviewFiles(files, { limit = 20, maxPatch = 64000 } = {}) {
+export function selectReviewFiles(files, { limit = 20, maxPatch = MAX_PATCH_CHARS } = {}) {
   const reviewable = []
   const skipped = []
   const unread = []
@@ -169,6 +176,17 @@ export function isModelUnavailable(status, body) {
   return String(body || '').includes('model_not_found') || status === 404
 }
 
+export function messageText(message) {
+  const content = message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map((part) => {
+    if (typeof part === 'string') return part
+    if (part && typeof part.text === 'string') return part.text
+    return ''
+  }).join('')
+}
+
 export async function postCompletion({
   endpoint,
   apiKey,
@@ -182,7 +200,7 @@ export async function postCompletion({
     model,
     messages,
     response_format: { type: 'json_object' },
-    max_completion_tokens: 2000,
+    max_completion_tokens: MAX_COMPLETION_TOKENS,
   })
   let lastError = null
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -212,11 +230,12 @@ export async function postCompletion({
       } catch {
         throw new Error('completion body is not JSON')
       }
-      const content = parsed?.choices?.[0]?.message?.content
-      if (typeof content !== 'string' || content.trim() === '') {
-        throw new Error('completion content missing')
-      }
-      return content
+      const choice = parsed?.choices?.[0]
+      const content = messageText(choice?.message)
+      if (content.trim() !== '') return content
+      const reason = choice?.finish_reason || 'none'
+      const keys = choice?.message ? Object.keys(choice.message).sort().join(',') : 'none'
+      throw new Error(`completion content missing (finish_reason=${reason}; keys=${keys})`)
     }
     if (isModelUnavailable(response.status, text) || response.status === 401 || response.status === 403) {
       const error = new Error(`openai ${response.status}${String(text).includes('model_not_found') ? ' model_not_found' : ''}`)
@@ -313,14 +332,21 @@ export async function reviewPullRequest({
   }
   const findings = []
   for (const file of selected.kept) {
-    const content = await postCompletion({
-      endpoint,
-      apiKey,
-      model,
-      messages: messagesFor(file),
-      fetchImpl,
-      sleep,
-    })
+    let content
+    try {
+      content = await postCompletion({
+        endpoint,
+        apiKey,
+        model,
+        messages: messagesFor(file),
+        fetchImpl,
+        sleep,
+      })
+    } catch (error) {
+      const wrapped = new Error(`${file.filename}: ${error.message}`)
+      wrapped.exitCode = error.exitCode
+      throw wrapped
+    }
     for (const finding of parseFindings(content)) {
       findings.push({ path: file.filename, line: finding.line, body: finding.body })
     }

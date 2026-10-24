@@ -173,7 +173,7 @@ function Set-ByteStubs {
         $script:ExpandArchive = $Expand
     }
     $script:InvokePackage = {
-        param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)
+        param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot, $PackageParameters)
         [void]$script:calls.Add([pscustomobject]@{
             ScriptPath = [string]$ScriptPath
             DeploymentType = [string]$DeploymentType
@@ -181,6 +181,7 @@ function Set-ByteStubs {
             PinVersion = [string]$PinVersion
             WorkRoot = [string]$WorkRoot
             Exists = (Test-Path -LiteralPath $ScriptPath)
+            PackageParameters = $PackageParameters
         })
         $index = $script:calls.Count - 1
         $planned = @($script:codes)
@@ -218,6 +219,7 @@ function Invoke-PinnedRunner {
         [string]$ToolkitUrlValue = $toolkitUrl,
         [string]$BrandPackUrlValue = $brandUrl,
         [AllowEmptyString()][string]$CancelPath = '',
+        [AllowEmptyString()][string]$PackageArguments = '',
         $PackageSha256,
         $ToolkitSha256,
         $BrandPackSha256
@@ -225,7 +227,7 @@ function Invoke-PinnedRunner {
     if (-not $PSBoundParameters.ContainsKey('PackageSha256')) { $PackageSha256 = [string]$Hashes['package'] }
     if (-not $PSBoundParameters.ContainsKey('ToolkitSha256')) { $ToolkitSha256 = [string]$Hashes['toolkit'] }
     if (-not $PSBoundParameters.ContainsKey('BrandPackSha256')) { $BrandPackSha256 = [string]$Hashes['brand'] }
-    return [int](Invoke-RelianRunner -PackageUrl $PackageUrlValue -PackageSha256 $PackageSha256 -ToolkitUrl $ToolkitUrlValue -ToolkitSha256 $ToolkitSha256 -BrandPackUrl $BrandPackUrlValue -BrandPackSha256 $BrandPackSha256 -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath)
+    return [int](Invoke-RelianRunner -PackageUrl $PackageUrlValue -PackageSha256 $PackageSha256 -ToolkitUrl $ToolkitUrlValue -ToolkitSha256 $ToolkitSha256 -BrandPackUrl $BrandPackUrlValue -BrandPackSha256 $BrandPackSha256 -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -PackageArguments $PackageArguments)
 }
 
 function Assert-NoInvokeOrExpand {
@@ -248,6 +250,57 @@ function Assert-WorkRemoved {
     if ($script:calls.Count -gt 0 -and (Test-Path -LiteralPath $script:calls[0].WorkRoot)) {
         Fail "$Label left work directory $($script:calls[0].WorkRoot)"
     }
+}
+
+function Assert-EmptyPackagePairs {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        $Pairs
+    )
+    if ($Pairs -isnot [System.Collections.Generic.List[object]]) {
+        Fail "$Label was not a List[object]"
+    }
+    if ($Pairs.Count -ne 0) {
+        Fail "$Label count was $($Pairs.Count)"
+    }
+}
+
+function Assert-PackagePairs {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        $Pairs,
+        [Parameter(Mandatory)][object[]]$Expected
+    )
+    $expectedList = @($Expected)
+    if ($Pairs -isnot [System.Collections.Generic.List[object]]) {
+        Fail "$Label was not a List[object]"
+    }
+    if ($Pairs.Count -ne $expectedList.Count) {
+        Fail "$Label count $($Pairs.Count) was not $($expectedList.Count)"
+    }
+    for ($i = 0; $i -lt $expectedList.Count; $i++) {
+        $pair = $Pairs[$i]
+        $want = $expectedList[$i]
+        if ($null -eq $pair -or $pair.Name -isnot [string] -or $pair.Value -isnot [string]) {
+            Fail "$Label pair $i was not a string pair"
+        }
+        if ($pair.Name -cne [string]$want.Name -or $pair.Value -cne [string]$want.Value) {
+            Fail "$Label pair $i was $($pair.Name)=$($pair.Value)"
+        }
+    }
+}
+
+function Assert-PackageArgumentsRejected {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Blob
+    )
+    try {
+        $null = ConvertFrom-RelianPackageArguments -PackageArguments $Blob
+    } catch {
+        return
+    }
+    Fail "$Label accepted [$Blob]"
 }
 
 function Write-FixtureDownload {
@@ -357,6 +410,92 @@ $userInfoUrl = -join @('https://', 'user', '@', 'example.invalid/package.ps1')
 if (-not (Get-Command Invoke-RelianRunner -ErrorAction SilentlyContinue)) {
     Fail 'Invoke-RelianRunner was not defined'
 }
+if (-not (Get-Command ConvertFrom-RelianPackageArguments -ErrorAction SilentlyContinue)) {
+    Fail 'ConvertFrom-RelianPackageArguments was not defined'
+}
+
+$frontPackageArguments = 'eyJQcmludGVyTmFtZSI6IkZyb250IERlc2siLCJQcmludGVyQWRkcmVzcyI6IjEwLjIwLjMwLjQwIiwiUHJpbnRlck1vZGVsIjoiQnJvdGhlckhsTDIzNzBEdyJ9'
+$emptyNamePackageArguments = 'eyJQcmludGVyTmFtZSI6IiJ9'
+$plusPackageArguments = 'eyJRIjoifn5+In0='
+$frontExpectedPairs = @(
+    [pscustomobject]@{ Name = 'PrinterName'; Value = 'Front Desk' }
+    [pscustomobject]@{ Name = 'PrinterAddress'; Value = '10.20.30.40' }
+    [pscustomobject]@{ Name = 'PrinterModel'; Value = 'BrotherHlL2370Dw' }
+)
+try {
+    $emptyPackageArguments = ConvertFrom-RelianPackageArguments -PackageArguments ''
+} catch {
+    Fail "empty package arguments threw $($_.Exception.Message)"
+}
+Assert-EmptyPackagePairs -Label 'empty package arguments' -Pairs $emptyPackageArguments
+Assert-PackagePairs -Label 'front package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments $frontPackageArguments) -Expected $frontExpectedPairs
+Assert-PackagePairs -Label 'plus package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments $plusPackageArguments) -Expected @(
+    [pscustomobject]@{ Name = 'Q'; Value = '~~~' }
+)
+Assert-EmptyPackagePairs -Label 'empty object package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'e30=')
+Assert-PackagePairs -Label 'empty name package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments $emptyNamePackageArguments) -Expected @(
+    [pscustomobject]@{ Name = 'PrinterName'; Value = '' }
+)
+Assert-PackagePairs -Label 'iso package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'eyJXaGVuIjoiMjAxOC0wMS0wMVQwMDowMDowMCJ9') -Expected @(
+    [pscustomobject]@{ Name = 'When'; Value = '2018-01-01T00:00:00' }
+)
+Assert-PackagePairs -Label 'iso z package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'eyJXaGVuIjoiMjAxOC0wMS0wMVQwMDowMDowMFoifQ==') -Expected @(
+    [pscustomobject]@{ Name = 'When'; Value = '2018-01-01T00:00:00Z' }
+)
+Assert-PackagePairs -Label 'ms date package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'eyJXaGVuIjoiL0RhdGUoMTQ4MzIyODgwMDAwMCkvIn0=') -Expected @(
+    [pscustomobject]@{ Name = 'When'; Value = '/Date(1483228800000)/' }
+)
+foreach ($rejected in @(
+    @{ Label = 'bang package arguments'; Blob = '!!!!' }
+    @{ Label = 'base64url package arguments'; Blob = 'abc-def' }
+    @{ Label = 'truncated package arguments'; Blob = 'eyJ9' }
+    @{ Label = 'newline package arguments'; Blob = 'eyJQcmludGVyTmFtZSI6IkFcbkIifQ==' }
+    @{ Label = 'quote package arguments'; Blob = 'eyJQcmludGVyTmFtZSI6IlNheSBcImhpXCIifQ==' }
+    @{ Label = 'number package arguments'; Blob = 'eyJQcmludGVyTmFtZSI6MX0=' }
+    @{ Label = 'nested package arguments'; Blob = 'eyJQcmludGVyTmFtZSI6eyJBIjoiQiJ9fQ==' }
+    @{ Label = 'array package arguments'; Blob = 'WyJQcmludGVyTmFtZSJd' }
+    @{ Label = 'reserved package arguments'; Blob = 'eyJhY3Rpb24iOiJJbnN0YWxsIn0=' }
+    @{ Label = 'bad key package arguments'; Blob = 'eyIxUHJpbnRlciI6IkEifQ==' }
+    @{ Label = 'dash key package arguments'; Blob = 'eyJQcmludGVyLU5hbWUiOiJBIn0=' }
+    @{ Label = 'url key package arguments'; Blob = 'eyJQYWNrYWdlVXJsIjoiaHR0cHM6Ly9leGFtcGxlLmludmFsaWQifQ==' }
+    @{ Label = 'text package arguments'; Blob = 'aGVsbG8=' }
+    @{ Label = 'bool package arguments'; Blob = 'eyJQcmludGVyTmFtZSI6dHJ1ZX0=' }
+    @{ Label = 'null package arguments'; Blob = 'eyJQcmludGVyTmFtZSI6bnVsbH0=' }
+    @{ Label = 'space package arguments'; Blob = ' ' }
+    @{ Label = 'spaces package arguments'; Blob = '   ' }
+)) {
+    Assert-PackageArgumentsRejected -Label $rejected.Label -Blob $rejected.Blob
+}
+$bomBytes = [byte[]](0xEF, 0xBB, 0xBF) + [System.Text.UTF8Encoding]::new($false).GetBytes('{}')
+Assert-PackageArgumentsRejected -Label 'bom package arguments' -Blob ([Convert]::ToBase64String($bomBytes))
+Assert-PackageArgumentsRejected -Label 'invalid utf8 package arguments' -Blob ([Convert]::ToBase64String([byte[]](0x80)))
+if (-not (Get-Command ConvertTo-RelianWindowsCommandLine -ErrorAction SilentlyContinue)) {
+    Fail 'ConvertTo-RelianWindowsCommandLine was not defined'
+}
+$frontWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @(
+    '-PrinterName', 'Front Desk',
+    '-PrinterAddress', '10.20.30.40',
+    '-PrinterModel', 'BrotherHlL2370Dw'
+)
+if (-not $frontWindowsLine.Contains('"Front Desk"')) {
+    Fail "windows command line missing quoted Front Desk [$frontWindowsLine]"
+}
+$emptyWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('-PrinterName', '')
+if ($emptyWindowsLine -notmatch '(^| )""($| )') {
+    Fail "windows command line missing empty PrinterName token [$emptyWindowsLine]"
+}
+$secretWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('-PrinterName', '-Secret')
+if (-not $secretWindowsLine.Contains('"-Secret"')) {
+    Fail "windows command line did not quote -Secret [$secretWindowsLine]"
+}
+$slashWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('C:\stage\')
+if (-not $slashWindowsLine.Contains('"C:\stage\\"')) {
+    Fail "windows command line did not escape a trailing backslash [$slashWindowsLine]"
+}
+$quoteWindowsLine = ConvertTo-RelianWindowsCommandLine -Argument @('C:\a"b')
+if (-not $quoteWindowsLine.Contains('"C:\a\"b"')) {
+    Fail "windows command line did not escape a quote [$quoteWindowsLine]"
+}
 foreach ($hookName in @('RetryDelay', 'TestCancel')) {
     $hook = Get-Variable -Name $hookName -Scope Script -ErrorAction SilentlyContinue
     if ($null -eq $hook -or $null -eq $hook.Value -or $hook.Value -isnot [scriptblock]) {
@@ -370,7 +509,7 @@ foreach ($pair in @(
     @{ Name = 'RetryDelay'; Block = $script:RetryDelay; Needles = @('param($Seconds)', 'Start-Sleep', '-Seconds') }
     @{ Name = 'TestCancel'; Block = $script:TestCancel; Needles = @('param($CancelPath)', 'RELIAN_DEPLOY_CANCEL', 'Test-Path', '-LiteralPath') }
     @{ Name = 'InvokePackage'; Block = $script:InvokePackage; Needles = @(
-            'param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)'
+            'param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot, $PackageParameters)'
             'MainModule.FileName'
             '& $hostPath'
             '-NoProfile'
@@ -379,6 +518,15 @@ foreach ($pair in @(
             'Bypass'
             '-File'
             '(Get-Process -Id $PID).Path'
+            '$PSVersionTable.PSVersion.Major -lt 6'
+            'PSNativeCommandArgumentPassing'
+            'Legacy'
+            'Windows'
+            'ProcessStartInfo'
+            'UseShellExecute'
+            'RedirectStandardOutput'
+            'RedirectStandardError'
+            'ConvertTo-RelianWindowsCommandLine'
         ) }
 )) {
     if ($pair.Block -isnot [scriptblock]) {
@@ -395,6 +543,12 @@ foreach ($pair in @(
     }
     if ($pair.Name -eq 'InvokePackage' -and $text -match '(?i)-WorkingDirectory') {
         Fail 'InvokePackage passes -WorkingDirectory'
+    }
+    if ($pair.Name -eq 'InvokePackage' -and $text.Contains('ArgumentList')) {
+        Fail 'InvokePackage uses ArgumentList'
+    }
+    if ($pair.Name -eq 'InvokePackage' -and $text.Contains('Start-Process')) {
+        Fail 'InvokePackage uses Start-Process'
     }
 }
 
@@ -1028,7 +1182,7 @@ exit 9
     Set-ByteStubs -Payloads $urlPayloads -Codes @(0, 99)
     Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
     $script:InvokePackage = {
-        param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot)
+        param($ScriptPath, $DeploymentType, $Action, $PinVersion, $WorkRoot, $PackageParameters)
         [void]$script:calls.Add([pscustomobject]@{
             ScriptPath = [string]$ScriptPath
             DeploymentType = [string]$DeploymentType
@@ -1036,6 +1190,7 @@ exit 9
             PinVersion = [string]$PinVersion
             WorkRoot = [string]$WorkRoot
             Exists = (Test-Path -LiteralPath $ScriptPath)
+            PackageParameters = $PackageParameters
         })
         if ($script:calls.Count -eq 1) {
             $env:RELIAN_DEPLOY_CANCEL = '1'
@@ -1137,6 +1292,167 @@ exit 9
     $entryEnvText = $entryCancelEnv.Stdout + $entryCancelEnv.Stderr
     if ($entryEnvText.Contains($packageUrl) -or $entryEnvText.Contains('example.invalid') -or $entryEnvText.Trim() -ne '') {
         Fail "entry RELIAN_DEPLOY_CANCEL printed [$entryEnvText]"
+    }
+
+    Set-ByteStubs -Payloads $urlPayloads -Codes @(7)
+    $frontInstall = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments $frontPackageArguments
+    if ($frontInstall -ne 7) {
+        Fail "front package arguments returned $frontInstall"
+    }
+    if ($script:calls.Count -ne 1) {
+        Fail "front package arguments called InvokePackage $($script:calls.Count) times"
+    }
+    if ($script:downloadUrls.Count -ne 3) {
+        Fail "front package arguments downloaded $($script:downloadUrls.Count) files"
+    }
+    Assert-PackagePairs -Label 'front install' -Pairs $script:calls[0].PackageParameters -Expected $frontExpectedPairs
+
+    Set-ByteStubs -Payloads $urlPayloads -Codes @(0, 0)
+    $frontReinstall = Invoke-PinnedRunner -Hashes $upper -Action 'Reinstall' -PinVersion '1.0.0' -PackageArguments $frontPackageArguments
+    if ($script:calls.Count -ne 2) {
+        Fail "front reinstall called InvokePackage $($script:calls.Count) times"
+    }
+    if ($script:calls[0].DeploymentType -cne 'Uninstall' -or $script:calls[0].Action -cne 'Uninstall') {
+        Fail "front reinstall first call was $($script:calls[0].DeploymentType)/$($script:calls[0].Action)"
+    }
+    if ($script:calls[1].DeploymentType -cne 'Install' -or $script:calls[1].Action -cne 'Install') {
+        Fail "front reinstall second call was $($script:calls[1].DeploymentType)/$($script:calls[1].Action)"
+    }
+    Assert-PackagePairs -Label 'front reinstall first' -Pairs $script:calls[0].PackageParameters -Expected $frontExpectedPairs
+    Assert-PackagePairs -Label 'front reinstall second' -Pairs $script:calls[1].PackageParameters -Expected $frontExpectedPairs
+
+    Set-ByteStubs -Payloads $urlPayloads -Codes @(5)
+    $emptyObjectRun = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments 'e30='
+    if ($emptyObjectRun -ne 5 -or $script:calls.Count -ne 1 -or $script:downloadUrls.Count -ne 3) {
+        Fail "empty object package arguments returned $emptyObjectRun calls $($script:calls.Count) downloads $($script:downloadUrls.Count)"
+    }
+    Assert-EmptyPackagePairs -Label 'empty object install' -Pairs $script:calls[0].PackageParameters
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $frontEmptyHash = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments $frontPackageArguments -BrandPackSha256 ''
+    if ($frontEmptyHash -ne 0) {
+        Fail "front package arguments with empty hash returned $frontEmptyHash"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'front package arguments with empty hash called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'front package arguments with empty hash'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $emptyObjectHash = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments 'e30=' -BrandPackSha256 ''
+    if ($emptyObjectHash -ne 0) {
+        Fail "empty object with empty hash returned $emptyObjectHash"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'empty object with empty hash called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'empty object with empty hash'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $badArguments = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments '!!!!'
+    if ($badArguments -ne 1) {
+        Fail "invalid package arguments returned $badArguments"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'invalid package arguments called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'invalid package arguments'
+
+    Set-ByteStubs -Payloads $urlPayloads
+    $badEmptyHash = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments '!!!!' -BrandPackSha256 ''
+    if ($badEmptyHash -ne 0) {
+        Fail "invalid package arguments with empty hash returned $badEmptyHash"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'invalid package arguments with empty hash called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'invalid package arguments with empty hash'
+
+    $previousBadCancel = $env:RELIAN_DEPLOY_CANCEL
+    $env:RELIAN_DEPLOY_CANCEL = '1'
+    try {
+        Set-ByteStubs -Payloads $urlPayloads
+        $badCancel = Invoke-PinnedRunner -Hashes $upper -Action 'Install' -PinVersion '1.0.0' -PackageArguments '!!!!' -CancelPath $cancelFlag
+    } finally {
+        if ([string]::IsNullOrEmpty($previousBadCancel)) {
+            Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
+        } else {
+            $env:RELIAN_DEPLOY_CANCEL = $previousBadCancel
+        }
+    }
+    if ($badCancel -ne 1) {
+        Fail "invalid package arguments with cancel returned $badCancel"
+    }
+    if ($script:downloadUrls.Count -ne 0) {
+        Fail 'invalid package arguments with cancel called DownloadFile'
+    }
+    Assert-NoInvokeOrExpand -Label 'invalid package arguments with cancel'
+
+    $argChild = Join-Path $temp 'package-arguments-child.ps1'
+    $argRecord = Join-Path $temp 'package-arguments.txt'
+    $argBody = @"
+param(
+    [string]`$DeploymentType,
+    [string]`$Action,
+    [string]`$PinVersion,
+    [AllowEmptyString()][string]`$PrinterName,
+    [AllowEmptyString()][string]`$PrinterAddress,
+    [AllowEmptyString()][string]`$PrinterModel
+)
+`$lines = [System.Collections.Generic.List[string]]::new()
+foreach (`$key in @('PrinterName', 'PrinterAddress', 'PrinterModel')) {
+    if (`$PSBoundParameters.ContainsKey(`$key)) {
+        [void]`$lines.Add(`$key + '=' + [string]`$PSBoundParameters[`$key])
+    } else {
+        [void]`$lines.Add(`$key + '=<missing>')
+    }
+}
+[System.IO.File]::WriteAllText(`$env:RELIAN_ARG_RECORD, (`$lines -join [Environment]::NewLine), [System.Text.UTF8Encoding]::new(`$false))
+exit 0
+"@
+    [System.IO.File]::WriteAllText($argChild, $argBody.Replace("`r`n", "`n"), [System.Text.UTF8Encoding]::new($false))
+    $env:RELIAN_ARG_RECORD = $argRecord
+    try {
+        $frontChild = [int](& $savedInvoke -ScriptPath $argChild -DeploymentType 'Install' -Action 'Install' -PinVersion '1.0.0' -WorkRoot $temp -PackageParameters (ConvertFrom-RelianPackageArguments -PackageArguments $frontPackageArguments))
+        $frontChildText = [System.IO.File]::ReadAllText($argRecord).Replace("`r`n", "`n")
+        $emptyChild = [int](& $savedInvoke -ScriptPath $argChild -DeploymentType 'Install' -Action 'Install' -PinVersion '1.0.0' -WorkRoot $temp -PackageParameters (ConvertFrom-RelianPackageArguments -PackageArguments $emptyNamePackageArguments))
+        $emptyChildText = [System.IO.File]::ReadAllText($argRecord).Replace("`r`n", "`n")
+    } finally {
+        Remove-Item -LiteralPath 'Env:RELIAN_ARG_RECORD' -ErrorAction SilentlyContinue
+    }
+    if ($frontChild -ne 0) {
+        Fail "front child exited $frontChild"
+    }
+    if ($frontChildText -cne "PrinterName=Front Desk`nPrinterAddress=10.20.30.40`nPrinterModel=BrotherHlL2370Dw") {
+        Fail "front child arguments were [$frontChildText]"
+    }
+    if ($emptyChild -ne 0) {
+        Fail "empty name child exited $emptyChild"
+    }
+    if ($emptyChildText -cne "PrinterName=`nPrinterAddress=<missing>`nPrinterModel=<missing>") {
+        Fail "empty name child arguments were [$emptyChildText]"
+    }
+
+    $entryBadArgs = Invoke-PwshFile -Script $runner -Arguments @(
+        '-PackageUrl', $packageUrl,
+        '-PackageSha256', 'AA',
+        '-ToolkitUrl', $toolkitUrl,
+        '-ToolkitSha256', 'BB',
+        '-BrandPackUrl', $brandUrl,
+        '-BrandPackSha256', 'CC',
+        '-Action', 'Install',
+        '-PinVersion', '1.0.0',
+        '-PackageArguments', '!!!!'
+    )
+    if ($entryBadArgs.ExitCode -ne 1) {
+        Fail "entry invalid package arguments exited $($entryBadArgs.ExitCode) stdout=[$($entryBadArgs.Stdout)] stderr=[$($entryBadArgs.Stderr)]"
+    }
+    if (-not $entryBadArgs.Stderr.Contains('invalid package arguments')) {
+        Fail "entry invalid package arguments stderr was [$($entryBadArgs.Stderr)]"
+    }
+    $entryBadText = $entryBadArgs.Stdout + $entryBadArgs.Stderr
+    if ($entryBadText.Contains('https://') -or $entryBadText.Contains('example.invalid') -or $entryBadText.Contains('!!!!')) {
+        Fail "entry invalid package arguments printed [$entryBadText]"
     }
 
     Write-Output 'runner tests passed'

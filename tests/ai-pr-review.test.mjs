@@ -8,12 +8,15 @@ import {
   NOT_PERFORMED_PREFIX,
   PROMPT,
   buildReviewBody,
+  MAX_PATCH_CHARS,
   capPatch,
   isDocsPath,
   isReviewablePath,
   notPerformedBody,
   parseFindings,
   parseModelList,
+  MAX_COMPLETION_TOKENS,
+  messageText,
   postCompletion,
   primaryModel,
   reviewPullRequest,
@@ -44,11 +47,20 @@ test('markdown and docs are skipped and PowerShell is reviewed', () => {
   assert.deepEqual(selected.skipped, ['docs/STATUS.md', 'windows/brand/logo.bin'])
 })
 
-test('a patch longer than 64000 characters is capped and the 21st file is omitted', () => {
-  const kept = 'a'.repeat(64000)
+test('a printer package patch fits and a longer patch is still capped', () => {
+  const printerPatch = 'p'.repeat(72000)
+  const selected = selectReviewFiles([
+    { filename: 'windows/packages/printer-tcp/Invoke-PrinterTcp.ps1', changes: 1, patch: printerPatch },
+  ])
+  assert.equal(selected.truncated.length, 0)
+  assert.equal(selected.kept[0].patch, printerPatch)
+})
+
+test('a patch longer than the cap is capped and the 21st file is omitted', () => {
+  const kept = 'a'.repeat(MAX_PATCH_CHARS)
   assert.equal(capPatch(kept), kept)
-  const over = 'b'.repeat(64001)
-  assert.equal(capPatch(over), `${'b'.repeat(64000)}\n...[truncated]`)
+  const over = 'b'.repeat(MAX_PATCH_CHARS + 1)
+  assert.equal(capPatch(over), `${'b'.repeat(MAX_PATCH_CHARS)}\n...[truncated]`)
   const files = []
   for (let i = 0; i < 21; i++) {
     files.push({ filename: `windows/packages/p${i}.ps1`, patch: 'diff' })
@@ -77,7 +89,7 @@ test('a withheld diff and a truncated patch are not LGTM', async () => {
   assert.equal(withheld.kept.length, 0)
 
   const huge = selectReviewFiles([
-    { filename: 'windows/packages/huge.ps1', changes: 1, patch: 'd'.repeat(64001) },
+    { filename: 'windows/packages/huge.ps1', changes: 1, patch: 'd'.repeat(MAX_PATCH_CHARS + 1) },
   ])
   assert.deepEqual(huge.truncated, ['windows/packages/huge.ps1'])
   const partial = buildReviewBody({
@@ -214,7 +226,7 @@ test('model_not_found fails without a second model and a 503 is retried once', a
     fetchImpl: async (_url, init) => {
       calls += 1
       const sent = JSON.parse(init.body)
-      assert.equal(sent.max_completion_tokens, 2000)
+      assert.equal(sent.max_completion_tokens, MAX_COMPLETION_TOKENS)
       assert.equal(sent.max_tokens, undefined)
       assert.equal(sent.model, DEFAULT_MODEL)
       assert.equal(init.headers.Authorization, 'Bearer test-key')
@@ -229,5 +241,43 @@ test('model_not_found fails without a second model and a 503 is retried once', a
     },
   })
   assert.equal(calls, 2)
+  assert.match(content, /findings/)
+})
+
+test('an empty completion fails immediately and a text part is accepted', async () => {
+  assert.equal(messageText({ content: [{ type: 'text', text: '{"findings":[]}' }] }), '{"findings":[]}')
+  let calls = 0
+  await assert.rejects(
+    () => postCompletion({
+      endpoint: 'https://api.openai.com/v1',
+      apiKey: 'test-key',
+      model: DEFAULT_MODEL,
+      messages: [],
+      sleep: async () => {},
+      fetchImpl: async () => {
+        calls += 1
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: null, refusal: 'no' } }] }),
+        }
+      },
+    }),
+    /finish_reason=length; keys=content,refusal/,
+  )
+  assert.equal(calls, 1)
+
+  const content = await postCompletion({
+    endpoint: 'https://api.openai.com/v1',
+    apiKey: 'test-key',
+    model: DEFAULT_MODEL,
+    messages: [],
+    sleep: async () => {},
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: '{"findings":[]}' }] } }] }),
+    }),
+  })
   assert.match(content, /findings/)
 })
