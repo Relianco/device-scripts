@@ -1456,16 +1456,59 @@ $script:GetInstalledDriverNames = {
     return ,$list.ToArray()
 }
 
+function Get-PrinterTcpPrnPortScript {
+    if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        return ''
+    }
+    $root = Join-Path $env:SystemRoot 'System32\Printing_Admin_Scripts'
+    if (-not (Test-Path -LiteralPath $root)) {
+        return ''
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -Filter 'prnport.vbs' -File -ErrorAction SilentlyContinue)) {
+        return [string]$file.FullName
+    }
+    return ''
+}
+
+function Get-PrinterTcpPrnPortArgumentList {
+    param(
+        [string]$ScriptPath,
+        [string]$PortName
+    )
+    if ([string]::IsNullOrWhiteSpace($ScriptPath) -or [string]::IsNullOrWhiteSpace($PortName)) {
+        return $null
+    }
+    # -md disables SNMP. Do not pass an SNMP index.
+    return @(
+        '//nologo',
+        (Get-PrinterTcpQuotedArgument -Value $ScriptPath),
+        '-t',
+        '-r',
+        (Get-PrinterTcpQuotedArgument -Value $PortName),
+        '-md'
+    )
+}
+
 function Disable-PrinterTcpPortSnmp {
     param([string]$Name)
-    $escaped = $Name.Replace("'", "''")
-    $filter = "Name='$escaped'"
-    $port = Get-CimInstance -ClassName 'Win32_TCPIPPrinterPort' -Filter $filter
-    if ($null -eq $port) {
-        throw 'tcp printer port was not created'
+    # Win32_TCPIPPrinterPort.SNMPEnabled is read-only. prnport.vbs -md turns SNMP off
+    # without restarting the Print Spooler.
+    $scriptPath = Get-PrinterTcpPrnPortScript
+    $argumentList = Get-PrinterTcpPrnPortArgumentList -ScriptPath $scriptPath -PortName $Name
+    if ($null -eq $argumentList) {
+        throw 'prnport.vbs missing'
     }
-    # Turn SNMP off without restarting the Print Spooler.
-    Set-CimInstance -InputObject $port -Property @{ SNMPEnabled = $false } | Out-Null
+    $cscript = ''
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $cscript = Join-Path $env:SystemRoot 'System32\cscript.exe'
+    }
+    if ([string]::IsNullOrWhiteSpace($cscript) -or -not (Test-Path -LiteralPath $cscript)) {
+        throw 'cscript missing'
+    }
+    $process = Start-Process -FilePath $cscript -ArgumentList $argumentList -Wait -PassThru -WindowStyle Hidden
+    if ($null -eq $process -or [int]$process.ExitCode -ne 0) {
+        throw 'could not disable snmp on the printer port'
+    }
 }
 
 $script:AddPrinterPort = {
