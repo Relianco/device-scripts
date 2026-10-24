@@ -360,6 +360,8 @@ function Get-CollectorBootstrapPlan {
         [AllowEmptyString()][string]$ScriptArguments = ''
     )
 
+    # Userinfo is refused before the empty-hash skip. The installer does the
+    # same. An empty hash only skips argument parsing and the download.
     if (Test-CollectorBootstrapUrl -Url $ScriptUrl) {
         Write-CollectorBootstrapError 'refusing a URL that contains userinfo'
         return [pscustomobject]@{

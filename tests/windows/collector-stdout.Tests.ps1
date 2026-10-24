@@ -327,6 +327,29 @@ if ($diskWrote.Count -ne 0) {
 }
 Assert-HardwareCalls -Expected @()
 
+Reset-HardwareCalls
+$emptySection = @(Invoke-HardwareInventory -Section '')
+if ($emptySection.Count -ne 1) {
+    Fail 'empty section list did not emit one object'
+}
+Assert-HardwareCalls -Expected @('Cpu', 'Memory', 'Storage', 'Motherboard', 'Gpu', 'Network', 'Battery')
+
+Reset-HardwareCalls
+$blankTokenWrote = [System.Collections.Generic.List[object]]::new()
+$blankTokenThrew = $false
+try {
+    Invoke-HardwareInventory -Section 'Cpu,' | ForEach-Object { [void]$blankTokenWrote.Add($_) }
+} catch {
+    $blankTokenThrew = $true
+}
+if (-not $blankTokenThrew) {
+    Fail 'empty section token did not throw'
+}
+if ($blankTokenWrote.Count -ne 0) {
+    Fail 'empty section token wrote JSON'
+}
+Assert-HardwareCalls -Expected @()
+
 $networkAdapters = @(
     @{
         name = 'Ethernet'

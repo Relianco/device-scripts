@@ -291,34 +291,41 @@ function Get-HardwareSectionSet {
 
     $allowed = @('Cpu', 'Memory', 'Storage', 'Motherboard', 'Gpu', 'Network', 'Battery')
     $selected = New-Object System.Collections.Generic.List[string]
-    $sawToken = $false
+    $blankList = $true
     if ($null -ne $Section) {
         foreach ($item in @($Section)) {
-            $sawToken = $true
-            foreach ($part in ([string]$item).Split(',')) {
-                $token = $part.Trim()
-                if ($token.Length -eq 0) {
-                    throw 'invalid hardware section'
-                }
-                $canonical = $null
-                foreach ($name in $allowed) {
-                    if ([string]::Equals($name, $token, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        $canonical = $name
-                        break
-                    }
-                }
-                if ($null -eq $canonical) {
-                    throw 'invalid hardware section'
-                }
-                if (-not $selected.Contains($canonical)) {
-                    [void]$selected.Add($canonical)
-                }
+            if (-not [string]::IsNullOrWhiteSpace([string]$item)) {
+                $blankList = $false
+                break
             }
         }
     }
-    if (-not $sawToken) {
+    if ($blankList) {
         foreach ($name in $allowed) {
             [void]$selected.Add($name)
+        }
+        return @($selected.ToArray())
+    }
+
+    foreach ($item in @($Section)) {
+        foreach ($part in ([string]$item).Split(',')) {
+            $token = $part.Trim()
+            if ($token.Length -eq 0) {
+                throw 'invalid hardware section'
+            }
+            $canonical = $null
+            foreach ($name in $allowed) {
+                if ([string]::Equals($name, $token, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $canonical = $name
+                    break
+                }
+            }
+            if ($null -eq $canonical) {
+                throw 'invalid hardware section'
+            }
+            if (-not $selected.Contains($canonical)) {
+                [void]$selected.Add($canonical)
+            }
         }
     }
     return @($selected.ToArray())
