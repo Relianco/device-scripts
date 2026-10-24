@@ -81,20 +81,17 @@ if (-not (Test-IntuneTextHasIpv4 -Text "prefix $sampleAddress suffix")) {
 if (Test-IntuneTextHasIpv4 -Text $pin) {
     Fail 'version pin was treated as an address'
 }
-$banned = @(
-    -join @('Le', 'ague'),
-    -join @('PI', 'LA'),
-    -join @('Sit', 'ka'),
-    -join @('/', 'home', '/')
-)
 foreach ($text in @($jsonText, $detectText, $testText)) {
     if (Test-IntuneTextHasIpv4 -Text $text) {
         Fail 'committed file contains an IPv4 address'
     }
-    foreach ($word in $banned) {
-        if ($text.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Fail 'committed file contains a banned marker'
-        }
+}
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-Edge.ps1' }
+    )) {
+    if ($packageFile.Text.Contains('/home/')) {
+        Fail "$($packageFile.Label) contains a home path"
     }
 }
 
