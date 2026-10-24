@@ -12,6 +12,8 @@ The runner is `windows/runner/Invoke-RelianRunner.ps1`. Paste that file into Nin
 
 `linux/runner/relian-runner.sh` is the Linux script to paste. It is not the macOS runner.
 
+`macos/runner/relian-runner.sh` is the macOS script to paste. It is not the Windows runner and not the Linux runner.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.

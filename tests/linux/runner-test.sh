@@ -307,18 +307,24 @@ JS
   fi
   ok
 
-  begin "ci runs the linux tests and not macos"
+  begin "ci runs the linux tests before macos"
   if [[ ! -f "$WORKFLOW" ]]; then
     fail "missing workflow"
   else
-    local workflow
+    local workflow rest
     workflow="$(cat "$WORKFLOW")"
     case "$workflow" in
       *"bash tests/linux/run-tests.sh"*) ;;
       *) fail "workflow missing linux tests" ;;
     esac
     case "$workflow" in
-      *"tests/macos/run-tests.sh"*) fail "workflow runs macos tests" ;;
+      *"bash tests/macos/run-tests.sh"*) ;;
+      *) fail "workflow missing macos tests" ;;
+    esac
+    rest="${workflow#*"bash tests/linux/run-tests.sh"}"
+    case "$rest" in
+      *"bash tests/macos/run-tests.sh"*) ;;
+      *) fail "macos tests are not after linux tests" ;;
     esac
     case "$workflow" in
       *"ubuntu-24.04"*) ;;
