@@ -175,6 +175,7 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1') {
 
 try {
     if (Test-PuttyDetectPresent -Entries (Get-PuttyDetectUninstallEntries)) {
+        Write-Output 'Relian PuTTY'
         exit 0
     }
 } catch {

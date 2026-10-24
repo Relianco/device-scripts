@@ -109,6 +109,11 @@ if (-not $detectText.Contains("-cne 'Simon Tatham'")) {
 if (-not $detectText.Contains("'0.85.0.0'")) {
     Fail 'detection minimum is not the pin'
 }
+$successAt = $detectText.IndexOf("Write-Output 'Relian PuTTY'", [System.StringComparison]::Ordinal)
+$exitAt = $detectText.IndexOf('exit 0', [System.StringComparison]::Ordinal)
+if ($successAt -lt 0 -or $exitAt -lt $successAt) {
+    Fail 'success output is missing'
+}
 foreach ($root in @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
