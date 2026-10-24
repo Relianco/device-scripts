@@ -1,0 +1,13 @@
+{
+  "displayName": "Relian Adobe Acrobat",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Acrobat.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Acrobat.ps1 -DeploymentType Install -Action Install -Edition \"{env:ACROBAT_EDITION}\" -PinVersion 0.0.0.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Acrobat.ps1 -DeploymentType Uninstall -Action Uninstall -Edition \"{env:ACROBAT_EDITION}\" -PinVersion 0.0.0.0",
+  "detectionScript": "Detect-Acrobat.ps1",
+  "detectReplace": [],
+  "editions": [
+    "Standard",
+    "Pro"
+  ]
+}
