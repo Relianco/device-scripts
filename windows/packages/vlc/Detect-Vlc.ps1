@@ -170,6 +170,11 @@ function Test-VlcDetectVersionAtPin {
     return $installed.CompareTo($pin) -ge 0
 }
 
+function Test-VlcDetectHasUninstallVersion {
+    param($Product)
+    return $null -ne $Product -and -not [string]::IsNullOrWhiteSpace([string]$Product.Version)
+}
+
 function Test-VlcDetectInstalled {
     param(
         [object[]]$Entries,
@@ -177,9 +182,11 @@ function Test-VlcDetectInstalled {
         [switch]$ProductUnreadable
     )
     $found = Find-VlcDetectUninstallProduct -Entries $Entries
-    if ($null -eq $found) {
+    if (-not (Test-VlcDetectHasUninstallVersion -Product $found)) {
         if ($ProductUnreadable -or $null -eq $ProductEntry) {
-            $found = New-VlcDetectProduct
+            if ($null -eq $found) {
+                $found = New-VlcDetectProduct
+            }
         } else {
             $found = Get-VlcDetectProductFromKey -Entry $ProductEntry
         }
@@ -208,10 +215,10 @@ function Get-VlcDetectRegistryState {
         }
     }
     $found = Find-VlcDetectUninstallProduct -Entries $entries.ToArray()
-    if ($null -ne $found) {
+    if (Test-VlcDetectHasUninstallVersion -Product $found) {
         return $found
     }
-    # Written by the VLC installer when the uninstall key has no version.
+    # The uninstall entry can name VLC and still omit DisplayVersion.
     $productKey = 'HKLM:\SOFTWARE\VideoLAN\VLC'
     if (-not (Test-Path -LiteralPath $productKey)) {
         return New-VlcDetectProduct

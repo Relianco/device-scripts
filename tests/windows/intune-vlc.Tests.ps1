@@ -201,8 +201,14 @@ if (Test-VlcDetectInstalled -Entries @($quietOlder, $newerComplete)) {
 }
 
 $pathOnly = New-VlcDetectEntry -DisplayVersion '' -UninstallString ''
-if (Test-VlcDetectInstalled -Entries @($pathOnly) -ProductEntry (New-VlcDetectProductKey)) {
-    Fail 'path-only entry still read the product key'
+if (-not (Test-VlcDetectInstalled -Entries @($pathOnly) -ProductEntry (New-VlcDetectProductKey -Version '3.0.24'))) {
+    Fail 'path without a display version ignored a product key at the pin'
+}
+if (Test-VlcDetectInstalled -Entries @($pathOnly) -ProductEntry (New-VlcDetectProductKey -Version '3.0.23')) {
+    Fail 'product key below the pin filled an empty uninstall version'
+}
+if (-not (Test-VlcDetectInstalled -Entries @(New-VlcDetectEntry -DisplayVersion '3.0.24'))) {
+    Fail 'uninstall display version at the pin needs a product key'
 }
 
 $invalidVersion = New-VlcDetectEntry -DisplayVersion 'not-a-version' -InstallLocation '' -UninstallString '' -QuietUninstallString ''
