@@ -436,6 +436,15 @@ Assert-EmptyPackagePairs -Label 'empty object package arguments' -Pairs (Convert
 Assert-PackagePairs -Label 'empty name package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments $emptyNamePackageArguments) -Expected @(
     [pscustomobject]@{ Name = 'PrinterName'; Value = '' }
 )
+Assert-PackagePairs -Label 'iso package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'eyJXaGVuIjoiMjAxOC0wMS0wMVQwMDowMDowMCJ9') -Expected @(
+    [pscustomobject]@{ Name = 'When'; Value = '2018-01-01T00:00:00' }
+)
+Assert-PackagePairs -Label 'iso z package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'eyJXaGVuIjoiMjAxOC0wMS0wMVQwMDowMDowMFoifQ==') -Expected @(
+    [pscustomobject]@{ Name = 'When'; Value = '2018-01-01T00:00:00Z' }
+)
+Assert-PackagePairs -Label 'ms date package arguments' -Pairs (ConvertFrom-RelianPackageArguments -PackageArguments 'eyJXaGVuIjoiL0RhdGUoMTQ4MzIyODgwMDAwMCkvIn0=') -Expected @(
+    [pscustomobject]@{ Name = 'When'; Value = '/Date(1483228800000)/' }
+)
 foreach ($rejected in @(
     @{ Label = 'bang package arguments'; Blob = '!!!!' }
     @{ Label = 'base64url package arguments'; Blob = 'abc-def' }

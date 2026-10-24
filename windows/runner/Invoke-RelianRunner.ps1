@@ -214,6 +214,94 @@ function Remove-RelianDirectory {
     }
 }
 
+function ConvertFrom-RelianJsonPairs {
+    param([Parameter(Mandatory)][string]$Json)
+    $text = $Json.Trim()
+    $state = [pscustomobject]@{ Text = $text; N = $text.Length; I = 0 }
+    $pairs = [System.Collections.Generic.List[object]]::new()
+
+    $take = {
+        if ($state.I -ge $state.N) { throw 'invalid package arguments' }
+        $ch = $state.Text[$state.I]
+        $state.I = $state.I + 1
+        return $ch
+    }
+    $peek = {
+        if ($state.I -ge $state.N) { return [char]0 }
+        return $state.Text[$state.I]
+    }
+    $skip = {
+        while ($state.I -lt $state.N -and [char]::IsWhiteSpace($state.Text[$state.I])) {
+            $state.I = $state.I + 1
+        }
+    }
+    $readString = {
+        if ((& $take) -ne '"') { throw 'invalid package arguments' }
+        $sb = [System.Text.StringBuilder]::new()
+        while ($true) {
+            if ($state.I -ge $state.N) { throw 'invalid package arguments' }
+            $ch = & $take
+            if ($ch -eq '"') { return $sb.ToString() }
+            if ($ch -ne '\') {
+                if ([int]$ch -lt 32) { throw 'invalid package arguments' }
+                [void]$sb.Append($ch)
+                continue
+            }
+            if ($state.I -ge $state.N) { throw 'invalid package arguments' }
+            $esc = & $take
+            switch ($esc) {
+                '"' { [void]$sb.Append('"'); continue }
+                '\' { [void]$sb.Append('\'); continue }
+                '/' { [void]$sb.Append('/'); continue }
+                'b' { [void]$sb.Append([char]8); continue }
+                'f' { [void]$sb.Append([char]12); continue }
+                'n' { [void]$sb.Append([char]10); continue }
+                'r' { [void]$sb.Append([char]13); continue }
+                't' { [void]$sb.Append([char]9); continue }
+                'u' {
+                    if ($state.I + 4 -gt $state.N) { throw 'invalid package arguments' }
+                    $hex = $state.Text.Substring($state.I, 4)
+                    $state.I = $state.I + 4
+                    $code = 0
+                    if (-not [int]::TryParse($hex, [System.Globalization.NumberStyles]::HexNumber, [cultureinfo]::InvariantCulture, [ref]$code)) {
+                        throw 'invalid package arguments'
+                    }
+                    [void]$sb.Append([char]$code)
+                    continue
+                }
+                default { throw 'invalid package arguments' }
+            }
+        }
+    }
+
+    & $skip
+    if ((& $take) -ne '{') { throw 'invalid package arguments' }
+    & $skip
+    if ((& $peek) -eq '}') {
+        [void](& $take)
+        & $skip
+        if ($state.I -ne $state.N) { throw 'invalid package arguments' }
+        return ,$pairs
+    }
+    while ($true) {
+        & $skip
+        $name = & $readString
+        & $skip
+        if ((& $take) -ne ':') { throw 'invalid package arguments' }
+        & $skip
+        if ((& $peek) -ne '"') { throw 'invalid package arguments' }
+        $value = & $readString
+        [void]$pairs.Add([pscustomobject]@{ Name = $name; Value = $value })
+        & $skip
+        $sep = & $take
+        if ($sep -eq '}') { break }
+        if ($sep -ne ',') { throw 'invalid package arguments' }
+    }
+    & $skip
+    if ($state.I -ne $state.N) { throw 'invalid package arguments' }
+    return ,$pairs
+}
+
 function ConvertFrom-RelianPackageArguments {
     param([AllowEmptyString()][string]$PackageArguments)
 
@@ -248,20 +336,13 @@ function ConvertFrom-RelianPackageArguments {
     if (-not $json.TrimStart().StartsWith('{')) {
         throw 'invalid package arguments'
     }
-    try {
-        $parsed = ConvertFrom-Json -InputObject $json -ErrorAction Stop
-    } catch {
-        throw 'invalid package arguments'
-    }
-    if ($null -eq $parsed -or $parsed -isnot [System.Management.Automation.PSCustomObject]) {
-        throw 'invalid package arguments'
-    }
+    $parsed = ConvertFrom-RelianJsonPairs -Json $json
     $reserved = @(
         'DeploymentType', 'Action', 'PinVersion', 'CancelPath', 'MarkerRoot',
         'PackageUrl', 'PackageSha256', 'ToolkitUrl', 'ToolkitSha256',
         'BrandPackUrl', 'BrandPackSha256', 'PackageArguments'
     )
-    foreach ($prop in $parsed.PSObject.Properties) {
+    foreach ($prop in $parsed) {
         $value = $prop.Value
         if ($null -eq $value) {
             throw 'invalid package arguments'
