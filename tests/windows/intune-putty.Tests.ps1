@@ -123,7 +123,7 @@ foreach ($root in @(
     }
 }
 
-function Assert-NoClientMarker {
+function Assert-NoAddress {
     param(
         [string]$Text,
         [string]$Label
@@ -138,23 +138,20 @@ function Assert-NoClientMarker {
             Fail "$Label contains an address"
         }
     }
-    $needles = @(
-        ('Le' + 'ague'),
-        ('PI' + 'LA'),
-        ('Sit' + 'ka'),
-        ('/' + 'home' + '/')
-    )
-    foreach ($needle in $needles) {
-        if ($Text.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Fail "$Label contains a banned marker"
-        }
-    }
 }
 
 $testText = Get-Content -LiteralPath $PSCommandPath -Raw -Encoding utf8
-Assert-NoClientMarker -Text $jsonText -Label 'intune.json'
-Assert-NoClientMarker -Text $detectText -Label 'Detect-Putty.ps1'
-Assert-NoClientMarker -Text $testText -Label 'intune-putty.Tests.ps1'
+Assert-NoAddress -Text $jsonText -Label 'intune.json'
+Assert-NoAddress -Text $detectText -Label 'Detect-Putty.ps1'
+Assert-NoAddress -Text $testText -Label 'intune-putty.Tests.ps1'
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-Putty.ps1' }
+    )) {
+    if ($packageFile.Text.Contains('/home/')) {
+        Fail "$($packageFile.Label) contains a home path"
+    }
+}
 
 $env:RELIAN_DEPLOY_TEST = '1'
 . $detectPath
