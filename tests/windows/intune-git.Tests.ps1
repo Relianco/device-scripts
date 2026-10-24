@@ -281,6 +281,14 @@ $exeOnly = New-GitDetectEntry -DisplayName 'Git' -Publisher $publisher -DisplayV
 if (Test-RelianGitInstalled -Entries @($exeOnly) -CurrentVersion $pin) {
     Fail 'GitForWindows replaced an uninstall entry that has no version'
 }
+$unparseable = New-GitDetectEntry -DisplayName 'Git' -Publisher $publisher -DisplayVersion 'not-a-version'
+if (Test-RelianGitInstalled -Entries @($unparseable) -CurrentVersion $pin) {
+    Fail 'an unparseable display version used GitForWindows'
+}
+$missingVersion = New-GitDetectEntry -DisplayName 'Git' -Publisher $publisher -DisplayVersion ''
+if (-not (Test-RelianGitInstalled -Entries @($missingVersion) -CurrentVersion $pin)) {
+    Fail 'a missing display version did not use GitForWindows'
+}
 if (Test-RelianGitInstalled -Entries @($olderComplete) -CurrentVersion $newer) {
     Fail 'GitForWindows replaced a lower uninstall version'
 }

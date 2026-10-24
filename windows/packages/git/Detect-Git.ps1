@@ -2,6 +2,7 @@
 # Exit 0 when Git from The Git Development Community is installed at or above the pin.
 # DisplayVersion 2.56.0.2 and the release tag 2.56.0.windows.2 are one build.
 # HKLM:\SOFTWARE\GitForWindows applies only when no matching uninstall entry has a version or an uninstall program.
+# A nonempty DisplayVersion that does not parse blocks that fallback.
 # A missing key is not installed. This file does not run setup.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -69,6 +70,7 @@ function Find-RelianGitProduct {
         [string]$CurrentVersion = ''
     )
     $best = $null
+    $sawInvalidVersion = $false
     $items = @()
     if ($null -ne $Entries) {
         $items = @($Entries)
@@ -98,6 +100,10 @@ function Find-RelianGitProduct {
                     $formatted = Format-RelianGitVersion -Version $parsed
                 }
                 $hasVersion = -not [string]::IsNullOrWhiteSpace($formatted)
+                # Present text that does not parse is not the same as a missing DisplayVersion.
+                if (-not [string]::IsNullOrWhiteSpace($versionText) -and -not $hasVersion) {
+                    $sawInvalidVersion = $true
+                }
                 $hasExe = -not [string]::IsNullOrWhiteSpace($exe)
                 if ($hasVersion -or $hasExe) {
                     $candidate = [pscustomobject]@{ Version = $formatted; UninstallPath = $exe }
@@ -120,6 +126,9 @@ function Find-RelianGitProduct {
     }
     if ($null -ne $best) {
         return $best
+    }
+    if ($sawInvalidVersion) {
+        return [pscustomobject]@{ Version = ''; UninstallPath = '' }
     }
     $parsedCurrent = Convert-RelianGitVersionText -Text $CurrentVersion
     if ($parsedCurrent -is [version]) {
