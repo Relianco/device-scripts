@@ -129,10 +129,15 @@ function Find-VlcDetectUninstallProduct {
         }
         $hasVersion = -not [string]::IsNullOrWhiteSpace($formatted)
         $hasPath = -not [string]::IsNullOrWhiteSpace($path) -and -not [string]::IsNullOrWhiteSpace($directory)
-        if ($hasVersion -and $hasPath) {
-            return New-VlcDetectProduct -Version $formatted -UninstallPath $path -InstallDirectory $directory
-        }
-        if ($null -eq $best -and ($hasVersion -or $hasPath)) {
+        if ($hasVersion) {
+            $product = New-VlcDetectProduct -Version $formatted -UninstallPath $path -InstallDirectory $directory
+            if (Test-VlcDetectVersionAtPin -VersionText $formatted) {
+                return $product
+            }
+            if (-not (Test-VlcDetectHasUninstallVersion -Product $best)) {
+                $best = $product
+            }
+        } elseif ($hasPath -and $null -eq $best) {
             $best = New-VlcDetectProduct -Version $formatted -UninstallPath $path -InstallDirectory $directory
         }
     }

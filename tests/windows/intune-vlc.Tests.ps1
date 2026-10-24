@@ -190,14 +190,20 @@ if (Test-VlcDetectInstalled -Entries @()) {
 }
 
 $olderComplete = New-VlcDetectEntry -DisplayVersion '3.0.23'
-$newerComplete = New-VlcDetectEntry -DisplayVersion '3.0.25'
-if (Test-VlcDetectInstalled -Entries @($olderComplete, $newerComplete) -ProductEntry (New-VlcDetectProductKey -Version '9.0.0')) {
-    Fail 'later entry replaced the first complete match'
+$atPin = New-VlcDetectEntry -DisplayVersion '3.0.24'
+if (-not (Test-VlcDetectInstalled -Entries @($olderComplete, $atPin))) {
+    Fail 'later entry at the pin is absent'
+}
+if (Test-VlcDetectInstalled -Entries @($olderComplete, (New-VlcDetectEntry -DisplayVersion '3.0.22'))) {
+    Fail 'entries below the pin are present'
+}
+if (Test-VlcDetectInstalled -Entries @($olderComplete) -ProductEntry (New-VlcDetectProductKey -Version '3.0.24')) {
+    Fail 'product key replaced an uninstall version below the pin'
 }
 
 $quietOlder = New-VlcDetectEntry -DisplayVersion '3.0.23' -InstallLocation '' -UninstallString '' -QuietUninstallString '"C:\Program Files\VideoLAN\VLC\uninstall.exe"'
-if (Test-VlcDetectInstalled -Entries @($quietOlder, $newerComplete)) {
-    Fail 'quiet uninstall path was not a complete match'
+if (-not (Test-VlcDetectInstalled -Entries @($quietOlder, $atPin))) {
+    Fail 'older quiet-path entry hid a later pin match'
 }
 
 $pathOnly = New-VlcDetectEntry -DisplayVersion '' -UninstallString ''
