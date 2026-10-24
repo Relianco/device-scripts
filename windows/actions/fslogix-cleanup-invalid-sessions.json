@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "fslogix-cleanup-invalid-sessions",
+  "title": "Clean invalid FSLogix sessions",
+  "description": "Sets CleanupInvalidSessions to 1.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\FSLogix\\Apps",
+      "name": "CleanupInvalidSessions",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}
