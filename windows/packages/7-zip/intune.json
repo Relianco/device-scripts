@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian 7-Zip",
+  "publisher": "Relian",
+  "setupFile": "Invoke-7Zip.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-7Zip.ps1 -DeploymentType Install -Action Install -PinVersion 26.04.00.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-7Zip.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 26.04.00.0",
+  "detectionScript": "Detect-7Zip.ps1",
+  "detectReplace": []
+}
