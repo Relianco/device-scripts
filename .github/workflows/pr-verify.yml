@@ -2,7 +2,8 @@ name: PR verify
 
 # PowerShell floor for this repo. The website's pr-verify runs typecheck,
 # lint, and vitest on its own runner labels. This repo has no Node app, so
-# the floor is the pwsh suite plus the reviewer unit tests, on ubuntu-24.04.
+# the floor is the pwsh suite, the reviewer unit tests, and the Linux and
+# macOS shell tests, on ubuntu-24.04.
 
 on:
   pull_request:
@@ -42,3 +43,9 @@ jobs:
 
       - name: Run the reviewer unit tests
         run: node --test tests/ai-pr-review.test.mjs tests/secret-scan.test.mjs
+
+      - name: Run the Linux runner tests
+        run: bash tests/linux/run-tests.sh
+
+      - name: Run the macOS runner tests
+        run: bash tests/macos/run-tests.sh

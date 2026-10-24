@@ -1,0 +1,6 @@
+{
+  "name": "noop",
+  "installsSoftware": false,
+  "file": "noop.sh",
+  "sha256": "87f7e68a0223967ab94bdbc57aa4097af265c5ba68f66a43ca390a8f51732122"
+}
