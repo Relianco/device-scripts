@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Microsoft Teams",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Teams.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Teams.ps1 -DeploymentType Install -Action Install -PinVersion 0.0.0.1",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Teams.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 0.0.0.1",
+  "detectionScript": "Detect-Teams.ps1",
+  "detectReplace": []
+}
