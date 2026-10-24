@@ -86,7 +86,9 @@ url_user() {
 }
 
 url_user_pw() {
-  printf '%s%s%s%s%s%s' 'https://' 'user' ':' 'abc' '@' 'example.invalid/noop.sh'
+  local secret
+  secret="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  printf '%s%s%s%s%s%s' 'https://' 'user' ':' "$secret" '@' 'example.invalid/noop.sh'
 }
 
 url_path_at() {
