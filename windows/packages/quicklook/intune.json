@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian QuickLook",
+  "publisher": "Relian",
+  "setupFile": "Invoke-QuickLook.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-QuickLook.ps1 -DeploymentType Install -Action Install -PinVersion 4.5.0.0",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-QuickLook.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 4.5.0.0",
+  "detectionScript": "Detect-QuickLook.ps1",
+  "detectReplace": []
+}
