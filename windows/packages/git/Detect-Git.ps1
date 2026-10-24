@@ -1,5 +1,6 @@
 # Intune runs this file with no arguments.
 # Exit 0 when Git from The Git Development Community is installed at or above the pin.
+# Any matching uninstall entry at or above the pin counts. An older entry must not hide a newer one.
 # DisplayVersion 2.56.0.2 and the release tag 2.56.0.windows.2 are one build.
 # HKLM:\SOFTWARE\GitForWindows applies only when no matching uninstall entry has a version or an uninstall program.
 # A nonempty DisplayVersion that does not parse blocks that fallback.
@@ -70,6 +71,7 @@ function Find-RelianGitProduct {
         [string]$CurrentVersion = ''
     )
     $best = $null
+    $bestVersion = $null
     $sawInvalidVersion = $false
     $items = @()
     if ($null -ne $Entries) {
@@ -80,7 +82,7 @@ function Find-RelianGitProduct {
             continue
         }
         $candidate = $null
-        $complete = $false
+        $parsedVersion = $null
         try {
             $displayName = (Get-RelianGitPropertyText -Object $props -Name 'DisplayName').Trim()
             $publisher = (Get-RelianGitPropertyText -Object $props -Name 'Publisher').Trim()
@@ -98,6 +100,7 @@ function Find-RelianGitProduct {
                 $formatted = ''
                 if ($parsed -is [version]) {
                     $formatted = Format-RelianGitVersion -Version $parsed
+                    $parsedVersion = [version]$formatted
                 }
                 $hasVersion = -not [string]::IsNullOrWhiteSpace($formatted)
                 # Present text that does not parse is not the same as a missing DisplayVersion.
@@ -107,18 +110,22 @@ function Find-RelianGitProduct {
                 $hasExe = -not [string]::IsNullOrWhiteSpace($exe)
                 if ($hasVersion -or $hasExe) {
                     $candidate = [pscustomobject]@{ Version = $formatted; UninstallPath = $exe }
-                    $complete = $hasVersion -and $hasExe
                 }
             }
         } catch {
             $candidate = $null
-            $complete = $false
+            $parsedVersion = $null
         }
         if ($null -eq $candidate) {
             continue
         }
-        if ($complete) {
-            return $candidate
+        # A later matching entry can meet the pin. Do not stop at the first complete entry.
+        if ($null -ne $parsedVersion) {
+            if ($null -eq $bestVersion -or $parsedVersion.CompareTo($bestVersion) -gt 0) {
+                $bestVersion = $parsedVersion
+                $best = $candidate
+            }
+            continue
         }
         if ($null -eq $best) {
             $best = $candidate

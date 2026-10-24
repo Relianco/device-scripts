@@ -274,8 +274,8 @@ if (-not (Test-RelianGitInstalled -Entries @($otherPublisher, $atPin) -CurrentVe
 }
 $olderComplete = New-GitDetectEntry -DisplayName 'Git' -Publisher $publisher -DisplayVersion $older -QuietUninstallString $quotedExe
 $newerComplete = New-GitDetectEntry -DisplayName 'Git' -Publisher $publisher -DisplayVersion $newer -QuietUninstallString $quotedExe
-if (Test-RelianGitInstalled -Entries @($olderComplete, $newerComplete) -CurrentVersion '') {
-    Fail 'an older complete entry was not the selected product'
+if (-not (Test-RelianGitInstalled -Entries @($olderComplete, $newerComplete) -CurrentVersion '')) {
+    Fail 'an older complete entry hid a newer Git install'
 }
 $exeOnly = New-GitDetectEntry -DisplayName 'Git' -Publisher $publisher -DisplayVersion '' -QuietUninstallString $quotedExe
 if (Test-RelianGitInstalled -Entries @($exeOnly) -CurrentVersion $pin) {
