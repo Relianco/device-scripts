@@ -9,6 +9,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Absolute before any git -C, which would resolve a relative path from its own folder.
+$OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/wdot.json') -Raw | ConvertFrom-Json
 $commit = [string]$release.commit

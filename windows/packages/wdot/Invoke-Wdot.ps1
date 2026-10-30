@@ -1,8 +1,9 @@
 # Windows Desktop Optimization Tool (WDOT) with the Relian profile.
+# For Azure Virtual Desktop session hosts only, not physical workstations.
 # NinjaOne runs this as SYSTEM on Windows PowerShell 5.1. Paste it as the
 # "Virtual Desktop Optimization" script. Its one script variable is the
-# checkbox "Keep Outlook" (keepOutlook): checked keeps the new Outlook and the
-# Mail and Calendar app.
+# checkbox "Keep Outlook" (keepOutlook): checked keeps the retired Mail and
+# Calendar app. The new Outlook, Copilot, Teams, OneDrive, and Edge are kept.
 #
 # ZipUrl and ZipSha256 are the pin in windows/releases/wdot.json. The zip is
 # WDOT at the pinned commit plus windows/packages/wdot/profile as
@@ -21,8 +22,8 @@ param(
     [string]$DeploymentType,
     [string]$Action,
     [string]$PinVersion,
-    [string]$ZipUrl = 'https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-d1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c.zip',
-    [string]$ZipSha256 = 'd1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c',
+    [string]$ZipUrl = 'https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-30d7c10d45d8ec5cd6aa213f1c6bc22fd31715ddbc6975c3c386362fe522176d.zip',
+    [string]$ZipSha256 = '30d7c10d45d8ec5cd6aa213f1c6bc22fd31715ddbc6975c3c386362fe522176d',
     [AllowEmptyString()][string]$KeepOutlook = $env:keepOutlook
 )
 

@@ -97,20 +97,37 @@ foreach ($item in @($default) + @($keep)) {
         Fail "AppxPackage name [$($item.AppxPackage)] has whitespace"
     }
 }
-$outlookApps = @('Microsoft.OutlookForWindows', 'microsoft.windowscommunicationsapps')
 $defaultApplied = @((Get-Applied $default).AppxPackage)
 $keepApplied = @((Get-Applied $keep).AppxPackage)
-foreach ($app in $outlookApps) {
-    if ($defaultApplied -notcontains $app) {
-        Fail "AppxPackages.json no longer removes $app"
-    }
-    if ($keepApplied -contains $app) {
-        Fail "AppxPackages-KeepOutlook.json removes $app"
+# Session-host users rely on these. Neither file removes them, whatever Keep Outlook says.
+$protectedApps = @(
+    'Microsoft.Copilot', 'Microsoft.MicrosoftOfficeHub', 'Microsoft.OutlookForWindows', 'MSTeams', 'MicrosoftTeams',
+    'Microsoft.OneDriveSync', 'Microsoft.MicrosoftEdge', 'Microsoft.MicrosoftEdge.Stable'
+)
+foreach ($app in $protectedApps) {
+    if ($defaultApplied -contains $app -or $keepApplied -contains $app) {
+        Fail "an AppxPackages file removes $app"
     }
 }
-$extra = @(Compare-Object -ReferenceObject $defaultApplied -DifferenceObject ($keepApplied + $outlookApps))
+foreach ($item in @(Get-Applied $default) + @(Get-Applied $keep)) {
+    if ([string]$item.AppxPackage -like '*Copilot*' -or [string]$item.AppxPackage -like '*Outlook*') {
+        Fail "an AppxPackages file removes $($item.AppxPackage)"
+    }
+}
+foreach ($setting in (Get-Applied (Read-Profile -Name 'DefaultUserSettings.json')) + (Get-Applied (Read-Profile -Name 'PolicyRegSettings.json'))) {
+    $name = if ($setting.PSObject.Properties.Name -contains 'KeyName') { [string]$setting.KeyName } else { [string]$setting.RegItemValueName }
+    if ($name -like '*Copilot*') {
+        Fail "a registry setting turns off Copilot: $name"
+    }
+}
+# Keep Outlook now decides only the retired Mail and Calendar app.
+$mail = 'microsoft.windowscommunicationsapps'
+if ($defaultApplied -notcontains $mail -or $keepApplied -contains $mail) {
+    Fail 'Keep Outlook does not decide Mail and Calendar'
+}
+$extra = @(Compare-Object -ReferenceObject $defaultApplied -DifferenceObject ($keepApplied + $mail))
 if ($extra.Count -ne 0) {
-    Fail 'the two AppxPackages files differ in more than the Outlook apps'
+    Fail 'the two AppxPackages files differ in more than Mail and Calendar'
 }
 foreach ($app in @('Microsoft.WindowsStore', 'Microsoft.DesktopAppInstaller', 'Microsoft.OneDriveSync', 'Microsoft.WindowsCalculator')) {
     if ($defaultApplied -contains $app) {
@@ -164,8 +181,8 @@ foreach ($needle in @('-File C:\w\Windows_Optimization.ps1', '-ConfigProfile Rel
         Fail "WDOT arguments miss $needle"
     }
 }
-if ($argLine.Contains('-Restart')) {
-    Fail 'WDOT arguments restart the device'
+if ($argLine.Contains('-Restart') -or $argLine.Contains('-AdvancedOptimizations')) {
+    Fail 'WDOT arguments restart the device or run advanced optimizations (Edge, OneDrive removal)'
 }
 
 # The script turns the appraiser tasks back on after WDOT.
@@ -295,6 +312,14 @@ if (Test-Path -LiteralPath $work) {
     Fail 'work folder left behind after a run'
 }
 Remove-Item -LiteralPath $payload -Force
+
+# build-wdot.ps1 makes OutDir absolute before git -C changes folders.
+$build = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'scripts/build-wdot.ps1'))
+$resolveAt = $build.IndexOf('$OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)', [System.StringComparison]::Ordinal)
+$firstUse = $build.IndexOf("Join-Path $OutDir", [System.StringComparison]::Ordinal)
+if ($resolveAt -lt 0 -or $firstUse -lt 0 -or $resolveAt -gt $firstUse) {
+    Fail 'build-wdot.ps1 does not make OutDir absolute before using it'
+}
 
 Write-Output 'PASS wdot'
 exit 0

@@ -13,7 +13,7 @@
     },
     {
         "AppxPackage": "Microsoft.Copilot",
-        "OptimizationState": "Apply",
+        "OptimizationState": "Skip",
         "URL": "https://apps.microsoft.com/detail/9nht9rb2f4hd",
         "Description": "Microsoft AI app"
     },
@@ -67,7 +67,7 @@
     },
     {
         "AppxPackage": "Microsoft.MicrosoftOfficeHub",
-        "OptimizationState": "Apply",
+        "OptimizationState": "Skip",
         "URL": "https://www.microsoft.com/en-us/p/office/9wzdncrd29v9",
         "Description": "Office UWP app suite"
     },
@@ -91,7 +91,7 @@
     },
     {
         "AppxPackage": "Microsoft.OutlookForWindows",
-        "OptimizationState": "Apply",
+        "OptimizationState": "Skip",
         "URL": "https://apps.microsoft.com/detail/9NRX63209R7B?hl=en-us&gl=US",
         "Description": "a best-in-class email experience that is free for anyone with Windows"
     },

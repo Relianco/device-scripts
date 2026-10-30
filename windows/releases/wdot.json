@@ -8,8 +8,8 @@
   "wdotVersion": "1.1.0.0",
   "profile": "Relian",
   "replaces": "Virtual-Desktop-Optimization-Tool commit 2e7fc851532acece8f70e1228e7720d6c19cb9e9",
-  "sourceUrl": "https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-d1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c.zip",
-  "file": "wdot-relian-d1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c.zip",
-  "sha256": "d1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c",
-  "size": 263395
+  "sourceUrl": "https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-30d7c10d45d8ec5cd6aa213f1c6bc22fd31715ddbc6975c3c386362fe522176d.zip",
+  "file": "wdot-relian-30d7c10d45d8ec5cd6aa213f1c6bc22fd31715ddbc6975c3c386362fe522176d.zip",
+  "sha256": "30d7c10d45d8ec5cd6aa213f1c6bc22fd31715ddbc6975c3c386362fe522176d",
+  "size": 263411
 }
