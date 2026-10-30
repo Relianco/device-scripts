@@ -61,7 +61,7 @@ A node that is Running with exactly that tag gets `tailscale set` with the same 
 
 ## Collectors
 
-`windows/bootstrap.ps1` downloads one script from `windows/collectors/` and runs it. The collectors are `cpu-benchmark`, `hardware-inventory`, `network-audit`, and `storage-health`. They write inventory into NinjaOne fields.
+`windows/bootstrap.ps1` downloads one collector by URL and SHA256 and prints that script's JSON on stdout. It does not write a NinjaOne field. An empty hash downloads nothing. The collectors are `cpu-benchmark`, `hardware-inventory`, `network-audit`, and `storage-health`.
 
 ## Layout
 
