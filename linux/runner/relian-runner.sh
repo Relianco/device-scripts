@@ -1,5 +1,13 @@
 #!/bin/bash
 # Linux package runner. Paste this file. It downloads one package script.
+# No trace output: a trace would print the package arguments.
+{ set +x; } 2>/dev/null
+
+# Package arguments from --package-arguments-b64. They are exported into the
+# package process only. They are not secret: they sit on this runner's command
+# line. Secrets stay in NinjaOne Secure custom fields.
+RELIAN_PKG_NAMES=()
+RELIAN_PKG_VALUES=()
 
 relian_error() {
   printf '%s\n' "$1" >&2
@@ -164,13 +172,85 @@ relian_verify_hash() {
   return 0
 }
 
+# Names that change how a process runs or loads code, matched case-insensitively.
+relian_arg_name_denied() {
+  local lower
+  lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    path|ifs|shell|home|user|env|term|tmpdir|cdpath|globignore|ps4|prompt_command|shellopts|bashopts|uid|euid|ppid|posixly_correct) return 0 ;;
+    execignore|funcnest|tmout|inputrc|shlvl|optind|opterr|hostfile|globsort) return 0 ;;
+    lang*|lc_*|ld_*|bash_*|python*|perl*|ruby*|node_*|relian_*|ninja_*) return 0 ;;
+    package_url|package_sha256|action|pin_version|script|deployment|step|pin|code|work|root|dest) return 0 ;;
+  esac
+  return 1
+}
+
+# Fills RELIAN_PKG_NAMES and RELIAN_PKG_VALUES from base64 Name=Value lines.
+# Errors never include the blob, a name, or a value.
+relian_parse_package_arguments() {
+  local b64="$1"
+  local raw_size=0
+  local kept_size=0
+  local text=""
+  local line name value i
+  RELIAN_PKG_NAMES=()
+  RELIAN_PKG_VALUES=()
+  if [[ -z "$b64" ]]; then
+    return 0
+  fi
+  if [[ ! "$b64" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+    return 1
+  fi
+  raw_size="$(printf '%s' "$b64" | base64 -d 2>/dev/null | wc -c)" || return 1
+  kept_size="$(printf '%s' "$b64" | base64 -d 2>/dev/null | tr -d '\000' | wc -c)" || return 1
+  raw_size="${raw_size//[[:space:]]/}"
+  kept_size="${kept_size//[[:space:]]/}"
+  if [[ "$raw_size" -eq 0 || "$raw_size" -gt 4096 || "$raw_size" -ne "$kept_size" ]]; then
+    return 1
+  fi
+  text="$(printf '%s' "$b64" | base64 -d 2>/dev/null)" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ -z "$line" ]]; then
+      continue
+    fi
+    case "$line" in
+      *=*) ;;
+      *) return 1 ;;
+    esac
+    name="${line%%=*}"
+    value="${line#*=}"
+    if [[ ! "$name" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]] || relian_arg_name_denied "$name"; then
+      return 1
+    fi
+    i=0
+    while [[ "$i" -lt "${#RELIAN_PKG_NAMES[@]}" ]]; do
+      if [[ "${RELIAN_PKG_NAMES[$i]}" == "$name" ]]; then
+        return 1
+      fi
+      i=$((i + 1))
+    done
+    RELIAN_PKG_NAMES+=("$name")
+    RELIAN_PKG_VALUES+=("$value")
+  done <<< "$text"
+  return 0
+}
+
+# The subshell exports the package arguments for the package process only.
 relian_invoke() {
   local script="$1"
   local deployment="$2"
   local step="$3"
   local pin="$4"
   local code=0
-  command bash -- "$script" --deployment-type "$deployment" --action "$step" --pin-version "$pin" || code=$?
+  (
+    # The counter is in the RELIAN_ namespace, which no pair may use.
+    RELIAN_ARG_INDEX=0
+    while [[ "$RELIAN_ARG_INDEX" -lt "${#RELIAN_PKG_NAMES[@]}" ]]; do
+      export "${RELIAN_PKG_NAMES[$RELIAN_ARG_INDEX]}=${RELIAN_PKG_VALUES[$RELIAN_ARG_INDEX]}"
+      RELIAN_ARG_INDEX=$((RELIAN_ARG_INDEX + 1))
+    done
+    exec bash -- "$script" --deployment-type "$deployment" --action "$step" --pin-version "$pin"
+  ) || code=$?
   return "$code"
 }
 
@@ -227,6 +307,7 @@ relian_runner_main() {
   local seen_hash=0
   local seen_action=0
   local seen_pin=0
+  local package_args=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -264,6 +345,14 @@ relian_runner_main() {
         fi
         pin_version="$2"
         seen_pin=1
+        shift 2
+        ;;
+      --package-arguments-b64)
+        if [[ $# -lt 2 ]]; then
+          relian_error "missing parameter --package-arguments-b64"
+          return 1
+        fi
+        package_args="$2"
         shift 2
         ;;
       *)
@@ -308,6 +397,17 @@ relian_runner_main() {
     return 1
   fi
 
+  # Invalid package arguments exit 1 and download nothing. Only names and the count are printed.
+  if ! relian_parse_package_arguments "$package_args"; then
+    RELIAN_PKG_NAMES=()
+    RELIAN_PKG_VALUES=()
+    relian_error "invalid package arguments"
+    return 1
+  fi
+  if [[ "${#RELIAN_PKG_NAMES[@]}" -gt 0 ]]; then
+    printf 'package arguments: %s (%s)\n' "${#RELIAN_PKG_NAMES[@]}" "${RELIAN_PKG_NAMES[*]}"
+  fi
+
   local root=""
   root="$(relian_temp_root)"
   local work=""
@@ -317,6 +417,8 @@ relian_runner_main() {
   }
   local code=0
   relian_run_downloaded "$work" "$package_url" "$package_sha256" "$action" "$pin_version" || code=$?
+  RELIAN_PKG_NAMES=()
+  RELIAN_PKG_VALUES=()
   relian_remove_work "$root" "$work"
   return "$code"
 }
