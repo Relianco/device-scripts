@@ -1,0 +1,21 @@
+{
+  "name": "tailscale",
+  "installsSoftware": true,
+  "file": "tailscale.sh",
+  "sha256": "9ba95aba54e39987c54e44a3101851f2bb2cb56269f00f36abb2a951f5f42f3a",
+  "pinVersion": "1.104.4",
+  "pinMeaning": "floor; apt installs the newest version in the stable repo",
+  "repo": "https://pkgs.tailscale.com/stable/debian",
+  "codenames": [
+    "bookworm",
+    "trixie"
+  ],
+  "repoKey": {
+    "file": "<codename>.noarmor.gpg",
+    "sha256": "3e03dacf222698c60b8e2f990b809ca1b3e104de127767864284e6c228f1fb39",
+    "size": 2288,
+    "fingerprint": "2596A99EAAB33821893C0A79458CA832957F5868",
+    "uid": "Tailscale Inc. (Package repository signing key) <info@tailscale.com>",
+    "checked": "2026-10-30: bookworm and trixie files downloaded from pkgs.tailscale.com into an empty dir are byte-identical; gpg --show-keys fingerprint matches the key served by keys.openpgp.org and keyserver.ubuntu.com for that fingerprint"
+  }
+}
