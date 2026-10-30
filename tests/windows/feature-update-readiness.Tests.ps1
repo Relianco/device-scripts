@@ -138,21 +138,26 @@ function New-FixRecord {
     $r = New-Record
     $r['timestamp'] = '2026-10-30T20:00:00Z'
     $r.appraiser['task'] = [ordered]@{ state = 'Ready'; lastRun = '2026-10-29 10:00' }
+    $r.appraiser['lastEvaluated'] = '2026-10-29 10:20'
     $r.appraiser['diagTrack'] = 'Stopped/Disabled'
     $r.appraiser.indicators['GE25H2'] = [ordered]@{ GatedBlockId = 'None' }
     $r
 }
 Assert-Same ((Get-FurFixPlan (New-FixRecord)) -join ',') '' 'fresh and enabled: nothing, DiagTrack untouched'
-$r = New-FixRecord; $r.appraiser.task.state = 'Disabled'; $r.appraiser.task.lastRun = '2023-11-23 12:27'
+$r = New-FixRecord; $r.appraiser.task.state = 'Disabled'; $r.appraiser.task.lastRun = '2023-11-23 12:27'; $r.appraiser.lastEvaluated = '2023-11-23 20:27'
 Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserTask,RunAppraiser' 'disabled and old'
 $r = New-FixRecord; $r.appraiser.task.state = 'Disabled'
 Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserTask' 'disabled but fresh'
 $r = New-FixRecord; $r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ GatedBlockId = 'None' } }
 Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'no record past 23H2'
 $r = New-FixRecord; $r.appraiser.indicators['NI23H2'] = [ordered]@{ GatedBlockId = '47615939' }
-Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'stale hold'
-$r = New-FixRecord; $r.appraiser.task.lastRun = '1999-11-30 00:00'
-Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'never ran'
+Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'hold with fresh evaluation: no rerun'
+$r.appraiser.lastEvaluated = '2023-11-27 17:08'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'hold with old evaluation'
+$r = New-FixRecord; $r.appraiser.task.lastRun = '2026-10-30 09:00'; $r.appraiser.lastEvaluated = '2026-08-01 10:00'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'task ran recently but evaluation old'
+$r = New-FixRecord; $r.appraiser.lastEvaluated = $null
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'never evaluated'
 $r = New-FixRecord; $r.appraiser.task.state = 'Running'; $r.appraiser.indicators = [ordered]@{}
 Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'already running: do not start again'
 $r = New-FixRecord; $r.appraiser.task = [ordered]@{ state = 'missing' }

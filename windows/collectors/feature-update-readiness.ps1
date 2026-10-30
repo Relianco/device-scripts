@@ -509,20 +509,19 @@ function Get-FurFixPlan {
     if ($state -eq 'Disabled') { $plan.Add('EnableAppraiserTask') }
     if ($state -eq 'Running' -or $state -eq 'missing' -or $state -eq '') { return @($plan) }
 
-    # Stale: last run over 30 days ago, no record for a release after 23H2, or any hold.
+    # Stale: the newest evaluation is missing or over 30 days old (a task run is
+    # no proof the scan succeeded), or no record exists for a release after 23H2.
+    # A hold alone is not staleness: a fresh hold is real, and an old one shows
+    # up as an old evaluation.
     $stale = $false
     $now = if ($Record.Contains('timestamp')) { [datetime]$Record.timestamp } else { Get-Date }
-    if ($task.Contains('lastRun') -and $task.lastRun) {
-        if (($now - [datetime]$task.lastRun).TotalDays -gt 30) { $stale = $true }
+    if ($a.Contains('lastEvaluated') -and $a.lastEvaluated) {
+        if (($now - [datetime]$a.lastEvaluated).TotalDays -gt 30) { $stale = $true }
     } else { $stale = $true }
     $ind = if ($a.Contains('indicators')) { $a.indicators } else { $null }
     $keys = @()
     if ($ind) { $keys = @($ind.Keys) }
     if (-not @($keys | Where-Object { $_ -match '(\d\dH\d)$' -and $Matches[1] -gt '23H2' }).Count) { $stale = $true }
-    foreach ($k in $keys) {
-        $i = $ind[$k]
-        if ((Test-Has $i 'GatedBlockId') -and "$($i.GatedBlockId)" -notmatch '^(None|0)$') { $stale = $true }
-    }
     if ($stale) { $plan.Add('RunAppraiser') }
     return @($plan)
 }
