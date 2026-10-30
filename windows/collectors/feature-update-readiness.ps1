@@ -142,9 +142,10 @@ function Get-FurVerdict {
     # newest evaluation over 30 days old. Disabled task, DiagTrack or telemetry
     # are listed as likely causes only then; DiagTrack just uploads results.
     $a = $Record.appraiser
-    $taskOff = $false; $diagOff = $false; $telOff = $false
+    $taskOff = $false; $expOff = $false; $diagOff = $false; $telOff = $false
     if ($a) {
         $taskOff = $a.Contains('task') -and $a.task -and $a.task.Contains('state') -and "$($a.task.state)" -eq 'Disabled'
+        $expOff = "$(Get-FurExpTaskState $a)" -eq 'Disabled'
         $diagOff = $a.Contains('diagTrack') -and "$($a.diagTrack)" -match 'Disabled'
     }
     $dc = $null
@@ -161,12 +162,14 @@ function Get-FurVerdict {
     if ($targets.Count -eq 0 -or $oldEval) {
         $why = @()
         if ($taskOff) { $why += 'task disabled' }
+        if ($expOff) { $why += 'Exp task disabled' }
         if ($diagOff) { $why += 'DiagTrack disabled' }
         if ($telOff) { $why += 'telemetry off' }
         if ($oldEval) { $why += "last evaluated $oldEval" }
         if ($why.Count -gt 0) { $reasons.Add("appraiser stale: " + ($why -join ' / ')) }
     } else {
         if ($taskOff) { $reasons.Add("appraiser task disabled") }
+        if ($expOff) { $reasons.Add("appraiser Exp task disabled") }
         if ($telOff) { $reasons.Add("telemetry off") }
     }
     if ($targets.Count -gt 0) {
@@ -503,6 +506,16 @@ function Get-FurToolHints {
     return $h
 }
 
+# Pure: state of the "Microsoft Compatibility Appraiser Exp" task, which tools
+# such as VDOT disable together with the main appraiser task. $null if absent.
+function Get-FurExpTaskState {
+    param($Appraiser)
+    if (-not $Appraiser -or -not $Appraiser.Contains('otherTasks')) { return $null }
+    $row = @($Appraiser.otherTasks | Where-Object { $_ -and "$($_.name)" -eq 'Microsoft Compatibility Appraiser Exp' }) | Select-Object -First 1
+    if ($row) { return "$($row.state)" }
+    return $null
+}
+
 # Pure: the repairs a record calls for, in order. Empty when nothing is needed.
 function Get-FurFixPlan {
     param($Record)
@@ -578,7 +591,7 @@ function Invoke-Main {
 
         if ($Fix) {
             $plan = @(Get-FurFixPlan $record)
-            $before = [ordered]@{ diagTrack = $record.appraiser.diagTrack; task = $record.appraiser.task.state; taskLastRun = $record.appraiser.task.lastRun }
+            $before = [ordered]@{ diagTrack = $record.appraiser.diagTrack; task = $record.appraiser.task.state; expTask = (Get-FurExpTaskState $record.appraiser); taskLastRun = $record.appraiser.task.lastRun }
             Write-Status "Fix plan: $(if ($plan.Count) { $plan -join ', ' } else { 'nothing to do' })"
             $result = Invoke-FurFix $plan
             $after = Get-AppraiserInfo
@@ -587,7 +600,7 @@ function Invoke-Main {
                 done   = $result.done
                 errors = $result.errors
                 before = $before
-                after  = [ordered]@{ diagTrack = $after.diagTrack; task = $after.task.state; taskLastRun = $after.task.lastRun }
+                after  = [ordered]@{ diagTrack = $after.diagTrack; task = $after.task.state; expTask = (Get-FurExpTaskState $after); taskLastRun = $after.task.lastRun }
             }
         }
 
