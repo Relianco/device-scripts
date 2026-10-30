@@ -37,6 +37,7 @@ function New-Record {
 
 # A 24H2 device is still checked for blockers; a pin to its own release blocks.
 $r = New-Record; $r.os.build = 26100; $r.os.displayVersion = '24H2'
+$r.appraiser.indicators['GE25H2'] = [ordered]@{ GatedBlockId = 'None'; RedReason = 'None' }
 $r.policy.wu = [ordered]@{ TargetReleaseVersion = 1; TargetReleaseVersionInfo = '24H2' }
 Assert-Same (Get-FurVerdict $r) 'pinned to 24H2 (GPO); not offered by WU' '24H2 pinned to 24H2'
 $r.policy.wu.TargetReleaseVersionInfo = '25H2'
