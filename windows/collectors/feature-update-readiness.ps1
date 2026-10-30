@@ -97,12 +97,17 @@ function Get-FurVerdict {
     # A pin blocks unless it names a release newer than the installed one ("23H2" -lt "24H2").
     if ($pin -and -not ($current -and ($pin.Split(' ')[0] -gt $current))) { $reasons.Add("pinned to $pin") }
 
+    # WSUS is a source, not a block: it may approve the upgrade, and scan-source
+    # policy (0 = Windows Update) can send feature updates to WU anyway.
     if ((Test-Has $au 'UseWUServer') -and [int]$au.UseWUServer -eq 1) {
-        $server = if (Test-Has $wu 'WUServer') { $wu.WUServer } else { 'no server set' }
-        $reasons.Add("WSUS/policy blocks WU ($server)")
+        $featureFromWu = (Test-Has $wu 'SetPolicyDrivenUpdateSourceForFeatureUpdates') -and [int]$wu.SetPolicyDrivenUpdateSourceForFeatureUpdates -eq 0
+        if (-not $featureFromWu) {
+            $server = if (Test-Has $wu 'WUServer') { $wu.WUServer } else { 'no server set' }
+            $reasons.Add("update source is WSUS ($server)")
+        }
     }
     if ((Test-Has $wu 'DoNotConnectToWindowsUpdateInternetLocations') -and [int]$wu.DoNotConnectToWindowsUpdateInternetLocations -eq 1) {
-        $reasons.Add("WSUS/policy blocks WU (no internet locations)")
+        $reasons.Add("WU internet locations disabled by policy")
     }
     # PausedFeatureStatus is the effective state; a leftover PauseFeatureUpdatesStartTime outlives the pause.
     if ((Test-Has $state 'PausedFeatureStatus') -and [int]$state.PausedFeatureStatus -eq 1) {
@@ -160,7 +165,8 @@ function Get-FurVerdict {
     }
 
     $search = $Record.wuSearch
-    if ($search -and -not $search.error -and $search.Contains('titles') -and -not @($search.titles | Where-Object { "$_" -match 'Cumulative Update for Windows' }).Count) {
+    # cumulativeOffered is computed from the full search result; titles is truncated.
+    if ($search -and -not $search.error -and $search.Contains('cumulativeOffered') -and -not $search.cumulativeOffered) {
         $reasons.Add("no cumulative update offered")
     }
     if ($search) {
@@ -176,6 +182,8 @@ function Get-FurVerdict {
 # alone is not enough: the Upgrades category, or a title that starts as an upgrade.
 function Test-FurFeatureUpdate {
     param([string]$Entry)
+    # "{upgrade}" marks the language-independent Upgrades category ID; names and titles are localized.
+    if ($Entry -match '\{upgrade\}\s*$') { return $true }
     if ($Entry -match '\[[^\]]*\bUpgrades\b[^\]]*\]\s*$') { return $true }
     return ($Entry -match '^(Feature update to Windows|Windows 1[01], version \d\dH\d\s*(\[|$))')
 }
@@ -194,6 +202,12 @@ function Get-FurLastEvaluated {
     }
     if ($max -eq 0) { return $null }
     return ([DateTimeOffset]::FromUnixTimeSeconds($max)).UtcDateTime.ToString('yyyy-MM-dd HH:mm')
+}
+
+# Pure: true when any search entry is a Windows cumulative update.
+function Test-FurCumulative {
+    param($Entries)
+    return [bool](@($Entries | Where-Object { "$_" -match 'Cumulative Update for Windows' }).Count)
 }
 
 # Pure: JSON no longer than $Max. Drops the bulkiest optional parts first.
@@ -329,7 +343,11 @@ function Invoke-WuSearch {
                 $found = $searcher.Search($criteria)
                 foreach ($u in $found.Updates) {
                     $cats = @($u.Categories | ForEach-Object { $_.Name }) -join '/'
-                    $res.titles += "$($u.Title) [$cats]"
+                    $ids = @($u.Categories | ForEach-Object { "$($_.CategoryID)".ToUpperInvariant() })
+                    $mark = ''
+                    if ($ids -contains '3689BDC8-B205-4AF4-8D4B-A63924C5E9D5') { $mark = ' {upgrade}' }
+                    elseif ($ids -contains 'EBFC1FC5-71A4-4F7B-9ACA-3B9A503104A0') { $mark = ' {driver}' }
+                    $res.titles += "$($u.Title) [$cats]$mark"
                 }
             }
         } catch { $res.error = "$($_.Exception.Message)" }
@@ -344,9 +362,10 @@ function Invoke-WuSearch {
         if ($r.error) { $out.error = Limit-Text $r.error 120 }
         $feature = @($titles | Where-Object { Test-FurFeatureUpdate $_ })
         $out.featureOffered = ($feature.Count -gt 0)
+        $out.cumulativeOffered = Test-FurCumulative $titles
         $out.featureTitles = @($feature | Select-Object -First 3 | ForEach-Object { Limit-Text $_ 120 })
         $out.titles = @($titles | Select-Object -First 10 | ForEach-Object { Limit-Text $_ 100 })
-        $out.drivers = @($titles | Where-Object { $_ -match '\[[^\]]*Drivers[^\]]*\]\s*$' } | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 100 })
+        $out.drivers = @($titles | Where-Object { $_ -match '\{driver\}\s*$|\[[^\]]*Drivers[^\]]*\]\s*$' } | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 100 })
     } else {
         $out.error = "timeout after $FurSearchSeconds s"
         $out.featureOffered = $false

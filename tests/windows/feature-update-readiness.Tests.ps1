@@ -66,7 +66,9 @@ Assert-Like (Get-FurVerdict $r) 'pinned to 23H2 (MDM)*' 'MDM pin'
 
 # WSUS.
 $r = New-Record; $r.policy.au = [ordered]@{ UseWUServer = 1 }; $r.policy.wu = [ordered]@{ WUServer = 'http://wsus:8530' }
-Assert-Like (Get-FurVerdict $r) 'WSUS/policy blocks WU (http://wsus:8530)*' 'WSUS'
+Assert-Like (Get-FurVerdict $r) 'update source is WSUS (http://wsus:8530)*' 'WSUS'
+$r.policy.wu['SetPolicyDrivenUpdateSourceForFeatureUpdates'] = 0
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'WSUS with feature updates from WU'
 
 # Paused.
 $r = New-Record; $r.policy.policyState = [ordered]@{ PausedFeatureStatus = 1 }
@@ -79,6 +81,10 @@ Assert-Same (Test-FurFeatureUpdate 'Windows 11, version 25H2 [Upgrades]') $true 
 Assert-Same (Test-FurFeatureUpdate 'Windows 11, version 24H2') $true 'feature by title'
 Assert-Same (Test-FurFeatureUpdate 'Feature update to Windows 11, version 24H2 [Windows 11]') $true 'feature update title'
 Assert-Same (Test-FurFeatureUpdate '2026-10 Cumulative Update for Windows 11, version 23H2 for x64-based Systems (KB5126653) [Security Updates/Windows 11]') $false 'cumulative 23H2'
+Assert-Same (Test-FurFeatureUpdate 'Windows 11, Version 25H2 [Mises à niveau] {upgrade}') $true 'localized upgrade by category id'
+Assert-Same (Test-FurFeatureUpdate 'Pilote AMD [Pilotes] {driver}') $false 'driver marker'
+Assert-Same (Test-FurCumulative @('x', '2026-10 Cumulative Update for Windows 11, version 23H2 (KB5126653) [Security Updates]')) $true 'cumulative found'
+Assert-Same (Test-FurCumulative @()) $false 'no cumulative'
 Assert-Same (Test-FurFeatureUpdate '2025-10 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems (KB5066835) [Security Updates]') $false 'cumulative 24H2'
 
 # Safeguard hold, ids de-duplicated across targets.
@@ -117,11 +123,11 @@ Assert-Same (ConvertTo-FurNativeArg '{"p":"C:\\x\\"}') '{\"p\":\"C:\\x\\\\\"}' '
 Assert-Same (ConvertTo-FurNativeArg 'none') 'none' 'no quotes'
 
 # Out-of-servicing Pro releases, stale UBR, and a missing cumulative update.
-$r = New-Record; $r.os['ubr'] = 6199; $r.os['edition'] = 'Professional'; $r.wuSearch['titles'] = @('AMD System Driver Update (23.19.0.6) [Drivers]')
+$r = New-Record; $r.os['ubr'] = 6199; $r.os['edition'] = 'Professional'; $r.wuSearch['titles'] = @('AMD System Driver Update (23.19.0.6) [Drivers]'); $r.wuSearch['cumulativeOffered'] = $false
 Assert-Same (Get-FurVerdict $r) '23H2 out of servicing (UBR 6199 is the last cumulative update); no cumulative update offered; not offered by WU' 'pro 23H2 final'
 $r = New-Record; $r.os.build = 22621; $r.os.displayVersion = '22H2'; $r.os['ubr'] = 4000; $r.os['edition'] = 'Professional'
 $r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ GatedBlockId = '47615939'; GatedBlockReason = 'Other' } }
-$r.wuSearch['titles'] = @('2024-10 Cumulative Update for Windows 11 Version 22H2 for x64-based Systems (KB5044285) [Security Updates]')
+$r.wuSearch['titles'] = @(); $r.wuSearch['cumulativeOffered'] = $true
 Assert-Same (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2; UBR 4000 behind last cumulative update 4317; not offered by WU' '22H2 behind, older hold ignored'
 $r = New-Record; $r.os['ubr'] = 6199; $r.os['edition'] = 'Enterprise'
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'enterprise not judged'
@@ -142,7 +148,7 @@ Assert-Like (Get-FurVerdict $r) 'hardware ineligible (TPM 1.2)*' 'tpm 1.2'
 $r = New-Record; $r.wuSearch.error = 'timeout after 150 s'
 Assert-Same (Get-FurVerdict $r) 'WU search failed (timeout after 150 s)' 'search failed'
 $r = New-Record; $r.policy.au = [ordered]@{ UseWUServer = 1 }; $r.appraiser.indicators.GE24H2.GatedBlockId = '1'
-Assert-Same (Get-FurVerdict $r) 'WSUS/policy blocks WU (no server set); safeguard hold 1; not offered by WU' 'joined'
+Assert-Same (Get-FurVerdict $r) 'update source is WSUS (no server set); safeguard hold 1; not offered by WU' 'joined'
 
 # JSON stays under the cap and says what it dropped.
 $r = New-Record
