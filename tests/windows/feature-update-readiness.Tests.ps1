@@ -99,13 +99,13 @@ Assert-Same (Get-FurVerdict $r) 'safeguard hold 222; not offered by WU' 'newer r
 $r = New-Record; $r.appraiser.indicators.GE24H2.RedReason = 'CpuFms'
 Assert-Like (Get-FurVerdict $r) 'hardware ineligible (appraiser: CpuFms)*' 'red reason'
 $r = New-Record; $r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ UpgEx = 'Green' } }
-Assert-Like (Get-FurVerdict $r) 'appraiser has no newer-release data*' 'no target data'
+Assert-Like (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2*' 'no target data'
 
 # Disabled appraiser task or DiagTrack is named, with or without target data.
 $r = New-Record; $r.appraiser.indicators = [ordered]@{}
 $r.appraiser['task'] = [ordered]@{ state = 'Disabled'; lastRun = '2023-11-27 08:48' }
 $r.appraiser['diagTrack'] = 'Stopped/Disabled'
-Assert-Same (Get-FurVerdict $r) 'appraiser has no newer-release data (appraiser task disabled, DiagTrack disabled); not offered by WU' 'appraiser off'
+Assert-Same (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2 (appraiser task disabled, DiagTrack disabled); not offered by WU' 'appraiser off'
 $r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Ready' }; $r.appraiser['diagTrack'] = 'Running/Automatic'
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'appraiser on'
 $r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }
@@ -115,6 +115,20 @@ Assert-Same (Get-FurVerdict $r) 'appraiser task disabled; not offered by WU' 'ap
 Assert-Same (ConvertTo-FurNativeArg '{"a":"b"}') '{\"a\":\"b\"}' 'plain quotes'
 Assert-Same (ConvertTo-FurNativeArg '{"p":"C:\\x\\"}') '{\"p\":\"C:\\x\\\\\"}' 'backslash before quote'
 Assert-Same (ConvertTo-FurNativeArg 'none') 'none' 'no quotes'
+
+# Out-of-servicing Pro releases, stale UBR, and a missing cumulative update.
+$r = New-Record; $r.os['ubr'] = 6199; $r.os['edition'] = 'Professional'; $r.wuSearch['titles'] = @('AMD System Driver Update (23.19.0.6) [Drivers]')
+Assert-Same (Get-FurVerdict $r) '23H2 out of servicing (UBR 6199 is the last cumulative update); no cumulative update offered; not offered by WU' 'pro 23H2 final'
+$r = New-Record; $r.os.build = 22621; $r.os.displayVersion = '22H2'; $r.os['ubr'] = 4000; $r.os['edition'] = 'Professional'
+$r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ GatedBlockId = '47615939'; GatedBlockReason = 'Other' } }
+$r.wuSearch['titles'] = @('2024-10 Cumulative Update for Windows 11 Version 22H2 for x64-based Systems (KB5044285) [Security Updates]')
+Assert-Same (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2; UBR 4000 behind last cumulative update 4317; not offered by WU' '22H2 behind, older hold ignored'
+$r = New-Record; $r.os['ubr'] = 6199; $r.os['edition'] = 'Enterprise'
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'enterprise not judged'
+
+# Appraiser last evaluation date.
+Assert-Same (Get-FurLastEvaluated ([ordered]@{ NI22H2 = [ordered]@{ TimestampEpochString = '1699994981' }; NI23H2 = [ordered]@{ TimestampEpochString = '1701104921' }; UNV = [ordered]@{} })) '2023-11-27 17:08' 'last evaluated'
+Assert-Same (Get-FurLastEvaluated ([ordered]@{})) $null 'never evaluated'
 
 # Disk and TPM.
 $r = New-Record; $r.hw.freeGB = 8.5

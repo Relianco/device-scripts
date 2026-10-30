@@ -28,6 +28,9 @@ $FurFieldName = "relianFeatureUpdate"
 # ponytail: NinjaOne text fields hold about 10,000 characters; trim to stay under.
 $FurMaxJson = 9500
 $FurSearchSeconds = 150
+# Build -> UBR of the last Home/Pro cumulative update after end of servicing:
+# 22H2 ended 2024-10 at 22621.4317, 23H2 ended 2025-11 at 22631.6199.
+$FurFinalUbr = @{ 22621 = 4317; 22631 = 6199 }
 
 function Write-Status {
     param([string]$Message, [string]$Level = "INFO")
@@ -112,7 +115,8 @@ function Get-FurVerdict {
     # Only records for releases newer than the installed one: an older record's
     # GatedBlockId or RedReason does not apply to the next upgrade.
     if ($ind) {
-        $floor = if ($current -match '^\d\dH\d$') { $current } else { '23H2' }
+        # The goal is 24H2 or later, so a 23H2 record never decides, even on 22H2.
+        $floor = if ($current -match '^\d\dH\d$' -and $current -gt '23H2') { $current } else { '23H2' }
         $targets = @($ind.Keys | Where-Object { $_ -match '(\d\dH\d)$' -and $Matches[1] -gt $floor } | Sort-Object)
     }
     $off = @()
@@ -123,7 +127,8 @@ function Get-FurVerdict {
     }
     if ($targets.Count -eq 0) {
         $why = if ($off.Count -gt 0) { " (" + ($off -join ', ') + ")" } else { "" }
-        $reasons.Add("appraiser has no newer-release data$why")
+        $next = if ($floor -lt '24H2') { '24H2/25H2' } else { "a release after $floor" }
+        $reasons.Add("appraiser never evaluated $next$why")
     } else {
         $holds = New-Object System.Collections.Generic.List[string]
         foreach ($t in $targets) {
@@ -142,7 +147,22 @@ function Get-FurVerdict {
         if ($full.Count -gt 0 -and -not ($reasons | Where-Object { $_ -like 'disk space*' })) { $reasons.Add("disk space (appraiser)") }
     }
 
+    # Last cumulative update for Home/Pro on releases past end of servicing.
+    # Enterprise and Education run a year longer and are not judged here.
+    $os = $Record.os
+    if ($os -and $os.Contains('build') -and $os.Contains('ubr') -and $null -ne $os.ubr -and "$($os.edition)" -match '^(Professional|Core)') {
+        $b = [int]$os.build
+        if ($FurFinalUbr.Contains($b)) {
+            $final = $FurFinalUbr[$b]
+            if ([int]$os.ubr -ge $final) { $reasons.Add("$current out of servicing (UBR $($os.ubr) is the last cumulative update)") }
+            else { $reasons.Add("UBR $($os.ubr) behind last cumulative update $final") }
+        }
+    }
+
     $search = $Record.wuSearch
+    if ($search -and -not $search.error -and $search.Contains('titles') -and -not @($search.titles | Where-Object { "$_" -match 'Cumulative Update for Windows' }).Count) {
+        $reasons.Add("no cumulative update offered")
+    }
     if ($search) {
         if ($search.featureOffered) { $reasons.Add("ok/offered") }
         elseif ($search.error) { $reasons.Add("WU search failed ($($search.error))") }
@@ -158,6 +178,22 @@ function Test-FurFeatureUpdate {
     param([string]$Entry)
     if ($Entry -match '\[[^\]]*\bUpgrades\b[^\]]*\]\s*$') { return $true }
     return ($Entry -match '^(Feature update to Windows|Windows 1[01], version \d\dH\d\s*(\[|$))')
+}
+
+# Pure: newest appraiser evaluation across indicator records, as a UTC date.
+function Get-FurLastEvaluated {
+    param($Indicators)
+    $max = 0
+    if ($Indicators) {
+        foreach ($k in @($Indicators.Keys)) {
+            $v = $Indicators[$k]
+            if ($v -and $v.Contains('TimestampEpochString') -and "$($v.TimestampEpochString)" -match '^\d+$') {
+                $max = [math]::Max($max, [long]$v.TimestampEpochString)
+            }
+        }
+    }
+    if ($max -eq 0) { return $null }
+    return ([DateTimeOffset]::FromUnixTimeSeconds($max)).UtcDateTime.ToString('yyyy-MM-dd HH:mm')
 }
 
 # Pure: JSON no longer than $Max. Drops the bulkiest optional parts first.
@@ -256,7 +292,7 @@ function Get-AppraiserInfo {
     } catch { $task = @{ error = (Limit-Text "$_" 100) } }
     $diag = $null
     try { $diag = "$((Get-Service DiagTrack -ErrorAction Stop).Status)/$((Get-Service DiagTrack).StartType)" } catch { $diag = 'missing' }
-    return [ordered]@{ task = $task; diagTrack = $diag; indicators = $ind }
+    return [ordered]@{ task = $task; diagTrack = $diag; lastEvaluated = (Get-FurLastEvaluated $ind); indicators = $ind }
 }
 
 function Get-HardwareInfo {
@@ -310,6 +346,7 @@ function Invoke-WuSearch {
         $out.featureOffered = ($feature.Count -gt 0)
         $out.featureTitles = @($feature | Select-Object -First 3 | ForEach-Object { Limit-Text $_ 120 })
         $out.titles = @($titles | Select-Object -First 10 | ForEach-Object { Limit-Text $_ 100 })
+        $out.drivers = @($titles | Where-Object { $_ -match '\[[^\]]*Drivers[^\]]*\]\s*$' } | Select-Object -First 8 | ForEach-Object { Limit-Text $_ 100 })
     } else {
         $out.error = "timeout after $FurSearchSeconds s"
         $out.featureOffered = $false
