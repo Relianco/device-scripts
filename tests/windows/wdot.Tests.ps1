@@ -316,7 +316,7 @@ Remove-Item -LiteralPath $payload -Force
 # build-wdot.ps1 makes OutDir absolute before git -C changes folders.
 $build = [System.IO.File]::ReadAllText((Join-Path $repoRoot 'scripts/build-wdot.ps1'))
 $resolveAt = $build.IndexOf('$OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)', [System.StringComparison]::Ordinal)
-$firstUse = $build.IndexOf("Join-Path $OutDir", [System.StringComparison]::Ordinal)
+$firstUse = $build.IndexOf('Join-Path $OutDir', [System.StringComparison]::Ordinal)
 if ($resolveAt -lt 0 -or $firstUse -lt 0 -or $resolveAt -gt $firstUse) {
     Fail 'build-wdot.ps1 does not make OutDir absolute before using it'
 }
