@@ -179,6 +179,15 @@ foreach ($bad in @('Set-Service', 'Start-Service', 'AllowTelemetry =', 'TargetRe
     if ($source.IndexOf($bad, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Fail "source contains $bad" }
 }
 
+# The Exp appraiser task is checked too.
+$exp = [ordered]@{ otherTasks = @([ordered]@{ name = 'ProgramDataUpdater'; state = 'Ready' }, [ordered]@{ name = 'Microsoft Compatibility Appraiser Exp'; state = 'Disabled' }) }
+Assert-Same (Get-FurExpTaskState $exp) 'Disabled' 'exp task state'
+Assert-Same (Get-FurExpTaskState ([ordered]@{ otherTasks = @() })) $null 'exp task absent'
+$r = New-Record; $r.appraiser['otherTasks'] = $exp.otherTasks
+Assert-Same (Get-FurVerdict $r) 'appraiser Exp task disabled; not offered by WU' 'exp disabled with fresh data'
+$r.appraiser.indicators = [ordered]@{}; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }
+Assert-Same (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2; appraiser stale: task disabled / Exp task disabled; not offered by WU' 'exp disabled when stale'
+
 # Native argument quoting survives the MSVCRT parser.
 Assert-Same (ConvertTo-FurNativeArg '{"a":"b"}') '{\"a\":\"b\"}' 'plain quotes'
 Assert-Same (ConvertTo-FurNativeArg '{"p":"C:\\x\\"}') '{\"p\":\"C:\\x\\\\\"}' 'backslash before quote'
