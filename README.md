@@ -53,6 +53,46 @@ The values come from the package environment: pass them in `--package-arguments-
 
 A node that is Running with exactly that tag gets `tailscale set` with the same preferences and exits 0. A node that is Stopped with that tag is brought up without a key. A node with any other tag, or joined without a tag, exits 1 and is not re-joined. A status that cannot be read on an installed node exits 1. Uninstall and Reinstall exit 1. An empty pin exits 0. The package does not change the Proxmox firewall, sshd, or anything else on the host. Those changes stay manual.
 
+## Proxmox and Debian diagnostics
+
+`linux/packages/diagnose-pve/diagnose-pve.sh` is a read-only, low-impact health report for Proxmox VE and Debian hosts. It is meant for live client production servers. It prints plain text to stdout, which NinjaOne keeps as the script output, and it always exits 0. Each section is capped and says when it cut lines, so the whole report stays under about 24 KB.
+
+What it collects, one section each:
+
+1. Identity: hostname, kernel, Debian version, uptime, load, date, timezone, `pveversion`.
+2. CPU and pressure: `lscpu` model, sockets, cores, threads and MHz lines, `/proc/pressure/{cpu,io,memory}`, and the top 8 processes by CPU and by RSS from `ps -eo pcpu=,pmem=,rss=,comm=`. Only the command name is read, never the full command line.
+3. Memory: `free -m`, `/proc/swaps`, the ZFS ARC size and limits, `vm.swappiness`, and the transparent huge page settings.
+4. Storage: `lsblk -d` with rotational, model, scheduler and request queue size, the SCSI queue depth from `/sys`, `df -hT` without tmpfs, `/proc/mdstat`, the file system under `/var/lib/vz`, `zpool status -x` and `zpool list`, `vgs --readonly` and `lvs --readonly`, and the ZFS `compression`, `recordsize`, `volblocksize` and `sync` properties.
+5. I/O sample: `/proc/diskstats` read twice, `Sample` seconds apart, then read and write MB/s, IOPS, average wait in ms and utilisation for each whole device that did I/O.
+6. Network: `ip -br address`, the default route, MTU and error and drop counters from `/sys/class/net`, link speed and duplex from plain `ethtool <interface>` for physical NICs, `ss -s`, and the Tailscale state, peer count and own tags.
+7. Proxmox, only when `pveversion` exists: `pvesm status`, `qm list`, `pct list`, an allowlisted part of `qm config <id>` for each VM, the backup jobs from `pvesh get /cluster/backup`, the non-comment lines of `/etc/vzdump.conf`, the last 15 tasks, and whether a backup task is running now.
+8. Backup agents: `systemctl is-active` and `systemctl show -p MemoryCurrent,NRestarts` for `backup-tool` and `cometd`.
+
+From `qm config`, only these keys are printed: `name`, `memory`, `balloon`, `cores`, `sockets`, `cpu`, `scsihw`, `agent`, `boot`, `ostype`, and the numbered `scsi`, `virtio`, `sata`, `ide`, `efidisk`, `tpmstate` and `net` keys. A key that contains `pass`, `key`, `secret` or `token` is never printed. A last pass replaces anything shaped like a Tailscale auth key or `password=<value>` with `<redacted>`.
+
+Every command runs under `timeout 10`, at `nice -n 19` and in the idle I/O class where `ionice` is available. No command starts after 43 seconds, so a run ends in about 45 seconds at most. A normal run takes the sample time plus a few seconds. A command that is missing, fails or times out prints `[unavailable: <command>]`, and the report goes on. The last lines list the sections that ran, with their times, and the total time.
+
+`Sample` is the only setting: whole seconds, default 5, clamped to 1 to 10. Pass it in `--package-arguments-b64`. For `Sample=5`, `printf 'Sample=5\n' | base64 -w0` gives `U2FtcGxlPTUK`, so the runner parameters are:
+
+```
+--package-url <raw URL of diagnose-pve.sh> --package-sha256 <sha256 from linux/releases/diagnose-pve.json> --action Install --pin-version 1 --package-arguments-b64 U2FtcGxlPTUK
+```
+
+The runner's action and pin version are ignored. The package does not:
+
+- write, create, or delete any file, or use a temp file
+- start, stop, restart, enable, or reload any service
+- install, update, or remove packages
+- change kernel settings, load modules, or write to `/proc` or `/sys`
+- run SMART reads, `hdparm`, benchmarks, scrubs, trims, or anything else that scans, wakes, or locks disks
+- take LVM locks
+- start, stop, migrate, back up, or change a VM or container, or call any `pvesh` method other than `get`
+- change network settings or use `ethtool` with any option
+- connect to the network. Only `tailscale status` and `pvesh get` talk to their local daemons.
+- print full process command lines, VM descriptions, cloud-init passwords, SSH keys, or Tailscale keys
+
+`tests/linux/diagnose-pve-test.sh` scans the script for forbidden commands, redirects and subcommands, and runs it against fake commands and fixture files only.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.
