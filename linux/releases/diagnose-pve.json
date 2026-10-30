@@ -1,0 +1,6 @@
+{
+  "name": "diagnose-pve",
+  "installsSoftware": false,
+  "file": "diagnose-pve.sh",
+  "sha256": "061beb57a645865bd2a9c519cdc63a6f4cd61735779913ce503f51a9b45903ad"
+}
