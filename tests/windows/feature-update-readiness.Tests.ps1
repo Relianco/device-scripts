@@ -86,17 +86,25 @@ $r.appraiser.indicators.GE24H2.GatedBlockId = '56318982'
 $r.appraiser.indicators['GE25H2'] = [ordered]@{ GatedBlockId = '56318982,57575634'; RedReason = 'None' }
 Assert-Like (Get-FurVerdict $r) 'safeguard hold 56318982,57575634*' 'safeguard'
 
+# On 24H2, a stale 24H2 record is ignored; the 25H2 record decides.
+$r = New-Record; $r.os.build = 26100; $r.os.displayVersion = '24H2'
+$r.appraiser.indicators.GE24H2.GatedBlockId = '111'; $r.appraiser.indicators.GE24H2.RedReason = 'Old'
+$r.appraiser.indicators['GE25H2'] = [ordered]@{ GatedBlockId = 'None'; RedReason = 'None' }
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'stale older record'
+$r.appraiser.indicators.GE25H2.GatedBlockId = '222'
+Assert-Same (Get-FurVerdict $r) 'safeguard hold 222; not offered by WU' 'newer record hold'
+
 # Appraiser red reason and missing appraiser data.
 $r = New-Record; $r.appraiser.indicators.GE24H2.RedReason = 'CpuFms'
 Assert-Like (Get-FurVerdict $r) 'hardware ineligible (appraiser: CpuFms)*' 'red reason'
 $r = New-Record; $r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ UpgEx = 'Green' } }
-Assert-Like (Get-FurVerdict $r) 'appraiser has no 24H2/25H2 data*' 'no target data'
+Assert-Like (Get-FurVerdict $r) 'appraiser has no newer-release data*' 'no target data'
 
 # Disabled appraiser task or DiagTrack is named, with or without target data.
 $r = New-Record; $r.appraiser.indicators = [ordered]@{}
 $r.appraiser['task'] = [ordered]@{ state = 'Disabled'; lastRun = '2023-11-27 08:48' }
 $r.appraiser['diagTrack'] = 'Stopped/Disabled'
-Assert-Same (Get-FurVerdict $r) 'appraiser has no 24H2/25H2 data (appraiser task disabled, DiagTrack disabled); not offered by WU' 'appraiser off'
+Assert-Same (Get-FurVerdict $r) 'appraiser has no newer-release data (appraiser task disabled, DiagTrack disabled); not offered by WU' 'appraiser off'
 $r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Ready' }; $r.appraiser['diagTrack'] = 'Running/Automatic'
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'appraiser on'
 $r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }

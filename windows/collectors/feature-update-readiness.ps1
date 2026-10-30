@@ -109,7 +109,12 @@ function Get-FurVerdict {
     $ind = $null
     if ($Record.appraiser) { $ind = $Record.appraiser.indicators }
     $targets = @()
-    if ($ind) { $targets = @($ind.Keys | Where-Object { $_ -match '24H2|25H2' } | Sort-Object) }
+    # Only records for releases newer than the installed one: an older record's
+    # GatedBlockId or RedReason does not apply to the next upgrade.
+    if ($ind) {
+        $floor = if ($current -match '^\d\dH\d$') { $current } else { '23H2' }
+        $targets = @($ind.Keys | Where-Object { $_ -match '(\d\dH\d)$' -and $Matches[1] -gt $floor } | Sort-Object)
+    }
     $off = @()
     if ($Record.appraiser) {
         $a = $Record.appraiser
@@ -118,7 +123,7 @@ function Get-FurVerdict {
     }
     if ($targets.Count -eq 0) {
         $why = if ($off.Count -gt 0) { " (" + ($off -join ', ') + ")" } else { "" }
-        $reasons.Add("appraiser has no 24H2/25H2 data$why")
+        $reasons.Add("appraiser has no newer-release data$why")
     } else {
         $holds = New-Object System.Collections.Generic.List[string]
         foreach ($t in $targets) {
