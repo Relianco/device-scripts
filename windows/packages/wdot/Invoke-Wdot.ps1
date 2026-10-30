@@ -107,23 +107,37 @@ function Remove-WdotVdotEventLog {
     }
 }
 
-# Retry a failure with no HTTP status (DNS, connect, timeout) and HTTP 408,
-# 429, 500, 502, 503, and 504. Any other HTTP status is final.
+# Retry only HTTP 408, 429, 500, 502, 503, and 504, and transport failures:
+# timeout, DNS, connect, send, receive, TLS. Anything else gets one attempt.
+# The same rule as the deploy runner's download.
 function Test-WdotRetryable {
     param($Exception)
-    $response = $null
-    if ($null -ne $Exception -and @($Exception.PSObject.Properties.Name) -contains 'Response') {
-        $response = $Exception.Response
+    $webTransient = @(
+        'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'SecureChannelFailure',
+        'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
+    )
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    $current = $Exception
+    for ($guard = 0; $null -ne $current -and $guard -lt 8; $guard++) {
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'Response' -and $null -ne $current.Response -and
+            @($current.Response.PSObject.Properties.Name) -contains 'StatusCode' -and $null -ne $current.Response.StatusCode) {
+            return @(408, 429, 500, 502, 503, 504) -contains [int]$current.Response.StatusCode
+        }
+        if ($current -is [System.TimeoutException] -or
+            $current -is [System.Threading.Tasks.TaskCanceledException] -or
+            $current -is [System.Net.Sockets.SocketException]) {
+            return $true
+        }
+        if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
+            return $true
+        }
+        if ($names -contains 'HttpRequestError' -and $requestTransient -contains [string]$current.HttpRequestError) {
+            return $true
+        }
+        $current = if ($names -contains 'InnerException') { $current.InnerException } else { $null }
     }
-    if ($null -eq $response) {
-        return $true
-    }
-    try {
-        $status = [int]$response.StatusCode
-    } catch {
-        return $true
-    }
-    return @(408, 429, 500, 502, 503, 504) -contains $status
+    return $false
 }
 
 function Save-WdotZip {

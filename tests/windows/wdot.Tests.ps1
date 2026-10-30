@@ -223,12 +223,20 @@ if ((Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 '' -KeepOutlook '') -ne 0 -or
     Fail 'empty pin or Uninstall downloaded or returned the wrong code'
 }
 
-# Retry policy: no HTTP status and 408/429/5xx retry; other statuses do not.
-foreach ($case in @(@($null, $true), @([pscustomobject]@{ Response = $null }, $true), @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 503 } }, $true),
-        @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 429 } }, $true), @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 404 } }, $false),
-        @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 403 } }, $false))) {
+# Retry policy: transport failures and 408/429/5xx retry; anything else does not.
+$status = { param([int]$Code) [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = $Code } } }
+foreach ($case in @(
+        @([System.Net.WebException]::new('dns', [System.Net.WebExceptionStatus]::NameResolutionFailure), $true),
+        @([System.Net.WebException]::new('tls', [System.Net.WebExceptionStatus]::SecureChannelFailure), $true),
+        @([System.TimeoutException]::new('slow'), $true),
+        @([System.Exception]::new('outer', [System.Net.Sockets.SocketException]::new(10061)), $true),
+        @((& $status 503), $true), @((& $status 429), $true), @((& $status 408), $true),
+        @((& $status 404), $false), @((& $status 403), $false),
+        @([System.Net.WebException]::new('unknown'), $false),
+        @([System.UnauthorizedAccessException]::new('output path denied'), $false),
+        @($null, $false))) {
     if ((Test-WdotRetryable -Exception $case[0]) -ne $case[1]) {
-        Fail "retryable for [$($case[0] | ConvertTo-Json -Compress)] was not $($case[1])"
+        Fail "retryable for [$($case[0])] was not $($case[1])"
     }
 }
 $script:attempts = 0
@@ -237,14 +245,18 @@ function Start-Sleep { param([int]$Seconds) $script:sleeps += $Seconds }
 function Invoke-WebRequest {
     param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
     $script:attempts++
-    throw [System.Net.WebException]::new('connect failed')
+    throw [System.Net.WebException]::new('connect failed', [System.Net.WebExceptionStatus]::ConnectFailure)
 }
 $probe = Join-Path ([System.IO.Path]::GetTempPath()) ('wdot-dl-' + [guid]::NewGuid().ToString('n'))
 if ((Save-WdotZip -Url $ZipUrl -Path $probe) -or $script:attempts -ne 3 -or ($script:sleeps -join ',') -ne '5,20') {
     Fail "transient failure made $($script:attempts) attempts with waits [$($script:sleeps -join ',')]"
 }
 $script:attempts = 0
-function Test-WdotRetryable { param($Exception) return $false }
+function Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
+    $script:attempts++
+    throw [System.UnauthorizedAccessException]::new('output path denied')
+}
 if ((Save-WdotZip -Url $ZipUrl -Path $probe) -or $script:attempts -ne 1) {
     Fail "final failure made $($script:attempts) attempts"
 }
