@@ -107,8 +107,15 @@ function Get-FurVerdict {
     if ($Record.appraiser) { $ind = $Record.appraiser.indicators }
     $targets = @()
     if ($ind) { $targets = @($ind.Keys | Where-Object { $_ -match '24H2|25H2' } | Sort-Object) }
+    $off = @()
+    if ($Record.appraiser) {
+        $a = $Record.appraiser
+        if ($a.Contains('task') -and $a.task -and $a.task.Contains('state') -and "$($a.task.state)" -eq 'Disabled') { $off += "appraiser task disabled" }
+        if ($a.Contains('diagTrack') -and "$($a.diagTrack)" -match 'Disabled') { $off += "DiagTrack disabled" }
+    }
     if ($targets.Count -eq 0) {
-        $reasons.Add("appraiser has no 24H2/25H2 data")
+        $why = if ($off.Count -gt 0) { " (" + ($off -join ', ') + ")" } else { "" }
+        $reasons.Add("appraiser has no 24H2/25H2 data$why")
     } else {
         $holds = New-Object System.Collections.Generic.List[string]
         foreach ($t in $targets) {
@@ -123,6 +130,7 @@ function Get-FurVerdict {
         $red = @($targets | ForEach-Object { $ind[$_] } | Where-Object { (Test-Has $_ 'RedReason') -and "$($_.RedReason)" -ne 'None' } | ForEach-Object { "$($_.RedReason)" } | Select-Object -Unique)
         if ($red.Count -gt 0) { $reasons.Add("hardware ineligible (appraiser: $($red -join ','))") }
         $full = @($targets | ForEach-Object { $ind[$_] } | Where-Object { (Test-Has $_ 'SystemDriveTooFull') -and [int]$_.SystemDriveTooFull -eq 1 })
+        if ($off.Count -gt 0) { $reasons.Add($off -join ', ') }
         if ($full.Count -gt 0 -and -not ($reasons | Where-Object { $_ -like 'disk space*' })) { $reasons.Add("disk space (appraiser)") }
     }
 
@@ -311,20 +319,29 @@ function Get-SetupInfo {
     return $info
 }
 
-# The loader runs collectors in a child powershell.exe, where the NinjaOne
-# cmdlets may not be loaded, so fall back to the agent CLI. --stdin keeps
-# PowerShell 5.1 from mangling the quotes in the JSON argument.
+# Pure: quotes a value for a native command line under Windows PowerShell 5.1,
+# which passes embedded double quotes through unescaped. Backslashes before a
+# quote are doubled, then the quote is escaped (MSVCRT argument rules).
+function ConvertTo-FurNativeArg {
+    param([string]$Value)
+    return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
+}
+
+# The loader runs collectors in a child powershell.exe. Ninja-Property-Set
+# there hands the value to the agent CLI as a native argument, and 5.1 strips
+# the JSON's quotes. So write through the CLI's stdin and read it back.
 function Set-FurField {
     param([string]$Value)
-    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try { Ninja-Property-Set $FurFieldName $Value; return $true } catch { }
-    }
     $cli = Join-Path $env:ProgramData 'NinjaRMMAgent\ninjarmm-cli.exe'
     if (Test-Path -LiteralPath $cli) {
         try {
             $null = $Value | & $cli set --stdin $FurFieldName 2>&1
-            return ($LASTEXITCODE -eq 0)
+            $back = (& $cli get $FurFieldName 2>$null) -join "`n"
+            if ($back.Trim() -eq $Value) { return $true }
         } catch { }
+    }
+    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
+        try { Ninja-Property-Set $FurFieldName (ConvertTo-FurNativeArg $Value); return $true } catch { }
     }
     return $false
 }

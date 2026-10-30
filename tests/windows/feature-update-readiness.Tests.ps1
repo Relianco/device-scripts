@@ -80,6 +80,21 @@ Assert-Like (Get-FurVerdict $r) 'hardware ineligible (appraiser: CpuFms)*' 'red 
 $r = New-Record; $r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ UpgEx = 'Green' } }
 Assert-Like (Get-FurVerdict $r) 'appraiser has no 24H2/25H2 data*' 'no target data'
 
+# Disabled appraiser task or DiagTrack is named, with or without target data.
+$r = New-Record; $r.appraiser.indicators = [ordered]@{}
+$r.appraiser['task'] = [ordered]@{ state = 'Disabled'; lastRun = '2023-11-27 08:48' }
+$r.appraiser['diagTrack'] = 'Stopped/Disabled'
+Assert-Same (Get-FurVerdict $r) 'appraiser has no 24H2/25H2 data (appraiser task disabled, DiagTrack disabled); not offered by WU' 'appraiser off'
+$r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Ready' }; $r.appraiser['diagTrack'] = 'Running/Automatic'
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'appraiser on'
+$r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }
+Assert-Same (Get-FurVerdict $r) 'appraiser task disabled; not offered by WU' 'appraiser off with data'
+
+# Native argument quoting survives the MSVCRT parser.
+Assert-Same (ConvertTo-FurNativeArg '{"a":"b"}') '{\"a\":\"b\"}' 'plain quotes'
+Assert-Same (ConvertTo-FurNativeArg '{"p":"C:\\x\\"}') '{\"p\":\"C:\\x\\\\\"}' 'backslash before quote'
+Assert-Same (ConvertTo-FurNativeArg 'none') 'none' 'no quotes'
+
 # Disk and TPM.
 $r = New-Record; $r.hw.freeGB = 8.5
 Assert-Like (Get-FurVerdict $r) 'disk space (8.5 GB free)*' 'low disk'
