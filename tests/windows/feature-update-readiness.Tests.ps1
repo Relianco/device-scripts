@@ -85,6 +85,8 @@ Assert-Same (Test-FurFeatureUpdate 'Windows 11, Version 25H2 [Mises à niveau] {
 Assert-Same (Test-FurFeatureUpdate 'Pilote AMD [Pilotes] {driver}') $false 'driver marker'
 Assert-Same (Test-FurCumulative @('x', '2026-10 Cumulative Update for Windows 11, version 23H2 (KB5126653) [Security Updates]')) $true 'cumulative found'
 Assert-Same (Test-FurCumulative @()) $false 'no cumulative'
+Assert-Same (Test-FurCumulative @('Mise à jour cumulative 2026-10 pour Windows 11 (KB5126653) [Mises à jour de sécurité/Windows 11] {oscu}')) $true 'localized cumulative by category id'
+Assert-Same (Test-FurCumulative @('AMD System Driver Update [Drivers] {driver}')) $false 'driver is not cumulative'
 Assert-Same (Test-FurFeatureUpdate '2025-10 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems (KB5066835) [Security Updates]') $false 'cumulative 24H2'
 
 # Safeguard hold, ids de-duplicated across targets.
@@ -128,6 +130,45 @@ $r = New-Record; $r.appraiser['lastEvaluated'] = '2023-11-27 17:08'; $r['timesta
 Assert-Same (Get-FurVerdict $r) 'appraiser stale: last evaluated 2023-11-27; not offered by WU' 'old evaluation'
 $r.appraiser['lastEvaluated'] = '2026-10-29 10:00'
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'fresh evaluation'
+
+$source = [IO.File]::ReadAllText($scriptPath)
+
+# Fix plan: enable the appraiser task when disabled, run it when its data is stale.
+function New-FixRecord {
+    $r = New-Record
+    $r['timestamp'] = '2026-10-30T20:00:00Z'
+    $r.appraiser['task'] = [ordered]@{ state = 'Ready'; lastRun = '2026-10-29 10:00' }
+    $r.appraiser['diagTrack'] = 'Stopped/Disabled'
+    $r.appraiser.indicators['GE25H2'] = [ordered]@{ GatedBlockId = 'None' }
+    $r
+}
+Assert-Same ((Get-FurFixPlan (New-FixRecord)) -join ',') '' 'fresh and enabled: nothing, DiagTrack untouched'
+$r = New-FixRecord; $r.appraiser.task.state = 'Disabled'; $r.appraiser.task.lastRun = '2023-11-23 12:27'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserTask,RunAppraiser' 'disabled and old'
+$r = New-FixRecord; $r.appraiser.task.state = 'Disabled'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserTask' 'disabled but fresh'
+$r = New-FixRecord; $r.appraiser.indicators = [ordered]@{ NI23H2 = [ordered]@{ GatedBlockId = 'None' } }
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'no record past 23H2'
+$r = New-FixRecord; $r.appraiser.indicators['NI23H2'] = [ordered]@{ GatedBlockId = '47615939' }
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'stale hold'
+$r = New-FixRecord; $r.appraiser.task.lastRun = '1999-11-30 00:00'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'RunAppraiser' 'never ran'
+$r = New-FixRecord; $r.appraiser.task.state = 'Running'; $r.appraiser.indicators = [ordered]@{}
+Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'already running: do not start again'
+$r = New-FixRecord; $r.appraiser.task = [ordered]@{ state = 'missing' }
+Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'task missing: nothing'
+
+# The verdict needs the timestamp, so it is set first.
+$iTs = $source.IndexOf('$record.timestamp =', [StringComparison]::Ordinal)
+$iVerdict = $source.IndexOf('$record.verdict =', [StringComparison]::Ordinal)
+if ($iTs -lt 0 -or $iTs -gt $iVerdict) { Fail 'timestamp must be set before the verdict' }
+# Tool hint directories: the first entry is parenthesized, or + swallows the array.
+if ($source.IndexOf("@((`$env:SystemDrive + '\'),", [StringComparison]::Ordinal) -lt 0) { Fail 'tool hint directory list not parenthesized' }
+
+# Fix mode never reboots, upgrades, or touches DiagTrack, policy or pins.
+foreach ($bad in @('Set-Service', 'Start-Service', 'AllowTelemetry =', 'TargetReleaseVersion =')) {
+    if ($source.IndexOf($bad, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Fail "source contains $bad" }
+}
 
 # Native argument quoting survives the MSVCRT parser.
 Assert-Same (ConvertTo-FurNativeArg '{"a":"b"}') '{\"a\":\"b\"}' 'plain quotes'

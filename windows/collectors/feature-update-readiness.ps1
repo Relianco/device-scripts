@@ -4,12 +4,24 @@
     Says why Windows Update has not moved a device to the next feature update.
 
 .DESCRIPTION
-    Read-only. It reads the OS version, Windows Update policy (GPO, MDM and
+    By default it is read-only. It reads the OS version, Windows Update policy (GPO, MDM and
     the effective policy state), the compatibility appraiser's upgrade
     indicators (safeguard holds), TPM, Secure Boot, free disk space, a Windows
     Update Agent search for updates that are not installed, recent Windows
     Update client errors, and logs from earlier setup attempts. It writes no
     registry value, changes no policy, and starts no upgrade.
+
+    With -Fix it repairs only what keeps the compatibility appraiser from
+    running: it enables the "Microsoft Compatibility Appraiser" task and,
+    when the appraiser data is
+    stale, starts that task without waiting (it runs 5 to 30 minutes; run the
+    check again later to read the result). It never reboots, never starts the
+    upgrade, and never touches DiagTrack, update policy, pins or telemetry
+    policy. Each
+    step runs only when needed, so a second run changes nothing.
+
+    The loader passes -Fix through its ParametersBase64 parameter:
+    base64 of {"Fix":true} is eyJGaXgiOnRydWV9.
 
     The result is one line of compact JSON, printed last on stdout, with a
     short "verdict". The JSON also goes to the NinjaOne device custom field
@@ -20,6 +32,8 @@
     Timeout: the Windows Update search stops after 150 seconds
     No external module dependencies
 #>
+
+param([switch]$Fix)
 
 $ProgressPreference = "SilentlyContinue"
 
@@ -220,7 +234,7 @@ function Get-FurLastEvaluated {
 # Pure: true when any search entry is a Windows cumulative update.
 function Test-FurCumulative {
     param($Entries)
-    return [bool](@($Entries | Where-Object { "$_" -match 'Cumulative Update for Windows' }).Count)
+    return [bool](@($Entries | Where-Object { "$_" -match '\{oscu\}\s*$|Cumulative Update for Windows' }).Count)
 }
 
 # Pure: JSON no longer than $Max. Drops the bulkiest optional parts first.
@@ -379,6 +393,11 @@ function Invoke-WuSearch {
                     $mark = ''
                     if ($ids -contains '3689BDC8-B205-4AF4-8D4B-A63924C5E9D5') { $mark = ' {upgrade}' }
                     elseif ($ids -contains 'EBFC1FC5-71A4-4F7B-9ACA-3B9A503104A0') { $mark = ' {driver}' }
+                    # Windows 11 or 10 product with Security Updates or Update Rollups classification,
+                    # minus .NET, marks an OS cumulative update in any display language.
+                    elseif ((($ids -contains '72E7624A-5B00-45D2-B92F-E561C0D2F7B7') -or ($ids -contains 'A3C2375D-0C8A-42F9-BCE0-28333E198407')) -and
+                        (($ids -contains '0FA1201D-4330-4FA8-8AE9-B877473B6441') -or ($ids -contains '28BC880E-0592-4CBF-8F95-C79B17911D5F')) -and
+                        "$($u.Title)" -notmatch '\.NET') { $mark = ' {oscu}' }
                     $res.titles += "$($u.Title) [$cats]$mark"
                 }
             }
@@ -466,7 +485,7 @@ function Get-FurToolHints {
         if ($first) { $h.vdotLog.firstEvent = $first.TimeCreated.ToString('yyyy-MM-dd') }
     } catch { }
     $oo = @()
-    foreach ($dir in @($env:SystemDrive + '\', $env:ProgramData, (Join-Path $env:SystemRoot 'Temp'), (Join-Path $env:SystemDrive 'Relian'))) {
+    foreach ($dir in @(($env:SystemDrive + '\'), $env:ProgramData, (Join-Path $env:SystemRoot 'Temp'), (Join-Path $env:SystemDrive 'Relian'))) {
         if (-not $dir) { continue }
         foreach ($name in @('OOSU10.exe', 'ooshutup10.cfg')) {
             $f = Join-Path $dir $name
@@ -475,6 +494,60 @@ function Get-FurToolHints {
     }
     if ($oo.Count -gt 0) { $h.ooShutUp = $oo }
     return $h
+}
+
+# Pure: the repairs a record calls for, in order. Empty when nothing is needed.
+function Get-FurFixPlan {
+    param($Record)
+    $plan = New-Object System.Collections.Generic.List[string]
+    $a = $Record.appraiser
+    if (-not $a) { return @() }
+    # DiagTrack is reported only: the appraiser writes its results locally
+    # without it; DiagTrack just uploads them.
+    $task = if ($a.Contains('task')) { $a.task } else { $null }
+    $state = if ($task -and $task.Contains('state')) { "$($task.state)" } else { '' }
+    if ($state -eq 'Disabled') { $plan.Add('EnableAppraiserTask') }
+    if ($state -eq 'Running' -or $state -eq 'missing' -or $state -eq '') { return @($plan) }
+
+    # Stale: last run over 30 days ago, no record for a release after 23H2, or any hold.
+    $stale = $false
+    $now = if ($Record.Contains('timestamp')) { [datetime]$Record.timestamp } else { Get-Date }
+    if ($task.Contains('lastRun') -and $task.lastRun) {
+        if (($now - [datetime]$task.lastRun).TotalDays -gt 30) { $stale = $true }
+    } else { $stale = $true }
+    $ind = if ($a.Contains('indicators')) { $a.indicators } else { $null }
+    $keys = @()
+    if ($ind) { $keys = @($ind.Keys) }
+    if (-not @($keys | Where-Object { $_ -match '(\d\dH\d)$' -and $Matches[1] -gt '23H2' }).Count) { $stale = $true }
+    foreach ($k in $keys) {
+        $i = $ind[$k]
+        if ((Test-Has $i 'GatedBlockId') -and "$($i.GatedBlockId)" -notmatch '^(None|0)$') { $stale = $true }
+    }
+    if ($stale) { $plan.Add('RunAppraiser') }
+    return @($plan)
+}
+
+# Applies a plan. Returns what was done and what failed; never throws.
+function Invoke-FurFix {
+    param([string[]]$Plan)
+    $done = @(); $errors = @()
+    foreach ($step in $Plan) {
+        try {
+            switch ($step) {
+                'EnableAppraiserTask' { $null = Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
+                'RunAppraiser' {
+                    # Asynchronous: the scan outlives the loader's 5-minute limit.
+                    try { Start-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
+                    catch {
+                        $exe = Join-Path $env:SystemRoot 'System32\CompatTelRunner.exe'
+                        $null = Start-Process -FilePath $exe -ArgumentList @('-m:appraiser.dll', '-f:DoScheduledTelemetryRun') -WindowStyle Hidden -ErrorAction Stop
+                    }
+                }
+            }
+            $done += $step
+        } catch { $errors += "${step}: $(Limit-Text "$_" 100)" }
+    }
+    return [ordered]@{ done = $done; errors = $errors }
 }
 
 function Invoke-Main {
@@ -493,9 +566,24 @@ function Invoke-Main {
         } catch { $ev = @() }
         $record.events = Get-FurEventSummary $ev
         $record.setup = Get-SetupInfo
-        $record.verdict = Get-FurVerdict $record
         $record.timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-        $record.version = "1.0"
+        $record.verdict = Get-FurVerdict $record
+        $record.version = "1.1"
+
+        if ($Fix) {
+            $plan = @(Get-FurFixPlan $record)
+            $before = [ordered]@{ diagTrack = $record.appraiser.diagTrack; task = $record.appraiser.task.state; taskLastRun = $record.appraiser.task.lastRun }
+            Write-Status "Fix plan: $(if ($plan.Count) { $plan -join ', ' } else { 'nothing to do' })"
+            $result = Invoke-FurFix $plan
+            $after = Get-AppraiserInfo
+            $record.fix = [ordered]@{
+                plan   = $plan
+                done   = $result.done
+                errors = $result.errors
+                before = $before
+                after  = [ordered]@{ diagTrack = $after.diagTrack; task = $after.task.state; taskLastRun = $after.task.lastRun }
+            }
+        }
 
         $json = ConvertTo-FurJson $record
         Write-Status "Verdict: $($record.verdict) ($($json.Length) bytes)"
