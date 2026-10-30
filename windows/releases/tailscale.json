@@ -1,0 +1,9 @@
+{
+  "name": "Tailscale",
+  "arch": "x64",
+  "sourceUrl": "https://pkgs.tailscale.com/stable/tailscale-setup-1.104.4-amd64.msi",
+  "file": "tailscale-setup-1.104.4-amd64.msi",
+  "sha256": "1d12cd8b1d6dbb447da8579b1a5268ae2fc050967bebfaa02e32d2bb645ef6ee",
+  "size": 38796288,
+  "version": "1.104.4"
+}
