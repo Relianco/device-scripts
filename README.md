@@ -93,6 +93,20 @@ The runner's action and pin version are ignored. The package does not:
 
 `tests/linux/diagnose-pve-test.sh` scans the script for forbidden commands, redirects and subcommands, and runs it against fake commands and fixture files only.
 
+## Windows Desktop Optimization Tool
+
+`windows/packages/wdot/Invoke-Wdot.ps1` is the NinjaOne script "Virtual Desktop Optimization". Paste it in place of the old VDOT script. It runs as SYSTEM on Windows PowerShell 5.1. Its one script variable is the checkbox "Keep Outlook" (`keepOutlook`). Checked, it keeps the new Outlook and the Mail and Calendar app.
+
+The script downloads one zip from `https://relianpub.blob.core.windows.net/pub/rmm/wdot/` and checks its sha256 before it expands anything. A mismatch exits 1. The zip is Microsoft's Windows Desktop Optimization Tool (WDOT) at the commit in `windows/releases/wdot.json`, plus `windows/packages/wdot/profile/` as the profile `Configurations/Relian`. The script runs `Windows_Optimization.ps1 -ConfigProfile Relian -Optimizations All -AcceptEULA` in a child process. It works in a new folder under `%ProgramData%` that only SYSTEM and Administrators can write, and removes the folder afterwards. WDOT's DiskCleanup empties `C:\Windows\Temp`, so the work folder is not there.
+
+The profile does not disable the Microsoft Compatibility Appraiser tasks. They refresh the upgrade-compatibility data that Windows Update uses to offer feature updates. After WDOT, the script turns both tasks back on where the old VDOT run had turned them off. `tests/windows/wdot.Tests.ps1` fails if the profile ever disables either task, or a service Windows Update needs.
+
+WDOT ships its own profiles opt-in: every task, service, and app is `Skip`. The Relian profile instead applies what the old VDOT run applied: the same tasks, services, policy values, default-user settings, and app removals, minus the two appraiser tasks. A setting that is new in WDOT is `Skip`. Five policy values that WDOT renamed from `Enabled` to `Apply` are named `Enabled` again, and two app names that could never match a package are corrected.
+
+`-Optimizations All` includes DiskCleanup, as the old run did. DiskCleanup deletes every `*.log`, `*.tmp`, `*.dmp`, `*.etl`, `*.evtx`, and `thumbcache*.db` file it can on `C:\`, including in user profiles, and empties every recycle bin. Replace `All` in `Get-WdotArgument` with the other categories to stop that.
+
+To change the profile, edit `windows/packages/wdot/profile/`, then run `pwsh -NoProfile -File scripts/build-wdot.ps1`. It prints the zip path, the sha256, and the blob name. Upload with `az storage blob upload --account-name relianpub --container-name pub --name <blob> --file <zip> --content-type application/zip --auth-mode login --overwrite false`, then put the URL, file, sha256, and size in `windows/releases/wdot.json` and the script defaults. Never overwrite or delete a published blob: a pasted script may still use it.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.

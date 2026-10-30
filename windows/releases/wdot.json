@@ -1,0 +1,15 @@
+{
+  "name": "Windows Desktop Optimization Tool",
+  "installsSoftware": false,
+  "repository": "https://github.com/The-Virtual-Desktop-Team/Windows-Desktop-Optimization-Tool",
+  "release": "v1.1",
+  "commit": "ff2574c016c6202dbb0303a3728016ad3dbf391c",
+  "commitDate": "2026-05-20",
+  "wdotVersion": "1.1.0.0",
+  "profile": "Relian",
+  "replaces": "Virtual-Desktop-Optimization-Tool commit 2e7fc851532acece8f70e1228e7720d6c19cb9e9",
+  "sourceUrl": "https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-1f05a5b42fb8eb8de948aacf52cd6b145920553d43ab654c7b866c85d9b9936b.zip",
+  "file": "wdot-relian-1f05a5b42fb8eb8de948aacf52cd6b145920553d43ab654c7b866c85d9b9936b.zip",
+  "sha256": "1f05a5b42fb8eb8de948aacf52cd6b145920553d43ab654c7b866c85d9b9936b",
+  "size": 263384
+}
