@@ -14,6 +14,12 @@ $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPat
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/wdot.json') -Raw | ConvertFrom-Json
 $commit = [string]$release.commit
+$repoUri = $null
+if (-not [Uri]::TryCreate([string]$release.repository, [UriKind]::Absolute, [ref]$repoUri) -or
+    $repoUri.Scheme -ne 'https' -or -not [string]::IsNullOrEmpty($repoUri.UserInfo)) {
+    [Console]::Error.WriteLine('windows/releases/wdot.json repository must be https with no userinfo')
+    exit 1
+}
 if ($commit -notmatch '^[0-9a-f]{40}$') {
     throw 'windows/releases/wdot.json commit is not a full SHA'
 }

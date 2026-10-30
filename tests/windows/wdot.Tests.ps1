@@ -321,5 +321,22 @@ if ($resolveAt -lt 0 -or $firstUse -lt 0 -or $resolveAt -gt $firstUse) {
     Fail 'build-wdot.ps1 does not make OutDir absolute before using it'
 }
 
+# build-wdot.ps1 refuses a repository URL with userinfo or without https before git runs.
+foreach ($badRepo in @('https://user@example.com/repo', 'http://example.com/repo')) {
+    $fake = Join-Path ([System.IO.Path]::GetTempPath()) ('wdot-build-' + [guid]::NewGuid().ToString('n'))
+    [void](New-Item -ItemType Directory -Path (Join-Path $fake 'scripts'), (Join-Path $fake 'windows/releases') -Force)
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/build-wdot.ps1') -Destination (Join-Path $fake 'scripts')
+    $fakeRelease = [pscustomobject]@{ repository = $badRepo; commit = ('a' * 40) }
+    $fakeRelease | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $fake 'windows/releases/wdot.json')
+    $out = Join-Path $fake 'out'
+    & pwsh -NoProfile -File (Join-Path $fake 'scripts/build-wdot.ps1') -OutDir $out 2>$null | Out-Null
+    $code = $LASTEXITCODE
+    $cloned = Test-Path -LiteralPath (Join-Path $out 'src')
+    Remove-Item -LiteralPath $fake -Recurse -Force
+    if ($code -ne 1 -or $cloned) {
+        Fail "build-wdot.ps1 with repository [$badRepo] exited [$code], created clone folder [$cloned]"
+    }
+}
+
 Write-Output 'PASS wdot'
 exit 0
