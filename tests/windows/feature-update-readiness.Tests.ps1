@@ -117,19 +117,23 @@ Assert-Same (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2; appraiser 
 $r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Ready' }; $r.appraiser['diagTrack'] = 'Running/Automatic'
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'appraiser on'
 $r = New-Record; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }
-Assert-Same (Get-FurVerdict $r) 'appraiser stale: task disabled; not offered by WU' 'appraiser off with data'
+Assert-Same (Get-FurVerdict $r) 'appraiser task disabled; not offered by WU' 'appraiser off with fresh data'
 
 # Telemetry off (policy or local) and an old evaluation both mark the appraiser stale.
 $r = New-Record; $r.policy['dataCollection'] = [ordered]@{ AllowTelemetry = 0 }
-Assert-Same (Get-FurVerdict $r) 'appraiser stale: telemetry off; not offered by WU' 'telemetry off policy'
+Assert-Same (Get-FurVerdict $r) 'telemetry off; not offered by WU' 'telemetry off policy'
 $r = New-Record; $r.policy['dataCollection'] = [ordered]@{ AllowTelemetryLocal = 0 }
-Assert-Same (Get-FurVerdict $r) 'appraiser stale: telemetry off; not offered by WU' 'telemetry off local'
+Assert-Same (Get-FurVerdict $r) 'telemetry off; not offered by WU' 'telemetry off local'
 $r = New-Record; $r.policy['dataCollection'] = [ordered]@{ AllowTelemetry = 1 }
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'telemetry basic'
 $r = New-Record; $r.appraiser['lastEvaluated'] = '2023-11-27 17:08'; $r['timestamp'] = '2026-10-30T20:00:00Z'
 Assert-Same (Get-FurVerdict $r) 'appraiser stale: last evaluated 2023-11-27; not offered by WU' 'old evaluation'
 $r.appraiser['lastEvaluated'] = '2026-10-29 10:00'
 Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'fresh evaluation'
+$r.appraiser['diagTrack'] = 'Stopped/Disabled'
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'DiagTrack off with fresh evaluation'
+$r.appraiser['lastEvaluated'] = '2023-11-27 17:08'; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }
+Assert-Same (Get-FurVerdict $r) 'appraiser stale: task disabled / DiagTrack disabled / last evaluated 2023-11-27; not offered by WU' 'old evaluation with causes'
 
 $source = [IO.File]::ReadAllText($scriptPath)
 

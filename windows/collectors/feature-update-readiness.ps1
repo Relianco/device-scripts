@@ -138,29 +138,36 @@ function Get-FurVerdict {
         $floor = if ($current -match '^\d\dH\d$' -and $current -gt '23H2') { $current } else { '23H2' }
         $targets = @($ind.Keys | Where-Object { $_ -match '(\d\dH\d)$' -and $Matches[1] -gt $floor } | Sort-Object)
     }
-    # Why the compatibility scan stopped: WU offers a feature update only on fresh appraiser data.
-    $off = @()
+    # Staleness comes from the evaluation itself: no record past 23H2, or the
+    # newest evaluation over 30 days old. Disabled task, DiagTrack or telemetry
+    # are listed as likely causes only then; DiagTrack just uploads results.
     $a = $Record.appraiser
+    $taskOff = $false; $diagOff = $false; $telOff = $false
     if ($a) {
-        if ($a.Contains('task') -and $a.task -and $a.task.Contains('state') -and "$($a.task.state)" -eq 'Disabled') { $off += "task disabled" }
-        if ($a.Contains('diagTrack') -and "$($a.diagTrack)" -match 'Disabled') { $off += "DiagTrack disabled" }
+        $taskOff = $a.Contains('task') -and $a.task -and $a.task.Contains('state') -and "$($a.task.state)" -eq 'Disabled'
+        $diagOff = $a.Contains('diagTrack') -and "$($a.diagTrack)" -match 'Disabled'
     }
     $dc = $null
     if ($Record.policy -and $Record.policy.Contains('dataCollection')) { $dc = $Record.policy.dataCollection }
-    if ($dc) {
-        foreach ($k in @('AllowTelemetry', 'AllowTelemetryLocal')) {
-            if ((Test-Has $dc $k) -and [int]$dc[$k] -eq 0) { $off += "telemetry off"; break }
-        }
+    if ($dc) { foreach ($k in @('AllowTelemetry', 'AllowTelemetryLocal')) { if ((Test-Has $dc $k) -and [int]$dc[$k] -eq 0) { $telOff = $true } } }
+    $oldEval = $null
+    if ($a -and $a.Contains('lastEvaluated') -and $a.lastEvaluated -and $Record.Contains('timestamp')) {
+        if (([datetime]$Record.timestamp - [datetime]$a.lastEvaluated).TotalDays -gt 30) { $oldEval = ([datetime]$a.lastEvaluated).ToString('yyyy-MM-dd') }
     }
     if ($targets.Count -eq 0) {
         $next = if ($floor -lt '24H2') { '24H2/25H2' } else { "a release after $floor" }
         $reasons.Add("appraiser never evaluated $next")
     }
-    if ($off.Count -gt 0) {
-        $reasons.Add("appraiser stale: " + ($off -join ' / '))
-    } elseif ($a -and $a.Contains('lastEvaluated') -and $a.lastEvaluated -and $Record.Contains('timestamp')) {
-        $age = ([datetime]$Record.timestamp - [datetime]$a.lastEvaluated).TotalDays
-        if ($age -gt 30) { $reasons.Add("appraiser stale: last evaluated $(([datetime]$a.lastEvaluated).ToString('yyyy-MM-dd'))") }
+    if ($targets.Count -eq 0 -or $oldEval) {
+        $why = @()
+        if ($taskOff) { $why += 'task disabled' }
+        if ($diagOff) { $why += 'DiagTrack disabled' }
+        if ($telOff) { $why += 'telemetry off' }
+        if ($oldEval) { $why += "last evaluated $oldEval" }
+        if ($why.Count -gt 0) { $reasons.Add("appraiser stale: " + ($why -join ' / ')) }
+    } else {
+        if ($taskOff) { $reasons.Add("appraiser task disabled") }
+        if ($telOff) { $reasons.Add("telemetry off") }
     }
     if ($targets.Count -gt 0) {
         $holds = New-Object System.Collections.Generic.List[string]
