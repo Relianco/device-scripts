@@ -35,9 +35,12 @@ function New-Record {
     }
 }
 
-# Already upgraded.
+# A 24H2 device is still checked for blockers; a pin to its own release blocks.
 $r = New-Record; $r.os.build = 26100; $r.os.displayVersion = '24H2'
-Assert-Same (Get-FurVerdict $r) 'already 24H2' 'upgraded device'
+$r.policy.wu = [ordered]@{ TargetReleaseVersion = 1; TargetReleaseVersionInfo = '24H2' }
+Assert-Same (Get-FurVerdict $r) 'pinned to 24H2 (GPO); not offered by WU' '24H2 pinned to 24H2'
+$r.policy.wu.TargetReleaseVersionInfo = '25H2'
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' '24H2 pinned to 25H2'
 
 # Nothing blocking, nothing offered.
 Assert-Same (Get-FurVerdict (New-Record)) 'not offered by WU' 'clean device'
@@ -67,6 +70,15 @@ Assert-Like (Get-FurVerdict $r) 'WSUS/policy blocks WU (http://wsus:8530)*' 'WSU
 # Paused.
 $r = New-Record; $r.policy.policyState = [ordered]@{ PausedFeatureStatus = 1 }
 Assert-Like (Get-FurVerdict $r) 'feature updates paused*' 'paused'
+$r = New-Record; $r.policy.wu = [ordered]@{ PauseFeatureUpdatesStartTime = '2025-01-01' }; $r.policy.policyState = [ordered]@{ PausedFeatureStatus = 0 }
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'expired pause start time'
+
+# Feature update detection ignores cumulative updates that name a version.
+Assert-Same (Test-FurFeatureUpdate 'Windows 11, version 25H2 [Upgrades]') $true 'feature by category'
+Assert-Same (Test-FurFeatureUpdate 'Windows 11, version 24H2') $true 'feature by title'
+Assert-Same (Test-FurFeatureUpdate 'Feature update to Windows 11, version 24H2 [Windows 11]') $true 'feature update title'
+Assert-Same (Test-FurFeatureUpdate '2026-10 Cumulative Update for Windows 11, version 23H2 for x64-based Systems (KB5126653) [Security Updates/Windows 11]') $false 'cumulative 23H2'
+Assert-Same (Test-FurFeatureUpdate '2025-10 Cumulative Update for Windows 11 Version 24H2 for x64-based Systems (KB5066835) [Security Updates]') $false 'cumulative 24H2'
 
 # Safeguard hold, ids de-duplicated across targets.
 $r = New-Record

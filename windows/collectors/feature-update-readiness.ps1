@@ -71,8 +71,9 @@ function Test-Has {
 function Get-FurVerdict {
     param($Record)
     $reasons = New-Object System.Collections.Generic.List[string]
-    $os = $Record.os
-    if ($os -and [int]$os.build -ge 26100) { return "already $($os.displayVersion)" }
+    # No early exit for 24H2 and later: a 24H2 device can be blocked from 25H2 too.
+    $current = ''
+    if ($Record.os -and $Record.os.Contains('displayVersion')) { $current = "$($Record.os.displayVersion)" }
 
     $hw = $Record.hw
     if ($hw) {
@@ -90,7 +91,8 @@ function Get-FurVerdict {
     } elseif (Test-Has $mdm 'TargetReleaseVersion') {
         $pin = "$($mdm.TargetReleaseVersion) (MDM)"
     }
-    if ($pin -and $pin -notmatch '^(24H2|25H2|2[6-9]H\d)') { $reasons.Add("pinned to $pin") }
+    # A pin blocks unless it names a release newer than the installed one ("23H2" -lt "24H2").
+    if ($pin -and -not ($current -and ($pin.Split(' ')[0] -gt $current))) { $reasons.Add("pinned to $pin") }
 
     if ((Test-Has $au 'UseWUServer') -and [int]$au.UseWUServer -eq 1) {
         $server = if (Test-Has $wu 'WUServer') { $wu.WUServer } else { 'no server set' }
@@ -99,7 +101,8 @@ function Get-FurVerdict {
     if ((Test-Has $wu 'DoNotConnectToWindowsUpdateInternetLocations') -and [int]$wu.DoNotConnectToWindowsUpdateInternetLocations -eq 1) {
         $reasons.Add("WSUS/policy blocks WU (no internet locations)")
     }
-    if ((Test-Has $wu 'PauseFeatureUpdatesStartTime') -or ((Test-Has $state 'PausedFeatureStatus') -and [int]$state.PausedFeatureStatus -eq 1)) {
+    # PausedFeatureStatus is the effective state; a leftover PauseFeatureUpdatesStartTime outlives the pause.
+    if ((Test-Has $state 'PausedFeatureStatus') -and [int]$state.PausedFeatureStatus -eq 1) {
         $reasons.Add("feature updates paused")
     }
 
@@ -141,6 +144,15 @@ function Get-FurVerdict {
         else { $reasons.Add("not offered by WU") }
     }
     return ($reasons -join '; ')
+}
+
+# Pure: true for a feature update offer, "Title [Category/Category]" as the search
+# records it. Cumulative updates also name "Windows 11, version 23H2", so the title
+# alone is not enough: the Upgrades category, or a title that starts as an upgrade.
+function Test-FurFeatureUpdate {
+    param([string]$Entry)
+    if ($Entry -match '\[[^\]]*\bUpgrades\b[^\]]*\]\s*$') { return $true }
+    return ($Entry -match '^(Feature update to Windows|Windows 1[01], version \d\dH\d\s*(\[|$))')
 }
 
 # Pure: JSON no longer than $Max. Drops the bulkiest optional parts first.
@@ -289,7 +301,7 @@ function Invoke-WuSearch {
         $out.count = $titles.Count
         $out.serverSelection = $r.serverSelection
         if ($r.error) { $out.error = Limit-Text $r.error 120 }
-        $feature = @($titles | Where-Object { $_ -match '24H2|25H2|Feature update|Windows 11, version' })
+        $feature = @($titles | Where-Object { Test-FurFeatureUpdate $_ })
         $out.featureOffered = ($feature.Count -gt 0)
         $out.featureTitles = @($feature | Select-Object -First 3 | ForEach-Object { Limit-Text $_ 120 })
         $out.titles = @($titles | Select-Object -First 10 | ForEach-Object { Limit-Text $_ 100 })
