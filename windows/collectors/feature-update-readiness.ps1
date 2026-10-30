@@ -124,17 +124,31 @@ function Get-FurVerdict {
         $floor = if ($current -match '^\d\dH\d$' -and $current -gt '23H2') { $current } else { '23H2' }
         $targets = @($ind.Keys | Where-Object { $_ -match '(\d\dH\d)$' -and $Matches[1] -gt $floor } | Sort-Object)
     }
+    # Why the compatibility scan stopped: WU offers a feature update only on fresh appraiser data.
     $off = @()
-    if ($Record.appraiser) {
-        $a = $Record.appraiser
-        if ($a.Contains('task') -and $a.task -and $a.task.Contains('state') -and "$($a.task.state)" -eq 'Disabled') { $off += "appraiser task disabled" }
+    $a = $Record.appraiser
+    if ($a) {
+        if ($a.Contains('task') -and $a.task -and $a.task.Contains('state') -and "$($a.task.state)" -eq 'Disabled') { $off += "task disabled" }
         if ($a.Contains('diagTrack') -and "$($a.diagTrack)" -match 'Disabled') { $off += "DiagTrack disabled" }
     }
+    $dc = $null
+    if ($Record.policy -and $Record.policy.Contains('dataCollection')) { $dc = $Record.policy.dataCollection }
+    if ($dc) {
+        foreach ($k in @('AllowTelemetry', 'AllowTelemetryLocal')) {
+            if ((Test-Has $dc $k) -and [int]$dc[$k] -eq 0) { $off += "telemetry off"; break }
+        }
+    }
     if ($targets.Count -eq 0) {
-        $why = if ($off.Count -gt 0) { " (" + ($off -join ', ') + ")" } else { "" }
         $next = if ($floor -lt '24H2') { '24H2/25H2' } else { "a release after $floor" }
-        $reasons.Add("appraiser never evaluated $next$why")
-    } else {
+        $reasons.Add("appraiser never evaluated $next")
+    }
+    if ($off.Count -gt 0) {
+        $reasons.Add("appraiser stale: " + ($off -join ' / '))
+    } elseif ($a -and $a.Contains('lastEvaluated') -and $a.lastEvaluated -and $Record.Contains('timestamp')) {
+        $age = ([datetime]$Record.timestamp - [datetime]$a.lastEvaluated).TotalDays
+        if ($age -gt 30) { $reasons.Add("appraiser stale: last evaluated $(([datetime]$a.lastEvaluated).ToString('yyyy-MM-dd'))") }
+    }
+    if ($targets.Count -gt 0) {
         $holds = New-Object System.Collections.Generic.List[string]
         foreach ($t in $targets) {
             $i = $ind[$t]
@@ -148,7 +162,6 @@ function Get-FurVerdict {
         $red = @($targets | ForEach-Object { $ind[$_] } | Where-Object { (Test-Has $_ 'RedReason') -and "$($_.RedReason)" -ne 'None' } | ForEach-Object { "$($_.RedReason)" } | Select-Object -Unique)
         if ($red.Count -gt 0) { $reasons.Add("hardware ineligible (appraiser: $($red -join ','))") }
         $full = @($targets | ForEach-Object { $ind[$_] } | Where-Object { (Test-Has $_ 'SystemDriveTooFull') -and [int]$_.SystemDriveTooFull -eq 1 })
-        if ($off.Count -gt 0) { $reasons.Add($off -join ', ') }
         if ($full.Count -gt 0 -and -not ($reasons | Where-Object { $_ -like 'disk space*' })) { $reasons.Add("disk space (appraiser)") }
     }
 
@@ -283,9 +296,22 @@ function Get-PolicyInfo {
         au             = Get-RegValues "$wuKey\AU"
         policyState    = Get-RegValues 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UpdatePolicy\PolicyState'
         mdm            = Get-RegValues 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Update'
-        dataCollection = Get-RegValues 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Only @('AllowTelemetry', 'DisableOneSettingsDownloads')
+        dataCollection = Get-FurDataCollection
         uxSettings     = Get-RegValues 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Only @('IsContinuousInnovationOptedIn', 'PauseFeatureUpdatesEndTime', 'PauseUpdatesExpiryTime')
     }
+}
+
+# AllowTelemetry from Group Policy, and the local (non-policy) setting as AllowTelemetryLocal.
+function Get-FurDataCollection {
+    $out = [ordered]@{}
+    $gpo = Get-RegValues 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Only @('AllowTelemetry', 'DisableOneSettingsDownloads')
+    if ($gpo) { foreach ($k in $gpo.Keys) { $out[$k] = $gpo[$k] } }
+    $local = Get-RegValues 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' -Only @('AllowTelemetry', 'MaxTelemetryAllowed')
+    if ($local) {
+        if ($local.Contains('AllowTelemetry')) { $out['AllowTelemetryLocal'] = $local['AllowTelemetry'] }
+        if ($local.Contains('MaxTelemetryAllowed')) { $out['MaxTelemetryAllowed'] = $local['MaxTelemetryAllowed'] }
+    }
+    return $out
 }
 
 function Get-AppraiserInfo {
@@ -298,15 +324,21 @@ function Get-AppraiserInfo {
             $ind[$k.PSChildName] = Get-RegValues $k.PSPath -Only $keep
         }
     }
+    # The main appraiser task, plus its siblings (Exp, ProgramDataUpdater and so on).
     $task = $null
+    $siblings = @()
     try {
-        $t = Get-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop
-        $ti = $t | Get-ScheduledTaskInfo
-        $task = [ordered]@{ state = "$($t.State)"; lastRun = $ti.LastRunTime.ToString('yyyy-MM-dd HH:mm'); lastResult = ('0x{0:x}' -f $ti.LastTaskResult) }
-    } catch { $task = @{ error = (Limit-Text "$_" 100) } }
+        $all = @(Get-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -ErrorAction Stop)
+        foreach ($t in $all) {
+            $ti = $t | Get-ScheduledTaskInfo
+            $row = [ordered]@{ name = $t.TaskName; state = "$($t.State)"; lastRun = $ti.LastRunTime.ToString('yyyy-MM-dd HH:mm'); lastResult = ('0x{0:x}' -f $ti.LastTaskResult) }
+            if ($t.TaskName -eq 'Microsoft Compatibility Appraiser') { $task = $row } else { $siblings += $row }
+        }
+        if (-not $task) { $task = [ordered]@{ state = 'missing' } }
+    } catch { $task = [ordered]@{ error = (Limit-Text "$_" 100) } }
     $diag = $null
     try { $diag = "$((Get-Service DiagTrack -ErrorAction Stop).Status)/$((Get-Service DiagTrack).StartType)" } catch { $diag = 'missing' }
-    return [ordered]@{ task = $task; diagTrack = $diag; lastEvaluated = (Get-FurLastEvaluated $ind); indicators = $ind }
+    return [ordered]@{ task = $task; otherTasks = $siblings; diagTrack = $diag; lastEvaluated = (Get-FurLastEvaluated $ind); indicators = $ind }
 }
 
 function Get-HardwareInfo {
@@ -419,6 +451,32 @@ function Set-FurField {
     return $false
 }
 
+# Hints at which tool turned the appraiser off. VDOT (Virtual Desktop
+# Optimization Tool) disables the appraiser task and DiagTrack, unpacks into
+# C:\Optimize and keeps its own event log. O&O ShutUp10 leaves OOSU10.exe or
+# a .cfg behind. Existence and dates only.
+function Get-FurToolHints {
+    $h = [ordered]@{}
+    $opt = Join-Path $env:SystemDrive 'Optimize'
+    if (Test-Path -LiteralPath $opt) { $h.vdotFolder = (Get-Item -LiteralPath $opt).LastWriteTime.ToString('yyyy-MM-dd') }
+    try {
+        $log = Get-WinEvent -ListLog 'Virtual Desktop Optimization' -ErrorAction Stop
+        $h.vdotLog = [ordered]@{ records = $log.RecordCount; lastWrite = $(if ($log.LastWriteTime) { $log.LastWriteTime.ToString('yyyy-MM-dd') } else { $null }) }
+        $first = Get-WinEvent -LogName 'Virtual Desktop Optimization' -MaxEvents 1 -Oldest -ErrorAction SilentlyContinue
+        if ($first) { $h.vdotLog.firstEvent = $first.TimeCreated.ToString('yyyy-MM-dd') }
+    } catch { }
+    $oo = @()
+    foreach ($dir in @($env:SystemDrive + '\', $env:ProgramData, (Join-Path $env:SystemRoot 'Temp'), (Join-Path $env:SystemDrive 'Relian'))) {
+        if (-not $dir) { continue }
+        foreach ($name in @('OOSU10.exe', 'ooshutup10.cfg')) {
+            $f = Join-Path $dir $name
+            if (Test-Path -LiteralPath $f) { $oo += "$f $((Get-Item -LiteralPath $f).LastWriteTime.ToString('yyyy-MM-dd'))" }
+        }
+    }
+    if ($oo.Count -gt 0) { $h.ooShutUp = $oo }
+    return $h
+}
+
 function Invoke-Main {
     try {
         Write-Status "Feature update readiness collection starting"
@@ -426,6 +484,7 @@ function Invoke-Main {
         $record.os = Get-OsInfo
         $record.policy = Get-PolicyInfo
         $record.appraiser = Get-AppraiserInfo
+        $record.toolHints = Get-FurToolHints
         $record.hw = Get-HardwareInfo
         Write-Status "Windows Update search (up to $FurSearchSeconds s)"
         $record.wuSearch = Invoke-WuSearch
