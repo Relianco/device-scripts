@@ -12,16 +12,17 @@
 # this script turns them back on where the old VDOT script turned them off.
 # Without them Windows Update stops offering feature updates.
 #
-# The deploy runner can call this file too. It ignores DeploymentType, Action,
-# and PinVersion. Parameters are not Mandatory, so dot-sourcing under
+# The deploy runner can call this file too. Action Uninstall exits 1; any other
+# Action runs WDOT. DeploymentType and PinVersion are ignored. An empty
+# ZipSha256 exits 0 and downloads nothing. Parameters are not Mandatory, so dot-sourcing under
 # RELIAN_DEPLOY_TEST does not prompt.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
     [string]$Action,
     [string]$PinVersion,
-    [string]$ZipUrl = 'https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-1f05a5b42fb8eb8de948aacf52cd6b145920553d43ab654c7b866c85d9b9936b.zip',
-    [string]$ZipSha256 = '1f05a5b42fb8eb8de948aacf52cd6b145920553d43ab654c7b866c85d9b9936b',
+    [string]$ZipUrl = 'https://relianpub.blob.core.windows.net/pub/rmm/wdot/wdot-relian-d1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c.zip',
+    [string]$ZipSha256 = 'd1be75f017c4205524a073ea9f3a3e40406106a38a16b8b1969916f44ab0938c',
     [AllowEmptyString()][string]$KeepOutlook = $env:keepOutlook
 )
 
@@ -32,10 +33,12 @@ $script:WdotFolder = 'Windows-Desktop-Optimization-Tool'
 $script:WdotProfile = 'Relian'
 $script:AppraiserTaskPath = '\Microsoft\Windows\Application Experience\'
 $script:AppraiserTasks = @('Microsoft Compatibility Appraiser', 'Microsoft Compatibility Appraiser Exp')
+$script:VdotEventLog = 'Virtual Desktop Optimization'
+$script:RetryDelays = @(5, 20)
 
 function Test-WdotSha256Shape {
     param([AllowEmptyString()][string]$Value)
-    return [string]$Value -match '^[0-9A-Fa-f]{64}$'
+    return [string]$Value -cmatch '^[0-9a-f]{64}$'
 }
 
 function Test-WdotUrl {
@@ -93,6 +96,54 @@ function New-WdotWorkFolder {
     return $path
 }
 
+# VDOT registered the event sources WindowsMediaPlayer, AppxPackages, and others
+# to its own log. WDOT registers the same names to the log WDOT, with
+# ErrorAction Stop, so on a device that ran VDOT it exits 1 before doing
+# anything. Removing VDOT's log unregisters its sources. VDOT is retired.
+function Remove-WdotVdotEventLog {
+    if ([System.Diagnostics.EventLog]::Exists($script:VdotEventLog)) {
+        Remove-EventLog -LogName $script:VdotEventLog
+        Write-Host "Removed event log: $($script:VdotEventLog)"
+    }
+}
+
+# Retry a failure with no HTTP status (DNS, connect, timeout) and HTTP 408,
+# 429, 500, 502, 503, and 504. Any other HTTP status is final.
+function Test-WdotRetryable {
+    param($Exception)
+    $response = $null
+    if ($null -ne $Exception -and @($Exception.PSObject.Properties.Name) -contains 'Response') {
+        $response = $Exception.Response
+    }
+    if ($null -eq $response) {
+        return $true
+    }
+    try {
+        $status = [int]$response.StatusCode
+    } catch {
+        return $true
+    }
+    return @(408, 429, 500, 502, 503, 504) -contains $status
+}
+
+function Save-WdotZip {
+    param([string]$Url, [string]$Path)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
+            return $true
+        } catch {
+            if ($attempt -eq 3 -or -not (Test-WdotRetryable -Exception $_.Exception)) {
+                [Console]::Error.WriteLine("download failed after $attempt attempt(s): $($_.Exception.Message)")
+                return $false
+            }
+            Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds $script:RetryDelays[$attempt - 1]
+        }
+    }
+    return $false
+}
+
 function Enable-WdotAppraiserTask {
     foreach ($name in $script:AppraiserTasks) {
         $task = Get-ScheduledTask -TaskPath $script:AppraiserTaskPath -TaskName $name -ErrorAction SilentlyContinue
@@ -121,8 +172,19 @@ function Invoke-Wdot {
     param(
         [string]$ZipUrl,
         [AllowEmptyString()][string]$ZipSha256,
-        [AllowEmptyString()][string]$KeepOutlook
+        [AllowEmptyString()][string]$KeepOutlook,
+        [AllowEmptyString()][string]$Action = ''
     )
+    # An empty pin exits 0 and downloads nothing, as in every package here.
+    if ([string]::IsNullOrWhiteSpace($ZipSha256)) {
+        return 0
+    }
+    # An optimization cannot be undone, so the runner's Uninstall (and the
+    # first half of Reinstall) is refused before any download.
+    if ($Action -eq 'Uninstall') {
+        [Console]::Error.WriteLine('Uninstall is not supported: WDOT changes are not reversible')
+        return 1
+    }
     if (-not (Test-WdotUrl -Url $ZipUrl)) {
         [Console]::Error.WriteLine('refusing the zip URL: it must be https with no userinfo')
         return 1
@@ -137,7 +199,9 @@ function Invoke-Wdot {
     try {
         $zip = Join-Path $work 'wdot.zip'
         $ProgressPreference = 'SilentlyContinue'
-        Invoke-WebRequest -Uri $ZipUrl -OutFile $zip -UseBasicParsing
+        if (-not (Save-WdotZip -Url $ZipUrl -Path $zip)) {
+            return 1
+        }
         if (-not (Test-WdotHash -Path $zip -Expected $ZipSha256)) {
             [Console]::Error.WriteLine('hash mismatch for the WDOT zip')
             return 1
@@ -151,6 +215,7 @@ function Invoke-Wdot {
             Copy-Item -LiteralPath (Join-Path $profileDir 'AppxPackages-KeepOutlook.json') -Destination (Join-Path $profileDir 'AppxPackages.json') -Force
         }
 
+        Remove-WdotVdotEventLog
         $code = Invoke-WdotChild -Argument (Get-WdotArgument -ScriptPath (Join-Path $root 'Windows_Optimization.ps1'))
         Write-Host "WDOT exited $code"
         Enable-WdotAppraiserTask
@@ -166,7 +231,7 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
 }
 
 try {
-    $exitCode = [int](Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 $ZipSha256 -KeepOutlook $KeepOutlook)
+    $exitCode = [int](Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 $ZipSha256 -KeepOutlook $KeepOutlook -Action $Action)
 } catch {
     [Console]::Error.WriteLine("WDOT run failed: $($_.Exception.Message)")
     $exitCode = 1

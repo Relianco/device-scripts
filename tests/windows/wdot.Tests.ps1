@@ -79,6 +79,16 @@ foreach ($setting in (Read-Profile -Name 'PolicyRegSettings.json')) {
     }
 }
 
+# WDOT writes an empty DWORD as 0, the same as not configured. An applied
+# DWORD needs a value.
+foreach ($pair in @(@('PolicyRegSettings.json', 'RegItemValue', 'RegItemValueType'), @('DefaultUserSettings.json', 'PropertyValue', 'PropertyType'))) {
+    foreach ($setting in (Get-Applied (Read-Profile -Name $pair[0]))) {
+        if ([string]$setting.($pair[2]) -eq 'DWord' -and ([string]$setting.($pair[1])).Trim() -eq '') {
+            Fail "$($pair[0]) applies an empty DWORD"
+        }
+    }
+}
+
 # Remove-WDOTAppxPackage matches *<name>* against PackageName. A space never matches.
 $default = Read-Profile -Name 'AppxPackages.json'
 $keep = Read-Profile -Name 'AppxPackages-KeepOutlook.json'
@@ -134,7 +144,7 @@ foreach ($bad in @('http://example.com/a.zip', 'https://user@example.com/a.zip',
         Fail "URL accepted: [$bad]"
     }
 }
-foreach ($bad in @('', 'PENDING', ('0' * 63), ('g' * 64))) {
+foreach ($bad in @('', 'PENDING', ('0' * 63), ('g' * 64), ('A' * 64))) {
     if (Test-WdotSha256Shape -Value $bad) {
         Fail "hash shape accepted: [$bad]"
     }
@@ -204,6 +214,75 @@ if ((Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 'PENDING' -KeepOutlook '') -ne 1 -or
     $script:downloaded) {
     Fail 'refused input downloaded or did not return 1'
 }
+
+# An empty pin exits 0 and Uninstall exits 1, both before any download.
+if ((Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 '' -KeepOutlook '') -ne 0 -or
+    (Invoke-Wdot -ZipUrl 'http://user@example.com/' -ZipSha256 ' ' -KeepOutlook '' -Action 'Uninstall') -ne 0 -or
+    (Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 $ZipSha256 -KeepOutlook '' -Action 'Uninstall') -ne 1 -or
+    $script:downloaded) {
+    Fail 'empty pin or Uninstall downloaded or returned the wrong code'
+}
+
+# Retry policy: no HTTP status and 408/429/5xx retry; other statuses do not.
+foreach ($case in @(@($null, $true), @([pscustomobject]@{ Response = $null }, $true), @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 503 } }, $true),
+        @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 429 } }, $true), @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 404 } }, $false),
+        @([pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 403 } }, $false))) {
+    if ((Test-WdotRetryable -Exception $case[0]) -ne $case[1]) {
+        Fail "retryable for [$($case[0] | ConvertTo-Json -Compress)] was not $($case[1])"
+    }
+}
+$script:attempts = 0
+$script:sleeps = @()
+function Start-Sleep { param([int]$Seconds) $script:sleeps += $Seconds }
+function Invoke-WebRequest {
+    param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
+    $script:attempts++
+    throw [System.Net.WebException]::new('connect failed')
+}
+$probe = Join-Path ([System.IO.Path]::GetTempPath()) ('wdot-dl-' + [guid]::NewGuid().ToString('n'))
+if ((Save-WdotZip -Url $ZipUrl -Path $probe) -or $script:attempts -ne 3 -or ($script:sleeps -join ',') -ne '5,20') {
+    Fail "transient failure made $($script:attempts) attempts with waits [$($script:sleeps -join ',')]"
+}
+$script:attempts = 0
+function Test-WdotRetryable { param($Exception) return $false }
+if ((Save-WdotZip -Url $ZipUrl -Path $probe) -or $script:attempts -ne 1) {
+    Fail "final failure made $($script:attempts) attempts"
+}
+
+# Happy path, stubbed: VDOT's event log goes before WDOT runs, the appraiser
+# tasks are re-enabled after, and Keep Outlook swaps the app list.
+$payload = Join-Path ([System.IO.Path]::GetTempPath()) ('wdot-payload-' + [guid]::NewGuid().ToString('n'))
+[System.IO.File]::WriteAllText($payload, 'stub zip')
+$payloadHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $payload).Hash.ToLowerInvariant()
+$work = Join-Path ([System.IO.Path]::GetTempPath()) ('wdot-test-' + [guid]::NewGuid().ToString('n'))
+[void](New-Item -ItemType Directory -Path $work)
+$script:calls = @()
+$script:appxSeen = ''
+function Save-WdotZip { param([string]$Url, [string]$Path) Copy-Item -LiteralPath $payload -Destination $Path; return $true }
+function Expand-Archive {
+    param([string]$LiteralPath, [string]$DestinationPath)
+    $dir = Join-Path $DestinationPath 'Windows-Desktop-Optimization-Tool/Configurations/Relian'
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    Set-Content -LiteralPath (Join-Path $dir 'AppxPackages.json') -Value 'default'
+    Set-Content -LiteralPath (Join-Path $dir 'AppxPackages-KeepOutlook.json') -Value 'keep'
+}
+function Remove-WdotVdotEventLog { $script:calls += 'eventlog' }
+function Invoke-WdotChild {
+    param([string[]]$Argument)
+    $script:calls += 'wdot'
+    $file = $Argument[[array]::IndexOf($Argument, '-File') + 1]
+    $script:appxSeen = (Get-Content -LiteralPath (Join-Path (Split-Path -Parent $file) 'Configurations/Relian/AppxPackages.json') -Raw).Trim()
+    return 0
+}
+function Enable-WdotAppraiserTask { $script:calls += 'appraiser' }
+$result = Invoke-Wdot -ZipUrl $ZipUrl -ZipSha256 $payloadHash -KeepOutlook 'true' -Action 'Install'
+if ($result -ne 0 -or ($script:calls -join ',') -ne 'eventlog,wdot,appraiser' -or $script:appxSeen -ne 'keep') {
+    Fail "happy path returned [$result], calls [$($script:calls -join ',')], app list [$($script:appxSeen)]"
+}
+if (Test-Path -LiteralPath $work) {
+    Fail 'work folder left behind after a run'
+}
+Remove-Item -LiteralPath $payload -Force
 
 Write-Output 'PASS wdot'
 exit 0

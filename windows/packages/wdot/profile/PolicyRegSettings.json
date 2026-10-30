@@ -319,7 +319,7 @@
         "RegItemValueName": "NoInternetOpenWith",
         "RegItemValueType": "DWord",
         "RegItemValue": "",
-        "OptimizationState": "Apply"
+        "OptimizationState": "Skip"
     },
     {
         "RegItemPath": "HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer",
@@ -956,7 +956,7 @@
         "RegItemValueName": "NoBalloonFeatureAdvertisements",
         "RegItemValueType": "DWord",
         "RegItemValue": "",
-        "OptimizationState": "Apply"
+        "OptimizationState": "Skip"
     },
     {
         "RegItemPath": "HKCU:\\SOFTWARE\\Policies\\Microsoft\\Control Panel\\International",
@@ -998,7 +998,7 @@
         "RegItemValueName": "NoInstrumentation",
         "RegItemValueType": "DWord",
         "RegItemValue": "",
-        "OptimizationState": "Apply"
+        "OptimizationState": "Skip"
     },
     {
         "RegItemPath": "HKCU:\\SOFTWARE\\Policies\\Microsoft\\Edge\\Recommended",
