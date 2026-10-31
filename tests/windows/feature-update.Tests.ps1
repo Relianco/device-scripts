@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$scriptPath = Join-Path $repoRoot 'windows/collectors/feature-update-readiness.ps1'
+$scriptPath = Join-Path $repoRoot 'windows/packages/feature-update/Invoke-FeatureUpdate.ps1'
 
 function Fail {
     param([string]$Message)
@@ -255,5 +255,49 @@ foreach ($bad in @('Set-ItemProperty', 'New-ItemProperty', 'Remove-ItemProperty'
     if ($source.IndexOf($bad, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Fail "source contains $bad" }
 }
 
-Write-Output 'feature-update-readiness tests passed'
+# Runner Action and Fix mapping.
+foreach ($a in @('Install', 'Update', 'Repair', 'Reinstall')) {
+    Assert-Same (Get-FurMode $a '') 'check' "$a is a read-only check"
+    Assert-Same (Get-FurMode $a 'false') 'check' "$a with Fix false"
+    Assert-Same (Get-FurMode $a 'true') 'fix' "$a with Fix true"
+}
+Assert-Same (Get-FurMode 'Install' 'TRUE') 'fix' 'Fix is case-insensitive'
+Assert-Same (Get-FurMode 'Uninstall' '') 'none' 'Uninstall does nothing'
+Assert-Same (Get-FurMode 'Uninstall' 'true') 'none' 'Uninstall ignores Fix'
+foreach ($bad in @(@('Bogus', ''), @('', ''), @('Install', 'yes'), @('Install', '1'))) {
+    $threw = $false
+    try { $null = Get-FurMode $bad[0] $bad[1] } catch { $threw = $true }
+    if (-not $threw) { Fail "Get-FurMode accepted [$($bad[0])] [$($bad[1])]" }
+}
+
+# The entry point reads the runner's parameters and Fix is a string, so -Fix true binds.
+$source = [IO.File]::ReadAllText($scriptPath)
+foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinVersion', "[string]`$Fix = ''")) {
+    if ($source.IndexOf($need, [StringComparison]::Ordinal) -lt 0) { Fail "param block lacks $need" }
+}
+
+# Pin record and script agree on the field; the package arguments example decodes to what the script reads.
+$release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/feature-update.json') | ConvertFrom-Json
+Assert-Same $release.installsSoftware $false 'pin record installsSoftware'
+Assert-Same $FurFieldName $release.ninjaField 'script field name and pin record'
+Assert-Same $FurFieldName 'relianFeatureUpdate' 'field name unchanged'
+$decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('eyJGaXgiOiJ0cnVlIn0='))
+Assert-Same $decoded '{"Fix":"true"}' 'documented package arguments'
+if ($release.packageArguments.IndexOf('eyJGaXgiOiJ0cnVlIn0=', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the base64 example' }
+
+# End to end through the runner's argument parser: Fix reaches the package as a named pair.
+$env:RELIAN_DEPLOY_TEST = '1'
+Set-StrictMode -Off
+. (Join-Path $repoRoot 'windows/runner/Invoke-RelianRunner.ps1')
+Set-StrictMode -Version Latest
+$pairs = @(ConvertFrom-RelianPackageArguments -PackageArguments 'eyJGaXgiOiJ0cnVlIn0=')
+Assert-Same $pairs.Count 1 'runner pair count'
+Assert-Same $pairs[0].Name 'Fix' 'runner pair name'
+Assert-Same $pairs[0].Value 'true' 'runner pair value'
+
+# An early exit 0 would skip every assertion after it: the first exit 0 must be the last line.
+$self = [IO.File]::ReadAllText($PSCommandPath)
+if ($self.IndexOf("exit 0`n", [StringComparison]::Ordinal) -lt $self.IndexOf('Assert-Same $pairs[0].Value', [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
+
+Write-Output 'feature-update tests passed'
 exit 0

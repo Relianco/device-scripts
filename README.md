@@ -109,6 +109,18 @@ WDOT ships its own profiles opt-in: every task, service, and app is `Skip`. The 
 
 To change the profile, edit `windows/packages/wdot/profile/`, then run `pwsh -NoProfile -File scripts/build-wdot.ps1`. It prints the zip path, the sha256, and the blob name. Upload with `az storage blob upload --account-name relianpub --container-name pub --name <blob> --file <zip> --content-type application/zip --auth-mode login --overwrite false`, then put the URL, file, sha256, and size in `windows/releases/wdot.json` and the script defaults. Never overwrite or delete a published blob: a pasted script may still use it.
 
+## Feature update readiness
+
+`windows/packages/feature-update/Invoke-FeatureUpdate.ps1` says why Windows Update has not offered a device the next feature update. Run it through the deploy runner (NinjaOne script 374) as SYSTEM on Windows PowerShell 5.1, not through the Bootstrap loader: the loader follows `main` with no hash check, and it writes `relian_<name>` fields, which NinjaOne rejects because field names are alphanumeric.
+
+It reads the OS build, Windows Update policy, the compatibility appraiser's safeguard holds, TPM, Secure Boot, free disk space, a Windows Update search, recent Windows Update client errors, and logs from earlier setup attempts. It writes one line of compact JSON to the device field `relianFeatureUpdate` with `ninjarmm-cli set --stdin` and a read-back check, and prints the same line last on stdout.
+
+Actions: `Install`, `Update`, `Repair` and `Reinstall` all run the same read-only check. `Uninstall` exits 0 and changes nothing, because nothing was installed. The runner turns `Reinstall` into an uninstall and then an install.
+
+Fix mode is off unless the package arguments are `{"Fix":"true"}`, base64 `eyJGaXgiOiJ0cnVlIn0=`, passed as `-PackageArguments`. Fix only enables the `Microsoft Compatibility Appraiser` and `Microsoft Compatibility Appraiser Exp` scheduled tasks when they are disabled, and starts one appraiser run without waiting when its data is stale. It never touches DiagTrack, update policy or pins, never reboots, and never starts an upgrade. A second run changes nothing. The runner still needs the toolkit and brand-pack parameters: it downloads and checks all three pins before it starts any package.
+
+`windows/releases/feature-update.json` records the field name and the package arguments. The package hash is not stored in the repo; it goes in the runner's `-PackageSha256`.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.

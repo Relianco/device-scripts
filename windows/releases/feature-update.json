@@ -1,0 +1,7 @@
+{
+  "name": "Feature update readiness",
+  "kind": "check",
+  "installsSoftware": false,
+  "ninjaField": "relianFeatureUpdate",
+  "packageArguments": "Optional. {\"Fix\":\"true\"} (base64 eyJGaXgiOiJ0cnVlIn0=) enables the Microsoft Compatibility Appraiser tasks and starts one async run. Without it the run is read-only."
+}

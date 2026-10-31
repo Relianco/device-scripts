@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Feature update readiness collector for Relian device inventory.
+    Feature update readiness package for the Relian deploy runner (NinjaOne script 374).
     Says why Windows Update has not moved a device to the next feature update.
 
 .DESCRIPTION
@@ -11,7 +11,7 @@
     Update client errors, and logs from earlier setup attempts. It writes no
     registry value, changes no policy, and starts no upgrade.
 
-    With -Fix it repairs only what keeps the compatibility appraiser from
+    With -Fix true it repairs only what keeps the compatibility appraiser from
     running: it enables the "Microsoft Compatibility Appraiser" task and,
     when the appraiser data is
     stale, starts that task without waiting (it runs 5 to 30 minutes; run the
@@ -20,8 +20,11 @@
     policy. Each
     step runs only when needed, so a second run changes nothing.
 
-    The loader passes -Fix through its ParametersBase64 parameter:
-    base64 of {"Fix":true} is eyJGaXgiOnRydWV9.
+    The runner passes DeploymentType, Action and PinVersion, then each
+    PackageArguments pair as -Name value. Fix is the only one read, and it is a
+    string: base64 of {"Fix":"true"} is eyJGaXgiOiJ0cnVlIn0=.
+    Install, Update, Repair and Reinstall all run the check (and the fix when
+    Fix is "true"). Uninstall changes nothing and exits 0: nothing was installed.
 
     The result is one line of compact JSON, printed last on stdout, with a
     short "verdict". The JSON also goes to the NinjaOne device custom field
@@ -33,11 +36,19 @@
     No external module dependencies
 #>
 
-param([switch]$Fix)
+# Not Mandatory: a mandatory param block prompts when this file is dot-sourced
+# under RELIAN_DEPLOY_TEST.
+[CmdletBinding()]
+param(
+    [string]$DeploymentType,
+    [string]$Action,
+    [string]$PinVersion,
+    [string]$Fix = ''
+)
 
 $ProgressPreference = "SilentlyContinue"
 
-# NinjaOne field names are alphanumeric only, so the loader's relian_<name> write cannot land.
+# NinjaOne field names are alphanumeric only, so a relian_<name> field cannot be written.
 $FurFieldName = "relianFeatureUpdate"
 # ponytail: NinjaOne text fields hold about 10,000 characters; trim to stay under.
 $FurMaxJson = 9500
@@ -461,7 +472,7 @@ function ConvertTo-FurNativeArg {
     return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
 }
 
-# The loader runs collectors in a child powershell.exe. Ninja-Property-Set
+# The runner starts the package in a child powershell.exe. Ninja-Property-Set
 # there hands the value to the agent CLI as a native argument, and 5.1 strips
 # the JSON's quotes. So write through the CLI's stdin and read it back.
 function Set-FurField {
@@ -555,7 +566,7 @@ function Invoke-FurFix {
             switch ($step) {
                 'EnableAppraiserTask' { $null = Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
                 'RunAppraiser' {
-                    # Asynchronous: the scan outlives the loader's 5-minute limit.
+                    # Asynchronous: the scan outlives the run.
                     try { Start-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
                     catch {
                         $exe = Join-Path $env:SystemRoot 'System32\CompatTelRunner.exe'
@@ -569,7 +580,20 @@ function Invoke-FurFix {
     return [ordered]@{ done = $done; errors = $errors }
 }
 
+# Pure: 'check', 'fix' or 'none' for a runner Action and Fix string. Throws on bad input.
+function Get-FurMode {
+    param([string]$Action, [string]$Fix)
+    if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) {
+        throw 'Action must be Install, Update, Repair, Reinstall, or Uninstall.'
+    }
+    if ($Action -eq 'Uninstall') { return 'none' }
+    if ($Fix -eq '' -or $Fix -eq 'false') { return 'check' }
+    if ($Fix -eq 'true') { return 'fix' }
+    throw 'Fix must be true or false.'
+}
+
 function Invoke-Main {
+    param([switch]$Fix)
     try {
         Write-Status "Feature update readiness collection starting"
         $record = [ordered]@{}
@@ -608,7 +632,7 @@ function Invoke-Main {
         Write-Status "Verdict: $($record.verdict) ($($json.Length) bytes)"
         if (Set-FurField $json) { Write-Status "Written to $FurFieldName" }
         else { Write-Status "Custom field not written; the JSON line below is the result" "WARN" }
-        # Last stdout line is the JSON; the loader picks the last line that starts with "{".
+        # Last stdout line is the JSON; so a log reader can find it.
         Write-Output $json
     } catch {
         Write-Status "Feature update readiness error: $_" "ERROR"
@@ -617,4 +641,9 @@ function Invoke-Main {
     }
 }
 
-if ($env:RELIAN_DEPLOY_TEST -ne '1') { Invoke-Main }
+if ($env:RELIAN_DEPLOY_TEST -ne '1') {
+    try { $furMode = Get-FurMode -Action $Action -Fix $Fix }
+    catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+    if ($furMode -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
+    Invoke-Main -Fix:($furMode -eq 'fix')
+}
