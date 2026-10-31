@@ -136,7 +136,12 @@ Assert-Same (Test-FupTransient ([Net.WebException]::new('t', [Net.WebExceptionSt
 Assert-Same (Test-FupTransient ([Net.WebException]::new('d', [Net.WebExceptionStatus]::NameResolutionFailure))) $true 'dns is transient'
 Assert-Same (Test-FupTransient ([Net.WebException]::new('t', [Net.WebExceptionStatus]::TrustFailure))) $false 'tls trust is not transient'
 Assert-Same (Test-FupTransient ([Exception]::new('x'))) $false 'plain error is not transient'
-Assert-Same (Test-FupTransient ([Exception]::new('x', [IO.IOException]::new('reset')))) $true 'dropped stream is transient'
+Assert-Same (Test-FupTransient ([Exception]::new('x', [IO.IOException]::new('disk full')))) $false 'local file error is not transient'
+$broken = [pscustomobject]@{}
+$broken | Add-Member -MemberType ScriptMethod -Name Read -Value { param($b, $o, $c) throw [IO.IOException]::new('connection reset') }
+$readErr = $null
+try { $null = Read-FupStream $broken (New-Object byte[] 4) } catch { $readErr = $_.Exception }
+Assert-Same (Test-FupTransient $readErr) $true 'dropped response stream is transient'
 $script:attempts = 0
 function Save-FupDownload { param($Url, $Part, $Minutes) $script:attempts++; throw [Net.WebException]::new('t', [Net.WebExceptionStatus]::Timeout) }
 Assert-Throws { Invoke-FupDownload -Url $goodUrl -Part 'x' } 'transient keeps failing'

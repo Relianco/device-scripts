@@ -228,6 +228,14 @@ function Get-FupRemoteSize {
     } catch { return -1 }
 }
 
+# A failed read of the response stream is a network failure; say so, so it is retried.
+# A failed write to the part file (disk full) stays an IOException and is not.
+function Read-FupStream {
+    param($Stream, [byte[]]$Buffer)
+    try { return $Stream.Read($Buffer, 0, $Buffer.Length) }
+    catch { throw [Net.WebException]::new("download stream failed: $($_.Exception.Message)", $_.Exception, [Net.WebExceptionStatus]::ReceiveFailure, $null) }
+}
+
 # Streams $Url into $Part, resuming from its current length. Throws on error or when
 # the time budget runs out; the part file stays so the next run resumes.
 function Save-FupDownload {
@@ -256,7 +264,7 @@ function Save-FupDownload {
         try {
             $buf = New-Object byte[] (1MB)
             $lastLog = Get-Date
-            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+            while (($n = Read-FupStream $in $buf) -gt 0) {
                 $out.Write($buf, 0, $n); $have += $n
                 if ((Get-Date) -gt $deadline) { throw "download stopped after $Minutes minutes at $([math]::Round($have / 1GB, 2)) GB; run again to resume" }
                 if (((Get-Date) - $lastLog).TotalMinutes -ge 5) { Write-Status "Downloaded $([math]::Round($have / 1GB, 2)) GB"; $lastLog = Get-Date }
@@ -266,7 +274,7 @@ function Save-FupDownload {
 }
 
 # Pure: true for a download error worth another attempt: timeout, connection or DNS
-# failure, a dropped stream, or HTTP 408/429/500/502/503/504.
+# failure, a dropped response stream, or HTTP 408/429/500/502/503/504. Local file errors are not.
 function Test-FupTransient {
     param($Exception)
     for ($e = $Exception; $e; $e = $e.InnerException) {
@@ -274,7 +282,7 @@ function Test-FupTransient {
             if ($e.Response) { return (@(408, 429, 500, 502, 503, 504) -contains [int]$e.Response.StatusCode) }
             return (@('Timeout', 'ConnectFailure', 'NameResolutionFailure', 'ConnectionClosed', 'ReceiveFailure', 'KeepAliveFailure', 'SendFailure') -contains "$($e.Status)")
         }
-        if ($e -is [IO.IOException] -or $e -is [TimeoutException]) { return $true }
+        if ($e -is [TimeoutException]) { return $true }
     }
     return $false
 }
