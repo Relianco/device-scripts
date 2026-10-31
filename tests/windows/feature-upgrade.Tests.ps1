@@ -45,7 +45,7 @@ Set-StrictMode -Version Latest
 # Argument validation.
 Assert-Throws { Get-FupArgs -IsoUrl '' -IsoSha256 $goodSha } 'empty url'
 Assert-Throws { Get-FupArgs -IsoUrl 'http://downloads.example.com/win.iso' -IsoSha256 $goodSha } 'http url'
-Assert-Throws { Get-FupArgs -IsoUrl 'https://user:pw@downloads.example.com/win.iso' -IsoSha256 $goodSha } 'userinfo url'
+Assert-Throws { Get-FupArgs -IsoUrl 'https://user@downloads.example.com/win.iso' -IsoSha256 $goodSha } 'userinfo url'
 Assert-Throws { Get-FupArgs -IsoUrl 'https://downloads.example.com/a b.iso' -IsoSha256 $goodSha } 'url with a space'
 Assert-Throws { Get-FupArgs -IsoUrl 'not a url' -IsoSha256 $goodSha } 'relative url'
 Assert-Throws { Get-FupArgs -IsoUrl $goodUrl -IsoSha256 ('a' * 63) } 'short hash'
@@ -119,13 +119,32 @@ Assert-Throws { Get-FupIso -Url $goodUrl -Sha256 $goodHash } 'hash mismatch'
 Assert-Same (Test-Path -LiteralPath "$iso.part") $false 'mismatched download deleted'
 Assert-Same (Test-Path -LiteralPath $iso) $false 'mismatched download not promoted'
 
-# An existing file with the wrong hash is deleted, then downloaded again.
+# An existing file with the wrong hash is deleted and the run fails; no download in this run.
 [IO.File]::WriteAllBytes($iso, [Text.Encoding]::ASCII.GetBytes('stale'))
 $script:payload = $bytes
 $script:downloads = 0
-Assert-Same (Get-FupIso -Url $goodUrl -Sha256 $goodHash) $iso 'redownloaded path'
-Assert-Same $script:downloads 1 'stale file redownloaded'
-Assert-Same (Get-FupFileHash $iso) $goodHash 'redownloaded file hash'
+Assert-Throws { Get-FupIso -Url $goodUrl -Sha256 $goodHash } 'stale file mismatch'
+Assert-Same $script:downloads 0 'stale file not redownloaded in the same run'
+Assert-Same (Test-Path -LiteralPath $iso) $false 'stale file deleted'
+# The next run downloads it.
+Assert-Same (Get-FupIso -Url $goodUrl -Sha256 $goodHash) $iso 'next run downloads'
+Assert-Same (Get-FupFileHash $iso) $goodHash 'downloaded file hash'
+
+# Transient errors: three attempts; other errors: one.
+function Start-Sleep { }
+Assert-Same (Test-FupTransient ([Net.WebException]::new('t', [Net.WebExceptionStatus]::Timeout))) $true 'timeout is transient'
+Assert-Same (Test-FupTransient ([Net.WebException]::new('d', [Net.WebExceptionStatus]::NameResolutionFailure))) $true 'dns is transient'
+Assert-Same (Test-FupTransient ([Net.WebException]::new('t', [Net.WebExceptionStatus]::TrustFailure))) $false 'tls trust is not transient'
+Assert-Same (Test-FupTransient ([Exception]::new('x'))) $false 'plain error is not transient'
+Assert-Same (Test-FupTransient ([Exception]::new('x', [IO.IOException]::new('reset')))) $true 'dropped stream is transient'
+$script:attempts = 0
+function Save-FupDownload { param($Url, $Part, $Minutes) $script:attempts++; throw [Net.WebException]::new('t', [Net.WebExceptionStatus]::Timeout) }
+Assert-Throws { Invoke-FupDownload -Url $goodUrl -Part 'x' } 'transient keeps failing'
+Assert-Same $script:attempts 3 'transient error tried three times'
+$script:attempts = 0
+function Save-FupDownload { param($Url, $Part, $Minutes) $script:attempts++; throw 'download redirected away from https' }
+Assert-Throws { Invoke-FupDownload -Url $goodUrl -Part 'x' } 'hard error'
+Assert-Same $script:attempts 1 'hard error tried once'
 
 # Dismount on failure: reading the version and running setup.
 $script:dismounts = 0

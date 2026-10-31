@@ -84,6 +84,8 @@ function Write-Status {
 # Pure: validated arguments as a hashtable. Throws on anything malformed.
 function Get-FupArgs {
     param([string]$IsoUrl, [string]$IsoSha256, [string]$BypassHardwareCheck, [switch]$WorkerMode)
+    # An empty IsoSha256 fails too. The runner's "empty hash exits 0" rule is for its own
+    # package pin; here the hash is the only proof of the ISO, so no hash means no run.
     if ($IsoSha256 -notmatch '\A[0-9A-Fa-f]{64}\z') { throw 'IsoSha256 must be 64 hex characters.' }
     $bypass = switch ($BypassHardwareCheck) {
         '' { $false } 'false' { $false } 'true' { $true }
@@ -238,10 +240,10 @@ function Save-FupDownload {
     if ($have -gt 0) { $req.AddRange($have) }
     try { $resp = $req.GetResponse() }
     catch [Net.WebException] {
-        # 416: the part already holds the whole file (or more); start over.
+        # 416: the part already holds the whole file (or more). Drop it; the next run starts over.
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 416) {
             Remove-Item -LiteralPath $Part -Force
-            return (Save-FupDownload -Url $Url -Part $Part -Minutes $Minutes)
+            throw 'server rejected the resume range; partial file deleted, run again'
         }
         throw
     }
@@ -263,7 +265,34 @@ function Save-FupDownload {
     } finally { $resp.Close() }
 }
 
-# Returns the path of a verified ISO. Reuses a matching file, deletes a bad one.
+# Pure: true for a download error worth another attempt: timeout, connection or DNS
+# failure, a dropped stream, or HTTP 408/429/500/502/503/504.
+function Test-FupTransient {
+    param($Exception)
+    for ($e = $Exception; $e; $e = $e.InnerException) {
+        if ($e -is [Net.WebException]) {
+            if ($e.Response) { return (@(408, 429, 500, 502, 503, 504) -contains [int]$e.Response.StatusCode) }
+            return (@('Timeout', 'ConnectFailure', 'NameResolutionFailure', 'ConnectionClosed', 'ReceiveFailure', 'KeepAliveFailure', 'SendFailure') -contains "$($e.Status)")
+        }
+        if ($e -is [IO.IOException] -or $e -is [TimeoutException]) { return $true }
+    }
+    return $false
+}
+
+# Three attempts for transient errors; each resumes from the part file.
+function Invoke-FupDownload {
+    param([string]$Url, [string]$Part)
+    for ($i = 1; ; $i++) {
+        try { Save-FupDownload -Url $Url -Part $Part -Minutes $FupDownloadMinutes; return }
+        catch {
+            if ($i -ge 3 -or -not (Test-FupTransient $_.Exception)) { throw }
+            Write-Status "Download attempt $i failed ($($_.Exception.Message)); resuming" 'WARN'
+            Start-Sleep -Seconds (5 * $i)
+        }
+    }
+}
+
+# Returns the path of a verified ISO. Reuses a matching file; deletes a bad one and throws.
 function Get-FupIso {
     param([string]$Url, [string]$Sha256)
     $iso = Join-Path $FupDir "$Sha256.iso"
@@ -274,11 +303,12 @@ function Get-FupIso {
         Remove-Item -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $iso) {
         if ((Get-FupFileHash $iso) -eq $Sha256) { Write-Status 'Reusing the downloaded ISO (hash matches)'; return $iso }
-        Write-Status 'Existing ISO hash does not match; deleting it' 'WARN'
+        # A mismatch is not retried in this run: delete and fail; the next run downloads again.
         Remove-Item -LiteralPath $iso -Force
+        throw 'existing ISO hash mismatch; file deleted. Run again to download it.'
     }
     Write-Status 'Downloading the ISO'
-    Save-FupDownload -Url $Url -Part $part -Minutes $FupDownloadMinutes
+    Invoke-FupDownload -Url $Url -Part $part
     $got = Get-FupFileHash $part
     if ($got -ne $Sha256) {
         Remove-Item -LiteralPath $part -Force
