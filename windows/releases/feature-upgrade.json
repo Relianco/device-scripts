@@ -1,0 +1,7 @@
+{
+  "name": "Feature upgrade from a pinned ISO",
+  "kind": "upgrade",
+  "installsSoftware": false,
+  "ninjaField": "relianFeatureUpgrade",
+  "packageArguments": "Required. {\"IsoUrl\":\"https://...\",\"IsoSha256\":\"<64 hex>\"}, optional \"BypassHardwareCheck\":\"true\" (adds /product server). Base64 of the JSON goes in the runner's -PackageArguments. The ISO's build is read from the image; nothing else about the version is assumed."
+}
