@@ -105,6 +105,38 @@ Fix mode is off unless the package arguments are `{"Fix":"true"}`, base64 `eyJGa
 
 `windows/releases/feature-update.json` records the field name and the package arguments. The package hash is not stored in the repo; it goes in the runner's `-PackageSha256`.
 
+## Feature upgrade from a pinned ISO
+
+`windows/packages/feature-upgrade/Invoke-FeatureUpgrade.ps1` upgrades Windows in place from an ISO named by the package arguments. Run it through the deploy runner (NinjaOne script 374) as SYSTEM. Nothing about a release is built in: the ISO's build is read from the mounted image (`install.wim`/`install.esd`, else `setup.exe`), so any Windows ISO works.
+
+Package arguments, base64 of the JSON in `-PackageArguments`:
+
+```json
+{"IsoUrl":"https://example.com/Win11.iso","IsoSha256":"<64 hex>","BypassHardwareCheck":"false"}
+```
+
+`IsoUrl` must be https with no userinfo; `IsoSha256` must be 64 hex characters. A missing or malformed value exits 1 before anything is touched. `BypassHardwareCheck` is optional; `"true"` adds `/product server`, which skips setup's CPU, TPM and Secure Boot check.
+
+One run takes the mutex `Global\RelianFeatureUpgrade`, reports any earlier attempt instead of starting another, stops if Windows already has a reboot pending, checks free space (ISO size plus 20 GB), and downloads the ISO to `%ProgramData%\Relian\FeatureUpgrade` with a streamed download that resumes from a `.part` file on the next run. A file whose SHA256 already matches is reused; a mismatch deletes the file and exits 1. It mounts the ISO to read the build and dismounts. At or below the running build it exits 0 with `alreadyCurrent`.
+
+Setup runs detached, because it can outlast a NinjaOne job. The run copies the script into the working folder (owner and ACL reset to SYSTEM and Administrators) and starts it as the one-shot SYSTEM task `Relian Feature Upgrade` with `-Worker true`, then exits 0 with `started`. The worker checks the hash again, mounts the ISO, runs `setup.exe /auto upgrade /quiet /noreboot /eula accept /dynamicupdate disable /copylogs <dir>\logs` with `Start-Process -PassThru`, waits up to 6 hours for the real exit code, always dismounts, records the result in `state.json` and the field, and removes its task. It never reboots, and never touches security services, safe mode, Windows Update folders or IFEO.
+
+Every run prints one JSON line last and writes it to the device field `relianFeatureUpgrade`. `status` is one of:
+
+| status | meaning | exit |
+| --- | --- | --- |
+| `started` / `starting` | worker launched, not finished | 0 |
+| `busy` | the worker or another run holds the mutex (setup running) | 0 |
+| `staged` | setup returned 0, 3010 or 1641; the upgrade finishes at the next reboot | 0 |
+| `finished` | rebooted onto the ISO's build | 0 |
+| `alreadyCurrent` | the running build is at or above the ISO's | 0 |
+| `rebootPending` | Windows has a servicing reboot pending; reboot first | 0 |
+| `failed` | bad hash, low space, download error, or setup's exit code (`exitHex`, `setupErr`) | 1 |
+| `rolledBack` | rebooted after staging but still on the old build | 1 |
+| `interrupted` | the worker stopped without a result | 1 |
+
+A `finished`, `failed`, `rolledBack` or `interrupted` result is reported once and cleared; the next run starts a new attempt and reuses the downloaded ISO. `Uninstall` exits 0 and changes nothing. `windows/releases/feature-upgrade.json` records the field and the argument shape.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.
