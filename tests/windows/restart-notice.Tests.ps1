@@ -40,6 +40,9 @@ $env:RELIAN_DEPLOY_TEST = '1'
 Set-StrictMode -Off
 . $scriptPath
 Set-StrictMode -Version Latest
+# The real dialog blocks, before Reset-Mocks replaces them.
+$realPrompt = $script:RnPrompt
+$realCountdown = $script:RnCountdown
 
 # Arguments.
 $a = Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes ''
@@ -169,7 +172,11 @@ function Reset-Mocks {
     $script:RnPrompt = { param($T, $S, $Sec) $script:Log.Add("prompt:${S}:$Sec"); $script:Clock = $script:Clock.AddMinutes($script:PromptDelay); & $script:OnPrompt; $script:MockPrompt }
     $script:RnCanShow = { $script:MockCanShow }
     $script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec") }
-    $script:RnSleep = { param($Sec) $script:Log.Add("sleep:$Sec") }
+    $script:RnSleep = { param($Sec) $script:Log.Add("sleep:$Sec"); $script:Clock = $script:Clock.AddSeconds($Sec) }
+    # Default: the countdown dialog cannot be watched, so the countdown is waited out whole.
+    $script:RnCountdownOpen = { throw 'no process list' }
+    # Logged, so any flow that must not style (report only) fails on it.
+    $script:RnTheme = { $script:Log.Add('theme') }
     $script:RnRestart = { $script:Log.Add('restart'); $script:MockRestart }
     $script:RnSetField = { param($Json, $Name) $script:Log.Add('field'); $script:FieldNames.Add($Name); $script:Fields.Add(($Json | ConvertFrom-Json)); $true }
     $script:FieldNames = [System.Collections.Generic.List[string]]::new()
@@ -288,6 +295,68 @@ Assert-Same $script:RnSessionOpen $true 'session opened'
 $script:RnSessionOpen = $false
 Assert-Same (Test-RnNoUserError ([Management.Automation.ErrorRecord]::new([Exception]::new('x', [NotSupportedException]::new('there are no suitable logged on users available')), 'id', 'NotSpecified', $null))) $true 'inner no-user error'
 Assert-Same (Test-RnNoUserError ([Management.Automation.ErrorRecord]::new([NotSupportedException]::new('stream'), 'id', 'NotSpecified', $null))) $false 'other NotSupportedException'
+
+# 2i. Brand theme: Open-RnSession installs it before the toolkit session, so notice 1
+# and the countdown both get it, once per run. A theme that throws changes nothing:
+# same calls, same result, same field.
+function Show-ADTInstallationPrompt { $script:Log.Add('showPrompt'); 'Restart now' }
+function Show-ADTInstallationRestartPrompt { $script:Log.Add('showCountdown') }
+function Get-ADTStringTable { [pscustomobject]@{ RestartPrompt = [pscustomobject]@{ ButtonRestartNow = ''; Message = [pscustomobject]@{ Install = '' }; MessageRestart = ''; MessageTime = ''; TimeRemaining = '' } } }
+$themeRuns = @{}
+foreach ($themeFails in @($false, $true)) {
+    Reset-Mocks
+    if ($themeFails) { $script:RnTheme = { $script:Log.Add('theme'); throw 'csc missing' } }
+    $script:RnPrompt = $realPrompt
+    $script:RnSessionOpen = $false
+    Assert-Same (Invoke-RnRun $args60) 0 "prompt with theme (fails $themeFails) exit"
+    Assert-Same ($script:Log -join '|') 'theme|openSession|showPrompt|field|restart' "prompt with theme (fails $themeFails) sequence"
+    $themeRuns["prompt$themeFails"] = ($script:Fields | ForEach-Object { $_ | Select-Object -Property * -ExcludeProperty timestamp | ConvertTo-Json -Compress }) -join '|'
+    Reset-Mocks -Marker ([pscustomobject]@{ SnoozeUntil = $now.AddMinutes(-1).ToString('o'); SetAt = $now.AddMinutes(-61).ToString('o') })
+    if ($themeFails) { $script:RnTheme = { $script:Log.Add('theme'); throw 'csc missing' } }
+    $script:RnCountdown = $realCountdown
+    $script:RnSessionOpen = $false
+    Assert-Same (Invoke-RnRun $args60) 0 "countdown with theme (fails $themeFails) exit"
+    Assert-Same ($script:Log -join '|') 'field|theme|openSession|showCountdown|sleep:900|field|restart' "countdown with theme (fails $themeFails) sequence"
+    $themeRuns["countdown$themeFails"] = ($script:Fields | ForEach-Object { $_ | Select-Object -Property * -ExcludeProperty timestamp | ConvertTo-Json -Compress }) -join '|'
+}
+Assert-Same $themeRuns['promptTrue'] $themeRuns['promptFalse'] 'theme failure leaves the prompt result'
+Assert-Same $themeRuns['countdownTrue'] $themeRuns['countdownFalse'] 'theme failure leaves the countdown result'
+# Once per run: the second dialog reuses the open session.
+Reset-Mocks
+$script:RnSessionOpen = $false
+Open-RnSession
+Open-RnSession
+Assert-Same @($script:Log | Where-Object { $_ -eq 'theme' }).Count 1 'theme installed once per run'
+$script:RnSessionOpen = $false
+
+# 2j. Restart now on the countdown: the dialog closes before the end, so the device
+# restarts at once, with the button recorded and the field written first.
+# The old code slept the whole countdown and recorded no button.
+function Set-OpenSequence { param([object[]]$States) $script:OpenStates = [System.Collections.Generic.Queue[object]]::new($States); $script:RnCountdownOpen = { $v = $script:OpenStates.Dequeue(); if ($v -is [string]) { throw $v }; $v } }
+Reset-Mocks -PromptResult 'Timeout'
+Set-OpenSequence @($false, $true, $true, $false)
+Assert-Same (Invoke-RnMain $args60) 0 'countdown restart now exit'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:5|sleep:5|sleep:5|field|restart' 'countdown restart now sequence'
+Assert-Same (Get-Last).status 'restarted' 'countdown restart now status'
+Assert-Same (Get-Last).button 'Restart now' 'countdown restart now button'
+Assert-Same (Get-Last).reason 'NoAnswer' 'countdown restart now keeps why the countdown showed'
+Assert-FieldBeforeRestart 'countdown restart now'
+function Get-Slept { ($script:Log | Where-Object { $_ -like 'sleep:*' } | ForEach-Object { [int]($_ -replace 'sleep:', '') } | Measure-Object -Sum).Sum }
+# No press (the dialog stays open), or never seen open: the whole countdown, then restart.
+foreach ($state in @($true, $false)) {
+    Reset-Mocks -PromptResult 'Timeout'
+    Set-OpenSequence (@($state) * 180)
+    $null = Invoke-RnMain $args60
+    Assert-Same (Get-Slept) 900 "countdown open=$state waits it out"
+    Assert-Same (Get-Last).status 'restartedAfterCountdown' "countdown open=$state status"
+    Assert-Same (Get-Last).button 'NoAnswer' "countdown open=$state button"
+}
+# The probe fails part way: the rest of the countdown is waited out, never an early restart.
+Reset-Mocks -PromptResult 'Timeout'
+Set-OpenSequence @($true, $true, 'wmi broke')
+$null = Invoke-RnMain $args60
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:5|sleep:5|sleep:890|field|restart' 'probe failure sequence'
+Assert-Same (Get-Last).status 'restartedAfterCountdown' 'probe failure status'
 
 # 3. Restart now on notice 1.
 Reset-Mocks -PromptResult 'Restart now'
