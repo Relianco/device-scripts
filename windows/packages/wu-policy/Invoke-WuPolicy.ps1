@@ -181,6 +181,17 @@ function Get-WupState {
     }
 }
 
+# Pure: why a policy key could not be read, or $null. Get-RegValues returns
+# @{ error = ... } on a read failure, which would otherwise look like no policy.
+function Get-WupReadError {
+    param($State)
+    foreach ($k in @('au', 'wu')) {
+        $m = $State[$k]
+        if ($null -ne $m -and $m.Count -eq 1 -and $m.Contains('error')) { return "$k $($m.error)" }
+    }
+    return $null
+}
+
 # Pure: the values that turn automatic updates off. Empty = nothing to do.
 function Get-WupBlockers {
     param($State)
@@ -322,7 +333,11 @@ function Invoke-WupRun {
     }
     $code = 0
     $left = if ($remaining.Count) { "; still set: $($remaining -join ', ')" } else { '' }
-    if ($plan.action -eq 'none') {
+    $readError = Get-WupReadError $state
+    if ($readError) {
+        $code = 1
+        $verdict = "policy read failed, not changed: $readError"
+    } elseif ($plan.action -eq 'none') {
         $verdict = "nothing to do: automatic updates not off by policy$left"
     } elseif ($plan.action -eq 'wsus') {
         $verdict = "WSUS-managed ($($plan.wsus)), not changed: $($blockers -join ', ')$left"
@@ -342,7 +357,11 @@ function Invoke-WupRun {
             $why = if (-not $p.Contains('other')) { 'not parsed' } elseif ([int]$p.other -gt 0) { "$($p.other) other entries" } elseif (@($p.wu).Count) { 'holds Windows Update policy this fix keeps' } else { 'no entries' }
             $pol = "Registry.pol left ($why)"
         }
-        if ($still.Count -eq 0 -and $record.fix.errors.Count -eq 0) {
+        $afterError = Get-WupReadError $after
+        if ($afterError) {
+            $code = 1
+            $verdict = "fix not verified, policy read failed: $afterError; errors $($record.fix.errors.Count); $pol"
+        } elseif ($still.Count -eq 0 -and $record.fix.errors.Count -eq 0) {
             $verdict = "fixed: removed $($record.fix.removed -join ', '); $pol$left"
         } else {
             $code = 1

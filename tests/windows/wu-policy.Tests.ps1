@@ -34,10 +34,14 @@ function Reset-Fake {
     $script:calls = New-Object System.Collections.Generic.List[string]
     $script:backupFails = $false
     $script:gpRestores = $false
+    $script:readFailAfterFix = $false
 }
 function Copy-Map { param($m) if ($null -eq $m) { return $null }; $c = [ordered]@{}; foreach ($k in $m.Keys) { $c[$k] = $m[$k] }; $c }
+# readFailAfterFix: the AU key cannot be read once the fix has changed something.
 function Get-WupState {
-    [ordered]@{ wu = (Copy-Map $script:reg[$WupKey]); au = (Copy-Map $script:reg[$WupAuKey]); registryPol = (Copy-Map $script:pol); appraiserTask = 'Ready' }
+    $au = Copy-Map $script:reg[$WupAuKey]
+    if ($script:readFailAfterFix -and $script:calls.Count -gt 0) { $au = @{ error = 'access denied' } }
+    [ordered]@{ wu = (Copy-Map $script:reg[$WupKey]); au = $au; registryPol = (Copy-Map $script:pol); appraiserTask = 'Ready' }
 }
 function Backup-WupPolicy { param($Dir) if ($script:backupFails) { throw 'disk full' }; $script:calls.Add("backup $Dir") }
 function Remove-WupValue { param($Key, $Name) $script:calls.Add("remove $Name"); $script:reg[$Key].Remove($Name) }
@@ -116,6 +120,19 @@ $run = Invoke-WupRun -Fix
 Assert-Same $run.exitCode 1 'failed backup exit'
 Assert-Same $script:calls.Count 0 'failed backup deletes nothing'
 Assert-Same $script:reg[$WupAuKey].NoAutoUpdate 1 'failed backup keeps NoAutoUpdate'
+
+# A policy key that cannot be read is a failure, not "no policy": before the
+# fix it changes nothing, and after the fix it is not reported as fixed.
+Reset-Fake -Au @{ error = 'access denied' } -Wu $null
+$run = Invoke-WupRun -Fix
+Assert-Same $run.exitCode 1 'read error exit'
+Assert-Same $run.record.verdict 'policy read failed, not changed: au access denied' 'read error verdict'
+Assert-Same $script:calls.Count 0 'read error changes nothing'
+Reset-Fake -Au (Copy-Map $blockedAu) -Wu $null
+$script:readFailAfterFix = $true
+$run = Invoke-WupRun -Fix
+Assert-Same $run.exitCode 1 'read error after fix exit'
+Assert-Like $run.record.verdict 'fix not verified, policy read failed: au access denied*' 'read error after fix verdict'
 
 # SetDisableUXWUAccess 0 and NoAutoUpdate 0 stay; AUOptions 3+ stays.
 Reset-Fake -Au ([ordered]@{ NoAutoUpdate = 0; AUOptions = 4 }) -Wu ([ordered]@{ DisableWindowsUpdateAccess = 1; SetDisableUXWUAccess = 0 })
