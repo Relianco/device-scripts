@@ -202,8 +202,17 @@ function Get-ChildItem {
     $script:listed.Add($LiteralPath)
     Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters
 }
+# The working folder itself with an empty DACL: logs can be created in it only after its repair.
+$script:aces[$tmp] = 0
+function New-Item {
+    [CmdletBinding()] param([string]$ItemType, [string]$Path, [switch]$Force)
+    $parent = Split-Path -Parent $Path
+    if ($script:aces.ContainsKey($parent) -and $script:aces[$parent] -eq 0) { throw "creating $Path denied" }
+    Microsoft.PowerShell.Management\New-Item @PSBoundParameters
+}
 Initialize-FupDir
-Remove-Item -LiteralPath function:Get-ChildItem
+Remove-Item -LiteralPath function:Get-ChildItem, function:New-Item
+Assert-Same $script:aces[$tmp] 2 'empty-DACL working folder repaired'
 Assert-Same $script:aces[$stateFile] 2 'empty-DACL state.json repaired'
 Assert-Same $script:aces[$logsDir] 2 'empty-DACL logs folder repaired'
 Assert-Same $script:listed.Contains($logsDir) $true 'logs folder listed after its repair'

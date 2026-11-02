@@ -263,8 +263,10 @@ function Set-FupTreeAcl {
 }
 
 function Initialize-FupDir {
-    $null = New-Item -ItemType Directory -Path (Join-Path $FupDir 'logs') -Force
+    $null = New-Item -ItemType Directory -Path $FupDir -Force
     Set-FupTreeAcl $FupDir
+    # After the repair: the folder must grant SYSTEM before logs can be created in it.
+    $null = New-Item -ItemType Directory -Path (Join-Path $FupDir 'logs') -Force
 }
 
 function Get-FupFileHash {
