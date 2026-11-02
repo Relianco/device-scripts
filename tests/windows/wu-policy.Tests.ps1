@@ -183,8 +183,10 @@ Assert-Same $pairs[0].Name 'Fix' 'runner pair name'
 Assert-Same $pairs[0].Value 'true' 'runner pair value'
 
 # An early exit 0 would skip every assertion after it: the first exit 0 must be the last line.
-$self = [IO.File]::ReadAllText($PSCommandPath)
-if ($self.IndexOf("exit 0`n", [StringComparison]::Ordinal) -lt $self.IndexOf('Assert-Same $pairs[0].Value', [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
+# Line endings normalized so a CRLF checkout passes too; a missing match fails.
+$self = [IO.File]::ReadAllText($PSCommandPath) -replace "`r`n", "`n"
+$firstExit = $self.IndexOf("exit 0`n", [StringComparison]::Ordinal)
+if ($firstExit -lt 0 -or $firstExit -lt $self.IndexOf('Assert-Same $pairs[0].Value', [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
 
 Write-Output 'wu-policy tests passed'
 exit 0

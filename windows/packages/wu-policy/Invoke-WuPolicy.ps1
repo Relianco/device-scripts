@@ -185,6 +185,11 @@ function Get-WupPlan {
     # gpupdate rewrites whatever Registry.pol holds, so a deleted value comes back
     # unless the file goes too. Rename it only when it is the plausible source:
     # it names one of these values, or is too small to hold much else.
+    # Review asked to rewrite the file entry by entry instead; rejected. Renaming
+    # deletes no applied value: target release, deferral and pause values stay in
+    # the registry and keep working, they are just no longer re-applied. A WSUS
+    # device never gets here. The file is copied to the backup first, and a PReg
+    # rewriter on client devices is more risk than a backed-up rename.
     $pol = $State.registryPol
     $rename = $false
     if ($pol -and $pol.exists) {
@@ -225,7 +230,7 @@ function Invoke-WupGpUpdate {
 function Invoke-WupFix {
     param($Plan, [string]$Stamp)
     $out = [ordered]@{ backup = $null; removed = @(); polRenamed = $null; gpupdate = $null; errors = @() }
-    $dir = Join-Path $WupBackupRoot "wu-policy-backup-$Stamp"
+    $dir = "$WupBackupRoot\wu-policy-backup-$Stamp"
     try { Backup-WupPolicy $dir; $out.backup = $dir }
     catch { $out.errors += "backup: $(Limit-Text "$_" 100)"; return $out }
     foreach ($d in $Plan.deletes) {
@@ -337,6 +342,7 @@ function Invoke-Main {
         Write-Status "Windows Update policy $(if ($Fix) { 'fix' } else { 'check' }) starting"
         $run = Invoke-WupRun -Fix:$Fix
         # ponytail: no trimming like feature-update; two policy keys stay far under the ~10,000 character field.
+        # ("ponytail:" is this repo's marker for a deliberate shortcut, as in feature-update; not a name.)
         $json = $run.record | ConvertTo-Json -Depth 6 -Compress
         Write-Status "Verdict: $($run.record.verdict) ($($json.Length) bytes)"
         if (Set-WupField $json) { Write-Status "Written to $WupFieldName" }
