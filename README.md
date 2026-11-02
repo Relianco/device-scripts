@@ -105,6 +105,14 @@ Fix mode is off unless the package arguments are `{"Fix":"true"}`, base64 `eyJGa
 
 `windows/releases/feature-update.json` records the field name and the package arguments. The package hash is not stored in the repo; it goes in the runner's `-PackageSha256`.
 
+## Windows Update policy
+
+`windows/packages/wu-policy/Invoke-WuPolicy.ps1` finds local policy that turns automatic updates off. Run it through the deploy runner (NinjaOne script 374) as SYSTEM. By default it is read-only: it reports the values under `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate` and its `AU` subkey, the machine `Registry.pol` (size, date, and which of the values it names), and the appraiser task state. It writes one line of compact JSON to the device field `relianWuPolicy` and prints the same line last on stdout.
+
+Fix mode is off unless the package arguments are `{"Fix":"true"}`, base64 `eyJGaXgiOiJ0cnVlIn0=`. Fix acts only when `NoAutoUpdate` is 1, `AUOptions` is below 3, or `DisableWindowsUpdateAccess` is 1, and does nothing on a WSUS-managed device (`UseWUServer` 1 or `WUServer` set). It first exports the policy key and copies `Registry.pol` to `C:\relian\wu-policy-backup-<yyyyMMdd-HHmmss>`. It then deletes those values and `SetDisableUXWUAccess` when it is 1, and renames `Registry.pol` to `Registry.pol.bak-<stamp>` when the file names one of them or is under 1 KB. Last it runs `gpupdate /target:computer /force` and reads the values again. A run where a value is still set exits 1. Target release, deferral, pause, `DisableOSUpgrade` and WSUS values are reported and left alone. It never reboots and never starts an upgrade. A second run changes nothing.
+
+`windows/releases/wu-policy.json` records the field name and the package arguments. The package hash goes in the runner's `-PackageSha256`.
+
 ## Feature upgrade from a pinned ISO
 
 `windows/packages/feature-upgrade/Invoke-FeatureUpgrade.ps1` upgrades Windows in place from an ISO named by the package arguments. Run it through the deploy runner (NinjaOne script 374) as SYSTEM. Nothing about a release is built in: the ISO's build is read from the mounted image (`install.wim`/`install.esd`, else `setup.exe`), so any Windows ISO works.
