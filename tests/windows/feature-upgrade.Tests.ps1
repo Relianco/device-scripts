@@ -191,8 +191,22 @@ function Get-FupAceCount { param($Path) if ($script:aces.ContainsKey($Path)) { $
 $stateFile = Join-Path $tmp 'state.json'
 [IO.File]::WriteAllText($stateFile, '{}')
 $script:aces[$stateFile] = 0
+# A folder with an empty DACL cannot be listed; it must be repaired before it is.
+$logsDir = Join-Path $tmp 'logs'
+$null = New-Item -ItemType Directory -Path $logsDir -Force
+$script:aces[$logsDir] = 0
+$script:listed = [Collections.Generic.List[string]]::new()
+function Get-ChildItem {
+    [CmdletBinding()] param([string]$LiteralPath, [switch]$Force, [switch]$Recurse)
+    if ($script:aces.ContainsKey($LiteralPath) -and $script:aces[$LiteralPath] -eq 0) { throw "listing $LiteralPath denied" }
+    $script:listed.Add($LiteralPath)
+    Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters
+}
 Initialize-FupDir
+Remove-Item -LiteralPath function:Get-ChildItem
 Assert-Same $script:aces[$stateFile] 2 'empty-DACL state.json repaired'
+Assert-Same $script:aces[$logsDir] 2 'empty-DACL logs folder repaired'
+Assert-Same $script:listed.Contains($logsDir) $true 'logs folder listed after its repair'
 $grantAt = $script:icacls.IndexOf("$stateFile /grant:r *S-1-5-18:F *S-1-5-32-544:F /C /Q")
 $inheritAt = $script:icacls.IndexOf("$stateFile /inheritance:r /C /Q")
 if ($grantAt -lt 0 -or $inheritAt -lt $grantAt) { Fail "state.json not granted before inheritance removal: $($script:icacls -join ' | ')" }

@@ -249,14 +249,22 @@ function Set-FupItemAcl {
 # Working folder, SYSTEM and Administrators only: the worker script copy runs as SYSTEM.
 # Every item gets explicit ACEs, which also repairs one left with an empty DACL (seen on
 # a device: state.json denied even to SYSTEM). Administrators owns each item, and the
-# owner can always rewrite the DACL.
+# owner can always rewrite the DACL. Top-down, each folder repaired before it is listed:
+# a folder with an empty DACL cannot be listed, so icacls /T would fail on it.
+# ponytail: three icacls calls per item; fine for the few files here, slow for thousands.
+function Set-FupTreeAcl {
+    param([string]$Path)
+    Invoke-FupIcacls $Path /setowner '*S-1-5-32-544' /C /Q
+    Set-FupItemAcl $Path
+    if ((Get-FupAceCount $Path) -eq 0) { throw "$Path has no ACE after icacls" }
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        foreach ($c in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) { Set-FupTreeAcl $c.FullName }
+    }
+}
+
 function Initialize-FupDir {
     $null = New-Item -ItemType Directory -Path (Join-Path $FupDir 'logs') -Force
-    Invoke-FupIcacls $FupDir /setowner '*S-1-5-32-544' /T /C /Q
-    foreach ($p in @($FupDir) + @(Get-ChildItem -LiteralPath $FupDir -Recurse -Force | ForEach-Object { $_.FullName })) {
-        Set-FupItemAcl $p
-        if ((Get-FupAceCount $p) -eq 0) { throw "$p has no ACE after icacls" }
-    }
+    Set-FupTreeAcl $FupDir
 }
 
 function Get-FupFileHash {
