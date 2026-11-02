@@ -1,0 +1,7 @@
+{
+  "name": "Restart notice",
+  "kind": "notify",
+  "installsSoftware": false,
+  "ninjaField": "relianRestartNotice",
+  "packageArguments": "Optional. {\"Message\":\"<notice text, no double quotes>\",\"SnoozeMinutes\":\"60\",\"PromptMinutes\":\"10\",\"CountdownMinutes\":\"15\"}. Base64 of the JSON goes in the runner's -PackageArguments. Without it the defaults above apply."
+}
