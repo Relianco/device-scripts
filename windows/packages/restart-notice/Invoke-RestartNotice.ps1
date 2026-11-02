@@ -532,6 +532,18 @@ function Import-RnToolkit {
     $script:RnToolkitLoaded = $true
 }
 
+# Get-ADTLoggedOnUser initializes PSADT's cached assembly list before the theme
+# DLL exists. Explicitly include the generated file when granting the same
+# read/execute access PSADT grants its own client libraries; never grant write.
+function Grant-RnThemeReadAccess {
+    param([Parameter(Mandatory)][string]$Path)
+    $sessions = @(Get-ADTLoggedOnUser -ErrorAction Stop | Where-Object { $_.IsActiveUserSession })
+    if (-not $sessions.Count) { throw 'no active user session for dialog theme' }
+    foreach ($session in $sessions) {
+        [PSADT.ClientServer.ClientPermissions]::Remediate($session.ToRunAsActiveUser(), [IO.FileInfo[]]@($Path))
+    }
+}
+
 # The user-check package's dialog theme, copied: the runner downloads each package
 # as one file by hash, so the two cannot share a file. The mark and subtitle parts
 # are left out. The toolkit's client process (PSADT.ClientServer.Client.exe, started
@@ -828,9 +840,10 @@ namespace Relian.RestartNoticeTheme
 
     if (Test-Path -LiteralPath $dll) { Remove-Item -LiteralPath $dll -Force }
     Add-Type -TypeDefinition $source -OutputAssembly $dll -ReferencedAssemblies @('System', 'System.Xaml', 'WindowsBase', 'PresentationCore', 'PresentationFramework')
+    Grant-RnThemeReadAccess -Path $dll
     $fullName = [System.Reflection.AssemblyName]::GetAssemblyName($dll).FullName
     # The config is written last, after the assembly exists: a config naming a
-    # missing assembly would stop the client process from starting.
+    # missing or unreadable assembly would stop the client process from starting.
     $configPath = "$ClientExe.config"
     [xml]$config = [System.IO.File]::ReadAllText($configPath)
     $runtime = $config.configuration.runtime

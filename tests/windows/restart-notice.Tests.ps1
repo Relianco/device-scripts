@@ -528,6 +528,56 @@ $r = Invoke-Report -Sessions $notPeople
 Assert-Same $r.userPresent 'none' 'report placeholder sessions'
 Assert-Same @($r.sessions).Count 0 'report placeholder sessions not listed'
 
+# A theme DLL is created after the toolkit has cached its library file list.
+# Simulate a standard user's inaccessible new DLL: the client can load it only
+# when it was explicitly included in permission remediation before config activation.
+Add-Type -TypeDefinition @'
+using System;
+using System.IO;
+namespace PSADT.ClientServer {
+    public static class ClientPermissions {
+        public static int Calls;
+        public static bool Deny;
+        public static string GrantedPath;
+        public static void Remediate(object user, FileInfo[] paths) {
+            if (paths.Length != 1 || !paths[0].Exists) throw new Exception("missing generated assembly");
+            if (File.ReadAllText(Path.Combine(paths[0].DirectoryName, "client.exe.config")).Contains("appDomainManagerAssembly"))
+                throw new Exception("client configured before permission repair");
+            Calls++;
+            if (Deny) throw new UnauthorizedAccessException("cannot grant theme access");
+            GrantedPath = paths[0].FullName;
+        }
+    }
+}
+'@
+$themeTemp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
+$null = New-Item -ItemType Directory -Path $themeTemp
+$themeClient = Join-Path $themeTemp 'client.exe'
+$themeConfig = "$themeClient.config"
+$originalConfig = '<configuration><runtime><supportedRuntime version="v4.0" /></runtime></configuration>'
+# Compilation is platform-specific; use a real managed assembly as its output.
+function Add-Type { param($TypeDefinition, $OutputAssembly, $ReferencedAssemblies); [IO.File]::Copy([object].Assembly.Location, $OutputAssembly) }
+function Get-ADTLoggedOnUser {
+    $user = [pscustomobject]@{ IsActiveUserSession = $true }
+    $user | Add-Member -MemberType ScriptMethod -Name ToRunAsActiveUser -Value { 'standard-user' }
+    $user
+}
+try {
+    [IO.File]::WriteAllText($themeConfig, $originalConfig)
+    Install-RnDialogTheme -ClientExe $themeClient
+    Assert-Same ([PSADT.ClientServer.ClientPermissions]::Calls) 1 'generated theme included in permission repair'
+    Assert-Same ([PSADT.ClientServer.ClientPermissions]::GrantedPath) (Join-Path $themeTemp 'RelianRestartNoticeTheme.dll') 'only generated theme extra path'
+    if ([IO.File]::ReadAllText($themeConfig) -notmatch 'appDomainManagerAssembly') { Fail 'accessible theme was not activated' }
+
+    [IO.File]::WriteAllText($themeConfig, $originalConfig)
+    [PSADT.ClientServer.ClientPermissions]::Deny = $true
+    Assert-Throws { Install-RnDialogTheme -ClientExe $themeClient } 'theme permission denial'
+    Assert-Same ([IO.File]::ReadAllText($themeConfig)) $originalConfig 'permission failure leaves working client config intact'
+} finally {
+    Remove-Item Function:Add-Type
+    Remove-Item -LiteralPath $themeTemp -Recurse -Force
+}
+
 # Pin record and README.
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/restart-notice.json') -Raw | ConvertFrom-Json
 Assert-Same $release.ninjaField $RnFieldName 'pin record matches script field'
