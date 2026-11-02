@@ -75,20 +75,45 @@ Assert-Same ((Get-RnPendingReasons -Cbs $true -WindowsUpdate $false -FupState $b
 $running = [pscustomobject]@{ status = 'running'; time = '2026-11-01T08:00:00.0000000Z'; isoBuild = 26100 }
 Assert-Same (@(Get-RnPendingReasons -Cbs $false -WindowsUpdate $false -FupState $running -CurrentBuild 19045 -LastBoot $boot).Count) 0 'running upgrade not pending'
 
-# User decision.
-Assert-Same (Get-RnUserPresence -Users @() -ProbeFailed $true) 'unknown' 'probe failed'
-Assert-Same (Get-RnUserPresence -Users @() -ProbeFailed $false) 'none' 'no sessions'
-Assert-Same (Get-RnUserPresence -Users @($null, '', 'NT AUTHORITY\SYSTEM', 'Window Manager\DWM-1', 'Font Driver Host\UMFD-0', 'WORKGROUP\SYSTEM') -ProbeFailed $false) 'none' 'service accounts only'
-Assert-Same (Get-RnUserPresence -Users @('NT AUTHORITY\SYSTEM', 'CONTOSO\jdoe') -ProbeFailed $false) 'present' 'a person'
-Assert-Same (Get-RnUserPresence -Users @('AzureAD\JaneDoe') -ProbeFailed $false) 'present' 'an Entra user'
-
-# Sessions from the toolkit: a disconnected or RemoteApp session has no explorer.exe but is a user.
-$sessions = @(
-    [pscustomobject]@{ NTAccount = 'CONTOSO\rdpuser'; IsUserSession = $true; ConnectState = 'Disconnected' },
-    [pscustomobject]@{ NTAccount = 'NT AUTHORITY\SYSTEM'; IsUserSession = $false; ConnectState = 'Active' })
-Assert-Same ((Get-RnSessionUsers $sessions) -join ',') 'CONTOSO\rdpuser' 'session users'
-Assert-Same (Get-RnUserPresence -Users @(Get-RnSessionUsers $sessions) -ProbeFailed $false) 'present' 'rdp session without explorer is present'
-Assert-Same (@(Get-RnSessionUsers @()).Count) 0 'no sessions'
+# User decision. Sessions are Get-ADTLoggedOnUser entries; the other names are the
+# console user and explorer.exe owners.
+function New-Session {
+    param([string]$User, [int]$Id, [string]$State = 'WTSActive', [bool]$Console = $false, [bool]$Rdp = $false, $Idle = $null, [string]$Name = '', [bool]$IsUser = $true)
+    [pscustomobject]@{ NTAccount = $User; SessionId = $Id; SessionName = $Name; IsUserSession = $IsUser; ConnectState = $State; IsConsoleSession = $Console; IsRdpSession = $Rdp; IdleTime = $Idle }
+}
+function Get-Presence {
+    param($Raw = @(), $Others = @(), [bool]$Failed = $false)
+    Get-RnUserPresence -Sessions @(ConvertTo-RnSessionReport $Raw) -OtherUsers $Others -ProbeFailed $Failed
+}
+$jdoe = New-Session 'CONTOSO\jdoe' 1 -Console $true
+Assert-Same (Get-Presence -Failed $true) 'unknown' 'probe failed'
+Assert-Same (Get-Presence) 'none' 'no sessions'
+Assert-Same (Get-Presence -Others @($null, '', 'NT AUTHORITY\SYSTEM', 'Window Manager\DWM-1', 'Font Driver Host\UMFD-0', 'WORKGROUP\SYSTEM')) 'none' 'service accounts only'
+Assert-Same (Get-Presence -Raw @($jdoe) -Others @('NT AUTHORITY\SYSTEM', 'contoso\JDOE')) 'present' 'a person, names compared without case'
+Assert-Same (Get-Presence -Raw @((New-Session 'AzureAD\JaneDoe' 2 -Console $true)) -Others @('AzureAD\JaneDoe')) 'present' 'an Entra user'
+# Not people: session 0, the Services session, the listening console and rdp-tcp
+# entries with no user, service accounts, a placeholder state, a non-user session.
+$notPeople = @(
+    (New-Session 'CONTOSO\svc' 0 -Name 'Services'),
+    (New-Session 'CONTOSO\svc' 5 -Name 'Services'),
+    (New-Session '' 1 'WTSConnected' -Console $true -Name 'Console'),
+    (New-Session $null 65536 'WTSListen' -Name 'rdp-tcp'),
+    (New-Session 'CONTOSO\x' 3 'WTSListen' -Name 'rdp-tcp'),
+    (New-Session 'CONTOSO\x' 4 'WTSDown'),
+    (New-Session 'NT AUTHORITY\SYSTEM' 1 -Console $true),
+    (New-Session 'Window Manager\DWM-1' 1 -Console $true),
+    (New-Session 'CONTOSO\x' 6 -IsUser $false))
+Assert-Same @(ConvertTo-RnSessionReport $notPeople).Count 0 'placeholder and service sessions dropped'
+Assert-Same (Get-Presence -Raw $notPeople) 'none' 'placeholder and service sessions are nobody'
+# A disconnected session (no explorer.exe needed) is a person who cannot see a dialog.
+$gone = New-Session 'CONTOSO\rdpuser' 2 'WTSDisconnected' -Rdp $true
+Assert-Same (Get-Presence -Raw @($gone)) 'disconnected' 'disconnected only'
+Assert-Same (Get-Presence -Raw @($gone, $jdoe)) 'present' 'connected beats disconnected'
+Assert-Same (Get-Presence -Raw @((New-Session 'CONTOSO\x' 2 'SomeNewState'))) 'present' 'an unrecognised state still counts'
+# A console user or explorer.exe owner with no session of their own (a ghost
+# session, a stuck logoff) disagrees with the session list: cannot tell, never none.
+Assert-Same (Get-Presence -Others @('CONTOSO\ghost')) 'unknown' 'explorer owner with no session'
+Assert-Same (Get-Presence -Raw @($jdoe) -Others @('CONTOSO\jdoe', 'CONTOSO\ghost')) 'unknown' 'one ghost among real users'
 
 # Owner lookup: a failed GetOwner fails the probe instead of hiding a person.
 Assert-Same (ConvertTo-RnOwnerName ([pscustomobject]@{ ReturnValue = 0; Domain = 'CONTOSO'; User = 'jdoe' })) 'CONTOSO\jdoe' 'owner name'
@@ -120,8 +145,10 @@ if (-not $raw.EndsWith('"timestamp":"2026-11-02T15:00:00Z"}')) { Fail "json time
 if ($raw.Contains("`n")) { Fail 'json is not one line' }
 
 # The flow, with every side effect replaced. Each call is logged in order.
+# Sessions are the toolkit's sessions, Users the console user and explorer owners.
 function Reset-Mocks {
-    param([string[]]$Pending = @('windowsUpdate'), $Marker = $null, $Users = @('CONTOSO\jdoe'), [switch]$UserProbeFails, $PromptResult = 'Timeout', [int]$RestartCode = 0, [int]$PromptDelay = 0, [bool]$CanShow = $true)
+    param([string[]]$Pending = @('windowsUpdate'), $Marker = $null, $Sessions = @($jdoe), $Users = @('CONTOSO\jdoe'), [switch]$UserProbeFails, $PromptResult = 'Timeout', [int]$RestartCode = 0, [int]$PromptDelay = 0, [bool]$CanShow = $true, [scriptblock]$OnPrompt = {})
+    $script:OnPrompt = $OnPrompt
     $script:MockCanShow = $CanShow
     $script:PromptDelay = $PromptDelay
     $script:Log = [System.Collections.Generic.List[string]]::new()
@@ -139,15 +166,14 @@ function Reset-Mocks {
     $script:RnGetSnooze = { $script:Marker }
     $script:RnSetSnooze = { param($U, $S) $script:Log.Add('setSnooze'); $script:Marker = [pscustomobject]@{ SnoozeUntil = $U; SetAt = $S } }
     $script:RnClearSnooze = { $script:Log.Add('clearSnooze'); $script:Marker = $null }
-    $script:RnGetUsers = { if ($script:MockUserFails) { throw 'cim down' }; $script:MockUsers }
-    $script:RnPrompt = { param($T, $S, $Sec) $script:Log.Add("prompt:${S}:$Sec"); $script:Clock = $script:Clock.AddMinutes($script:PromptDelay); $script:MockPrompt }
+    $script:RnPrompt = { param($T, $S, $Sec) $script:Log.Add("prompt:${S}:$Sec"); $script:Clock = $script:Clock.AddMinutes($script:PromptDelay); & $script:OnPrompt; $script:MockPrompt }
     $script:RnCanShow = { $script:MockCanShow }
     $script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec") }
     $script:RnSleep = { param($Sec) $script:Log.Add("sleep:$Sec") }
     $script:RnRestart = { $script:Log.Add('restart'); $script:MockRestart }
     $script:RnSetField = { param($Json, $Name) $script:Log.Add('field'); $script:FieldNames.Add($Name); $script:Fields.Add(($Json | ConvertFrom-Json)); $true }
     $script:FieldNames = [System.Collections.Generic.List[string]]::new()
-    $script:MockSessions = @()
+    $script:MockSessions = $Sessions
     $script:RnGetSessions = { if ($script:MockUserFails) { throw 'wts down' }; $script:MockSessions }
     $script:RnGetOtherUsers = { $script:MockUsers }
     $script:RnBuild = { 19045 }
@@ -170,7 +196,7 @@ Assert-NoRestart 'none'
 if ($script:Log -match '^prompt') { Fail 'none prompted' }
 
 # 2. Confirmed nobody signed in: restart now, field first.
-Reset-Mocks -Users @('NT AUTHORITY\SYSTEM')
+Reset-Mocks -Sessions @() -Users @('NT AUTHORITY\SYSTEM')
 Assert-Same (Invoke-RnMain $args60) 0 'no user exit'
 Assert-Same (Get-Last).status 'restartedNoUser' 'no user status'
 Assert-FieldBeforeRestart 'no user'
@@ -181,6 +207,87 @@ Reset-Mocks -UserProbeFails -PromptResult 'Snooze 1 hour'
 $null = Invoke-RnMain $args60
 Assert-Same (Get-Last).status 'snoozed' 'unknown user is prompted'
 Assert-NoRestart 'unknown user'
+
+# 2c. Only a disconnected user: no notice 1, the countdown waited out without a
+# dialog, then restart.
+Reset-Mocks -Sessions @($gone) -Users @() -PromptResult 'Restart now'
+Assert-Same (Invoke-RnMain $args60) 0 'disconnected exit'
+Assert-Same ($script:Log -join '|') 'field|sleep:900|field|restart' 'disconnected sequence'
+Assert-Same (Get-Last).reason 'NotShown' 'disconnected reason'
+
+# 2d. The first real run: the detector sees a user, the toolkit refuses notice 1
+# (no suitable logged on users), and a second look finds nobody: restartedNoUser,
+# the field written before the restart. The old code let the error end the run.
+$noUser = { throw [NotSupportedException]::new('This deployment explicitly requires interactivity, however there are no suitable logged on users available and this process is running non-interactively.') }
+Reset-Mocks -PromptResult $null -OnPrompt { $script:MockSessions = @(); $script:MockUsers = @(); & $noUser }
+Assert-Same (Invoke-RnMain $args60) 0 'toolkit no user exit'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|restart' 'toolkit no user sequence'
+Assert-Same (Get-Last).status 'restartedNoUser' 'toolkit no user status'
+Assert-Same (Get-Last).reason 'toolkitNoUser' 'toolkit no user reason'
+if ((Get-Last).message -notmatch 'toolkit saw no') { Fail "toolkit no user message $((Get-Last).message)" }
+Assert-FieldBeforeRestart 'toolkit no user'
+
+# 2e. The toolkit refuses and the second look still sees a person (a disconnected
+# user who could come back, or cannot tell): countdown without a dialog, then restart.
+foreach ($second in @(@{ S = @($gone); U = @() }, @{ S = @(); U = @('CONTOSO\ghost') })) {
+    $script:Second = $second
+    Reset-Mocks -PromptResult $null -OnPrompt { $script:MockSessions = $script:Second.S; $script:MockUsers = $script:Second.U; & $noUser }
+    Assert-Same (Invoke-RnMain $args60) 0 'toolkit no user, person still there exit'
+    Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|sleep:900|field|restart' 'toolkit no user, person still there sequence'
+    Assert-Same (Get-Last).status 'restartedAfterCountdown' 'toolkit no user, person still there status'
+    Assert-Same (Get-Last).reason 'NotShown' 'toolkit no user, person still there reason'
+}
+
+# 2f. The user leaves before the countdown dialog: the toolkit's refusal is not a
+# failure, the countdown is waited out and the device restarts.
+Reset-Mocks -PromptResult 'Timeout'
+$script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec"); & $noUser }
+Assert-Same (Invoke-RnMain $args60) 0 'countdown refused exit'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:900|field|restart' 'countdown refused sequence'
+
+# 2g. Any other error: result failed with the message, in the field, exit 1, no restart.
+Reset-Mocks -OnPrompt { throw 'dialog broke' }
+Assert-Same (Invoke-RnRun $args60) 1 'other error exit'
+Assert-Same (Get-Last).status 'failed' 'other error status'
+Assert-Same (Get-Last).message 'dialog broke' 'other error message'
+Assert-Same ($script:FieldNames -join ',') 'relianRestartNotice' 'other error field'
+Assert-NoRestart 'other error'
+Reset-Mocks
+$script:RnGetPending = { throw 'registry broke' }
+Assert-Same (Invoke-RnRun (Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '' -ReportOnly 'true')) 1 'report error exit'
+Assert-Same ($script:FieldNames -join ',') 'relianSessionState' 'report error field'
+Assert-Same (Get-Last).status 'failed' 'report error status'
+
+# 2h. Open-RnSession checks the toolkit's own rule first: with no active user it
+# throws a catchable error and never calls Open-ADTSession (whose refusal ends the
+# process). Detection never opens a session. A toolkit break is caught as a failure.
+function Remove-ADTHashtableNullOrEmptyValues { param($Hashtable) $Hashtable }
+function Open-ADTSession { $script:Log.Add('openSession'); if ($script:BreakOpen) { $Global:LASTEXITCODE = 1602; break } }
+$script:RnToolkitLoaded = $true
+$script:BreakOpen = $false
+Reset-Mocks -Sessions @() -Users @()
+$script:RnSessionOpen = $false
+$null = Invoke-RnMain $args60
+$null = Invoke-RnReport
+if ($script:Log -contains 'openSession') { Fail 'detection opened a toolkit session' }
+Reset-Mocks -CanShow $false
+$err = $null
+try { Open-RnSession } catch { $err = $_ }
+if (-not $err -or -not (Test-RnNoUserError $err)) { Fail 'no active user did not throw the no-user error' }
+if ($script:Log -contains 'openSession') { Fail 'Open-ADTSession called with no active user' }
+Assert-Same $script:RnSessionOpen $false 'no session after refusal'
+Reset-Mocks
+$script:BreakOpen = $true
+$err = $null
+try { Open-RnSession } catch { $err = $_ }
+if (-not $err -or "$err" -notmatch '1602') { Fail "toolkit break not turned into an error: $err" }
+Assert-Same $script:RnSessionOpen $false 'no session after a toolkit break'
+$script:BreakOpen = $false
+Open-RnSession
+Assert-Same $script:RnSessionOpen $true 'session opened'
+$script:RnSessionOpen = $false
+Assert-Same (Test-RnNoUserError ([Management.Automation.ErrorRecord]::new([Exception]::new('x', [NotSupportedException]::new('there are no suitable logged on users available')), 'id', 'NotSpecified', $null))) $true 'inner no-user error'
+Assert-Same (Test-RnNoUserError ([Management.Automation.ErrorRecord]::new([NotSupportedException]::new('stream'), 'id', 'NotSpecified', $null))) $false 'other NotSupportedException'
 
 # 3. Restart now on notice 1.
 Reset-Mocks -PromptResult 'Restart now'
@@ -273,10 +380,6 @@ function Invoke-Report {
     Assert-Same $j.build 19045 'report build'
     return $j
 }
-function New-Session {
-    param([string]$User, [int]$Id, [string]$State = 'WTSActive', [bool]$Console = $false, [bool]$Rdp = $false, $Idle = $null)
-    [pscustomobject]@{ NTAccount = $User; SessionId = $Id; IsUserSession = $true; ConnectState = $State; IsConsoleSession = $Console; IsRdpSession = $Rdp; IdleTime = $Idle }
-}
 $sys = [pscustomobject]@{ NTAccount = 'NT AUTHORITY\SYSTEM'; SessionId = 0; IsUserSession = $false; ConnectState = 'WTSActive'; IsConsoleSession = $false; IsRdpSession = $false; IdleTime = $null }
 
 $r = Invoke-Report -Sessions @($sys) -Users @('NT AUTHORITY\SYSTEM', '')
@@ -302,7 +405,7 @@ Assert-Same $r.reason 'rdp' 'report rdp reason'
 Assert-Same $r.sessions[0].idleMinutes $null 'report idle not available'
 
 $r = Invoke-Report -Sessions @((New-Session 'CONTOSO\rdpuser' 2 'WTSDisconnected' -Rdp $true))
-Assert-Same $r.userPresent 'present' 'report disconnected still present'
+Assert-Same $r.userPresent 'disconnected' 'report disconnected, not none'
 Assert-Same $r.reason 'disconnected' 'report disconnected reason'
 Assert-Same $r.sessions[0].state 'disconnected' 'report disconnected state'
 
@@ -317,7 +420,13 @@ Assert-Same $r.snooze 'stale' 'report stale marker'
 Assert-Same "$($script:Marker.SnoozeUntil)" $old.SnoozeUntil 'report leaves a stale marker'
 $r = Invoke-Report -Users @('CONTOSO\jdoe') -Marker $m
 Assert-Same $r.snooze 'active' 'report active marker'
-Assert-Same $r.reason 'console' 'report named only by console user or explorer'
+Assert-Same $r.userPresent 'unknown' 'report ghost: named only by console user or explorer'
+Assert-Same $r.reason 'cannotTell' 'report ghost reason'
+Assert-Same ($r.users -join ',') 'CONTOSO\jdoe' 'report ghost name listed'
+# The same fixed detector as the decision: placeholders and service sessions are nobody.
+$r = Invoke-Report -Sessions $notPeople
+Assert-Same $r.userPresent 'none' 'report placeholder sessions'
+Assert-Same @($r.sessions).Count 0 'report placeholder sessions not listed'
 
 # Pin record and README.
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/restart-notice.json') -Raw | ConvertFrom-Json

@@ -9,10 +9,15 @@
          staged by the feature-upgrade package): result none, snooze marker cleared.
       2. A snooze that has not run out: result snoozed. Nothing is shown.
       3. Nobody signed in (confirmed): result restartedNoUser, then restart now.
-      4. Someone signed in, or it cannot tell: notice 1 with Restart now and one
+      4. Only a disconnected user: no notice can show; the countdown is waited
+         out without one, then restart.
+      5. Someone signed in, or it cannot tell: notice 1 with Restart now and one
          snooze. Restart now restarts. Snooze writes the marker and exits.
          No answer, or the snooze was already used: notice 2, a countdown with
-         Restart now and no snooze, then restart.
+         Restart now and no snooze, then restart. If the toolkit finds no user to
+         show notice 1 to, a second check decides: nobody, restartedNoUser
+         (reason toolkitNoUser); otherwise the countdown without a notice.
+      Any other error: result failed, exit 1.
 
     The result is written to the NinjaOne device field relianRestartNotice before
     any restart, because nothing runs after it, and printed last on stdout.
@@ -108,18 +113,25 @@ function Get-RnPendingReasons {
     return $r
 }
 
-# Pure: present | none | unknown, from the owners of interactive sessions.
-# The rule: a person is signed in when any of these names one: the toolkit's
-# Get-ADTLoggedOnUser (Windows terminal-services sessions: console and RDP,
-# connected or disconnected, RemoteApp too), the console user from
-# Win32_ComputerSystem.UserName (set for a locked console too), or the owner of
-# any explorer.exe. A disconnected user still counts: their unsaved work is still
-# there. SYSTEM, service accounts and the DWM-/UMFD- session accounts are
-# not people. A probe that failed is unknown, and unknown is treated as present.
+# Pure: present | disconnected | none | unknown.
+# The rule: the toolkit's Get-ADTLoggedOnUser (Windows terminal-services sessions)
+# is the list of sessions. A session is a person's only when it has a user name
+# that is a person (see Get-RnPeople), is not session 0 or "Services", and is not
+# a placeholder state (listen, idle, down, init, reset: the listening "console" and
+# "rdp-tcp" entries). Any connected one: present. Only disconnected ones:
+# disconnected, still a person with unsaved work, but no dialog can show. None:
+# none. The console user (Win32_ComputerSystem.UserName) and explorer.exe owners
+# cross-check it: a person they name with no session of their own (a ghost
+# session, a stuck logoff) is a disagreement, so unknown. A probe that failed is
+# unknown. Unknown is treated as present.
 function Get-RnUserPresence {
-    param([string[]]$Users, [bool]$ProbeFailed)
+    param($Sessions, [string[]]$OtherUsers, [bool]$ProbeFailed)
     if ($ProbeFailed) { return 'unknown' }
-    if (@(Get-RnPeople $Users).Count) { return 'present' }
+    $sessions = @($Sessions | Where-Object { $null -ne $_ })
+    $known = @($sessions | ForEach-Object { $_.user })
+    if (@(Get-RnPeople $OtherUsers | Where-Object { $known -notcontains $_ }).Count) { return 'unknown' }
+    if (@($sessions | Where-Object { $_.state -ne 'disconnected' }).Count) { return 'present' }
+    if ($sessions.Count) { return 'disconnected' }
     return 'none'
 }
 
@@ -138,43 +150,65 @@ function Get-RnPeople {
     }
 }
 
-# Pure: account names of the user sessions Get-ADTLoggedOnUser returned.
-function Get-RnSessionUsers {
-    param($Sessions)
-    foreach ($x in @($Sessions)) {
-        if ($null -ne $x -and $x.IsUserSession -and "$($x.NTAccount)") { "$($x.NTAccount)" }
-    }
-}
-
-# Pure: one report entry per user session from Get-ADTLoggedOnUser. ConnectState
-# is the WTS state (WTSActive -> active). Lock state is not in the toolkit's
-# session data and a LogonUI.exe check is a guess, so locked is always unknown.
+# Pure: one entry per person's session from Get-ADTLoggedOnUser (the rule is at
+# Get-RnUserPresence). ConnectState is the WTS state (WTSActive -> active); an
+# unrecognised state counts, so a new state name cannot hide a person. Lock state
+# is not in the toolkit's session data and a LogonUI.exe check is a guess, so
+# locked is always unknown.
 function ConvertTo-RnSessionReport {
     param($Sessions)
     foreach ($x in @($Sessions)) {
-        if ($null -eq $x -or -not $x.IsUserSession -or -not "$($x.NTAccount)") { continue }
-        $state = "$($x.ConnectState)" -replace '^WTS', ''
+        if ($null -eq $x -or -not $x.IsUserSession -or -not @(Get-RnPeople @("$($x.NTAccount)")).Count) { continue }
+        if ([int]$x.SessionId -eq 0 -or "$($x.SessionName)" -eq 'Services') { continue }
+        $state = ("$($x.ConnectState)" -replace '^WTS', '').ToLowerInvariant()
+        if (@('listen', 'listening', 'idle', 'down', 'init', 'initializing', 'reset') -contains $state) { continue }
         $kind = if ($x.IsConsoleSession) { 'console' } elseif ($x.IsRdpSession) { 'rdp' } else { 'other' }
         $idle = $null
         if ($x.IdleTime -is [timespan]) { $idle = [int][math]::Floor($x.IdleTime.TotalMinutes) }
-        [ordered]@{ user = "$($x.NTAccount)"; id = [int]$x.SessionId; type = $kind; state = $state.ToLowerInvariant(); locked = 'unknown'; idleMinutes = $idle }
+        [ordered]@{ user = "$($x.NTAccount)".Trim(); id = [int]$x.SessionId; type = $kind; state = $state; locked = 'unknown'; idleMinutes = $idle }
     }
 }
 
 # Pure: why Get-RnUserPresence decided what it did: none | console | rdp |
-# disconnected | cannotTell. A connected console session wins over RDP, and any
-# connected session over a disconnected one.
+# disconnected | cannotTell. A connected console session wins over RDP.
 function Get-RnPresenceReason {
     param([string]$Presence, $Sessions)
     if ($Presence -eq 'unknown') { return 'cannotTell' }
-    if ($Presence -eq 'none') { return 'none' }
-    $connected = @(@($Sessions) | Where-Object { $_.state -ne 'disconnected' })
-    if (@($connected | Where-Object { $_.type -eq 'console' }).Count) { return 'console' }
-    if ($connected.Count) { return 'rdp' }
-    if (@($Sessions).Count) { return 'disconnected' }
-    # ponytail: a person named only by the console user or an explorer.exe owner, with
-    # no toolkit session, is taken as at the console.
-    return 'console'
+    if ($Presence -ne 'present') { return $Presence }
+    if (@(@($Sessions) | Where-Object { $_.state -ne 'disconnected' -and $_.type -eq 'console' }).Count) { return 'console' }
+    return 'rdp'
+}
+
+# The one user detector, for Invoke-RnMain and Invoke-RnReport. It opens no
+# toolkit session: an Interactive session with nobody signed in ends the process.
+function Get-RnDetection {
+    $sessions = @()
+    $others = @()
+    $failed = $false
+    try {
+        $sessions = @(ConvertTo-RnSessionReport @(& $script:RnGetSessions))
+        $others = @(& $script:RnGetOtherUsers)
+    } catch {
+        $failed = $true
+        Write-Status "user probe failed: $($_.Exception.Message)" 'WARN'
+    }
+    $presence = Get-RnUserPresence -Sessions $sessions -OtherUsers $others -ProbeFailed $failed
+    return [ordered]@{
+        presence = $presence
+        reason   = Get-RnPresenceReason -Presence $presence -Sessions $sessions
+        users    = @(Get-RnPeople (@($sessions | ForEach-Object { $_.user }) + $others))
+        sessions = $sessions
+    }
+}
+
+# Pure: true for the toolkit refusing an Interactive session because no user can
+# see it (and for Open-RnSession's own check of the same thing).
+function Test-RnNoUserError {
+    param($ErrorRecord)
+    for ($e = $ErrorRecord.Exception; $null -ne $e; $e = $e.InnerException) {
+        if ($e.Message -match 'no suitable logged on users') { return $true }
+    }
+    return $false
 }
 
 # Pure: DOMAIN\user from a Win32_Process GetOwner result. A failed lookup throws, so
@@ -294,10 +328,7 @@ function Invoke-RnMain {
         return 0
     }
 
-    $users = @()
-    $failed = $false
-    try { $users = @(& $script:RnGetUsers) } catch { $failed = $true }
-    $presence = Get-RnUserPresence -Users $users -ProbeFailed $failed
+    $presence = (Get-RnDetection).presence
     if ($presence -eq 'none') {
         return (Invoke-RnRestartNow (New-RnResult 'restartedNoUser' 'nobody signed in; restarted' $pending))
     }
@@ -305,9 +336,27 @@ function Invoke-RnMain {
     $snoozeUsed = $snooze -eq 'used'
     $button = ''
     $reason = 'snoozeUsed'
-    if (-not $snoozeUsed) {
+    # Disconnected: a person, but no session can show notice 1. Straight to the
+    # countdown without a dialog.
+    if ($presence -eq 'disconnected') { $reason = 'NotShown' }
+    elseif (-not $snoozeUsed) {
         $snoozeText = Get-RnSnoozeText $A.SnoozeMinutes
-        $button = Get-RnButton -Result (& $script:RnPrompt $A.Message $snoozeText ($A.PromptMinutes * 60)) -SnoozeText $snoozeText
+        $shown = $null
+        try { $shown = & $script:RnPrompt $A.Message $snoozeText ($A.PromptMinutes * 60) }
+        catch {
+            if (-not (Test-RnNoUserError $_)) { throw }
+            # The toolkit saw no user where the detector saw one (or could not tell).
+            # A second look decides: nobody now means restart now; anyone else (a
+            # disconnected user who could come back, still cannot tell) gets the
+            # countdown without a dialog.
+            Write-Status "toolkit saw no user: $($_.Exception.Message)" 'WARN'
+            if ((Get-RnDetection).presence -eq 'none') {
+                $r = New-RnResult 'restartedNoUser' 'the toolkit saw no signed-in user and a second check agreed; restarted' $pending
+                $r['reason'] = 'toolkitNoUser'
+                return (Invoke-RnRestartNow $r)
+            }
+        }
+        $button = Get-RnButton -Result $shown -SnoozeText $snoozeText
         if ($button -eq 'Restart now') {
             return (Invoke-RnRestartNow (New-RnResult 'restarted' 'user chose Restart now' $pending $button))
         }
@@ -335,7 +384,12 @@ function Invoke-RnMain {
     $r = New-RnResult 'restartedAfterCountdown' "countdown of $($A.CountdownMinutes) minutes ($reason), then restart" $pending $button $snoozeUsed
     $r['reason'] = $reason
     Out-RnResult $r
-    if ($reason -ne 'NotShown') { & $script:RnCountdown $A.Message $seconds }
+    if ($reason -ne 'NotShown') {
+        # The user left between the check and the dialog: the field is written, so
+        # wait the countdown out without it.
+        try { & $script:RnCountdown $A.Message $seconds }
+        catch { if (-not (Test-RnNoUserError $_)) { throw }; Write-Status "countdown not shown: $($_.Exception.Message)" 'WARN' }
+    }
     & $script:RnSleep $seconds
     return (Invoke-RnRestartNow $r)
 }
@@ -346,20 +400,12 @@ function Invoke-RnMain {
 function Invoke-RnReport {
     $now = (& $script:RnNow).ToUniversalTime()
     $boot = & $script:RnLastBoot
-    $sessions = @()
-    $users = @()
-    $failed = $false
-    try {
-        $raw = @(& $script:RnGetSessions)
-        $sessions = @(ConvertTo-RnSessionReport $raw)
-        $users = @(Get-RnSessionUsers $raw) + @(& $script:RnGetOtherUsers)
-    } catch { $failed = $true }
-    $presence = Get-RnUserPresence -Users $users -ProbeFailed $failed
+    $d = Get-RnDetection
     $r = [ordered]@{
-        userPresent = $presence
-        reason      = Get-RnPresenceReason -Presence $presence -Sessions $sessions
-        users       = @(Get-RnPeople $users)
-        sessions    = $sessions
+        userPresent = $d.presence
+        reason      = $d.reason
+        users       = $d.users
+        sessions    = $d.sessions
         pending     = @(& $script:RnGetPending)
         lastBoot    = $boot.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         build       = [int](& $script:RnBuild)
@@ -367,6 +413,21 @@ function Invoke-RnReport {
     }
     Out-RnResult $r $RnReportField
     return 0
+}
+
+# Runs one mode. Any error is written as failed (before anything else can end the
+# run) and returns 1, so a run never ends silent.
+function Invoke-RnRun {
+    param($A)
+    try {
+        if ($A.ReportOnly) { return (Invoke-RnReport) }
+        return (Invoke-RnMain $A)
+    } catch {
+        Write-Status "$($_.Exception.Message) $($_.ScriptStackTrace)" 'ERROR'
+        $outField = if ($A.ReportOnly) { $RnReportField } else { $RnFieldName }
+        Out-RnResult (New-RnResult 'failed' "$($_.Exception.Message)" @()) $outField
+        return 1
+    }
 }
 
 # --- Real implementations. Tests replace these. -------------------------------
@@ -390,7 +451,7 @@ $script:RnGetPending = {
     Get-RnPendingReasons -Cbs $cbs -WindowsUpdate $wu -FupState $state -CurrentBuild $build -LastBoot (& $script:RnLastBoot)
 }
 
-# The one user detector. Invoke-RnMain uses the names; Invoke-RnReport also the sessions.
+# The probes behind Get-RnDetection.
 $script:RnGetSessions = {
     Import-RnToolkit
     @(Get-ADTLoggedOnUser -ErrorAction Stop)
@@ -400,11 +461,6 @@ $script:RnGetOtherUsers = {
     foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)) {
         ConvertTo-RnOwnerName (Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop)
     }
-}
-$script:RnGetUsers = {
-    Open-RnSession
-    Get-RnSessionUsers @(& $script:RnGetSessions)
-    & $script:RnGetOtherUsers
 }
 
 $script:RnGetSnooze = {
@@ -433,12 +489,27 @@ function Import-RnToolkit {
     $script:RnToolkitLoaded = $true
 }
 
+# An Interactive session needs a user the toolkit calls active (IsActiveUserSession,
+# as Get-ADTRunAsActiveUser picks it). Without one, Open-ADTSession refuses
+# ("no suitable logged on users") and then ends the process itself: exit 1602, or
+# break when it thinks it runs at a prompt. No try/catch sees either, so the same
+# test runs first and throws an error the caller can catch.
 function Open-RnSession {
     if ($script:RnSessionOpen) { return }
     Import-RnToolkit
+    if (-not (& $script:RnCanShow)) {
+        throw [NotSupportedException]::new('no suitable logged on users: no active user session for the toolkit')
+    }
     $s = @{ AppVendor = ''; AppName = 'Restart needed'; AppVersion = '1'; RequireAdmin = $false; DeployAppScriptVersion = '4.1.8' }
     $s = Remove-ADTHashtableNullOrEmptyValues -Hashtable $s
-    $null = Open-ADTSession @s -DeploymentType 'Install' -DeployMode 'Interactive' -PassThru
+    # The loop catches the toolkit's break, so a race (the user leaves after the
+    # check) is a failed result, not a silent end. Its exit cannot be caught.
+    $opened = $false
+    foreach ($once in 1) {
+        $null = Open-ADTSession @s -DeploymentType 'Install' -DeployMode 'Interactive' -PassThru
+        $opened = $true
+    }
+    if (-not $opened) { throw "Open-ADTSession ended without a session (exit code $Global:LASTEXITCODE)" }
     $script:RnSessionOpen = $true
 }
 
@@ -449,8 +520,9 @@ $script:RnPrompt = {
 }
 
 # True when a user session is active (connected), so a toolkit dialog can show.
+# Needs no toolkit session; Open-RnSession uses it as its check.
 $script:RnCanShow = {
-    Open-RnSession
+    Import-RnToolkit
     [bool](@(Get-ADTLoggedOnUser | Where-Object { $_.IsActiveUserSession }).Count)
 }
 
@@ -485,14 +557,7 @@ try {
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 
 $script:RnJson = $null
-try {
-    if ($rnArgs.ReportOnly) { $code = Invoke-RnReport } else { $code = Invoke-RnMain $rnArgs }
-} catch {
-    Write-Status "$($_.ScriptStackTrace)" 'ERROR'
-    $outField = if ($rnArgs.ReportOnly) { $RnReportField } else { $RnFieldName }
-    Out-RnResult (New-RnResult 'failed' "$($_.Exception.Message)" @()) $outField
-    $code = 1
-}
+$code = Invoke-RnRun $rnArgs
 # Last stdout line is the JSON, so a log reader can find it.
 if ($script:RnJson) { Write-Output $script:RnJson }
 # Close-ADTSession exits the process itself; the exit after it covers a session
