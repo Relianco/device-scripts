@@ -129,7 +129,8 @@ function Get-WupPolEntries {
         $i += 2
         $out.Add("$($text[0]);$($text[1])")
     }
-    return , $out.ToArray()
+    # Unrolled on purpose: callers wrap in @(), and an empty file must count 0.
+    return $out.ToArray()
 }
 
 # Pure: true for a Registry.pol entry the fix deletes anyway (a "**del." entry counts).
