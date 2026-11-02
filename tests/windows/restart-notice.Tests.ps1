@@ -336,7 +336,7 @@ function Set-OpenSequence { param([object[]]$States) $script:OpenStates = [Syste
 Reset-Mocks -PromptResult 'Timeout'
 Set-OpenSequence @($false, $true, $true, $false)
 Assert-Same (Invoke-RnMain $args60) 0 'countdown restart now exit'
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:5|sleep:5|sleep:5|field|restart' 'countdown restart now sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:1|sleep:1|sleep:1|field|restart' 'countdown restart now sequence'
 Assert-Same (Get-Last).status 'restarted' 'countdown restart now status'
 Assert-Same (Get-Last).button 'Restart now' 'countdown restart now button'
 Assert-Same (Get-Last).reason 'NoAnswer' 'countdown restart now keeps why the countdown showed'
@@ -345,17 +345,27 @@ function Get-Slept { ($script:Log | Where-Object { $_ -like 'sleep:*' } | ForEac
 # No press (the dialog stays open), or never seen open: the whole countdown, then restart.
 foreach ($state in @($true, $false)) {
     Reset-Mocks -PromptResult 'Timeout'
-    Set-OpenSequence (@($state) * 180)
+    Set-OpenSequence (@($state) * 900)
     $null = Invoke-RnMain $args60
     Assert-Same (Get-Slept) 900 "countdown open=$state waits it out"
     Assert-Same (Get-Last).status 'restartedAfterCountdown' "countdown open=$state status"
     Assert-Same (Get-Last).button 'NoAnswer' "countdown open=$state button"
 }
+# The dialog opens 2 seconds in and is answered 2 seconds later: seen and acted on.
+# Polling every 5 seconds missed it and waited the whole countdown.
+Reset-Mocks -PromptResult 'Timeout'
+$script:CountdownStart = $now
+$script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec"); $script:CountdownStart = $script:Clock }
+$script:RnCountdownOpen = { $t = ($script:Clock - $script:CountdownStart).TotalSeconds; $t -ge 2 -and $t -lt 4 }
+$null = Invoke-RnMain $args60
+Assert-Same (Get-Last).button 'Restart now' 'quick Restart now seen'
+Assert-Same (Get-Slept) 4 'quick Restart now restarts at once'
+
 # The probe fails part way: the rest of the countdown is waited out, never an early restart.
 Reset-Mocks -PromptResult 'Timeout'
 Set-OpenSequence @($true, $true, 'wmi broke')
 $null = Invoke-RnMain $args60
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:5|sleep:5|sleep:890|field|restart' 'probe failure sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:1|sleep:1|sleep:898|field|restart' 'probe failure sequence'
 Assert-Same (Get-Last).status 'restartedAfterCountdown' 'probe failure status'
 
 # 3. Restart now on notice 1.

@@ -413,9 +413,11 @@ function Invoke-RnMain {
 }
 
 # Waits out the countdown. True when the countdown dialog closed before the end:
-# it has no close or minimize, so that is Restart now. Polls every 5 seconds; the
-# dialog counts as closed only after it was seen open. A probe that fails waits
-# the rest of the countdown, as before this check existed.
+# it has no close or minimize, so that is Restart now. The dialog counts as closed
+# only after it was seen open, so the poll is every second: a dialog that opens
+# and is answered between two polls is missed and the countdown runs out. Nobody
+# reads it and clicks within a second. A probe that fails waits the rest of the
+# countdown, as before this check existed.
 function Wait-RnCountdown {
     param([int]$Seconds)
     $end = (& $script:RnNow).AddSeconds($Seconds)
@@ -426,7 +428,7 @@ function Wait-RnCountdown {
             if ($left -le 0) { return $false }
             if (& $script:RnCountdownOpen) { $seen = $true }
             elseif ($seen) { return $true }
-            & $script:RnSleep ([math]::Min(5, $left))
+            & $script:RnSleep 1
         }
     } catch {
         Write-Status "countdown dialog not watched: $($_.Exception.Message)" 'WARN'
