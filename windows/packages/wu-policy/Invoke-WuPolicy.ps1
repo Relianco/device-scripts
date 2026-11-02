@@ -56,8 +56,6 @@ $WupKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
 $WupAuKey = "$WupKey\AU"
 $WupPolPath = "$env:SystemRoot\System32\GroupPolicy\Machine\Registry.pol"
 $WupBackupRoot = 'C:\relian'
-# Value names the fix may delete. Anything else is reported, never changed.
-$WupFixNames = @('NoAutoUpdate', 'AUOptions', 'DisableWindowsUpdateAccess', 'SetDisableUXWUAccess')
 
 function Write-Status {
     param([string]$Message, [string]$Level = "INFO")
@@ -104,14 +102,14 @@ function Get-WupInt {
     return $null
 }
 
-# Pure: "key;value" for each entry of a Registry.pol. PReg is an 8-byte header,
-# then [key;value;type;size;data] with UTF-16LE text and uint32 type and size.
-# Throws when the file is not well formed.
+# Pure: one object (key, name, data) per Registry.pol entry. PReg is an 8-byte
+# header, then [key;name;type;size;data] with UTF-16LE text and uint32 type and
+# size. data is the number for a REG_DWORD, else $null. Throws when malformed.
 function Get-WupPolEntries {
     param([byte[]]$Bytes)
     if ($null -eq $Bytes -or $Bytes.Length -lt 8 -or [Text.Encoding]::ASCII.GetString($Bytes, 0, 4) -ne 'PReg') { throw 'not a PReg file' }
     $u = [Text.Encoding]::Unicode
-    $out = New-Object System.Collections.Generic.List[string]
+    $out = New-Object System.Collections.Generic.List[object]
     $i = 8
     while ($i -lt $Bytes.Length) {
         if ([BitConverter]::ToUInt16($Bytes, $i) -ne 0x5B) { throw "no [ at $i" }
@@ -123,23 +121,32 @@ function Get-WupPolEntries {
             $text += $u.GetString($Bytes, $start, $i - $start)
             $i += 4   # terminator and ';'
         }
+        $type = [BitConverter]::ToUInt32($Bytes, $i)
         $size = [int][BitConverter]::ToUInt32($Bytes, $i + 6)   # after type (4) and ';' (2)
+        $data = $null
+        if ($type -eq 4 -and $size -eq 4) { $data = [BitConverter]::ToUInt32($Bytes, $i + 12) }
         $i += 12 + $size                                       # type ; size ; data
         if ([BitConverter]::ToUInt16($Bytes, $i) -ne 0x5D) { throw "no ] at $i" }
         $i += 2
-        $out.Add("$($text[0]);$($text[1])")
+        $out.Add([pscustomobject]@{ key = $text[0]; name = $text[1]; data = $data })
     }
     # Unrolled on purpose: callers wrap in @(), and an empty file must count 0.
     return $out.ToArray()
 }
 
-# Pure: true for a Registry.pol entry the fix deletes anyway (a "**del." entry counts).
+# Pure: true when a Registry.pol entry only re-applies a value this fix deletes:
+# a planned delete, under that value's own key, with a blocking value (or a
+# "**del." directive for it). Anything else in the file is policy to keep.
 function Test-WupFixEntry {
-    param([string]$Entry)
-    $parts = $Entry -split ';', 2
-    $value = $parts[1] -replace '^\*\*del\.', ''
-    $keys = @('Software\Policies\Microsoft\Windows\WindowsUpdate', 'Software\Policies\Microsoft\Windows\WindowsUpdate\AU')
-    return ($keys -contains $parts[0]) -and ($WupFixNames -contains $value)
+    param($Entry, [string[]]$Deletes)
+    $name = "$($Entry.name)" -replace '^\*\*del\.', ''
+    if ($Deletes -notcontains $name) { return $false }
+    $key = if (@('DisableWindowsUpdateAccess', 'SetDisableUXWUAccess') -contains $name) { $WupKey } else { $WupAuKey }
+    if (('HKLM:\' + $Entry.key) -ne $key) { return $false }
+    if ("$($Entry.name)" -like '[*][*]del.*') { return $true }
+    if ("$($Entry.data)" -notmatch '^\d+$') { return $false }
+    if ($name -eq 'AUOptions') { return [long]$Entry.data -lt 3 }
+    return [long]$Entry.data -eq 1
 }
 
 function Get-WupPolInfo {
@@ -153,11 +160,12 @@ function Get-WupPolInfo {
             lastWrite = $item.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
         }
         try {
+            # wu: its entries under the two Windows Update keys; other: the rest.
             $entries = @(Get-WupPolEntries ([IO.File]::ReadAllBytes($Path)))
-            $ours = @($entries | Where-Object { Test-WupFixEntry $_ })
+            $wu = @($entries | Where-Object { @($WupKey, $WupAuKey) -contains ('HKLM:\' + $_.key) })
             $info.entries = $entries.Count
-            $info.wuValues = @($ours | ForEach-Object { ($_ -split ';', 2)[1] })
-            $info.other = $entries.Count - $ours.Count
+            $info.other = $entries.Count - $wu.Count
+            $info.wu = $wu
         } catch { $info.parseError = Limit-Text "$_" 80 }
         return $info
     } catch { return [ordered]@{ exists = $true; error = (Limit-Text "$_" 120) } }
@@ -224,8 +232,11 @@ function Get-WupPlan {
     # value it puts back fails the verify step. An unparsed file is left.
     $pol = $State.registryPol
     $rename = $false
-    if ($pol -and $pol.exists -and $pol.Contains('other') -and $pol.Contains('entries')) {
-        $rename = ([int]$pol.other -eq 0) -and ([int]$pol.entries -gt 0)
+    if ($pol -and $pol.exists -and $pol.Contains('other') -and $pol.Contains('wu')) {
+        $names = @($deletes | ForEach-Object { $_.name })
+        $polWu = @($pol.wu)
+        $keep = @($polWu | Where-Object { -not (Test-WupFixEntry $_ $names) })
+        $rename = ([int]$pol.other -eq 0) -and ($polWu.Count -gt 0) -and ($keep.Count -eq 0)
     }
     return [ordered]@{ action = 'fix'; deletes = $deletes; renamePol = $rename }
 }
@@ -328,7 +339,7 @@ function Invoke-WupRun {
         elseif ($plan.renamePol) { $pol = 'Registry.pol not renamed' }
         elseif ($state.registryPol.exists) {
             $p = $state.registryPol
-            $why = if (-not $p.Contains('other')) { 'not parsed' } elseif ([int]$p.other -gt 0) { "$($p.other) other entries" } else { 'no entries' }
+            $why = if (-not $p.Contains('other')) { 'not parsed' } elseif ([int]$p.other -gt 0) { "$($p.other) other entries" } elseif (@($p.wu).Count) { 'holds Windows Update policy this fix keeps' } else { 'no entries' }
             $pol = "Registry.pol left ($why)"
         }
         if ($still.Count -eq 0 -and $record.fix.errors.Count -eq 0) {
