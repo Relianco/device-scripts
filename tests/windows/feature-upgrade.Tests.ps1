@@ -200,6 +200,14 @@ Assert-Same (ConvertFrom-Json $script:FupJson).status 'failed' 'low space status
 $script:free = 27GB
 Assert-Same (Invoke-FupMain $args1) 0 'enough space exit code'
 
+# A resumed download of an ISO over 2^31 bytes: the size math stays Int64.
+Reset-Mocks
+function Get-FupRemoteSize { param($Url) 4768632832L }
+Set-Content -LiteralPath (Join-Path $FupDir "$goodHash.iso.part") -Value 'x' -NoNewline
+Assert-Same (Invoke-FupMain $args1) 0 'large ISO resume exit code'
+Assert-Same (ConvertFrom-Json $script:FupJson).status 'started' 'large ISO resume status'
+function Get-FupRemoteSize { param($Url) 6GB }
+
 # Already at or above the ISO's build: skip, no worker.
 Reset-Mocks
 $script:osBuild = 26100

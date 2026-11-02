@@ -206,6 +206,8 @@ Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'enterprise not judged'
 # Appraiser last evaluation date.
 Assert-Same (Get-FurLastEvaluated ([ordered]@{ NI22H2 = [ordered]@{ TimestampEpochString = '1699994981' }; NI23H2 = [ordered]@{ TimestampEpochString = '1701104921' }; UNV = [ordered]@{} })) '2023-11-27 17:08' 'last evaluated'
 Assert-Same (Get-FurLastEvaluated ([ordered]@{})) $null 'never evaluated'
+# An epoch past 2^31 (2100-01-01) keeps the max Int64.
+Assert-Same (Get-FurLastEvaluated ([ordered]@{ A = [ordered]@{ TimestampEpochString = '4102444800' } })) '2100-01-01 00:00' 'epoch past 2^31'
 
 # Disk and TPM.
 $r = New-Record; $r.hw.freeGB = 8.5
