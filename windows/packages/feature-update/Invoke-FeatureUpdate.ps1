@@ -239,7 +239,7 @@ function Test-FurFeatureUpdate {
 # Pure: newest appraiser evaluation across indicator records, as a UTC date.
 function Get-FurLastEvaluated {
     param($Indicators)
-    $max = 0
+    $max = 0L
     if ($Indicators) {
         foreach ($k in @($Indicators.Keys)) {
             $v = $Indicators[$k]

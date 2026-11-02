@@ -258,7 +258,7 @@ function Save-FupDownload {
     try {
         if ($resp.ResponseUri.Scheme -ne 'https') { throw 'download redirected away from https' }
         $mode = [IO.FileMode]::Append
-        if ([int]$resp.StatusCode -ne 206) { $mode = [IO.FileMode]::Create; $have = 0 }
+        if ([int]$resp.StatusCode -ne 206) { $mode = [IO.FileMode]::Create; $have = 0L }
         $in = $resp.GetResponseStream()
         $out = [IO.File]::Open($Part, $mode, [IO.FileAccess]::Write)
         try {
@@ -488,7 +488,7 @@ function Invoke-FupMain {
             $size = Get-FupRemoteSize $A.IsoUrl
             if ($size -le 0) { $size = $FupUnknownIsoBytes }
             $part = "$iso.part"
-            if (Test-Path -LiteralPath $part) { $size = [math]::Max(0, $size - (Get-Item -LiteralPath $part).Length) }
+            if (Test-Path -LiteralPath $part) { $size = [math]::Max(0L, $size - (Get-Item -LiteralPath $part).Length) }
             $need += $size
         }
         $free = Get-FupFreeBytes
