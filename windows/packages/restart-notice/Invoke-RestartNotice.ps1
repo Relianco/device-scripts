@@ -120,6 +120,14 @@ function Get-RnUserPresence {
     return 'none'
 }
 
+# Pure: DOMAIN\user from a Win32_Process GetOwner result. A failed lookup throws, so
+# the probe fails and the user counts as present: an unreadable owner can be a person.
+function ConvertTo-RnOwnerName {
+    param($Owner)
+    if ($null -eq $Owner -or $Owner.ReturnValue -ne 0) { throw 'explorer.exe owner could not be read' }
+    return "$($Owner.Domain)\$($Owner.User)"
+}
+
 # Pure: none | stale | active | used for the snooze marker.
 # stale = set before the last boot, so the restart it was for has happened.
 function Get-RnSnoozeState {
@@ -247,8 +255,10 @@ function Invoke-RnMain {
             return (Invoke-RnRestartNow (New-RnResult 'restarted' 'user chose Restart now' $pending $button))
         }
         if ($button -eq 'Snooze') {
-            $until = $now.AddMinutes($A.SnoozeMinutes).ToString('o')
-            & $script:RnSetSnooze $until $now.ToString('o')
+            # From the click, not the start of the run: the prompt may have waited minutes.
+            $clicked = (& $script:RnNow).ToUniversalTime()
+            $until = $clicked.AddMinutes($A.SnoozeMinutes).ToString('o')
+            & $script:RnSetSnooze $until $clicked.ToString('o')
             $r = New-RnResult 'snoozed' "snoozed for $($A.SnoozeMinutes) minutes" $pending $button $true
             $r['snoozeUntil'] = $until
             Out-RnResult $r
@@ -294,8 +304,7 @@ $script:RnGetPending = {
 $script:RnGetUsers = {
     @((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName)
     foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)) {
-        $o = Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop
-        if ($o.ReturnValue -eq 0) { "$($o.Domain)\$($o.User)" }
+        ConvertTo-RnOwnerName (Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop)
     }
 }
 

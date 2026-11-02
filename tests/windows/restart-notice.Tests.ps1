@@ -74,6 +74,11 @@ Assert-Same (Get-RnUserPresence -Users @($null, '', 'NT AUTHORITY\SYSTEM', 'Wind
 Assert-Same (Get-RnUserPresence -Users @('NT AUTHORITY\SYSTEM', 'CONTOSO\jdoe') -ProbeFailed $false) 'present' 'a person'
 Assert-Same (Get-RnUserPresence -Users @('AzureAD\JaneDoe') -ProbeFailed $false) 'present' 'an Entra user'
 
+# Owner lookup: a failed GetOwner fails the probe instead of hiding a person.
+Assert-Same (ConvertTo-RnOwnerName ([pscustomobject]@{ ReturnValue = 0; Domain = 'CONTOSO'; User = 'jdoe' })) 'CONTOSO\jdoe' 'owner name'
+Assert-Throws { ConvertTo-RnOwnerName ([pscustomobject]@{ ReturnValue = 2; Domain = $null; User = $null }) } 'owner access denied'
+Assert-Throws { ConvertTo-RnOwnerName $null } 'owner missing'
+
 # Snooze decision.
 $now = [datetime]::new(2026, 11, 2, 15, 0, 0, [DateTimeKind]::Utc)
 Assert-Same (Get-RnSnoozeState -Marker $null -Now $now -LastBoot $boot) 'none' 'no marker'
@@ -100,7 +105,8 @@ if ($raw.Contains("`n")) { Fail 'json is not one line' }
 
 # The flow, with every side effect replaced. Each call is logged in order.
 function Reset-Mocks {
-    param([string[]]$Pending = @('windowsUpdate'), $Marker = $null, $Users = @('CONTOSO\jdoe'), [switch]$UserProbeFails, $PromptResult = 'Timeout', [int]$RestartCode = 0)
+    param([string[]]$Pending = @('windowsUpdate'), $Marker = $null, $Users = @('CONTOSO\jdoe'), [switch]$UserProbeFails, $PromptResult = 'Timeout', [int]$RestartCode = 0, [int]$PromptDelay = 0)
+    $script:PromptDelay = $PromptDelay
     $script:Log = [System.Collections.Generic.List[string]]::new()
     $script:Fields = [System.Collections.Generic.List[object]]::new()
     $script:Marker = $Marker
@@ -109,14 +115,15 @@ function Reset-Mocks {
     $script:MockUserFails = [bool]$UserProbeFails
     $script:MockPrompt = $PromptResult
     $script:MockRestart = $RestartCode
-    $script:RnNow = { $now }
+    $script:Clock = $now
+    $script:RnNow = { $script:Clock }
     $script:RnLastBoot = { $boot }
     $script:RnGetPending = { $script:MockPending }
     $script:RnGetSnooze = { $script:Marker }
     $script:RnSetSnooze = { param($U, $S) $script:Log.Add('setSnooze'); $script:Marker = [pscustomobject]@{ SnoozeUntil = $U; SetAt = $S } }
     $script:RnClearSnooze = { $script:Log.Add('clearSnooze'); $script:Marker = $null }
     $script:RnGetUsers = { if ($script:MockUserFails) { throw 'cim down' }; $script:MockUsers }
-    $script:RnPrompt = { param($T, $S, $Sec) $script:Log.Add("prompt:${S}:$Sec"); $script:MockPrompt }
+    $script:RnPrompt = { param($T, $S, $Sec) $script:Log.Add("prompt:${S}:$Sec"); $script:Clock = $script:Clock.AddMinutes($script:PromptDelay); $script:MockPrompt }
     $script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec") }
     $script:RnSleep = { param($Sec) $script:Log.Add("sleep:$Sec") }
     $script:RnRestart = { $script:Log.Add('restart'); $script:MockRestart }
@@ -167,6 +174,12 @@ Assert-Same (Get-Last).status 'snoozed' 'snooze status'
 Assert-Same (Get-Last).snoozeUsed $true 'snooze used'
 Assert-Same (ConvertTo-RnUtc $script:Marker.SnoozeUntil) $now.AddMinutes(60) 'snooze until'
 Assert-NoRestart 'snooze'
+
+# 4a. Snooze clicked 70 minutes into the prompt: the hour runs from the click.
+Reset-Mocks -PromptResult 'Snooze 1 hour' -PromptDelay 70
+$null = Invoke-RnMain $args60
+Assert-Same (ConvertTo-RnUtc $script:Marker.SnoozeUntil) $now.AddMinutes(130) 'snooze counted from the click'
+Assert-Same (ConvertTo-RnUtc $script:Marker.SetAt) $now.AddMinutes(70) 'snooze set at the click'
 
 # 4b. A snooze is running: snoozed, nothing shown, never a restart, even with nobody signed in.
 foreach ($users in @(@('CONTOSO\jdoe'), @())) {
