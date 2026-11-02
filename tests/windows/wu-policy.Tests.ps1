@@ -77,7 +77,7 @@ Assert-Same $script:calls.Count 0 'UseWUServer changes nothing'
 # Check mode: blocked, but nothing is written.
 $blockedAu = [ordered]@{ NoAutoUpdate = 1; AUOptions = 1; ScheduledInstallDay = 0 }
 $blockedWu = [ordered]@{ DisableWindowsUpdateAccess = 1; SetDisableUXWUAccess = 1; DisableOSUpgrade = 1; DeferFeatureUpdatesPeriodInDays = 30; PauseFeatureUpdatesStartTime = '2025-01-01' }
-Reset-Fake -Au (Copy-Map $blockedAu) -Wu (Copy-Map $blockedWu) -Pol ([ordered]@{ exists = $true; size = 158; wuValues = @() })
+Reset-Fake -Au (Copy-Map $blockedAu) -Wu (Copy-Map $blockedWu) -Pol ([ordered]@{ exists = $true; size = 158; entries = 2; other = 0; wuValues = @('NoAutoUpdate', 'AUOptions') })
 $run = Invoke-WupRun
 Assert-Same $run.exitCode 0 'check exit'
 Assert-Same $run.record.mode 'check' 'check mode'
@@ -115,33 +115,63 @@ Reset-Fake -Au ([ordered]@{ NoAutoUpdate = 0; AUOptions = 4 }) -Wu ([ordered]@{ 
 $null = Invoke-WupRun -Fix
 Assert-Same (($script:calls | Where-Object { $_ -like 'remove *' }) -join ',') 'remove DisableWindowsUpdateAccess' 'only the blocking value'
 
-# A large Registry.pol without these values is left; one that names them is renamed.
-$big = [ordered]@{ exists = $true; size = 4096; wuValues = @() }
-Assert-Same (Get-WupPlan ([ordered]@{ au = [ordered]@{ NoAutoUpdate = 1 }; wu = $null; registryPol = $big })).renamePol $false 'large unrelated pol left'
-$big.wuValues = @('NoAutoUpdate')
-Assert-Same (Get-WupPlan ([ordered]@{ au = [ordered]@{ NoAutoUpdate = 1 }; wu = $null; registryPol = $big })).renamePol $true 'pol naming the value renamed'
-Reset-Fake -Au ([ordered]@{ NoAutoUpdate = 1 }) -Wu $null -Pol ([ordered]@{ exists = $true; size = 4096; wuValues = @() })
+# Registry.pol is renamed only when it holds nothing but entries the fix deletes:
+# a file with other policy is left even when it is small or names a fix value,
+# because removing it can drop that other policy too.
+function Get-RenamePlan { param($Pol) (Get-WupPlan ([ordered]@{ au = [ordered]@{ NoAutoUpdate = 1 }; wu = $null; registryPol = $Pol })).renamePol }
+Assert-Same (Get-RenamePlan ([ordered]@{ exists = $true; size = 300; entries = 2; other = 0; wuValues = @('NoAutoUpdate', 'AUOptions') })) $true 'only fix entries: renamed'
+Assert-Same (Get-RenamePlan ([ordered]@{ exists = $true; size = 4096; entries = 10; other = 9; wuValues = @('NoAutoUpdate') })) $false 'fix value plus other policy: left'
+Assert-Same (Get-RenamePlan ([ordered]@{ exists = $true; size = 158; entries = 2; other = 2; wuValues = @() })) $false 'small file of other policy: left'
+Assert-Same (Get-RenamePlan ([ordered]@{ exists = $true; size = 8; entries = 0; other = 0; wuValues = @() })) $false 'empty file: left'
+Assert-Same (Get-RenamePlan ([ordered]@{ exists = $true; size = 158; parseError = 'no ]' })) $false 'unparsed file: left'
+Reset-Fake -Au ([ordered]@{ NoAutoUpdate = 1 }) -Wu $null -Pol ([ordered]@{ exists = $true; size = 4096; entries = 10; other = 9; wuValues = @('NoAutoUpdate') })
 $run = Invoke-WupRun -Fix
-Assert-Same ($script:calls -contains 'rename') $false 'large pol not renamed'
-Assert-Like $run.record.verdict '*Registry.pol left (4096 bytes, no WU values)' 'large pol said'
+Assert-Same ($script:calls -contains 'rename') $false 'pol with other policy not renamed'
+Assert-Like $run.record.verdict '*Registry.pol left (9 other entries)' 'pol left said'
 
 # Verify after gpupdate: a value the policy puts back fails the run.
-Reset-Fake -Au ([ordered]@{ NoAutoUpdate = 1 }) -Wu $null -Pol ([ordered]@{ exists = $true; size = 4096; wuValues = @() })
+Reset-Fake -Au ([ordered]@{ NoAutoUpdate = 1 }) -Wu $null -Pol ([ordered]@{ exists = $true; size = 4096; entries = 10; other = 9; wuValues = @('NoAutoUpdate') })
 $script:gpRestores = $true
 $run = Invoke-WupRun -Fix
 Assert-Same $run.exitCode 1 'value back after gpupdate exit'
 Assert-Like $run.record.verdict 'fix incomplete: still set NoAutoUpdate*' 'value back after gpupdate verdict'
 
-# Registry.pol scan: PReg entries are UTF-16LE.
-$bytes = [Text.Encoding]::Unicode.GetBytes('PReg[Software\Policies\Microsoft\Windows\WindowsUpdate\AU;NoAutoUpdate;]')
-Assert-Same ((Get-WupPolNames $bytes) -join ',') 'NoAutoUpdate' 'pol names'
-Assert-Same @(Get-WupPolNames ([Text.Encoding]::Unicode.GetBytes('PReg[Software\Policies\Microsoft\Edge;HomepageLocation;]'))).Count 0 'pol without WU names'
+# Registry.pol parsing: PReg header, then [key;value;type;size;data] in UTF-16LE.
+function New-PolBytes {
+    param([string[]]$Entries)
+    $u = [Text.Encoding]::Unicode
+    $b = New-Object System.Collections.Generic.List[byte]
+    $b.AddRange([Text.Encoding]::ASCII.GetBytes('PReg')); $b.AddRange([BitConverter]::GetBytes([uint32]1))
+    foreach ($e in $Entries) {
+        $kv = $e -split ';', 2
+        $b.AddRange($u.GetBytes("[$($kv[0])`0;$($kv[1])`0;"))
+        $b.AddRange([BitConverter]::GetBytes([uint32]4)); $b.AddRange($u.GetBytes(';'))
+        $b.AddRange([BitConverter]::GetBytes([uint32]4)); $b.AddRange($u.GetBytes(';'))
+        $b.AddRange([BitConverter]::GetBytes([uint32]1)); $b.AddRange($u.GetBytes(']'))
+    }
+    return , $b.ToArray()
+}
+$auKeyText = 'Software\Policies\Microsoft\Windows\WindowsUpdate\AU'
+$bytes = New-PolBytes @("$auKeyText;NoAutoUpdate", 'Software\Policies\Microsoft\Windows\WindowsUpdate;**del.SetDisableUXWUAccess', 'Software\Policies\Microsoft\Edge;HomepageLocation')
+Assert-Same ((Get-WupPolEntries $bytes) -join '|') "$auKeyText;NoAutoUpdate|Software\Policies\Microsoft\Windows\WindowsUpdate;**del.SetDisableUXWUAccess|Software\Policies\Microsoft\Edge;HomepageLocation" 'pol entries'
+Assert-Same @(Get-WupPolEntries (New-PolBytes @())).Count 0 'header-only pol'
+Assert-Same (Test-WupFixEntry "$auKeyText;AUOptions") $true 'AUOptions entry is a fix entry'
+Assert-Same (Test-WupFixEntry "$auKeyText;ScheduledInstallDay") $false 'other AU entry is not'
+Assert-Same (Test-WupFixEntry 'Software\Policies\Microsoft\Edge;NoAutoUpdate') $false 'same name under another key is not'
+$threw = $false
+try { $null = Get-WupPolEntries $bytes[0..($bytes.Length - 3)] } catch { $threw = $true }
+if (-not $threw) { Fail 'truncated pol parsed' }
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("wup-" + [guid]::NewGuid() + '.pol')
 [IO.File]::WriteAllBytes($tmp, $bytes)
 $info = Get-WupPolInfo $tmp
-Remove-Item -LiteralPath $tmp
+[IO.File]::WriteAllBytes($tmp, $bytes[0..20])
+$bad = Get-WupPolInfo $tmp
+[IO.File]::Delete($tmp)
 Assert-Same $info.size ([long]$bytes.Length) 'pol size'
-Assert-Same ($info.wuValues -join ',') 'NoAutoUpdate' 'pol info names'
+Assert-Same $info.entries 3 'pol entry count'
+Assert-Same $info.other 1 'pol other entries'
+Assert-Same ($info.wuValues -join ',') 'NoAutoUpdate,**del.SetDisableUXWUAccess' 'pol fix values'
+if (-not $bad.Contains('parseError') -or $bad.Contains('other')) { Fail 'malformed pol not marked unparsed' }
 Assert-Same (Get-WupPolInfo $tmp).exists $false 'missing pol'
 
 # Runner Action and Fix mapping.
