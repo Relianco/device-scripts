@@ -14,8 +14,9 @@
       5. Someone signed in, or it cannot tell: notice 1 with Restart now and one
          snooze. Restart now restarts. Snooze writes the marker and exits.
          No answer, or the snooze was already used: notice 2, a countdown with
-         Restart now and no snooze, then restart. If the toolkit finds no user to
-         show notice 1 to, a second check decides: nobody, restartedNoUser
+         Restart now and no snooze, then restart. Restart now on the countdown
+         restarts at once (result restarted, button Restart now). If the toolkit
+         finds no user to show notice 1 to, a second check decides: nobody, restartedNoUser
          (reason toolkitNoUser); otherwise the countdown without a notice.
       Any other error: result failed, exit 1.
 
@@ -384,14 +385,56 @@ function Invoke-RnMain {
     $r = New-RnResult 'restartedAfterCountdown' "countdown of $($A.CountdownMinutes) minutes ($reason), then restart" $pending $button $snoozeUsed
     $r['reason'] = $reason
     Out-RnResult $r
+    $waited = $false
     if ($reason -ne 'NotShown') {
         # The user left between the check and the dialog: the field is written, so
         # wait the countdown out without it.
+        $shown = $true
         try { & $script:RnCountdown $A.Message $seconds }
-        catch { if (-not (Test-RnNoUserError $_)) { throw }; Write-Status "countdown not shown: $($_.Exception.Message)" 'WARN' }
+        catch {
+            if (-not (Test-RnNoUserError $_)) { throw }
+            Write-Status "countdown not shown: $($_.Exception.Message)" 'WARN'
+            $shown = $false
+        }
+        if ($shown) {
+            $waited = $true
+            # The dialog runs on its own and does not restart the device itself, so
+            # Restart now there is seen here as the dialog closing early.
+            if (Wait-RnCountdown $seconds) {
+                $r['status'] = 'restarted'
+                $r['message'] = "user chose Restart now on the countdown ($reason)"
+                $r['button'] = 'Restart now'
+                return (Invoke-RnRestartNow $r)
+            }
+        }
     }
-    & $script:RnSleep $seconds
+    if (-not $waited) { & $script:RnSleep $seconds }
     return (Invoke-RnRestartNow $r)
+}
+
+# Waits out the countdown. True when the countdown dialog closed before the end:
+# it has no close or minimize, so that is Restart now. The dialog counts as closed
+# only after it was seen open (RnCountdownOpen says why the first poll sees it).
+# Never seen: the countdown runs out, as before. A probe that fails waits the
+# rest of the countdown, as before this check existed.
+function Wait-RnCountdown {
+    param([int]$Seconds)
+    $end = (& $script:RnNow).AddSeconds($Seconds)
+    $seen = $false
+    try {
+        while ($true) {
+            $left = [int][math]::Ceiling(($end - (& $script:RnNow)).TotalSeconds)
+            if ($left -le 0) { return $false }
+            if (& $script:RnCountdownOpen) { $seen = $true }
+            elseif ($seen) { return $true }
+            & $script:RnSleep 1
+        }
+    } catch {
+        Write-Status "countdown dialog not watched: $($_.Exception.Message)" 'WARN'
+        $left = [int][math]::Ceiling(($end - (& $script:RnNow)).TotalSeconds)
+        if ($left -gt 0) { & $script:RnSleep $left }
+        return $false
+    }
 }
 
 # Report only: the same probes and rules as Invoke-RnMain, written to
@@ -489,6 +532,322 @@ function Import-RnToolkit {
     $script:RnToolkitLoaded = $true
 }
 
+# The user-check package's dialog theme, copied: the runner downloads each package
+# as one file by hash, so the two cannot share a file. The mark and subtitle parts
+# are left out. The toolkit's client process (PSADT.ClientServer.Client.exe, started
+# in the user's session for notice 1, and again through its launcher for the
+# countdown) loads this assembly as its AppDomainManager from the .exe.config, so it
+# runs inside the process that owns the WPF window although this script runs as
+# SYSTEM. A background thread polls the open windows every 150 ms, paints
+# SidebarAccentFill and SidebarPanel black, recolours resource keys holding
+# "Accent" (OnAccent and Foreground keys white) and whitens text on black buttons.
+# It stops about 4 seconds after the last window closes, or after 4000 styled
+# polls; what it painted stays. It never touches a dialog result.
+function Install-RnDialogTheme {
+    param([Parameter(Mandatory)][string]$ClientExe)
+    $ErrorActionPreference = 'Stop'
+    $dll = Join-Path (Split-Path -Parent $ClientExe) 'RelianRestartNoticeTheme.dll'
+    $source = @'
+using System;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Media;
+
+[assembly: AssemblyVersion("1.0.0.0")]
+
+namespace Relian.RestartNoticeTheme
+{
+    public sealed class ThemeDomainManager : AppDomainManager
+    {
+        public override void InitializeNewDomain(AppDomainSetup appDomainInfo)
+        {
+            base.InitializeNewDomain(appDomainInfo);
+            try
+            {
+                TryLog("manager loaded");
+                var thread = new Thread(Watch);
+                thread.IsBackground = true;
+                thread.Start();
+            }
+            catch (Exception ex)
+            {
+                TryLog(ex.ToString());
+            }
+        }
+
+        private static void Watch()
+        {
+            var missing = 0;
+            var seen = 0;
+            while (seen < 4000 && missing < 25)
+            {
+                Thread.Sleep(150);
+                try
+                {
+                    var app = Application.Current;
+                    if (app == null)
+                    {
+                        if (seen > 0)
+                        {
+                            missing++;
+                        }
+                        continue;
+                    }
+                    var found = (bool)app.Dispatcher.Invoke(new Func<bool>(StyleOpenWindows));
+                    if (found)
+                    {
+                        seen++;
+                        missing = 0;
+                    }
+                    else if (seen > 0)
+                    {
+                        missing++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    TryLog(ex.Message);
+                    if (seen > 0)
+                    {
+                        missing++;
+                    }
+                }
+            }
+        }
+
+        private static bool StyleOpenWindows()
+        {
+            var app = Application.Current;
+            if (app == null || app.Windows.Count == 0)
+            {
+                return false;
+            }
+            var black = new SolidColorBrush(Color.FromRgb(0, 0, 0));
+            var white = new SolidColorBrush(Color.FromRgb(255, 255, 255));
+            black.Freeze();
+            white.Freeze();
+            Recolor(app.Resources, black, white);
+            var any = false;
+            foreach (Window window in app.Windows)
+            {
+                any = true;
+                Paint(window, "SidebarAccentFill", black);
+                Paint(window, "SidebarPanel", black);
+                WhitenBlackButtons(window, white);
+            }
+            if (any && Interlocked.Exchange(ref styledOnce, 1) == 0)
+            {
+                TryLog("styled");
+            }
+            return any;
+        }
+
+        private static int styledOnce;
+
+        private static void Paint(DependencyObject root, string name, Brush brush)
+        {
+            var element = Find(root, name);
+            if (element == null)
+            {
+                return;
+            }
+            var opacity = element.GetType().GetProperty("Opacity");
+            if (opacity != null && opacity.CanWrite)
+            {
+                opacity.SetValue(element, 1.0, null);
+            }
+            var fill = element.GetType().GetProperty("Fill");
+            if (fill != null && fill.CanWrite)
+            {
+                fill.SetValue(element, brush, null);
+            }
+            var background = element.GetType().GetProperty("Background");
+            if (background != null && background.CanWrite)
+            {
+                background.SetValue(element, brush, null);
+            }
+        }
+
+        private static void WhitenBlackButtons(Window window, Brush white)
+        {
+            foreach (var name in new[] { "ButtonLeft", "ButtonMiddle", "ButtonRight" })
+            {
+                var button = Find(window, name) as Button;
+                if (button == null || !ButtonLooksBlack(button))
+                {
+                    continue;
+                }
+                button.Foreground = white;
+                WhitenText(button, white);
+            }
+        }
+
+        private static bool ButtonLooksBlack(Button button)
+        {
+            return LooksBlack(button.Background) || LooksBlack(button.BorderBrush) || AnyBlackFill(button);
+        }
+
+        private static bool AnyBlackFill(DependencyObject node)
+        {
+            var border = node as Border;
+            if (border != null && LooksBlack(border.Background))
+            {
+                return true;
+            }
+            var count = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < count; i++)
+            {
+                if (AnyBlackFill(VisualTreeHelper.GetChild(node, i)))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool LooksBlack(Brush brush)
+        {
+            var solid = brush as SolidColorBrush;
+            if (solid == null)
+            {
+                return false;
+            }
+            var color = solid.Color;
+            return color.A > 200 && color.R < 40 && color.G < 40 && color.B < 40;
+        }
+
+        private static void WhitenText(DependencyObject node, Brush white)
+        {
+            var block = node as TextBlock;
+            if (block != null)
+            {
+                block.Foreground = white;
+            }
+            var access = node as AccessText;
+            if (access != null)
+            {
+                access.Foreground = white;
+            }
+            var count = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < count; i++)
+            {
+                WhitenText(VisualTreeHelper.GetChild(node, i), white);
+            }
+        }
+
+        private static FrameworkElement Find(DependencyObject node, string name)
+        {
+            var named = node as FrameworkElement;
+            if (named != null && named.Name == name)
+            {
+                return named;
+            }
+            var window = node as Window;
+            if (window != null)
+            {
+                var found = window.FindName(name) as FrameworkElement;
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+            var count = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < count; i++)
+            {
+                var child = Find(VisualTreeHelper.GetChild(node, i), name);
+                if (child != null)
+                {
+                    return child;
+                }
+            }
+            return null;
+        }
+
+        private static void Recolor(ResourceDictionary dictionary, Brush black, Brush white)
+        {
+            if (dictionary == null)
+            {
+                return;
+            }
+            try
+            {
+                var keys = new object[dictionary.Keys.Count];
+                dictionary.Keys.CopyTo(keys, 0);
+                foreach (var key in keys)
+                {
+                    var label = key == null ? string.Empty : key.ToString();
+                    if (label.IndexOf("Accent", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        continue;
+                    }
+                    var lightText = label.IndexOf("OnAccent", StringComparison.OrdinalIgnoreCase) >= 0
+                        || label.IndexOf("Foreground", StringComparison.OrdinalIgnoreCase) >= 0;
+                    try
+                    {
+                        var value = dictionary[key];
+                        if (value is SolidColorBrush)
+                        {
+                            dictionary[key] = lightText ? (object)white : black;
+                        }
+                        else if (value is Color)
+                        {
+                            dictionary[key] = lightText ? (object)Colors.White : Colors.Black;
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            catch
+            {
+            }
+            foreach (ResourceDictionary child in dictionary.MergedDictionaries)
+            {
+                Recolor(child, black, white);
+            }
+        }
+
+        private static void TryLog(string message)
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(typeof(ThemeDomainManager).Assembly.Location);
+                File.AppendAllText(Path.Combine(dir, "relian-dialog-theme.log"), message + Environment.NewLine);
+            }
+            catch
+            {
+            }
+        }
+    }
+}
+'@
+
+    if (Test-Path -LiteralPath $dll) { Remove-Item -LiteralPath $dll -Force }
+    Add-Type -TypeDefinition $source -OutputAssembly $dll -ReferencedAssemblies @('System', 'System.Xaml', 'WindowsBase', 'PresentationCore', 'PresentationFramework')
+    $fullName = [System.Reflection.AssemblyName]::GetAssemblyName($dll).FullName
+    # The config is written last, after the assembly exists: a config naming a
+    # missing assembly would stop the client process from starting.
+    $configPath = "$ClientExe.config"
+    [xml]$config = [System.IO.File]::ReadAllText($configPath)
+    $runtime = $config.configuration.runtime
+    if ($null -eq $runtime) { throw 'client config has no runtime element' }
+    foreach ($name in @('appDomainManagerAssembly', 'appDomainManagerType')) {
+        foreach ($node in @($runtime.ChildNodes | Where-Object { $_.LocalName -eq $name })) { [void]$runtime.RemoveChild($node) }
+    }
+    $assemblyNode = $config.CreateElement('appDomainManagerAssembly')
+    [void]$assemblyNode.SetAttribute('value', $fullName)
+    [void]$runtime.AppendChild($assemblyNode)
+    $typeNode = $config.CreateElement('appDomainManagerType')
+    [void]$typeNode.SetAttribute('value', 'Relian.RestartNoticeTheme.ThemeDomainManager')
+    [void]$runtime.AppendChild($typeNode)
+    $config.Save($configPath)
+    Write-Status 'dialog theme installed'
+}
+
 # An Interactive session needs a user the toolkit calls active (IsActiveUserSession,
 # as Get-ADTRunAsActiveUser picks it). Without one, Open-ADTSession refuses
 # ("no suitable logged on users") and then ends the process itself: exit 1602, or
@@ -500,6 +859,9 @@ function Open-RnSession {
     if (-not (& $script:RnCanShow)) {
         throw [NotSupportedException]::new('no suitable logged on users: no active user session for the toolkit')
     }
+    # Brand colours only, before the toolkit starts its client process. A failure
+    # leaves the toolkit's own colours and changes nothing else.
+    try { & $script:RnTheme } catch { Write-Status "dialog theme not installed: $($_.Exception.Message)" 'WARN' }
     $s = @{ AppVendor = ''; AppName = 'Restart needed'; AppVersion = '1'; RequireAdmin = $false; DeployAppScriptVersion = '4.1.8' }
     $s = Remove-ADTHashtableNullOrEmptyValues -Hashtable $s
     # The loop catches the toolkit's break, so a race (the user leaves after the
@@ -511,6 +873,13 @@ function Open-RnSession {
     }
     if (-not $opened) { throw "Open-ADTSession ended without a session (exit code $Global:LASTEXITCODE)" }
     $script:RnSessionOpen = $true
+}
+
+# Once per run, from Open-RnSession, so both notice 1 and the countdown get it.
+$script:RnTheme = {
+    $client = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'PSAppDeployToolkit') -Filter 'PSADT.ClientServer.Client.exe' -Recurse -File | Select-Object -First 1
+    if ($null -eq $client) { throw 'missing PSADT client executable' }
+    Install-RnDialogTheme -ClientExe $client.FullName
 }
 
 $script:RnPrompt = {
@@ -541,6 +910,27 @@ $script:RnCountdown = {
     } catch { Write-Status "restart dialog text not set: $($_.Exception.Message)" 'WARN' }
     # Asynchronous with a session: it returns at once. The caller waits, then restarts.
     Show-ADTInstallationRestartPrompt -CountdownSeconds $Seconds -CountdownNoHideSeconds $Seconds -Title 'Restart needed' -Subtitle 'Windows update'
+}
+
+# True while the countdown dialog is open. The async restart prompt starts
+# PSADT.ClientServer.Client.Launcher.exe with -DialogType RestartDialog on its
+# command line, and the launcher starts PSADT.ClientServer.Client.exe, which shows
+# the dialog. Show-ADTInstallationRestartPrompt returns once the launcher process
+# exists, so the first poll, a moment later, finds the launcher or its client:
+# Wait-RnCountdown sees the dialog open before anyone can answer it. Tracked: any
+# of the two whose command line names RestartDialog, and any child of a tracked
+# process (the client may carry other arguments). Notice 1's client has neither.
+# Throws when the process list cannot be read, so Wait-RnCountdown waits the
+# countdown out.
+$script:RnCountdownPids = @{}
+$script:RnCountdownOpen = {
+    $all = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'PSADT.ClientServer.Client%'" -ErrorAction Stop)
+    foreach ($pass in 1, 2) {
+        foreach ($p in $all) {
+            if ("$($p.CommandLine)" -match '\bRestartDialog\b' -or $script:RnCountdownPids.ContainsKey([int]$p.ParentProcessId)) { $script:RnCountdownPids[[int]$p.ProcessId] = $true }
+        }
+    }
+    [bool]@($all | Where-Object { $script:RnCountdownPids.ContainsKey([int]$_.ProcessId) }).Count
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
