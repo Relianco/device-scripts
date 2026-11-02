@@ -100,11 +100,12 @@ function Get-RnPendingReasons {
 }
 
 # Pure: present | none | unknown, from the owners of interactive sessions.
-# The rule: a person is signed in when Windows reports a console user
-# (Win32_ComputerSystem.UserName, set for a locked console too) or any explorer.exe
-# runs as a person. explorer.exe runs in every console and RDP session, connected
-# or disconnected, so a disconnected user still counts: their unsaved work is
-# still there. SYSTEM, service accounts and the DWM-/UMFD- session accounts are
+# The rule: a person is signed in when any of these names one: the toolkit's
+# Get-ADTLoggedOnUser (Windows terminal-services sessions: console and RDP,
+# connected or disconnected, RemoteApp too), the console user from
+# Win32_ComputerSystem.UserName (set for a locked console too), or the owner of
+# any explorer.exe. A disconnected user still counts: their unsaved work is still
+# there. SYSTEM, service accounts and the DWM-/UMFD- session accounts are
 # not people. A probe that failed is unknown, and unknown is treated as present.
 function Get-RnUserPresence {
     param([string[]]$Users, [bool]$ProbeFailed)
@@ -118,6 +119,14 @@ function Get-RnUserPresence {
         return 'present'
     }
     return 'none'
+}
+
+# Pure: account names of the user sessions Get-ADTLoggedOnUser returned.
+function Get-RnSessionUsers {
+    param($Sessions)
+    foreach ($x in @($Sessions)) {
+        if ($null -ne $x -and $x.IsUserSession -and "$($x.NTAccount)") { "$($x.NTAccount)" }
+    }
 }
 
 # Pure: DOMAIN\user from a Win32_Process GetOwner result. A failed lookup throws, so
@@ -304,6 +313,8 @@ $script:RnGetPending = {
 }
 
 $script:RnGetUsers = {
+    Open-RnSession
+    Get-RnSessionUsers @(Get-ADTLoggedOnUser -ErrorAction Stop)
     @((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName)
     foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)) {
         ConvertTo-RnOwnerName (Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop)

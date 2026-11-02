@@ -74,6 +74,14 @@ Assert-Same (Get-RnUserPresence -Users @($null, '', 'NT AUTHORITY\SYSTEM', 'Wind
 Assert-Same (Get-RnUserPresence -Users @('NT AUTHORITY\SYSTEM', 'CONTOSO\jdoe') -ProbeFailed $false) 'present' 'a person'
 Assert-Same (Get-RnUserPresence -Users @('AzureAD\JaneDoe') -ProbeFailed $false) 'present' 'an Entra user'
 
+# Sessions from the toolkit: a disconnected or RemoteApp session has no explorer.exe but is a user.
+$sessions = @(
+    [pscustomobject]@{ NTAccount = 'CONTOSO\rdpuser'; IsUserSession = $true; ConnectState = 'Disconnected' },
+    [pscustomobject]@{ NTAccount = 'NT AUTHORITY\SYSTEM'; IsUserSession = $false; ConnectState = 'Active' })
+Assert-Same ((Get-RnSessionUsers $sessions) -join ',') 'CONTOSO\rdpuser' 'session users'
+Assert-Same (Get-RnUserPresence -Users @(Get-RnSessionUsers $sessions) -ProbeFailed $false) 'present' 'rdp session without explorer is present'
+Assert-Same (@(Get-RnSessionUsers @()).Count) 0 'no sessions'
+
 # Owner lookup: a failed GetOwner fails the probe instead of hiding a person.
 Assert-Same (ConvertTo-RnOwnerName ([pscustomobject]@{ ReturnValue = 0; Domain = 'CONTOSO'; User = 'jdoe' })) 'CONTOSO\jdoe' 'owner name'
 Assert-Throws { ConvertTo-RnOwnerName ([pscustomobject]@{ ReturnValue = 2; Domain = $null; User = $null }) } 'owner access denied'
