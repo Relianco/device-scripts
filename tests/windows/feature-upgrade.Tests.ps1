@@ -162,6 +162,73 @@ function Start-Process { throw 'setup missing' }
 Assert-Throws { Invoke-FupSetup -Iso $iso -Bypass $false } 'setup failure'
 Assert-Same $script:dismounts 2 'dismount after setup failure'
 
+# An unreadable ISO says why; it used to end as "cannot call a method on a null-valued expression".
+$unreadable = Join-Path $tmp 'unreadable.bin'
+[IO.File]::WriteAllBytes($unreadable, $bytes)
+& chmod 000 $unreadable
+$canTestUnreadable = $true
+try { $null = [IO.File]::ReadAllBytes($unreadable); $canTestUnreadable = $false; Write-Output 'SKIP unreadable-file tests: running as root' } catch { }
+if ($canTestUnreadable) {
+    $hashErr = & {
+        $ErrorActionPreference = 'Continue'
+        try { $null = Get-FupFileHash $unreadable; 'no error' } catch { $_.Exception.Message }
+    }
+    if ("$hashErr" -match 'null-valued|no error') { Fail "unreadable ISO hash error was [$hashErr]" }
+}
+Remove-Item -LiteralPath $unreadable -Force
+
+# The ACL step: icacls is mocked; every exit code is checked, and an item with no ACE
+# (state.json as found on a device) gets explicit grants before inheritance is removed.
+$script:icacls = [Collections.Generic.List[string]]::new()
+$script:icaclsExit = 0
+$script:aces = @{}
+function icacls.exe {
+    $script:icacls.Add(($args -join ' '))
+    if ($args -contains '/grant:r') { $script:aces[$args[0]] = 2 }
+    $global:LASTEXITCODE = $script:icaclsExit
+}
+function Get-FupAceCount { param($Path) if ($script:aces.ContainsKey($Path)) { $script:aces[$Path] } else { 1 } }
+$stateFile = Join-Path $tmp 'state.json'
+[IO.File]::WriteAllText($stateFile, '{}')
+$script:aces[$stateFile] = 0
+# A folder with an empty DACL cannot be listed; it must be repaired before it is.
+$logsDir = Join-Path $tmp 'logs'
+$null = New-Item -ItemType Directory -Path $logsDir -Force
+$script:aces[$logsDir] = 0
+$script:listed = [Collections.Generic.List[string]]::new()
+function Get-ChildItem {
+    [CmdletBinding()] param([string]$LiteralPath, [switch]$Force, [switch]$Recurse)
+    if ($script:aces.ContainsKey($LiteralPath) -and $script:aces[$LiteralPath] -eq 0) { throw "listing $LiteralPath denied" }
+    $script:listed.Add($LiteralPath)
+    Microsoft.PowerShell.Management\Get-ChildItem @PSBoundParameters
+}
+# The working folder itself with an empty DACL: logs can be created in it only after its repair.
+$script:aces[$tmp] = 0
+function New-Item {
+    [CmdletBinding()] param([string]$ItemType, [string]$Path, [switch]$Force)
+    $parent = Split-Path -Parent $Path
+    if ($script:aces.ContainsKey($parent) -and $script:aces[$parent] -eq 0) { throw "creating $Path denied" }
+    Microsoft.PowerShell.Management\New-Item @PSBoundParameters
+}
+Initialize-FupDir
+Remove-Item -LiteralPath function:Get-ChildItem, function:New-Item
+Assert-Same $script:aces[$tmp] 2 'empty-DACL working folder repaired'
+Assert-Same $script:aces[$stateFile] 2 'empty-DACL state.json repaired'
+Assert-Same $script:aces[$logsDir] 2 'empty-DACL logs folder repaired'
+Assert-Same $script:listed.Contains($logsDir) $true 'logs folder listed after its repair'
+$grantAt = $script:icacls.IndexOf("$stateFile /grant:r *S-1-5-18:F *S-1-5-32-544:F /C /Q")
+$inheritAt = $script:icacls.IndexOf("$stateFile /inheritance:r /C /Q")
+if ($grantAt -lt 0 -or $inheritAt -lt $grantAt) { Fail "state.json not granted before inheritance removal: $($script:icacls -join ' | ')" }
+if (-not $script:icacls.Contains("$(Join-Path $tmp 'logs') /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F /C /Q")) { Fail 'logs folder not granted with inheritance flags' }
+$script:icaclsExit = 5
+Assert-Throws { Initialize-FupDir } 'icacls failure'
+$script:icaclsExit = 0
+# An item that still has no ACE after icacls fails the run instead of being left that way.
+function icacls.exe { $global:LASTEXITCODE = 0 }
+$script:aces[$stateFile] = 0
+Assert-Throws { Initialize-FupDir } 'item left with no ACE'
+Remove-Item -LiteralPath $stateFile, (Join-Path $tmp 'logs') -Recurse -Force
+
 # Invoke-FupMain with the machine mocked.
 function Initialize-FupDir { }
 function Set-FupField { param($Value) $true }
@@ -190,6 +257,37 @@ Assert-Same (Read-FupState).status 'started' 'started state written'
 Assert-Same (Invoke-FupMain $args1) 0 'second run exit code'
 Assert-Same $script:workerStarts 1 'no second worker'
 Assert-Same (ConvertFrom-Json $script:FupJson).status 'starting' 'second run reports starting'
+
+# Write-FupState sets the file's ACL itself before the file replaces state.json.
+function icacls.exe { $script:icacls.Add(($args -join ' ')); $global:LASTEXITCODE = 0 }
+$script:icacls.Clear()
+Write-FupState ([ordered]@{ status = 'started'; time = [datetime]::UtcNow.ToString('o') })
+$tmpState = Join-Path $FupDir 'state.json.tmp'
+Assert-Same ($script:icacls -join ' | ') "$tmpState /grant:r *S-1-5-18:F *S-1-5-32-544:F /C /Q | $tmpState /inheritance:r /C /Q" 'state.json ACL calls'
+Assert-Same (Test-Path -LiteralPath $tmpState) $false 'temp state file moved into place'
+# A write that fails (here the temp path is a folder) keeps the last good state.
+$null = New-Item -ItemType Directory -Path $tmpState
+Assert-Throws { Write-FupState ([ordered]@{ status = 'running'; time = [datetime]::UtcNow.ToString('o') }) } 'state write into a blocked temp path'
+Assert-Same (Read-FupState).status 'started' 'failed state write keeps the old state'
+Remove-Item -LiteralPath $tmpState -Force
+
+# An unreadable state.json (empty DACL on a device) is a failed attempt: removed, and a new attempt starts.
+if ($canTestUnreadable) {
+    Reset-Mocks
+    Set-Content -LiteralPath (Join-Path $FupDir 'state.json') -Value '{"status":"failed"}' -NoNewline
+    & chmod 000 (Join-Path $FupDir 'state.json')
+    Assert-Same (Invoke-FupMain $args1) 0 'unreadable state exit code'
+    Assert-Same (ConvertFrom-Json $script:FupJson).status 'started' 'unreadable state starts a new attempt'
+    Assert-Same $script:workerStarts 1 'unreadable state starts the worker'
+    Assert-Same (Read-FupState).status 'started' 'unreadable state replaced'
+}
+
+# A state missing a field the verdict needs (no time) is a failed attempt too, not a failure on every run.
+Reset-Mocks
+Write-FupState ([ordered]@{ status = 'staged'; isoBuild = 26100 })
+Assert-Same (Invoke-FupMain $args1) 0 'state without time exit code'
+Assert-Same (ConvertFrom-Json $script:FupJson).status 'started' 'state without time starts a new attempt'
+Assert-Same (Read-FupState).status 'started' 'state without time replaced'
 
 # Free space: 6 GB ISO + 20 GB margin does not fit in 25 GB.
 Reset-Mocks

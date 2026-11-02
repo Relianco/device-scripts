@@ -169,17 +169,38 @@ function Get-FupStateVerdict {
     return 'none'
 }
 
+# An unreadable or unparseable state.json is a failed attempt: logged, removed, and the
+# run starts a new attempt. File.Delete needs only the folder's delete-child right, not
+# access to the file; it fails only when the folder ACL is broken, and that throws.
 function Read-FupState {
     $p = Join-Path $FupDir 'state.json'
     if (-not (Test-Path -LiteralPath $p)) { return $null }
-    try { return (Get-Content -LiteralPath $p -Raw | ConvertFrom-Json) } catch { return $null }
+    # ReadAllText throws on access denied; Get-Content only wrote a non-terminating error.
+    try { return ([IO.File]::ReadAllText($p) | ConvertFrom-Json) }
+    catch {
+        Write-Status "state.json unreadable ($($_.Exception.Message)); removed, starting a new attempt" 'WARN'
+        [IO.File]::Delete($p)
+        return $null
+    }
 }
 
+# Written to a temp file with its own explicit ACL, then moved to state.json. Files are
+# deleted, not overwritten, so an old file's ACL (even an empty one) does not matter.
+# A failed ACL step still leaves the folder's inherited ACEs on the new file, so it
+# warns instead of failing the write. The old state is deleted only once the new one is
+# written, so a failed write (disk full) keeps it.
+# ponytail: delete-then-rename, not an atomic replace: File.Replace opens the old file,
+# which an empty DACL denies. Only a failed same-folder rename loses the state.
 function Write-FupState {
     param($State)
     $p = Join-Path $FupDir 'state.json'
-    if ($null -eq $State) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue; return }
-    [IO.File]::WriteAllText($p, ($State | ConvertTo-Json -Compress))
+    if ($null -eq $State) { [IO.File]::Delete($p); return }
+    $tmp = "$p.tmp"
+    [IO.File]::Delete($tmp)
+    [IO.File]::WriteAllText($tmp, ($State | ConvertTo-Json -Compress))
+    try { Set-FupItemAcl $tmp } catch { Write-Status "state.json ACL not set: $($_.Exception.Message)" 'WARN' }
+    [IO.File]::Delete($p)
+    [IO.File]::Move($tmp, $p)
 }
 
 function Get-FupOsBuild {
@@ -187,7 +208,7 @@ function Get-FupOsBuild {
 }
 
 function Get-FupLastBoot {
-    return (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime()
+    return (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
 }
 
 function Get-FupFreeBytes {
@@ -204,18 +225,54 @@ function Test-FupRebootPending {
     return $false
 }
 
+# icacls with its exit code checked: under /C a failed item shows only in the exit code.
+function Invoke-FupIcacls {
+    $out = & icacls.exe @args 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "icacls $($args -join ' ') exited $LASTEXITCODE`: $("$out".Trim())" }
+}
+
+# Number of ACEs in an item's DACL; 0 for an empty DACL or one that cannot be read.
+function Get-FupAceCount {
+    param([string]$Path)
+    try { return @((Get-Acl -LiteralPath $Path -ErrorAction Stop).Access).Count } catch { return 0 }
+}
+
+# Explicit SYSTEM and Administrators full control, then inheritance off. Granting first
+# means removing inheritance never leaves the item with no ACE.
+function Set-FupItemAcl {
+    param([string]$Path)
+    $flags = if (Test-Path -LiteralPath $Path -PathType Container) { '(OI)(CI)F' } else { 'F' }
+    Invoke-FupIcacls $Path /grant:r "*S-1-5-18:$flags" "*S-1-5-32-544:$flags" /C /Q
+    Invoke-FupIcacls $Path /inheritance:r /C /Q
+}
+
 # Working folder, SYSTEM and Administrators only: the worker script copy runs as SYSTEM.
+# Every item gets explicit ACEs, which also repairs one left with an empty DACL (seen on
+# a device: state.json denied even to SYSTEM). Administrators owns each item, and the
+# owner can always rewrite the DACL. Top-down, each folder repaired before it is listed:
+# a folder with an empty DACL cannot be listed, so icacls /T would fail on it.
+# ponytail: three icacls calls per item; fine for the few files here, slow for thousands.
+function Set-FupTreeAcl {
+    param([string]$Path)
+    Invoke-FupIcacls $Path /setowner '*S-1-5-32-544' /C /Q
+    Set-FupItemAcl $Path
+    if ((Get-FupAceCount $Path) -eq 0) { throw "$Path has no ACE after icacls" }
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        foreach ($c in @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)) { Set-FupTreeAcl $c.FullName }
+    }
+}
+
 function Initialize-FupDir {
-    if (-not (Test-Path -LiteralPath $FupDir)) { $null = New-Item -ItemType Directory -Path $FupDir -Force }
-    $null = & icacls.exe $FupDir /setowner '*S-1-5-32-544' /T /C /Q
-    $null = & icacls.exe $FupDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /T /C /Q
-    if ($LASTEXITCODE -ne 0) { throw "icacls failed with $LASTEXITCODE" }
+    $null = New-Item -ItemType Directory -Path $FupDir -Force
+    Set-FupTreeAcl $FupDir
+    # After the repair: the folder must grant SYSTEM before logs can be created in it.
     $null = New-Item -ItemType Directory -Path (Join-Path $FupDir 'logs') -Force
 }
 
 function Get-FupFileHash {
     param([string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToUpperInvariant()
+    # -ErrorAction Stop: an unreadable file otherwise ends as "cannot call a method on a null-valued expression".
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpperInvariant()
 }
 
 # Remote size in bytes, -1 when unknown.
@@ -456,8 +513,16 @@ function Invoke-FupMain {
         if (-not $held) { return (Out-FupResult (New-FupResult 'busy' 'another run or the upgrade worker holds the lock')) }
         Initialize-FupDir
         $build = Get-FupOsBuild
+        $lastBoot = Get-FupLastBoot
         $state = Read-FupState
-        $verdict = Get-FupStateVerdict -State $state -CurrentBuild $build -LastBoot (Get-FupLastBoot) -Now (Get-Date).ToUniversalTime()
+        try { $verdict = Get-FupStateVerdict -State $state -CurrentBuild $build -LastBoot $lastBoot -Now (Get-Date).ToUniversalTime() }
+        catch {
+            # A state with a missing or bad field (no time, say) is a failed attempt too.
+            # Without this, every later run fails on it and never clears it.
+            Write-Status "state.json unusable ($($_.Exception.Message)); removed, starting a new attempt" 'WARN'
+            Write-FupState $null
+            $state = $null; $verdict = 'none'
+        }
         $r = $null
         switch ($verdict) {
             'starting' { $r = New-FupResult 'starting' 'upgrade worker was started and has not taken the lock yet' }
@@ -470,7 +535,7 @@ function Invoke-FupMain {
         if ($r) {
             $r['currentBuild'] = $build
             foreach ($k in @('message', 'isoBuild', 'isoVersion', 'exitCode', 'exitHex', 'time', 'setupErr')) {
-                if ($state.PSObject.Properties[$k]) { $r[$k] = $state.$k }
+                if ($state -and $state.PSObject.Properties[$k]) { $r[$k] = $state.$k }
             }
             # Terminal outcomes are reported once; the next run starts a new attempt.
             if (@('finished', 'rolledBack', 'interrupted', 'failed') -contains $verdict) {
