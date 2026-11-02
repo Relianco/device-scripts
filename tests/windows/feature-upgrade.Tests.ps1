@@ -242,6 +242,11 @@ Write-FupState ([ordered]@{ status = 'started'; time = [datetime]::UtcNow.ToStri
 $tmpState = Join-Path $FupDir 'state.json.tmp'
 Assert-Same ($script:icacls -join ' | ') "$tmpState /grant:r *S-1-5-18:F *S-1-5-32-544:F /C /Q | $tmpState /inheritance:r /C /Q" 'state.json ACL calls'
 Assert-Same (Test-Path -LiteralPath $tmpState) $false 'temp state file moved into place'
+# A write that fails (here the temp path is a folder) keeps the last good state.
+$null = New-Item -ItemType Directory -Path $tmpState
+Assert-Throws { Write-FupState ([ordered]@{ status = 'running'; time = [datetime]::UtcNow.ToString('o') }) } 'state write into a blocked temp path'
+Assert-Same (Read-FupState).status 'started' 'failed state write keeps the old state'
+Remove-Item -LiteralPath $tmpState -Force
 
 # An unreadable state.json (empty DACL on a device) is a failed attempt: removed, and a new attempt starts.
 if ($canTestUnreadable) {

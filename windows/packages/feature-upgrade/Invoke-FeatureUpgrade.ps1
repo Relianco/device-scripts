@@ -187,16 +187,19 @@ function Read-FupState {
 # Written to a temp file with its own explicit ACL, then moved to state.json. Files are
 # deleted, not overwritten, so an old file's ACL (even an empty one) does not matter.
 # A failed ACL step still leaves the folder's inherited ACEs on the new file, so it
-# warns instead of failing the write.
+# warns instead of failing the write. The old state is deleted only once the new one is
+# written, so a failed write (disk full) keeps it.
+# ponytail: delete-then-rename, not an atomic replace: File.Replace opens the old file,
+# which an empty DACL denies. Only a failed same-folder rename loses the state.
 function Write-FupState {
     param($State)
     $p = Join-Path $FupDir 'state.json'
+    if ($null -eq $State) { [IO.File]::Delete($p); return }
     $tmp = "$p.tmp"
-    [IO.File]::Delete($p)
-    if ($null -eq $State) { return }
     [IO.File]::Delete($tmp)
     [IO.File]::WriteAllText($tmp, ($State | ConvertTo-Json -Compress))
     try { Set-FupItemAcl $tmp } catch { Write-Status "state.json ACL not set: $($_.Exception.Message)" 'WARN' }
+    [IO.File]::Delete($p)
     [IO.File]::Move($tmp, $p)
 }
 
