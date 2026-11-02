@@ -30,6 +30,8 @@ Assert-Same $LASTEXITCODE 0 'uninstall exit code'
 Assert-Same "$out" 'Nothing to change. Nothing was installed.' 'uninstall output'
 & pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Install -PinVersion 1 -SnoozeMinutes 'abc' 2>$null | Out-Null
 Assert-Same $LASTEXITCODE 1 'bad SnoozeMinutes exit code'
+& pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Install -PinVersion 1 -ReportOnly 'yes' 2>$null | Out-Null
+Assert-Same $LASTEXITCODE 1 'bad ReportOnly exit code'
 & pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Bogus -PinVersion 1 2>$null | Out-Null
 Assert-Same $LASTEXITCODE 1 'bad action exit code'
 $env:RELIAN_DEPLOY_TEST = $saved
@@ -50,6 +52,12 @@ Assert-Throws { Get-RnArgs -Message '' -SnoozeMinutes '4' -PromptMinutes '' -Cou
 Assert-Throws { Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '56' -CountdownMinutes '' } 'prompt over the toolkit ceiling'
 Assert-Throws { Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '0' } 'zero countdown'
 Assert-Throws { Get-RnArgs -Message ('x' * 301) -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '' } 'long message'
+Assert-Same $a.ReportOnly $false 'report off by default'
+Assert-Same (Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '' -ReportOnly 'true').ReportOnly $true 'report on'
+Assert-Same (Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '' -ReportOnly 'false').ReportOnly $false 'report off'
+foreach ($bad in @('TRUE', '1', 'yes', ' true')) {
+    Assert-Throws { Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '' -ReportOnly $bad } "ReportOnly '$bad'"
+}
 Assert-Same (Get-RnSnoozeText 60) 'Snooze 1 hour' 'snooze label 60'
 Assert-Same (Get-RnSnoozeText 120) 'Snooze 2 hours' 'snooze label 120'
 Assert-Same (Get-RnSnoozeText 30) 'Snooze 30 minutes' 'snooze label 30'
@@ -137,7 +145,12 @@ function Reset-Mocks {
     $script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec") }
     $script:RnSleep = { param($Sec) $script:Log.Add("sleep:$Sec") }
     $script:RnRestart = { $script:Log.Add('restart'); $script:MockRestart }
-    $script:RnSetField = { param($Json) $script:Log.Add('field'); $script:Fields.Add(($Json | ConvertFrom-Json)); $true }
+    $script:RnSetField = { param($Json, $Name) $script:Log.Add('field'); $script:FieldNames.Add($Name); $script:Fields.Add(($Json | ConvertFrom-Json)); $true }
+    $script:FieldNames = [System.Collections.Generic.List[string]]::new()
+    $script:MockSessions = @()
+    $script:RnGetSessions = { if ($script:MockUserFails) { throw 'wts down' }; $script:MockSessions }
+    $script:RnGetOtherUsers = { $script:MockUsers }
+    $script:RnBuild = { 19045 }
 }
 function Get-Last { return $script:Fields[$script:Fields.Count - 1] }
 function Assert-NoRestart { param([string]$Label) if ($script:Log -contains 'restart') { Fail "$Label restarted" } }
@@ -241,21 +254,88 @@ Reset-Mocks -PromptResult 'Restart now' -RestartCode 1190
 Assert-Same (Invoke-RnMain $args60) 1 'restart failure exit'
 Assert-Same (Get-Last).status 'failed' 'restart failure status'
 
+# Report only: the same detection, nothing else. Every side effect except the
+# field write is logged, so any prompt, countdown, sleep, restart or marker change fails.
+function Invoke-Report {
+    param($Sessions = @(), $Users = @(), [switch]$UserProbeFails, $Marker = $null)
+    Reset-Mocks -Users $Users -UserProbeFails:$UserProbeFails -Marker $Marker
+    $script:MockSessions = $Sessions
+    Assert-Same (Invoke-RnReport) 0 'report exit'
+    Assert-Same ($script:Log -join '|') 'field' 'report only writes the field'
+    Assert-Same ($script:FieldNames -join ',') 'relianSessionState' 'report field name'
+    $j = Get-Last
+    foreach ($k in @('userPresent', 'reason', 'users', 'sessions', 'pending', 'lastBoot', 'build', 'snooze', 'timestamp')) {
+        if (-not $j.PSObject.Properties[$k]) { Fail "report lacks $k" }
+    }
+    Assert-Same ($j.pending -join ',') 'windowsUpdate' 'report pending'
+    # pwsh 7 ConvertFrom-Json turns the string into a [datetime]; the field holds the string.
+    Assert-Same (ConvertTo-RnUtc "$(([datetime]$j.lastBoot).ToUniversalTime().ToString('o'))") $boot 'report last boot'
+    Assert-Same $j.build 19045 'report build'
+    return $j
+}
+function New-Session {
+    param([string]$User, [int]$Id, [string]$State = 'WTSActive', [bool]$Console = $false, [bool]$Rdp = $false, $Idle = $null)
+    [pscustomobject]@{ NTAccount = $User; SessionId = $Id; IsUserSession = $true; ConnectState = $State; IsConsoleSession = $Console; IsRdpSession = $Rdp; IdleTime = $Idle }
+}
+$sys = [pscustomobject]@{ NTAccount = 'NT AUTHORITY\SYSTEM'; SessionId = 0; IsUserSession = $false; ConnectState = 'WTSActive'; IsConsoleSession = $false; IsRdpSession = $false; IdleTime = $null }
+
+$r = Invoke-Report -Sessions @($sys) -Users @('NT AUTHORITY\SYSTEM', '')
+Assert-Same $r.userPresent 'none' 'report no user'
+Assert-Same $r.reason 'none' 'report no user reason'
+Assert-Same @($r.sessions).Count 0 'report no user sessions'
+Assert-Same @($r.users).Count 0 'report no user names'
+
+$r = Invoke-Report -Sessions @($sys, (New-Session 'CONTOSO\jdoe' 1 -Console $true -Idle ([timespan]::FromSeconds(150)))) -Users @('CONTOSO\jdoe', 'CONTOSO\jdoe')
+Assert-Same $r.userPresent 'present' 'report console user'
+Assert-Same $r.reason 'console' 'report console reason'
+Assert-Same ($r.users -join ',') 'CONTOSO\jdoe' 'report console names once'
+Assert-Same @($r.sessions).Count 1 'report console one session'
+Assert-Same $r.sessions[0].user 'CONTOSO\jdoe' 'report session user'
+Assert-Same $r.sessions[0].id 1 'report session id'
+Assert-Same $r.sessions[0].type 'console' 'report session type'
+Assert-Same $r.sessions[0].state 'active' 'report session state'
+Assert-Same $r.sessions[0].locked 'unknown' 'report lock not guessed'
+Assert-Same $r.sessions[0].idleMinutes 2 'report idle minutes'
+
+$r = Invoke-Report -Sessions @((New-Session 'CONTOSO\rdpuser' 2 -Rdp $true))
+Assert-Same $r.reason 'rdp' 'report rdp reason'
+Assert-Same $r.sessions[0].idleMinutes $null 'report idle not available'
+
+$r = Invoke-Report -Sessions @((New-Session 'CONTOSO\rdpuser' 2 'WTSDisconnected' -Rdp $true))
+Assert-Same $r.userPresent 'present' 'report disconnected still present'
+Assert-Same $r.reason 'disconnected' 'report disconnected reason'
+Assert-Same $r.sessions[0].state 'disconnected' 'report disconnected state'
+
+$r = Invoke-Report -Sessions @((New-Session 'CONTOSO\a' 2 'WTSDisconnected' -Rdp $true), (New-Session 'CONTOSO\b' 1 -Console $true))
+Assert-Same $r.reason 'console' 'report connected console beats disconnected'
+
+# Cannot tell, with a stale and an active marker: reported, never cleared or written.
+$r = Invoke-Report -UserProbeFails -Marker $old
+Assert-Same $r.userPresent 'unknown' 'report cannot tell'
+Assert-Same $r.reason 'cannotTell' 'report cannot tell reason'
+Assert-Same $r.snooze 'stale' 'report stale marker'
+Assert-Same "$($script:Marker.SnoozeUntil)" $old.SnoozeUntil 'report leaves a stale marker'
+$r = Invoke-Report -Users @('CONTOSO\jdoe') -Marker $m
+Assert-Same $r.snooze 'active' 'report active marker'
+Assert-Same $r.reason 'console' 'report named only by console user or explorer'
+
 # Pin record and README.
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/restart-notice.json') -Raw | ConvertFrom-Json
 Assert-Same $release.ninjaField $RnFieldName 'pin record matches script field'
 Assert-Same $release.kind 'notify' 'pin record kind'
+if ($release.packageArguments.IndexOf('"ReportOnly"', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks ReportOnly' }
+if ($release.packageArguments.IndexOf($RnReportField, [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the report field' }
 $readme = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
 if ($readme.IndexOf('windows/packages/restart-notice/Invoke-RestartNotice.ps1', [StringComparison]::Ordinal) -lt 0) { Fail 'README lacks the package section' }
 
 # End to end through the runner's argument parser.
-$json = '{"Message":"Windows needs to restart. Save your work.","SnoozeMinutes":"60","PromptMinutes":"10","CountdownMinutes":"15"}'
+$json = '{"Message":"Windows needs to restart. Save your work.","SnoozeMinutes":"60","PromptMinutes":"10","CountdownMinutes":"15","ReportOnly":"true"}'
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 Set-StrictMode -Off
 . (Join-Path $repoRoot 'windows/runner/Invoke-RelianRunner.ps1')
 Set-StrictMode -Version Latest
 $pairs = ConvertFrom-RelianPackageArguments -PackageArguments $b64
-Assert-Same (($pairs | ForEach-Object { $_.Name }) -join ',') 'Message,SnoozeMinutes,PromptMinutes,CountdownMinutes' 'runner pair names'
+Assert-Same (($pairs | ForEach-Object { $_.Name }) -join ',') 'Message,SnoozeMinutes,PromptMinutes,CountdownMinutes,ReportOnly' 'runner pair names'
 
 # An early exit 0 would skip every assertion after it: the first exit 0 must be the last line.
 $self = [IO.File]::ReadAllText($PSCommandPath)

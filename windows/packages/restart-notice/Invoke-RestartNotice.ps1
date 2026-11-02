@@ -22,6 +22,9 @@
       SnoozeMinutes     5 to 240, default 60. The one snooze; never extended.
       PromptMinutes     1 to 55, default 10. How long notice 1 waits for an answer.
       CountdownMinutes  1 to 60, default 15. Countdown on notice 2.
+      ReportOnly        true or false, default false. true: detection only, written
+                        to the device field relianSessionState. No notice, no
+                        snooze marker change, no restart.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM. Uninstall exits 0.
@@ -37,12 +40,14 @@ param(
     [string]$Message = '',
     [string]$SnoozeMinutes = '',
     [string]$PromptMinutes = '',
-    [string]$CountdownMinutes = ''
+    [string]$CountdownMinutes = '',
+    [string]$ReportOnly = ''
 )
 
 $ProgressPreference = 'SilentlyContinue'
 
 $RnFieldName = 'relianRestartNotice'
+$RnReportField = 'relianSessionState'
 $RnMarkerKey = 'HKLM:\SOFTWARE\Relian\RestartNotice'
 $RnFupState = [IO.Path]::Combine("$env:ProgramData", 'Relian', 'FeatureUpgrade', 'state.json')
 $RnDefaultMessage = 'Windows needs to restart to finish an update. Save your work.'
@@ -54,8 +59,12 @@ function Write-Status {
 
 # Pure: validated arguments. Throws on anything malformed.
 function Get-RnArgs {
-    param([string]$Message, [string]$SnoozeMinutes, [string]$PromptMinutes, [string]$CountdownMinutes)
-    $a = @{ Message = $RnDefaultMessage; SnoozeMinutes = 60; PromptMinutes = 10; CountdownMinutes = 15 }
+    param([string]$Message, [string]$SnoozeMinutes, [string]$PromptMinutes, [string]$CountdownMinutes, [string]$ReportOnly = '')
+    $a = @{ Message = $RnDefaultMessage; SnoozeMinutes = 60; PromptMinutes = 10; CountdownMinutes = 15; ReportOnly = $false }
+    if ($ReportOnly -ne '') {
+        if ($ReportOnly -cnotmatch '\A(true|false)\z') { throw 'ReportOnly must be true or false.' }
+        $a.ReportOnly = $ReportOnly -ceq 'true'
+    }
     if ($Message.Trim()) {
         if ($Message.Length -gt 300) { throw 'Message must be 300 characters or fewer.' }
         $a.Message = $Message.Trim()
@@ -110,15 +119,23 @@ function Get-RnPendingReasons {
 function Get-RnUserPresence {
     param([string[]]$Users, [bool]$ProbeFailed)
     if ($ProbeFailed) { return 'unknown' }
+    if (@(Get-RnPeople $Users).Count) { return 'present' }
+    return 'none'
+}
+
+# Pure: the names that are people (see Get-RnUserPresence), trimmed, each once.
+function Get-RnPeople {
+    param([string[]]$Users)
+    $seen = @{}
     foreach ($u in @($Users)) {
         $name = "$u".Trim()
-        if (-not $name) { continue }
+        if (-not $name -or $seen.ContainsKey($name)) { continue }
         $short = ($name -split '\\')[-1]
         if ($name -match '^(NT AUTHORITY|Font Driver Host|Window Manager)\\') { continue }
         if ($short -match '^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)$' -or $short -match '^(DWM|UMFD)-\d+$') { continue }
-        return 'present'
+        $seen[$name] = $true
+        $name
     }
-    return 'none'
 }
 
 # Pure: account names of the user sessions Get-ADTLoggedOnUser returned.
@@ -127,6 +144,37 @@ function Get-RnSessionUsers {
     foreach ($x in @($Sessions)) {
         if ($null -ne $x -and $x.IsUserSession -and "$($x.NTAccount)") { "$($x.NTAccount)" }
     }
+}
+
+# Pure: one report entry per user session from Get-ADTLoggedOnUser. ConnectState
+# is the WTS state (WTSActive -> active). Lock state is not in the toolkit's
+# session data and a LogonUI.exe check is a guess, so locked is always unknown.
+function ConvertTo-RnSessionReport {
+    param($Sessions)
+    foreach ($x in @($Sessions)) {
+        if ($null -eq $x -or -not $x.IsUserSession -or -not "$($x.NTAccount)") { continue }
+        $state = "$($x.ConnectState)" -replace '^WTS', ''
+        $kind = if ($x.IsConsoleSession) { 'console' } elseif ($x.IsRdpSession) { 'rdp' } else { 'other' }
+        $idle = $null
+        if ($x.IdleTime -is [timespan]) { $idle = [int][math]::Floor($x.IdleTime.TotalMinutes) }
+        [ordered]@{ user = "$($x.NTAccount)"; id = [int]$x.SessionId; type = $kind; state = $state.ToLowerInvariant(); locked = 'unknown'; idleMinutes = $idle }
+    }
+}
+
+# Pure: why Get-RnUserPresence decided what it did: none | console | rdp |
+# disconnected | cannotTell. A connected console session wins over RDP, and any
+# connected session over a disconnected one.
+function Get-RnPresenceReason {
+    param([string]$Presence, $Sessions)
+    if ($Presence -eq 'unknown') { return 'cannotTell' }
+    if ($Presence -eq 'none') { return 'none' }
+    $connected = @(@($Sessions) | Where-Object { $_.state -ne 'disconnected' })
+    if (@($connected | Where-Object { $_.type -eq 'console' }).Count) { return 'console' }
+    if ($connected.Count) { return 'rdp' }
+    if (@($Sessions).Count) { return 'disconnected' }
+    # ponytail: a person named only by the console user or an explorer.exe owner, with
+    # no toolkit session, is taken as at the console.
+    return 'console'
 }
 
 # Pure: DOMAIN\user from a Win32_Process GetOwner result. A failed lookup throws, so
@@ -181,26 +229,26 @@ function ConvertTo-RnNativeArg {
 
 # Same write as the feature-upgrade package: the agent CLI's stdin, then a read-back.
 function Set-RnField {
-    param([string]$Value)
+    param([string]$Value, [string]$Name = $RnFieldName)
     $cli = Join-Path $env:ProgramData 'NinjaRMMAgent\ninjarmm-cli.exe'
     if (Test-Path -LiteralPath $cli) {
         try {
-            $null = $Value | & $cli set --stdin $RnFieldName 2>&1
-            $back = (& $cli get $RnFieldName 2>$null) -join "`n"
+            $null = $Value | & $cli set --stdin $Name 2>&1
+            $back = (& $cli get $Name 2>$null) -join "`n"
             if ($back.Trim() -eq $Value) { return $true }
         } catch { }
     }
     if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try { Ninja-Property-Set $RnFieldName (ConvertTo-RnNativeArg $Value); return $true } catch { }
+        try { Ninja-Property-Set $Name (ConvertTo-RnNativeArg $Value); return $true } catch { }
     }
     return $false
 }
 
 # Writes the field and keeps the JSON for the caller to print last.
 function Out-RnResult {
-    param([System.Collections.Specialized.OrderedDictionary]$Result)
+    param([System.Collections.Specialized.OrderedDictionary]$Result, [string]$Field = $RnFieldName)
     $json = ConvertTo-RnJson $Result (& $script:RnNow)
-    if (& $script:RnSetField $json) { Write-Status "Written to $RnFieldName" }
+    if (& $script:RnSetField $json $Field) { Write-Status "Written to $Field" }
     else { Write-Status 'Custom field not written; the JSON line below is the result' 'WARN' }
     $script:RnJson = $json
 }
@@ -292,14 +340,44 @@ function Invoke-RnMain {
     return (Invoke-RnRestartNow $r)
 }
 
+# Report only: the same probes and rules as Invoke-RnMain, written to
+# relianSessionState. Reads only: no prompt, no snooze marker change (a stale
+# marker is reported, not cleared), no restart. Returns the exit code.
+function Invoke-RnReport {
+    $now = (& $script:RnNow).ToUniversalTime()
+    $boot = & $script:RnLastBoot
+    $sessions = @()
+    $users = @()
+    $failed = $false
+    try {
+        $raw = @(& $script:RnGetSessions)
+        $sessions = @(ConvertTo-RnSessionReport $raw)
+        $users = @(Get-RnSessionUsers $raw) + @(& $script:RnGetOtherUsers)
+    } catch { $failed = $true }
+    $presence = Get-RnUserPresence -Users $users -ProbeFailed $failed
+    $r = [ordered]@{
+        userPresent = $presence
+        reason      = Get-RnPresenceReason -Presence $presence -Sessions $sessions
+        users       = @(Get-RnPeople $users)
+        sessions    = $sessions
+        pending     = @(& $script:RnGetPending)
+        lastBoot    = $boot.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        build       = [int](& $script:RnBuild)
+        snooze      = Get-RnSnoozeState -Marker (& $script:RnGetSnooze) -Now $now -LastBoot $boot
+    }
+    Out-RnResult $r $RnReportField
+    return 0
+}
+
 # --- Real implementations. Tests replace these. -------------------------------
 
 $script:RnNow = { (Get-Date).ToUniversalTime() }
-$script:RnSetField = { param($Json) Set-RnField $Json }
+$script:RnSetField = { param($Json, $Name) Set-RnField $Json $Name }
 $script:RnSleep = { param($Seconds) Start-Sleep -Seconds $Seconds }
 # /f: apps with unsaved work would otherwise block the restart and let it be cancelled.
 $script:RnRestart = { & shutdown.exe /r /f /t 0; $LASTEXITCODE }
 $script:RnLastBoot = { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime() }
+$script:RnBuild = { [int](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuild).CurrentBuild }
 
 $script:RnGetPending = {
     $cbs = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
@@ -308,17 +386,25 @@ $script:RnGetPending = {
     if (Test-Path -LiteralPath $RnFupState) {
         try { $state = [IO.File]::ReadAllText($RnFupState) | ConvertFrom-Json } catch { $state = $null }
     }
-    $build = [int](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuild).CurrentBuild
+    $build = & $script:RnBuild
     Get-RnPendingReasons -Cbs $cbs -WindowsUpdate $wu -FupState $state -CurrentBuild $build -LastBoot (& $script:RnLastBoot)
 }
 
-$script:RnGetUsers = {
-    Open-RnSession
-    Get-RnSessionUsers @(Get-ADTLoggedOnUser -ErrorAction Stop)
+# The one user detector. Invoke-RnMain uses the names; Invoke-RnReport also the sessions.
+$script:RnGetSessions = {
+    Import-RnToolkit
+    @(Get-ADTLoggedOnUser -ErrorAction Stop)
+}
+$script:RnGetOtherUsers = {
     @((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName)
     foreach ($p in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction Stop)) {
         ConvertTo-RnOwnerName (Invoke-CimMethod -InputObject $p -MethodName GetOwner -ErrorAction Stop)
     }
+}
+$script:RnGetUsers = {
+    Open-RnSession
+    Get-RnSessionUsers @(& $script:RnGetSessions)
+    & $script:RnGetOtherUsers
 }
 
 $script:RnGetSnooze = {
@@ -336,12 +422,20 @@ $script:RnSetSnooze = {
 $script:RnClearSnooze = { Remove-Item -LiteralPath $RnMarkerKey -Recurse -Force -ErrorAction SilentlyContinue }
 
 $script:RnSessionOpen = $false
-function Open-RnSession {
-    if ($script:RnSessionOpen) { return }
+$script:RnToolkitLoaded = $false
+# The module only: Get-ADTLoggedOnUser needs no toolkit session, so report mode opens none.
+function Import-RnToolkit {
+    if ($script:RnToolkitLoaded) { return }
     $manifest = Join-Path $PSScriptRoot 'PSAppDeployToolkit\PSAppDeployToolkit.psd1'
     if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "missing PSAppDeployToolkit module at $manifest" }
     Get-ChildItem -LiteralPath (Split-Path -Parent $manifest) -Recurse -File | Unblock-File -ErrorAction Ignore
     Import-Module -FullyQualifiedName @{ ModuleName = $manifest; Guid = '8c3c366b-8606-4576-9f2d-4051144f7ca2'; ModuleVersion = '4.1.8' } -Force
+    $script:RnToolkitLoaded = $true
+}
+
+function Open-RnSession {
+    if ($script:RnSessionOpen) { return }
+    Import-RnToolkit
     $s = @{ AppVendor = ''; AppName = 'Restart needed'; AppVersion = '1'; RequireAdmin = $false; DeployAppScriptVersion = '4.1.8' }
     $s = Remove-ADTHashtableNullOrEmptyValues -Hashtable $s
     $null = Open-ADTSession @s -DeploymentType 'Install' -DeployMode 'Interactive' -PassThru
@@ -387,15 +481,16 @@ if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Act
 }
 if ($Action -eq 'Uninstall') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
 try {
-    $rnArgs = Get-RnArgs -Message $Message -SnoozeMinutes $SnoozeMinutes -PromptMinutes $PromptMinutes -CountdownMinutes $CountdownMinutes
+    $rnArgs = Get-RnArgs -Message $Message -SnoozeMinutes $SnoozeMinutes -PromptMinutes $PromptMinutes -CountdownMinutes $CountdownMinutes -ReportOnly $ReportOnly
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 
 $script:RnJson = $null
 try {
-    $code = Invoke-RnMain $rnArgs
+    if ($rnArgs.ReportOnly) { $code = Invoke-RnReport } else { $code = Invoke-RnMain $rnArgs }
 } catch {
     Write-Status "$($_.ScriptStackTrace)" 'ERROR'
-    Out-RnResult (New-RnResult 'failed' "$($_.Exception.Message)" @())
+    $outField = if ($rnArgs.ReportOnly) { $RnReportField } else { $RnFieldName }
+    Out-RnResult (New-RnResult 'failed' "$($_.Exception.Message)" @()) $outField
     $code = 1
 }
 # Last stdout line is the JSON, so a log reader can find it.
