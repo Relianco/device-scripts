@@ -414,10 +414,9 @@ function Invoke-RnMain {
 
 # Waits out the countdown. True when the countdown dialog closed before the end:
 # it has no close or minimize, so that is Restart now. The dialog counts as closed
-# only after it was seen open, so the poll is every second: a dialog that opens
-# and is answered between two polls is missed and the countdown runs out. Nobody
-# reads it and clicks within a second. A probe that fails waits the rest of the
-# countdown, as before this check existed.
+# only after it was seen open (RnCountdownOpen says why the first poll sees it).
+# Never seen: the countdown runs out, as before. A probe that fails waits the
+# rest of the countdown, as before this check existed.
 function Wait-RnCountdown {
     param([int]$Seconds)
     $end = (& $script:RnNow).AddSeconds($Seconds)
@@ -913,13 +912,25 @@ $script:RnCountdown = {
     Show-ADTInstallationRestartPrompt -CountdownSeconds $Seconds -CountdownNoHideSeconds $Seconds -Title 'Restart needed' -Subtitle 'Windows update'
 }
 
-# True while the countdown dialog is open. The async restart prompt runs in its own
-# PSADT.ClientServer.Client.exe (through the launcher), whose command line names
-# -DialogType RestartDialog; notice 1's client process does not. The launcher is
-# left out: it exits once the client starts. Throws when the process list cannot
-# be read, so Wait-RnCountdown waits the countdown out.
+# True while the countdown dialog is open. The async restart prompt starts
+# PSADT.ClientServer.Client.Launcher.exe with -DialogType RestartDialog on its
+# command line, and the launcher starts PSADT.ClientServer.Client.exe, which shows
+# the dialog. Show-ADTInstallationRestartPrompt returns once the launcher process
+# exists, so the first poll, a moment later, finds the launcher or its client:
+# Wait-RnCountdown sees the dialog open before anyone can answer it. Tracked: any
+# of the two whose command line names RestartDialog, and any child of a tracked
+# process (the client may carry other arguments). Notice 1's client has neither.
+# Throws when the process list cannot be read, so Wait-RnCountdown waits the
+# countdown out.
+$script:RnCountdownPids = @{}
 $script:RnCountdownOpen = {
-    [bool]@(Get-CimInstance Win32_Process -Filter "Name='PSADT.ClientServer.Client.exe'" -ErrorAction Stop | Where-Object { "$($_.CommandLine)" -match '\bRestartDialog\b' }).Count
+    $all = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'PSADT.ClientServer.Client%'" -ErrorAction Stop)
+    foreach ($pass in 1, 2) {
+        foreach ($p in $all) {
+            if ("$($p.CommandLine)" -match '\bRestartDialog\b' -or $script:RnCountdownPids.ContainsKey([int]$p.ParentProcessId)) { $script:RnCountdownPids[[int]$p.ProcessId] = $true }
+        }
+    }
+    [bool]@($all | Where-Object { $script:RnCountdownPids.ContainsKey([int]$_.ProcessId) }).Count
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {

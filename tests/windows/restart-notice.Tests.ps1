@@ -368,6 +368,27 @@ $null = Invoke-RnMain $args60
 Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:1|sleep:1|sleep:898|field|restart' 'probe failure sequence'
 Assert-Same (Get-Last).status 'restartedAfterCountdown' 'probe failure status'
 
+# 2k. The real countdown probe, over a mocked process list: the launcher carries
+# RestartDialog, its client may not. The client is tracked through its parent
+# after the launcher exits; notice 1's client never counts.
+$probeSource = [IO.File]::ReadAllText($scriptPath)
+$probeAt = $probeSource.IndexOf('$script:RnCountdownPids = @{}', [StringComparison]::Ordinal)
+$probeEnd = $probeSource.IndexOf("if (`$env:RELIAN_DEPLOY_TEST", $probeAt, [StringComparison]::Ordinal)
+. ([scriptblock]::Create($probeSource.Substring($probeAt, $probeEnd - $probeAt)))
+function New-Proc { param([int]$Id, [int]$Parent, [string]$Cmd) [pscustomobject]@{ ProcessId = $Id; ParentProcessId = $Parent; CommandLine = $Cmd } }
+$toastClient = New-Proc 5 4 '"PSADT.ClientServer.Client.exe" /ClientServer'
+$launcher = New-Proc 10 4 '"PSADT.ClientServer.Client.Launcher.exe" /ShowModalDialog -DialogType RestartDialog -DialogStyle Fluent'
+$countdownClient = New-Proc 11 10 '"PSADT.ClientServer.Client.exe" /ShowModalDialog'
+$script:ProcLists = [System.Collections.Generic.Queue[object]]::new([object[]]@(
+        , @($toastClient, $launcher)
+        , @($toastClient, $countdownClient)
+        , @($toastClient)))
+function Get-CimInstance { $script:ProcLists.Dequeue() }
+Assert-Same (& $script:RnCountdownOpen) $true 'probe sees the launcher'
+Assert-Same (& $script:RnCountdownOpen) $true 'probe follows the launcher to its client'
+Assert-Same (& $script:RnCountdownOpen) $false 'probe: only notice 1 left, the countdown closed'
+Remove-Item Function:\Get-CimInstance
+
 # 3. Restart now on notice 1.
 Reset-Mocks -PromptResult 'Restart now'
 Assert-Same (Invoke-RnMain $args60) 0 'restart now exit'
