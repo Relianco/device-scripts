@@ -145,6 +145,14 @@ Every run prints one JSON line last and writes it to the device field `relianFea
 
 A `finished`, `failed`, `rolledBack` or `interrupted` result is reported once and cleared; the next run starts a new attempt and reuses the downloaded ISO. `Uninstall` exits 0 and changes nothing. `windows/releases/feature-upgrade.json` records the field and the argument shape.
 
+## Restart notice
+
+`windows/packages/restart-notice/Invoke-RestartNotice.ps1` restarts a device that is waiting for a restart and tells the signed-in user first. Run it through the deploy runner (NinjaOne script 374) as SYSTEM. It acts only when Windows servicing or Windows Update has a restart pending, or the feature-upgrade package left an upgrade `staged` that has not booted yet. Otherwise it writes `none` and exits 0.
+
+When nobody is signed in it restarts at once, at any hour. A person counts as signed in when the toolkit lists a user session (console or RDP, connected or disconnected), Windows reports a console user, or an `explorer.exe` runs as a person; if it cannot tell, it assumes someone is. A signed-in user sees a notice with `Restart now` and one snooze (60 minutes by default). The snooze is kept under `HKLM\SOFTWARE\Relian\RestartNotice`, used once and never extended, and cleared after the restart or when nothing is pending. A run during the snooze writes `snoozed` and does nothing else. If the notice gets no answer (10 minutes by default) or the snooze is used up, a 15-minute countdown with `Restart now` shows, then the device restarts with `shutdown /r /f /t 0`.
+
+The result goes to the device field `relianRestartNotice` before any restart: `none`, `snoozed`, `restarted`, `restartedNoUser`, `restartedAfterCountdown` (with `reason`) or `failed`, plus the button pressed and whether the snooze was used. Optional package arguments: `Message`, `SnoozeMinutes`, `PromptMinutes`, `CountdownMinutes`; see `windows/releases/restart-notice.json`. A run can last the prompt time plus the countdown, so the NinjaOne script timeout must allow that. `Uninstall` exits 0 and changes nothing.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.
