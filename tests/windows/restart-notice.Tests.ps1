@@ -105,7 +105,8 @@ if ($raw.Contains("`n")) { Fail 'json is not one line' }
 
 # The flow, with every side effect replaced. Each call is logged in order.
 function Reset-Mocks {
-    param([string[]]$Pending = @('windowsUpdate'), $Marker = $null, $Users = @('CONTOSO\jdoe'), [switch]$UserProbeFails, $PromptResult = 'Timeout', [int]$RestartCode = 0, [int]$PromptDelay = 0)
+    param([string[]]$Pending = @('windowsUpdate'), $Marker = $null, $Users = @('CONTOSO\jdoe'), [switch]$UserProbeFails, $PromptResult = 'Timeout', [int]$RestartCode = 0, [int]$PromptDelay = 0, [bool]$CanShow = $true)
+    $script:MockCanShow = $CanShow
     $script:PromptDelay = $PromptDelay
     $script:Log = [System.Collections.Generic.List[string]]::new()
     $script:Fields = [System.Collections.Generic.List[object]]::new()
@@ -124,6 +125,7 @@ function Reset-Mocks {
     $script:RnClearSnooze = { $script:Log.Add('clearSnooze'); $script:Marker = $null }
     $script:RnGetUsers = { if ($script:MockUserFails) { throw 'cim down' }; $script:MockUsers }
     $script:RnPrompt = { param($T, $S, $Sec) $script:Log.Add("prompt:${S}:$Sec"); $script:Clock = $script:Clock.AddMinutes($script:PromptDelay); $script:MockPrompt }
+    $script:RnCanShow = { $script:MockCanShow }
     $script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec") }
     $script:RnSleep = { param($Sec) $script:Log.Add("sleep:$Sec") }
     $script:RnRestart = { $script:Log.Add('restart'); $script:MockRestart }
@@ -199,6 +201,13 @@ Assert-Same ($script:Log -join '|') 'field|countdown:900|sleep:900|field|restart
 Assert-Same (Get-Last).status 'restartedAfterCountdown' 'snooze used status'
 Assert-Same (Get-Last).reason 'snoozeUsed' 'snooze used reason'
 Assert-Same (Get-Last).snoozeUsed $true 'snooze used flag'
+
+# 5a. Snooze ran out and the user is disconnected: no toolkit dialog (it would restart
+# at once), the countdown is waited out, then restart.
+Reset-Mocks -Marker $used -CanShow $false
+$null = Invoke-RnMain $args60
+Assert-Same ($script:Log -join '|') 'field|sleep:900|field|restart' 'snooze used, no session sequence'
+Assert-Same (Get-Last).reason 'NotShown' 'snooze used, no session reason'
 
 # 5b. No answer on notice 1: countdown, then restart.
 Reset-Mocks -PromptResult 'Timeout'

@@ -267,15 +267,17 @@ function Invoke-RnMain {
         $reason = $button
     }
 
+    # NotShown: no session can show the dialog (a disconnected user). The toolkit's
+    # restart dialog would then restart at once, so the countdown is waited out here
+    # without it. Checked on the used-snooze path too, where notice 1 was skipped.
+    if ($reason -ne 'NotShown' -and -not (& $script:RnCanShow)) { $reason = 'NotShown' }
+
     # Countdown, then restart. Written first: the dialog's own Restart now may restart
     # the device before this run gets another chance.
     $seconds = $A.CountdownMinutes * 60
     $r = New-RnResult 'restartedAfterCountdown' "countdown of $($A.CountdownMinutes) minutes ($reason), then restart" $pending $button $snoozeUsed
     $r['reason'] = $reason
     Out-RnResult $r
-    # NotShown: the toolkit could not reach a session (a disconnected user). Its
-    # restart dialog would restart at once with no active user, so wait out the
-    # countdown here instead.
     if ($reason -ne 'NotShown') { & $script:RnCountdown $A.Message $seconds }
     & $script:RnSleep $seconds
     return (Invoke-RnRestartNow $r)
@@ -339,6 +341,12 @@ $script:RnPrompt = {
     param($Text, $SnoozeText, $TimeoutSeconds)
     Open-RnSession
     Show-ADTInstallationPrompt -Message $Text -ButtonLeftText 'Restart now' -ButtonRightText $SnoozeText -Title 'Restart needed' -Subtitle 'Windows update' -NoExitOnTimeout -Timeout $TimeoutSeconds
+}
+
+# True when a user session is active (connected), so a toolkit dialog can show.
+$script:RnCanShow = {
+    Open-RnSession
+    [bool](@(Get-ADTLoggedOnUser | Where-Object { $_.IsActiveUserSession }).Count)
 }
 
 $script:RnCountdown = {
