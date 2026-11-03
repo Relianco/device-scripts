@@ -2,5 +2,5 @@
   "name": "Feature upgrade diagnostic report",
   "kind": "diagnostic",
   "installsSoftware": false,
-  "packageArguments": "None. Read-only, bounded JSON on stdout; no custom field writes."
+  "packageArguments": "Optional: {\"Section\":\"Summary\"}, or Rollback, Servicing, Setup. Base64 in PackageArguments. Each read-only stdout JSON report is at most 8000 UTF-8 bytes; no custom field writes."
 }
