@@ -16,6 +16,9 @@ try {
     $r = Read-DiagnosticLog -Path $log -MaxBytes 4096
     Assert (($r.matches -join ' ') -match 'before.*KB5043080.*after') 'historical failure with adjacent context'
     Assert (($r.tail -join ' ') -match 'later 100') 'latest tail retained'
+    [IO.File]::WriteAllText($log, "KB5043080 underlying package failure`n" + ((1..20 | ForEach-Object { "generic 0x80070057 $_" }) -join "`n"))
+    $r = Read-DiagnosticLog -Path $log -MaxBytes 4096
+    Assert (($r.matches -join ' ') -match 'KB5043080 underlying') 'package context survives repeated generic errors'
     [IO.File]::WriteAllText($log, ('x' * 5000) + "`n0x20003 tail`n")
     $r = Read-DiagnosticLog -Path $log -MaxBytes 512
     Assert ($r.sampledBytes -le 512 -and $r.truncated) 'large file byte cap'

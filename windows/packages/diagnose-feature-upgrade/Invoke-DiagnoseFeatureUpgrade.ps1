@@ -75,12 +75,15 @@ function Read-DiagnosticLog {
     $r = Read-DiagnosticBytes -Path $Path -MaxBytes $MaxBytes
     if ($r.status -ne 'read') { return $r }
     $lines = @($r.text -split '\r?\n' | Where-Object { $_.Trim() })
-    $hits = [Collections.Generic.List[int]]::new()
+    # Keep the latest hit in each category, not just the final generic errors:
+    # repeated HRESULT summaries must not hide the earlier package-add failure.
+    $patterns = @('0x80070057','0x20003','KB5043080','CAddCbsPackage','rollback failure|fatal error')
+    $hits = @{}
     for ($i=0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -match '(?i)0x80070057|0x20003|KB5043080|CAddCbsPackage|rollback failure|fatal error') { $hits.Add($i) }
+        foreach ($pattern in $patterns) { if ($lines[$i] -match $pattern) { $hits[$pattern]=$i } }
     }
     $indices = @{}
-    foreach ($hit in @($hits | Select-Object -Last 4)) {
+    foreach ($hit in $hits.Values) {
         for ($j=[Math]::Max(0,$hit-2); $j -le [Math]::Min($lines.Count-1,$hit+2); $j++) { $indices[$j]=$true }
     }
     $context = @($indices.Keys | Sort-Object | ForEach-Object { $lines[$_] })
