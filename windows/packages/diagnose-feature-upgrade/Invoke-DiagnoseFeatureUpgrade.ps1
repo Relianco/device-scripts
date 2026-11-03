@@ -77,7 +77,7 @@ function Read-DiagnosticLog {
     $lines = @($r.text -split '\r?\n' | Where-Object { $_.Trim() })
     # Keep the latest hit in each category, not just the final generic errors:
     # repeated HRESULT summaries must not hide the earlier package-add failure.
-    $patterns = @('0x80070057','0x80070005','0x20003','KB5043080','CAddCbsPackage','ERROR_ACCESS_DENIED','STATUS_CANNOT_DELETE','rollback failure|fatal error')
+    $patterns = @('0x80070057','0x80070005','0x20003','KB5043080','CAddCbsPackage','ERROR_ACCESS_DENIED','STATUS_CANNOT_DELETE','Current phase','Current op','Current result','Setup360','PostRebootInstall','rollback failure|fatal error')
     $hits = @{}
     $firstAccessDenied = $null
     for ($i=0; $i -lt $lines.Count; $i++) {
@@ -216,7 +216,7 @@ function Read-DiagnosticBitLocker {
 function Invoke-FeatureUpgradeDiagnostic {
     param([ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $report = [ordered]@{ version='3'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
+    $report = [ordered]@{ version='4'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
     $win = $env:SystemRoot
     $drive = $env:SystemDrive
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'
@@ -273,7 +273,7 @@ function Invoke-FeatureUpgradeDiagnostic {
         $entry.label=$p[0]; $report.logs += $entry
     }
     $report.elapsedSeconds = [Math]::Round($clock.Elapsed.TotalSeconds,1)
-    $report.notes = @('Logs sample only their final 2 MiB; older history may be omitted.', 'Matching context: 0x80070057, 0x80070005, 0x20003, KB5043080, CAddCbsPackage, ERROR_ACCESS_DENIED, STATUS_CANNOT_DELETE, rollback/fatal failures.', 'No changes made. Setup and servicing may continue while this report is collected.')
+    $report.notes = @('Logs sample only their final 2 MiB; older history may be omitted.', 'Matching context: 0x80070057, 0x80070005, 0x20003, KB5043080, CAddCbsPackage, ERROR_ACCESS_DENIED, STATUS_CANNOT_DELETE, Current phase/op/result, Setup360, PostRebootInstall, rollback/fatal failures.', 'No changes made. Setup and servicing may continue while this report is collected.')
     return ConvertTo-BoundedDiagnosticJson $report
 }
 

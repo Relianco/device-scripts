@@ -29,6 +29,17 @@ try {
     $r = Read-DiagnosticLog -Path $log -MaxBytes 8192
     Assert (($r.matches -join ' ') -match 'first offline file operation.*abandoning 0x80070005') 'first access failure survives trailing summaries'
     Assert (($r.matches -join ' ') -match 'ERROR_ACCESS_DENIED.*STATUS_CANNOT_DELETE') 'named underlying access/delete errors retained'
+    # Rollback completion and diagnostic timeout are not the upgrade outcome.
+    # Space the outcome markers apart so each needs its own matcher category.
+    $outcomes=@('Current phase: SafeOS','Current op: Boot','Current result: 0xC1900101','Setup360: result recorded','PostRebootInstall: upgrade failed')
+    $history=@()
+    foreach ($outcome in $outcomes) { $history += $outcome; $history += @(1..8 | ForEach-Object { "ordinary progress $_" }) }
+    $history += @(1..100 | ForEach-Object { "later rollback work $_" })
+    $history += @('Rollback completed successfully','Diagnostics timed out 0x800705B4')
+    [IO.File]::WriteAllText($log, ($history -join "`n"))
+    $r=Read-DiagnosticLog -Path $log -MaxBytes 8192
+    foreach ($outcome in $outcomes) { Assert (($r.matches -join ' ').Contains($outcome)) "rollback outcome retained: $outcome" }
+    Assert (($r.tail -join ' ') -match 'Diagnostics timed out') 'diagnostic timeout retained separately from upgrade result'
     [IO.File]::WriteAllText($log, ('x' * 5000) + "`n0x20003 tail`n")
     $r = Read-DiagnosticLog -Path $log -MaxBytes 512
     Assert ($r.sampledBytes -le 512 -and $r.truncated) 'large file byte cap'
@@ -93,6 +104,7 @@ try {
     $output = Invoke-FeatureUpgradeDiagnostic
     $report = $output | ConvertFrom-Json
     Assert ($report.status -eq 'collected') 'whole collector succeeds'
+    Assert ($report.version -eq '4') 'report identifies rollback outcome matcher revision'
     Assert ([IO.File]::ReadAllText($stateFile) -eq $stateText) 'running worker state untouched'
     Assert ($report.state.status -eq 'started') 'running worker state collected'
     Assert ($report.bitLocker.encryptionStatus -eq 'FullyEncrypted' -and $report.bitLocker.protectionStatus -eq 'On') 'Summary includes BitLocker status'
