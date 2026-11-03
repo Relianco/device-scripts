@@ -2,7 +2,7 @@
 .SYNOPSIS
     Read-only evidence for a failed or running Windows feature upgrade.
 .DESCRIPTION
-    Section is Summary (default), Rollback, Servicing or Setup. Prints bounded JSON to stdout. Reads fixed setup/rollback/servicing logs,
+    Section is Summary (default), Rollback, Servicing, Setup or Boot. Prints bounded JSON to stdout. Reads fixed setup/rollback/servicing logs,
     allowlisted upgrade state and registry values, current setup process names,
     OS, boot, disk and hardware. No custom-field writes, WU scans, installers,
     service changes, state deletion, or restarts. Safe to inspect a running worker.
@@ -12,7 +12,7 @@
     Windows PowerShell 5.1+, run as SYSTEM through the Relian deploy runner.
 #>
 [CmdletBinding()]
-param([string]$DeploymentType, [string]$Action, [string]$PinVersion, [ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
+param([string]$DeploymentType, [string]$Action, [string]$PinVersion, [ValidateSet('Summary','Rollback','Servicing','Setup','Boot')][string]$Section = 'Summary')
 $ProgressPreference = 'SilentlyContinue'
 
 function Protect-DiagnosticText {
@@ -77,16 +77,19 @@ function Read-DiagnosticLog {
     $lines = @($r.text -split '\r?\n' | Where-Object { $_.Trim() })
     # Keep the latest hit in each category, not just the final generic errors:
     # repeated HRESULT summaries must not hide the earlier package-add failure.
-    $patterns = @('0x80070057','0x80070005','0x20003','KB5043080','CAddCbsPackage','ERROR_ACCESS_DENIED','STATUS_CANNOT_DELETE','Current phase','Current op','Current result','Setup360','PostRebootInstall','rollback failure|fatal error')
+    $patterns = @('0x80070057','0x80070005','0x20003','KB5043080','CAddCbsPackage','ERROR_ACCESS_DENIED','STATUS_CANNOT_DELETE','Current phase','Current op','Current result','Setup360','PostRebootInstall','rollback failure|fatal error','!!!')
     $hits = @{}
     $firstAccessDenied = $null
+    $firstDriverError = $null
     for ($i=0; $i -lt $lines.Count; $i++) {
+        if ($null -eq $firstDriverError -and $lines[$i] -match '!!!') { $firstDriverError=$i }
         if ($null -eq $firstAccessDenied -and $lines[$i] -match '0x80070005') { $firstAccessDenied=$i }
         foreach ($pattern in $patterns) { if ($lines[$i] -match $pattern) { $hits[$pattern]=$i } }
     }
     $indices = @{}
     $selectedHits=@($hits.Values)
     if ($null -ne $firstAccessDenied) { $selectedHits += $firstAccessDenied }
+    if ($null -ne $firstDriverError) { $selectedHits += $firstDriverError }
     foreach ($hit in $selectedHits) {
         for ($j=[Math]::Max(0,$hit-2); $j -le [Math]::Min($lines.Count-1,$hit+2); $j++) { $indices[$j]=$true }
     }
@@ -95,6 +98,27 @@ function Read-DiagnosticLog {
     $r.matches = @(Limit-DiagnosticLines -Lines $context)
     $r.tail = @(Limit-DiagnosticLines -Lines @($lines | Select-Object -Last 5) -MaxChars 2400)
     return $r
+}
+
+function Read-DiagnosticFileMetadata {
+    param([string]$Path)
+    try {
+        $file=[IO.FileInfo]::new($Path)
+        if (-not $file.Exists) { return @{status='missing'} }
+        return @{status='present';sizeBytes=$file.Length;lastWriteUtc=$file.LastWriteTimeUtc.ToString('o')}
+    } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
+}
+
+function Read-DiagnosticBootEvents {
+    try {
+        $since=[datetime]::UtcNow.AddHours(-72).ToString('yyyyMMddHHmmss.000000+000')
+        $filter="Logfile='System' AND TimeGenerated >= '$since' AND ((EventCode=41 AND SourceName='Microsoft-Windows-Kernel-Power') OR (EventCode=1001 AND SourceName='Microsoft-Windows-WER-SystemErrorReporting') OR (EventCode=6008 AND SourceName='EventLog'))"
+        $events=@(Get-CimInstance -ClassName Win32_NTLogEvent -Filter $filter -Property TimeGenerated,SourceName,EventCode,Message -OperationTimeoutSec 5 -ErrorAction Stop | Sort-Object TimeGenerated -Descending | Select-Object -First 8)
+        $safe=@(foreach ($event in $events) {
+            [ordered]@{timestamp=$event.TimeGenerated.ToUniversalTime().ToString('o');source=Protect-DiagnosticText ([string]$event.SourceName) -Max 100;id=[int]$event.EventCode;message=Protect-DiagnosticText ([string]$event.Message) -Max 500}
+        })
+        return @{status='collected';windowHours=72;limit=8;events=$safe}
+    } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
 }
 
 function Read-DiagnosticState {
@@ -214,9 +238,9 @@ function Read-DiagnosticBitLocker {
 }
 
 function Invoke-FeatureUpgradeDiagnostic {
-    param([ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
+    param([ValidateSet('Summary','Rollback','Servicing','Setup','Boot')][string]$Section = 'Summary')
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $report = [ordered]@{ version='4'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
+    $report = [ordered]@{ version='5'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
     $win = $env:SystemRoot
     $drive = $env:SystemDrive
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'
@@ -244,6 +268,10 @@ function Invoke-FeatureUpgradeDiagnostic {
     # Fixed paths only, no recursive walks or archive extraction. Rollback and
     # offline-image servicing are first because they explain Safe OS failures.
     $paths = @(
+        # Microsoft documents both flat and nested supplemental driver log locations.
+        @('rollback-drivers', (Join-Path $bt 'Sources\Rollback\setupapi\setupapi.dev.log')),
+        @('rollback-drivers-flat', (Join-Path $bt 'Sources\Rollback\setupapi.dev.log')),
+        @('windows-drivers', (Join-Path $win 'INF\setupapi.dev.log')),
         @('rollback-errors', (Join-Path $bt 'Sources\Rollback\setuperr.log')),
         @('newos-cbs', (Join-Path $bt 'NewOS\Windows\Logs\CBS\CBS.log')),
         @('newos-dism', (Join-Path $bt 'NewOS\Windows\Logs\DISM\dism.log')),
@@ -258,6 +286,7 @@ function Invoke-FeatureUpgradeDiagnostic {
     )
     $labels = switch ($Section) {
         'Summary' { @() }
+        'Boot' { @('rollback-drivers','rollback-drivers-flat','windows-drivers') }
         'Rollback' { @('rollback-errors','rollback-actions') }
         'Servicing' { @('newos-cbs','newos-dism','host-cbs','host-dism') }
         'Setup' { @('panther-errors','panther-actions','windows-panther-errors','windows-panther-actions','mosetup') }
@@ -266,6 +295,11 @@ function Invoke-FeatureUpgradeDiagnostic {
         foreach ($key in @('FailureData','FailureDetails','LastSetupOperation')) { $report.setupDiag.Remove($key) }
         foreach ($key in @('message','setupErr')) { $report.state.Remove($key) }
     }
+    if ($Section -eq 'Boot') {
+        # Dump metadata only: never open, hash or parse its contents.
+        $report.setupMemoryDump=Read-DiagnosticFileMetadata (Join-Path $bt 'Sources\Rollback\setupmem.dmp')
+        $report.bootEvents=if ($clock.Elapsed.TotalSeconds -gt 40) { @{status='timeBudget'} } else { Read-DiagnosticBootEvents }
+    }
     $report.logs=@()
     foreach ($p in @($paths | Where-Object { $_[0] -in $labels })) {
         if ($clock.Elapsed.TotalSeconds -gt 40) { $entry=@{status='timeBudget'} }
@@ -273,7 +307,7 @@ function Invoke-FeatureUpgradeDiagnostic {
         $entry.label=$p[0]; $report.logs += $entry
     }
     $report.elapsedSeconds = [Math]::Round($clock.Elapsed.TotalSeconds,1)
-    $report.notes = @('Logs sample only their final 2 MiB; older history may be omitted.', 'Matching context: 0x80070057, 0x80070005, 0x20003, KB5043080, CAddCbsPackage, ERROR_ACCESS_DENIED, STATUS_CANNOT_DELETE, Current phase/op/result, Setup360, PostRebootInstall, rollback/fatal failures.', 'No changes made. Setup and servicing may continue while this report is collected.')
+    $report.notes = @('Logs sample only their final 2 MiB; older history may be omitted.', 'Matching context: 0x80070057, 0x80070005, 0x20003, KB5043080, CAddCbsPackage, ERROR_ACCESS_DENIED, STATUS_CANNOT_DELETE, Current phase/op/result, Setup360, PostRebootInstall, rollback/fatal failures, !!! driver errors.', 'No changes made. Setup and servicing may continue while this report is collected.')
     return ConvertTo-BoundedDiagnosticJson $report
 }
 
