@@ -186,6 +186,9 @@ function ConvertTo-BoundedDiagnosticJson {
 function Read-DiagnosticBitLocker {
     param([string]$SystemDrive)
     try {
+        # Microsoft's Properties section lists ConversionStatus and VolumeType
+        # (read-only uint32), although its abbreviated Syntax block omits them:
+        # https://learn.microsoft.com/en-us/windows/win32/secprov/win32-encryptablevolume#properties
         $volumes=@(Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='$SystemDrive'" -Property ConversionStatus,ProtectionStatus,VolumeType -OperationTimeoutSec 5 -ErrorAction Stop)
         if ($volumes.Count -ne 1) { return @{status='unavailable';reason='systemVolumeNotFoundOrAmbiguous'} }
         $volume=$volumes[0]
