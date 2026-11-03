@@ -143,7 +143,7 @@ function Invoke-FeatureUpgradeDiagnostic {
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'
     $bt = Join-Path $drive '$WINDOWS.~BT'
     $report.state = Read-DiagnosticState (Join-Path $fup 'state.json')
-    $report.setupDiag = Read-DiagnosticRegistry 'HKLM:\SYSTEM\Setup\SetupDiag\Results' @('ProfileName','DateTime','FailureData','FailureDetails','LastSetupOperation')
+    $report.setupDiag = Read-DiagnosticRegistry 'HKLM:\SYSTEM\Setup\SetupDiag\Results' @('ProfileName','DateTime','FailureData','FailureDetails','LastSetupOperation','UpgradeStartTime','UpgradeEndTime','TargetOSBuildString')
     $report.moSetup = Read-DiagnosticRegistry 'HKLM:\SYSTEM\Setup\MoSetup\Volatile' @('SetupPhase','SetupSubPhase','SetupProgress','SetupHostResult','BoxResult','InstallScenario')
     $report.os = Read-DiagnosticRegistry 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' @('CurrentBuild','UBR','DisplayVersion','EditionID')
     $report.secureBoot = Read-DiagnosticRegistry 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' @('UEFISecureBootEnabled')
@@ -164,11 +164,11 @@ function Invoke-FeatureUpgradeDiagnostic {
     # offline-image servicing are first because they explain Safe OS failures.
     $paths = @(
         @('rollback-errors', (Join-Path $bt 'Sources\Rollback\setuperr.log')),
+        @('newos-cbs', (Join-Path $bt 'NewOS\Windows\Logs\CBS\CBS.log')),
+        @('newos-dism', (Join-Path $bt 'NewOS\Windows\Logs\DISM\dism.log')),
         @('rollback-actions', (Join-Path $bt 'Sources\Rollback\setupact.log')),
         @('panther-errors', (Join-Path $bt 'Sources\Panther\setuperr.log')),
         @('panther-actions', (Join-Path $bt 'Sources\Panther\setupact.log')),
-        @('newos-cbs', (Join-Path $bt 'NewOS\Windows\Logs\CBS\CBS.log')),
-        @('newos-dism', (Join-Path $bt 'NewOS\Windows\Logs\DISM\dism.log')),
         @('windows-panther-errors', (Join-Path $win 'Panther\setuperr.log')),
         @('windows-panther-actions', (Join-Path $win 'Panther\setupact.log')),
         @('host-cbs', (Join-Path $win 'Logs\CBS\CBS.log')),

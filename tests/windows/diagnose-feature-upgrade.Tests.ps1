@@ -43,7 +43,7 @@ try {
 $runtimeTemp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
 $null = New-Item -ItemType Directory -Path $runtimeTemp
 $oldEnv = @($env:SystemRoot, $env:SystemDrive, $env:ProgramData)
-function Get-ItemProperty { param($LiteralPath, $ErrorAction); [pscustomobject]@{CurrentBuild='22631';FailureDetails='0x80070057-0x20003';UEFISecureBootEnabled=0} }
+function Get-ItemProperty { param($LiteralPath, $ErrorAction); [pscustomobject]@{CurrentBuild='22631';FailureDetails='0x80070057-0x20003';UpgradeStartTime='2026-01-01T01:00:00Z';TargetOSBuildString='26300';UEFISecureBootEnabled=0} }
 function Get-CimInstance {
     param($ClassName, $Namespace, $Filter, $OperationTimeoutSec, $ErrorAction)
     Assert ($OperationTimeoutSec -eq 5) 'CIM request timeout'
@@ -64,6 +64,8 @@ try {
     Assert ([IO.File]::ReadAllText($stateFile) -eq $stateText) 'running worker state untouched'
     Assert ($report.state.status -eq 'started') 'running worker state collected'
     Assert ($report.logs.Count -eq 11) 'all fixed log sections present'
+    Assert ($report.logs[1].label -eq 'newos-cbs' -and $report.logs[2].label -eq 'newos-dism') 'offline servicing evidence has output priority'
+    Assert ($report.setupDiag.UpgradeStartTime -eq '2026-01-01T01:00:00Z' -and $report.setupDiag.TargetOSBuildString -eq '26300') 'prior attempt timing and target retained'
     Assert (($report.logs.label -contains 'newos-cbs') -and ($report.logs.label -contains 'newos-dism')) 'offline servicing logs included'
     Assert ($output -notmatch 'password|hidden|CommandLine') 'process command line excluded'
     Assert ($report.setupDiag.FailureDetails -eq '0x80070057-0x20003') 'full SetupDiag data retained'
