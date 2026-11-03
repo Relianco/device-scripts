@@ -77,13 +77,17 @@ function Read-DiagnosticLog {
     $lines = @($r.text -split '\r?\n' | Where-Object { $_.Trim() })
     # Keep the latest hit in each category, not just the final generic errors:
     # repeated HRESULT summaries must not hide the earlier package-add failure.
-    $patterns = @('0x80070057','0x20003','KB5043080','CAddCbsPackage','rollback failure|fatal error')
+    $patterns = @('0x80070057','0x80070005','0x20003','KB5043080','CAddCbsPackage','ERROR_ACCESS_DENIED','STATUS_CANNOT_DELETE','rollback failure|fatal error')
     $hits = @{}
+    $firstAccessDenied = $null
     for ($i=0; $i -lt $lines.Count; $i++) {
+        if ($null -eq $firstAccessDenied -and $lines[$i] -match '0x80070005') { $firstAccessDenied=$i }
         foreach ($pattern in $patterns) { if ($lines[$i] -match $pattern) { $hits[$pattern]=$i } }
     }
     $indices = @{}
-    foreach ($hit in $hits.Values) {
+    $selectedHits=@($hits.Values)
+    if ($null -ne $firstAccessDenied) { $selectedHits += $firstAccessDenied }
+    foreach ($hit in $selectedHits) {
         for ($j=[Math]::Max(0,$hit-2); $j -le [Math]::Min($lines.Count-1,$hit+2); $j++) { $indices[$j]=$true }
     }
     $context = @($indices.Keys | Sort-Object | ForEach-Object { $lines[$_] })
@@ -177,10 +181,42 @@ function ConvertTo-BoundedDiagnosticJson {
     return $json
 }
 
+# Query only status properties for the system volume. Do not enumerate key
+# protectors or call any recovery-password, unlock, suspend or encryption method.
+function Read-DiagnosticBitLocker {
+    param([string]$SystemDrive)
+    try {
+        # Microsoft's Properties section lists ConversionStatus and VolumeType
+        # (read-only uint32), although its abbreviated Syntax block omits them:
+        # https://learn.microsoft.com/en-us/windows/win32/secprov/win32-encryptablevolume#properties
+        $volumes=@(Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftVolumeEncryption' -ClassName Win32_EncryptableVolume -Filter "DriveLetter='$SystemDrive'" -Property ConversionStatus,ProtectionStatus,VolumeType -OperationTimeoutSec 5 -ErrorAction Stop)
+        if ($volumes.Count -ne 1) { return @{status='unavailable';reason='systemVolumeNotFoundOrAmbiguous'} }
+        $volume=$volumes[0]
+        $result=[ordered]@{encryptionStatus='Unknown';protectionStatus='Unknown';lockStatus='Unknown';volumeType='Unknown'}
+        $maps=@(
+            @{Field='encryptionStatus';Property='ConversionStatus';Values=@{'0'='FullyDecrypted';'1'='FullyEncrypted';'2'='EncryptionInProgress';'3'='DecryptionInProgress';'4'='EncryptionPaused';'5'='DecryptionPaused'}},
+            @{Field='protectionStatus';Property='ProtectionStatus';Values=@{'0'='Off';'1'='On';'2'='Unknown'}},
+            @{Field='volumeType';Property='VolumeType';Values=@{'0'='OperatingSystem';'1'='FixedData';'2'='RemovableData'}}
+        )
+        foreach ($map in $maps) {
+            $property=$volume.PSObject.Properties[$map.Property]
+            if ($property -and $null -ne $property.Value -and $map.Values.ContainsKey([string]$property.Value)) { $result[$map.Field]=$map.Values[[string]$property.Value] }
+        }
+        try {
+            $lock=Invoke-CimMethod -InputObject $volume -MethodName GetLockStatus -OperationTimeoutSec 5 -ErrorAction Stop
+            if ($lock.PSObject.Properties['ReturnValue'] -and $null -ne $lock.ReturnValue -and $lock.ReturnValue -eq 0 -and $lock.PSObject.Properties['LockStatus']) {
+                if ($null -ne $lock.LockStatus -and $lock.LockStatus -eq 0) { $result.lockStatus='Unlocked' }
+                elseif ($lock.LockStatus -eq 1) { $result.lockStatus='Locked' }
+            }
+        } catch { } # Access/provider failures remain Unknown, without exception text.
+        return $result
+    } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
+}
+
 function Invoke-FeatureUpgradeDiagnostic {
     param([ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $report = [ordered]@{ version='2'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
+    $report = [ordered]@{ version='3'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
     $win = $env:SystemRoot
     $drive = $env:SystemDrive
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'
@@ -191,12 +227,13 @@ function Invoke-FeatureUpgradeDiagnostic {
     $report.os = Read-DiagnosticRegistry 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' @('CurrentBuild','UBR','DisplayVersion','EditionID')
     $report.secureBoot = Read-DiagnosticRegistry 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' @('UEFISecureBootEnabled')
     # No process command lines: these can contain credentials or private URLs.
-    $probeSections = if ($Section -eq 'Summary') { @('boot','disk','processes','cpu','tpm') } else { @('boot') }
+    $probeSections = if ($Section -eq 'Summary') { @('boot','bitLocker','disk','processes','cpu','tpm') } else { @('boot') }
     foreach ($probe in $probeSections) {
         if ($clock.Elapsed.TotalSeconds -gt 40) { $report[$probe]=@{status='timeBudget'}; continue }
         try {
             switch ($probe) {
                 'boot' { $report.boot = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o') }
+                'bitLocker' { $report.bitLocker=Read-DiagnosticBitLocker -SystemDrive $drive }
                 'disk' { $report.disk = @(Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object DeviceID,Size,FreeSpace) }
                 'processes' { $report.processes = @(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 20 Name,ProcessId,CreationDate) }
                 'cpu' { $report.cpu = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 2 Name,AddressWidth,NumberOfCores) }
@@ -236,7 +273,7 @@ function Invoke-FeatureUpgradeDiagnostic {
         $entry.label=$p[0]; $report.logs += $entry
     }
     $report.elapsedSeconds = [Math]::Round($clock.Elapsed.TotalSeconds,1)
-    $report.notes = @('Logs sample only their final 2 MiB; older history may be omitted.', 'Matching context: 0x80070057, 0x20003, KB5043080, CAddCbsPackage, rollback/fatal failures.', 'No changes made. Setup and servicing may continue while this report is collected.')
+    $report.notes = @('Logs sample only their final 2 MiB; older history may be omitted.', 'Matching context: 0x80070057, 0x80070005, 0x20003, KB5043080, CAddCbsPackage, ERROR_ACCESS_DENIED, STATUS_CANNOT_DELETE, rollback/fatal failures.', 'No changes made. Setup and servicing may continue while this report is collected.')
     return ConvertTo-BoundedDiagnosticJson $report
 }
 
