@@ -2,17 +2,17 @@
 .SYNOPSIS
     Read-only evidence for a failed or running Windows feature upgrade.
 .DESCRIPTION
-    Prints bounded JSON to stdout. Reads fixed setup/rollback/servicing logs,
+    Section is Summary (default), Rollback, Servicing or Setup. Prints bounded JSON to stdout. Reads fixed setup/rollback/servicing logs,
     allowlisted upgrade state and registry values, current setup process names,
     OS, boot, disk and hardware. No custom-field writes, WU scans, installers,
     service changes, state deletion, or restarts. Safe to inspect a running worker.
     Each log samples at most its last 2 MiB. Matching error context and the last
     lines are retained; omitted history is explicit. Stops starting sections after
-    40 seconds; each CIM request has a five-second operation timeout. JSON <=40KB.
+    40 seconds; each CIM request has a five-second operation timeout. Serialized UTF-8 JSON <=8,000 bytes (below the runner output cap).
     Windows PowerShell 5.1+, run as SYSTEM through the Relian deploy runner.
 #>
 [CmdletBinding()]
-param([string]$DeploymentType, [string]$Action, [string]$PinVersion)
+param([string]$DeploymentType, [string]$Action, [string]$PinVersion, [ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
 $ProgressPreference = 'SilentlyContinue'
 
 function Protect-DiagnosticText {
@@ -120,24 +120,65 @@ function Read-DiagnosticRegistry {
     } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
 }
 
+# References to long text fields, allowing measured JSON-budget reductions without
+# replacing the entire report (and losing its state/error evidence).
+function Get-DiagnosticTextLeaves {
+    param($Value)
+    if ($Value -is [Collections.IDictionary]) { $keys=@($Value.Keys) }
+    elseif ($Value -is [array]) { $keys=@(0..($Value.Count-1)); if (-not $Value.Count) { return } }
+    else { return }
+    foreach ($key in $keys) {
+        $item=$Value[$key]
+        if ($item -is [string]) {
+            if ($item.Length -gt 64) {
+                [pscustomobject]@{Container=$Value;Key=$key;Text=$item}
+            }
+        } else { Get-DiagnosticTextLeaves $item }
+    }
+}
+
 function ConvertTo-BoundedDiagnosticJson {
-    param($Report, [int]$MaxBytes = 40000)
+    param($Report, [int]$MaxBytes = 8000)
     $Report['truncated'] = $false
     $json = $Report | ConvertTo-Json -Depth 8 -Compress
     if ([Text.Encoding]::UTF8.GetByteCount($json) -le $MaxBytes) { return $json }
     $Report['truncated'] = $true
-    # Logs are priority ordered. Discard lower-priority sections explicitly first.
-    for ($i=$Report.logs.Count-1; $i -ge 0; $i--) {
-        $Report.logs[$i] = @{status='omittedForOutputLimit'; label=$Report.logs[$i].label}
-        $json = $Report | ConvertTo-Json -Depth 8 -Compress
-        if ([Text.Encoding]::UTF8.GetByteCount($json) -le $MaxBytes) { return $json }
+    # Targeted matches outrank generic tails; metadata is always serialized first.
+    foreach ($log in @($Report.logs)) {
+        if ($log.Contains('tail') -and $log.tail.Count) { $log.tail=@(); $log.tailOmitted=$true }
     }
-    return '{"status":"outputLimit","truncated":true}'
+    $json = $Report | ConvertTo-Json -Depth 8 -Compress
+    while ([Text.Encoding]::UTF8.GetByteCount($json) -gt $MaxBytes) {
+        # Reduce log text before touching Summary failure details/current state.
+        $leaf = Get-DiagnosticTextLeaves $Report.logs | Sort-Object { $_.Text.Length } -Descending | Select-Object -First 1
+        if (-not $leaf) {
+            foreach ($optional in @('notes','cpu','tpm','disk','secureBoot','processes','moSetup')) {
+                if ($Report.Contains($optional)) { $Report.Remove($optional) }
+            }
+            $json = $Report | ConvertTo-Json -Depth 8 -Compress
+            if ([Text.Encoding]::UTF8.GetByteCount($json) -le $MaxBytes) { return $json }
+            $leaf = Get-DiagnosticTextLeaves $Report | Sort-Object { $_.Text.Length } -Descending | Select-Object -First 1
+        }
+        if ($leaf) {
+            $limit=[Math]::Max(32,[int]($leaf.Text.Length/2))
+            $leaf.Container[$leaf.Key]=$leaf.Text.Substring(0,$limit)+'[clipped]'
+        } elseif ($Report.logs.Count) {
+            # Only possible for a structurally large collection after all strings
+            # are small. Preserve metadata and record which section was omitted.
+            $Report.logs=@($Report.logs | Select-Object -First ($Report.logs.Count-1))
+            $Report['logsOmitted']=$true
+        } else {
+            throw 'Diagnostic metadata exceeds the output budget.'
+        }
+        $json = $Report | ConvertTo-Json -Depth 8 -Compress
+    }
+    return $json
 }
 
 function Invoke-FeatureUpgradeDiagnostic {
+    param([ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $report = [ordered]@{ version='1'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; logs=@(); notes=@() }
+    $report = [ordered]@{ version='2'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
     $win = $env:SystemRoot
     $drive = $env:SystemDrive
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'
@@ -148,17 +189,18 @@ function Invoke-FeatureUpgradeDiagnostic {
     $report.os = Read-DiagnosticRegistry 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' @('CurrentBuild','UBR','DisplayVersion','EditionID')
     $report.secureBoot = Read-DiagnosticRegistry 'HKLM:\SYSTEM\CurrentControlSet\Control\SecureBoot\State' @('UEFISecureBootEnabled')
     # No process command lines: these can contain credentials or private URLs.
-    foreach ($section in @('boot','disk','processes','cpu','tpm')) {
-        if ($clock.Elapsed.TotalSeconds -gt 40) { $report[$section]=@{status='timeBudget'}; continue }
+    $probeSections = if ($Section -eq 'Summary') { @('boot','disk','processes','cpu','tpm') } else { @('boot') }
+    foreach ($probe in $probeSections) {
+        if ($clock.Elapsed.TotalSeconds -gt 40) { $report[$probe]=@{status='timeBudget'}; continue }
         try {
-            switch ($section) {
+            switch ($probe) {
                 'boot' { $report.boot = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o') }
                 'disk' { $report.disk = @(Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$drive'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object DeviceID,Size,FreeSpace) }
                 'processes' { $report.processes = @(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 20 Name,ProcessId,CreationDate) }
                 'cpu' { $report.cpu = @(Get-CimInstance Win32_Processor -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 2 Name,AddressWidth,NumberOfCores) }
                 'tpm' { $report.tpm = @(Get-CimInstance -Namespace 'root\CIMV2\Security\MicrosoftTpm' -ClassName Win32_Tpm -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object SpecVersion,IsEnabled_InitialValue,IsActivated_InitialValue) }
             }
-        } catch { $report[$section]=@{status='unavailable';error=$_.Exception.GetType().Name} }
+        } catch { $report[$probe]=@{status='unavailable';error=$_.Exception.GetType().Name} }
     }
     # Fixed paths only, no recursive walks or archive extraction. Rollback and
     # offline-image servicing are first because they explain Safe OS failures.
@@ -175,7 +217,18 @@ function Invoke-FeatureUpgradeDiagnostic {
         @('host-dism', (Join-Path $win 'Logs\DISM\dism.log')),
         @('mosetup', (Join-Path $win 'Logs\MoSetup\BlueBox.log'))
     )
-    foreach ($p in $paths) {
+    $labels = switch ($Section) {
+        'Summary' { @() }
+        'Rollback' { @('rollback-errors','rollback-actions') }
+        'Servicing' { @('newos-cbs','newos-dism','host-cbs','host-dism') }
+        'Setup' { @('panther-errors','panther-actions','windows-panther-errors','windows-panther-actions','mosetup') }
+    }
+    if ($Section -ne 'Summary') {
+        foreach ($key in @('FailureData','FailureDetails','LastSetupOperation')) { $report.setupDiag.Remove($key) }
+        foreach ($key in @('message','setupErr')) { $report.state.Remove($key) }
+    }
+    $report.logs=@()
+    foreach ($p in @($paths | Where-Object { $_[0] -in $labels })) {
         if ($clock.Elapsed.TotalSeconds -gt 40) { $entry=@{status='timeBudget'} }
         else { $entry=Read-DiagnosticLog $p[1] }
         $entry.label=$p[0]; $report.logs += $entry
@@ -188,5 +241,5 @@ function Invoke-FeatureUpgradeDiagnostic {
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
 if ($Action -eq 'Uninstall') { Write-Output '{"status":"nothingToUninstall"}'; exit 0 }
 if (@('Install','Update','Repair','Reinstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
-try { Write-Output (Invoke-FeatureUpgradeDiagnostic); exit 0 }
+try { Write-Output (Invoke-FeatureUpgradeDiagnostic -Section $Section); exit 0 }
 catch { Write-Output ('{"status":"failed","error":"' + $_.Exception.GetType().Name + '"}'); exit 1 }
