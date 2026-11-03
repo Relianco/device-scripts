@@ -22,6 +22,13 @@ try {
     [IO.File]::WriteAllText($log, "KB5043080 underlying package failure`n" + ((1..20 | ForEach-Object { "generic 0x80070057 $_" }) -join "`n"))
     $r = Read-DiagnosticLog -Path $log -MaxBytes 4096
     Assert (($r.matches -join ' ') -match 'KB5043080 underlying') 'package context survives repeated generic errors'
+    [IO.File]::WriteAllText($log, "before access failure`nOffline file operation failed 0x80070005`nafter access failure`n" + ((1..100 | ForEach-Object { "later $_" }) -join "`n"))
+    $r = Read-DiagnosticLog -Path $log -MaxBytes 4096
+    Assert (($r.matches -join ' ') -match 'before access failure.*0x80070005.*after access failure') 'access-denied operation context retained'
+    [IO.File]::WriteAllText($log, "first offline file operation failed 0x80070005`nERROR_ACCESS_DENIED opening offline item`nSTATUS_CANNOT_DELETE deleting offline item`n" + ((1..100 | ForEach-Object { "later $_" }) -join "`n") + "`n" + ((1..12 | ForEach-Object { "abandoning 0x80070005 $_" }) -join "`n"))
+    $r = Read-DiagnosticLog -Path $log -MaxBytes 8192
+    Assert (($r.matches -join ' ') -match 'first offline file operation.*abandoning 0x80070005') 'first access failure survives trailing summaries'
+    Assert (($r.matches -join ' ') -match 'ERROR_ACCESS_DENIED.*STATUS_CANNOT_DELETE') 'named underlying access/delete errors retained'
     [IO.File]::WriteAllText($log, ('x' * 5000) + "`n0x20003 tail`n")
     $r = Read-DiagnosticLog -Path $log -MaxBytes 512
     Assert ($r.sampledBytes -le 512 -and $r.truncated) 'large file byte cap'
@@ -66,9 +73,12 @@ $runtimeTemp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString(
 $null = New-Item -ItemType Directory -Path $runtimeTemp
 $oldEnv = @($env:SystemRoot, $env:SystemDrive, $env:ProgramData)
 function Get-ItemProperty { param($LiteralPath, $ErrorAction); [pscustomobject]@{CurrentBuild='22631';FailureDetails='0x80070057-0x20003';UpgradeStartTime='2026-01-01T01:00:00Z';TargetOSBuildString='26300';UEFISecureBootEnabled=0} }
+$script:bitLockerQueries=0
+function Invoke-CimMethod { param($InputObject,$MethodName,$OperationTimeoutSec,$ErrorAction); Assert ($MethodName -eq 'GetLockStatus' -and $OperationTimeoutSec -eq 5) 'read-only BitLocker lock probe'; [pscustomobject]@{ReturnValue=0;LockStatus=0} }
 function Get-CimInstance {
-    param($ClassName, $Namespace, $Filter, $OperationTimeoutSec, $ErrorAction)
+    param($ClassName, $Namespace, $Filter, $Property, $OperationTimeoutSec, $ErrorAction)
     Assert ($OperationTimeoutSec -eq 5) 'CIM request timeout'
+    if ($ClassName -eq 'Win32_EncryptableVolume') { $script:bitLockerQueries++; return [pscustomobject]@{ConversionStatus=1;ProtectionStatus=1;VolumeType=0} }
     if ($ClassName -eq 'Win32_OperatingSystem') { return [pscustomobject]@{LastBootUpTime=[datetime]::UtcNow} }
     if ($ClassName -eq 'Win32_Process') { return [pscustomobject]@{Name='setuphost.exe';ProcessId=12;CreationDate=[datetime]::UtcNow;CommandLine=('password=' + $script:sensitiveValue)} }
     [pscustomobject]@{Name='test';Size=100;FreeSpace=80;SpecVersion='2.0'}
@@ -85,6 +95,7 @@ try {
     Assert ($report.status -eq 'collected') 'whole collector succeeds'
     Assert ([IO.File]::ReadAllText($stateFile) -eq $stateText) 'running worker state untouched'
     Assert ($report.state.status -eq 'started') 'running worker state collected'
+    Assert ($report.bitLocker.encryptionStatus -eq 'FullyEncrypted' -and $report.bitLocker.protectionStatus -eq 'On') 'Summary includes BitLocker status'
     Assert ($report.section -eq 'Summary' -and $report.logs.Count -eq 0) 'default summary contains metadata without logs'
     Assert ($output.Contains('"UpgradeStartTime":"2026-01-01T01:00:00Z"') -and $report.setupDiag.TargetOSBuildString -eq '26300') 'prior attempt timing and target retained'
     Assert ($output.IndexOf('"setupDiag":') -lt $output.IndexOf('"logs":')) 'metadata serialized before logs'
@@ -102,6 +113,7 @@ try {
         if ($section -eq 'Servicing') { Assert ($part.truncated -and (($part.logs | Where-Object { $_.status -eq 'read' } | ForEach-Object { $_.matches }) -join ' ') -match '0x80070057') 'verbose servicing logs clipped with evidence retained' }
         Assert ($part.state.status -eq 'started') "state retained in $section"
     }
+    Assert ($script:bitLockerQueries -eq 1) 'BitLocker collected only in Summary'
     Assert ($output -notmatch ('password|CommandLine|' + [regex]::Escape($script:sensitiveValue))) 'process command line excluded'
     Assert ($report.setupDiag.FailureDetails -eq '0x80070057-0x20003') 'full SetupDiag data retained'
 } finally {
