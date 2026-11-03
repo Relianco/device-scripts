@@ -91,6 +91,7 @@ function Get-CimInstance {
     Assert ($OperationTimeoutSec -eq 5) 'CIM request timeout'
     if ($ClassName -eq 'Win32_EncryptableVolume') { $script:bitLockerQueries++; return [pscustomobject]@{ConversionStatus=1;ProtectionStatus=1;VolumeType=0} }
     if ($ClassName -eq 'Win32_OperatingSystem') { return [pscustomobject]@{LastBootUpTime=[datetime]::UtcNow} }
+    if ($ClassName -eq 'Win32_NTLogEvent') { return }
     if ($ClassName -eq 'Win32_Process') { return [pscustomobject]@{Name='setuphost.exe';ProcessId=12;CreationDate=[datetime]::UtcNow;CommandLine=('password=' + $script:sensitiveValue)} }
     [pscustomobject]@{Name='test';Size=100;FreeSpace=80;SpecVersion='2.0'}
 }
@@ -104,7 +105,7 @@ try {
     $output = Invoke-FeatureUpgradeDiagnostic
     $report = $output | ConvertFrom-Json
     Assert ($report.status -eq 'collected') 'whole collector succeeds'
-    Assert ($report.version -eq '4') 'report identifies rollback outcome matcher revision'
+    Assert ($report.version -eq '5') 'report identifies boot diagnostics revision'
     Assert ([IO.File]::ReadAllText($stateFile) -eq $stateText) 'running worker state untouched'
     Assert ($report.state.status -eq 'started') 'running worker state collected'
     Assert ($report.bitLocker.encryptionStatus -eq 'FullyEncrypted' -and $report.bitLocker.protectionStatus -eq 'On') 'Summary includes BitLocker status'
@@ -116,7 +117,7 @@ try {
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force
         [IO.File]::WriteAllText($logPath, ((1..12 | ForEach-Object { (('0x80070057 KB5043080 ' + $fixturePath + ' ') * 15) }) -join "`n"))
     }
-    $expected = @{Rollback=@('rollback-errors','rollback-actions');Servicing=@('newos-cbs','newos-dism','host-cbs','host-dism');Setup=@('panther-errors','panther-actions','windows-panther-errors','windows-panther-actions','mosetup')}
+    $expected = @{Boot=@('rollback-drivers','rollback-drivers-flat','windows-drivers');Rollback=@('rollback-errors','rollback-actions');Servicing=@('newos-cbs','newos-dism','host-cbs','host-dism');Setup=@('panther-errors','panther-actions','windows-panther-errors','windows-panther-actions','mosetup')}
     foreach ($section in $expected.Keys) {
         $partJson = Invoke-FeatureUpgradeDiagnostic -Section $section
         Assert ([Text.Encoding]::UTF8.GetByteCount($partJson) -le 8000) "transport budget for $section"
