@@ -1,7 +1,7 @@
 # Status
 
 - Branch: `lane/installer-design`, based on `origin/main` at `40fb716`.
-- P1 plan HEAD: `293cc60`; this status commit follows it. Current fetched
+- Reviewed P1 plan HEAD: `c0c4ce2`; this status commit follows it. Current fetched
   `origin/main` is `ef12f67`; subsequent main changes are unrelated diagnostics.
 - Completed: [reviewed design](superpowers/specs/2026-11-02-unified-installer-design.md),
   [recipe specimens](design/unified-installer/recipes.md),
@@ -13,8 +13,9 @@
   checkboxes remain unchecked. No shared engine has been implemented.
 - Review: independent plan task review found a configuration-binding gap and
   a verification-only recovery mapping ambiguity. Both were fixed and the
-  scoped re-review approved them. Whole-branch review is the remaining
-  documentation gate before this planning handoff.
+  scoped re-review approved them. Independent whole-branch review found one
+  minor supersession transition gap; it was fixed and approved on final
+  re-review. No review findings remain.
 - Validation: plan relative links, code fences, JSON where present, public-path
   checks, whitespace and branch secret scan pass. No runtime tests were run
   locally for this documentation-only change.
