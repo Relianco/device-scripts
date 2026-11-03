@@ -37,6 +37,10 @@ Build the parameter with `printf 'ClientTag=tag:client-example\nAuthKeyField=tai
 
 `PrinterModel` is `BrotherHlL2370Dw` or `KonicaUniversalPcl`. The driver pins are in `windows/releases/printer-tcp.json`. SNMP on the new port is turned off. `Add-Printer` receives the queue name, the driver, and the port. Uninstall removes that queue and removes the port when no other queue uses it. The driver stays installed.
 
+## Global Secure Access
+
+[`Invoke-GlobalSecureAccess.ps1`](windows/packages/global-secure-access/Invoke-GlobalSecureAccess.ps1) replaces clients older than 2.34.222 and leaves equal or newer versions alone. Supply the pinned installer using `InstallerPath` or `InstallerUrl`, directly or in the runner's `PackageArguments`. The package verifies the replacement before running the old client's cached bundle uninstaller. If removal requires a reboot, it returns 3010; reboot and rerun to install. See the [package instructions](windows/packages/global-secure-access/README.md).
+
 ## Tailscale
 
 `windows/packages/tailscale/Invoke-Tailscale.ps1` installs the pinned Tailscale MSI with `TS_UNATTENDEDMODE=always` and joins the tailnet with `tailscale up --advertise-tags=<ClientTag> --hostname=<COMPUTERNAME> --unattended --accept-dns=false --accept-routes=false`. Pass `ClientTag`, such as `tag:client-example`, in `PackageArguments`. Do not pass the auth key there: package arguments become the child command line.
