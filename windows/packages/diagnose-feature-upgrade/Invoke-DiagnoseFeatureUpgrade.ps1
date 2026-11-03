@@ -216,7 +216,7 @@ function Read-DiagnosticBitLocker {
 function Invoke-FeatureUpgradeDiagnostic {
     param([ValidateSet('Summary','Rollback','Servicing','Setup')][string]$Section = 'Summary')
     $clock = [Diagnostics.Stopwatch]::StartNew()
-    $report = [ordered]@{ version='3'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
+    $report = [ordered]@{ version='4'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
     $win = $env:SystemRoot
     $drive = $env:SystemDrive
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'

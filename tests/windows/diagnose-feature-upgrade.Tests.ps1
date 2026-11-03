@@ -104,6 +104,7 @@ try {
     $output = Invoke-FeatureUpgradeDiagnostic
     $report = $output | ConvertFrom-Json
     Assert ($report.status -eq 'collected') 'whole collector succeeds'
+    Assert ($report.version -eq '4') 'report identifies rollback outcome matcher revision'
     Assert ([IO.File]::ReadAllText($stateFile) -eq $stateText) 'running worker state untouched'
     Assert ($report.state.status -eq 'started') 'running worker state collected'
     Assert ($report.bitLocker.encryptionStatus -eq 'FullyEncrypted' -and $report.bitLocker.protectionStatus -eq 'On') 'Summary includes BitLocker status'
