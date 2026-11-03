@@ -1,7 +1,7 @@
 # Status
 
 - Branch: `lane/installer-design`, based on `origin/main` at `40fb716`.
-- Reviewed P1 plan HEAD: `c0c4ce2`; this status commit follows it. Current fetched
+- PAL-reviewed P1 plan HEAD: `6c52814`; this status commit follows it. Current fetched
   `origin/main` is `ef12f67`; subsequent main changes are unrelated diagnostics.
 - Completed: [reviewed design](superpowers/specs/2026-11-02-unified-installer-design.md),
   [recipe specimens](design/unified-installer/recipes.md),
@@ -15,15 +15,19 @@
   a verification-only recovery mapping ambiguity. Both were fixed and the
   scoped re-review approved them. Independent whole-branch review found one
   minor supersession transition gap; it was fixed and approved on final
-  re-review. No review findings remain.
+  re-review. PAL consensus then requested contract clarifications, completed in
+  `4d04778` and `6c52814`. Final OpenAI/Anthropic/Google verdicts are all Ready,
+  with no planning blockers. See the [consensus record](reviews/2026-11-03-unified-installer-p1-pal-consensus.md).
 - Validation: plan relative links, code fences, JSON where present, public-path
   checks, whitespace and branch secret scan pass. No runtime tests were run
   locally for this documentation-only change.
-- PR 85 remains open. At the previously published HEAD `3d80e18`, PowerShell
-  and secret CI passed; AI review failed because it found no reviewable source
-  files. No model review occurred in that job. New commits need fresh CI.
-- Next task: maintainer review of the P1 plan, then Task 1 in an isolated
-  implementation lane using the preserved subagent-driven workflow. P1 output
+- PR 85 remains open. At published HEAD `205fd57`, PowerShell and secret CI
+  passed; AI review failed because it found no reviewable source files. No
+  model review occurred in that job. PAL is separate and does not waive CI.
+  This documentation push requires fresh checks; inspect PR status.
+- Next task: in a new conversation, follow the [execution handoff](handoffs/2026-11-03-unified-installer-p1.md)
+  and start Task 1 when explicitly instructed. Preserve serial subagent-driven
+  implementation/review in isolated lanes. No implementation in this session. P1 output
   is a nondeployable preview; real Windows execution/recovery, runner delivery
   and Intune integration remain P2/P3/P4 qualification work.
 - Release boundaries: PSADT 4.1.8, explicit bundle protocol alongside legacy
