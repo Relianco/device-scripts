@@ -161,7 +161,9 @@ function ConvertTo-BoundedDiagnosticJson {
         }
         if ($leaf) {
             $limit=[Math]::Max(32,[int]($leaf.Text.Length/2))
-            $leaf.Container[$leaf.Key]=$leaf.Text.Substring(0,$limit)+'[clipped]'
+            $head=[int][Math]::Floor($limit/2)
+            # Servicing lines often put the HRESULT at the end. Keep both ends.
+            $leaf.Container[$leaf.Key]=$leaf.Text.Substring(0,$head)+'[clipped]'+$leaf.Text.Substring($leaf.Text.Length-($limit-$head))
         } elseif ($Report.logs.Count) {
             # Only possible for a structurally large collection after all strings
             # are small. Preserve metadata and record which section was omitted.

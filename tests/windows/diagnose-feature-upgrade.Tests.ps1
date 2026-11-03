@@ -56,6 +56,10 @@ $r = $json | ConvertFrom-Json
 Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 8000) 'pathological escaped Unicode capped'
 Assert ($r.state.exitHex -eq '0x80070057' -and $r.state.status -eq 'running' -and $r.truncated) 'oversize still retains state evidence'
 
+$endError = [ordered]@{status='collected';state=@{status='running'};logs=@(@{label='servicing';matches=@(('context ' * 1000) + ' hr:0x800f081f');tail=@()});notes=@()}
+$json = ConvertTo-BoundedDiagnosticJson $endError -MaxBytes 1000
+Assert ($json -match '0x800f081f' -and [Text.Encoding]::UTF8.GetByteCount($json) -le 1000) 'clipping retains trailing servicing HRESULT'
+
 # Exercise the complete report with unavailable logs and mocked Windows probes.
 # Collecting evidence must leave the existing upgrade state unchanged.
 $runtimeTemp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
