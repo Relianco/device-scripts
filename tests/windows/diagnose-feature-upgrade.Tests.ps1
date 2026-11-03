@@ -5,9 +5,12 @@ $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $path = Join-Path $root 'windows/packages/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1'
 $env:RELIAN_DEPLOY_TEST = '1'
 . $path
-Assert ((Protect-DiagnosticText 'password=secret 0x80070057') -eq '[sensitive line omitted]') 'password omitted'
-Assert ((Protect-DiagnosticText 'https://example.com/file?sig=private') -notmatch 'private|https') 'URL omitted'
-Assert ((Protect-DiagnosticText 'C:\Users\person\setup.log failed 0x80070057') -notmatch 'person') 'user profile redacted'
+$script:sensitiveValue = [guid]::NewGuid().ToString('n')
+$profileName = [guid]::NewGuid().ToString('n')
+$profilePath = [string]::Join([char]92, @('C:', 'Users', $profileName, 'setup.log'))
+Assert ((Protect-DiagnosticText ('password=' + $script:sensitiveValue + ' 0x80070057')) -eq '[sensitive line omitted]') 'password omitted'
+Assert ((Protect-DiagnosticText ("https://example.invalid/file?sig=$script:sensitiveValue")) -notmatch ([regex]::Escape($script:sensitiveValue) + '|https')) 'URL omitted'
+Assert ((Protect-DiagnosticText ($profilePath + ' failed 0x80070057')) -notmatch [regex]::Escape($profileName)) 'user profile redacted'
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
 $null = New-Item -ItemType Directory -Path $tmp
 try {
@@ -29,7 +32,7 @@ try {
     $r = Read-DiagnosticLog -Path (Join-Path $tmp 'missing.log')
     Assert ($r.status -eq 'missing') 'missing log explicit'
     $state = Join-Path $tmp 'state.json'
-    [IO.File]::WriteAllText($state, '{"status":"failed","exitHex":"0x80070057","secret":"do-not-print","message":"password=hidden"}')
+    [IO.File]::WriteAllText($state, (@{status='failed';exitHex='0x80070057';secret=$script:sensitiveValue;message=('password=' + $script:sensitiveValue)} | ConvertTo-Json -Compress))
     $r = Read-DiagnosticState -Path $state
     Assert ($r.exitHex -eq '0x80070057' -and -not $r.Contains('secret')) 'state allowlist'
     Assert ($r.message -eq '[sensitive line omitted]') 'state text sanitized'
@@ -48,7 +51,7 @@ function Get-CimInstance {
     param($ClassName, $Namespace, $Filter, $OperationTimeoutSec, $ErrorAction)
     Assert ($OperationTimeoutSec -eq 5) 'CIM request timeout'
     if ($ClassName -eq 'Win32_OperatingSystem') { return [pscustomobject]@{LastBootUpTime=[datetime]::UtcNow} }
-    if ($ClassName -eq 'Win32_Process') { return [pscustomobject]@{Name='setuphost.exe';ProcessId=12;CreationDate=[datetime]::UtcNow;CommandLine='password=hidden'} }
+    if ($ClassName -eq 'Win32_Process') { return [pscustomobject]@{Name='setuphost.exe';ProcessId=12;CreationDate=[datetime]::UtcNow;CommandLine=('password=' + $script:sensitiveValue)} }
     [pscustomobject]@{Name='test';Size=100;FreeSpace=80;SpecVersion='2.0'}
 }
 try {
@@ -67,7 +70,7 @@ try {
     Assert ($report.logs[1].label -eq 'newos-cbs' -and $report.logs[2].label -eq 'newos-dism') 'offline servicing evidence has output priority'
     Assert ($output.Contains('"UpgradeStartTime":"2026-01-01T01:00:00Z"') -and $report.setupDiag.TargetOSBuildString -eq '26300') 'prior attempt timing and target retained'
     Assert (($report.logs.label -contains 'newos-cbs') -and ($report.logs.label -contains 'newos-dism')) 'offline servicing logs included'
-    Assert ($output -notmatch 'password|hidden|CommandLine') 'process command line excluded'
+    Assert ($output -notmatch ('password|CommandLine|' + [regex]::Escape($script:sensitiveValue))) 'process command line excluded'
     Assert ($report.setupDiag.FailureDetails -eq '0x80070057-0x20003') 'full SetupDiag data retained'
 } finally {
     $env:SystemRoot=$oldEnv[0];$env:SystemDrive=$oldEnv[1];$env:ProgramData=$oldEnv[2]
