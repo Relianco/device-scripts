@@ -155,6 +155,14 @@ The result goes to the device field `relianRestartNotice` before any restart: `n
 
 `ReportOnly` set to `true` runs the same detection and stops there: no notice, no snooze marker change, no restart. It writes one JSON line to the device field `relianSessionState`: `userPresent` (`present`, `disconnected`, `none` or `unknown`), `reason` (`none`, `console`, `rdp`, `disconnected` or `cannotTell`), the people counted, each user session (account, id, `console`/`rdp`, state such as `active` or `disconnected`, idle minutes when Windows reports them, `locked` always `unknown` because the toolkit does not report it), pending restart reasons, last boot, build, snooze state and a UTC timestamp. Use it instead of NinjaOne's logged-on-user data, which can name a user who is not there.
 
+## Feature upgrade diagnostics
+
+`windows/packages/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1` collects read-only evidence through the deploy runner as SYSTEM. No package arguments are needed. It prints JSON to stdout and does not write a custom field, change update state, scan Windows Update, start setup, change services, or restart the device. It can inspect a running upgrade worker.
+
+The report includes allowlisted feature-upgrade state, SetupDiag results (up to 2,000 characters per value), MoSetup progress, OS/boot/disk/hardware, and current setup process names/PIDs without command lines. Fixed logs cover `$WINDOWS.~BT` Panther and Rollback, the offline NewOS image's CBS/DISM logs, Windows Panther, host CBS/DISM and MoSetup. Each samples only its final 2 MiB, with file size and sampled bytes reported. It retains the latest lines and nearby context for `0x80070057`, `0x20003`, `KB5043080`, package-add and rollback failures. History outside that window remains unavailable; a successful collection does not mean the upgrade succeeded.
+
+Credential/command-line records are omitted, URLs and profile names are redacted, and output is limited to 40,000 UTF-8 bytes with explicit truncation markers. Lower-priority logs are omitted first if necessary. No new section starts after 40 seconds; CIM requests have five-second operation timeouts. Uninstall changes nothing.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.

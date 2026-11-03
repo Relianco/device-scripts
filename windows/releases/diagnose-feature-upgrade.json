@@ -1,0 +1,6 @@
+{
+  "name": "Feature upgrade diagnostic report",
+  "kind": "diagnostic",
+  "installsSoftware": false,
+  "packageArguments": "None. Read-only, bounded JSON on stdout; no custom field writes."
+}
