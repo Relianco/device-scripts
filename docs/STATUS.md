@@ -1,8 +1,8 @@
 # Status
 
-Branch: `lane/maintenance`. Last verified implementation HEAD: `8ecc515e557ae3093592addbad886d6d2a1ef340`; this status-only closeout follows it. Base main: `ef12f6743d24a00de53bd741b036d96bd3d4dec4`.
+Branch: `lane/maintenance`. Reviewed implementation HEAD: `d0a37c212bef4a5f5ea65e38de1463e014a2ef5f`; this documentation closeout follows it. Latest main `6ecf780` is integrated.
 
-Draft pull request: [90](https://github.com/Relianco/device-scripts/pull/90).
+Pull request: [90](https://github.com/Relianco/device-scripts/pull/90).
 Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md).
 Runbook: [Maintenance](maintenance.md).
 Evidence and limits: [Review and pilot record](reviews/2026-11-04-maintenance.md).
@@ -11,8 +11,8 @@ Evidence and limits: [Review and pilot record](reviews/2026-11-04-maintenance.md
 - [x] Update maintenance package and independent reviews.
 - [x] Whole-branch review, qualification fixes, focused/full PowerShell checks and secret scanning.
 - [x] Both packages piloted in Report mode on the two authorized Windows devices with PSADT notifications; active Setup correctly withheld changes.
-- [ ] After USB upgrades/restarts finish, run full reports and review profile candidates. Execute harmless Windows-native/NTFS regression cases before relying on optional long-running servicing. Cleanup/repair/deletion paths are not yet live-qualified.
+- [ ] After USB upgrades/restarts finish, run full reports and review profile candidates. The Windows CI gate now executes harmless native-process/NTFS regressions; qualify actual servicing separately before relying on it. Cleanup/repair/deletion paths are not yet live-qualified.
 
 Next task: post-upgrade qualification above. No automatic follow-up job or reboot is scheduled. Existing installer P1 work remains separate and was not modified.
 
-No uncommitted implementation files remain in this lane after this closeout commit. Private device evidence and dispatch parameters are retained in machine-local ignored memory. Main is not merged; the draft PR preserves the review gate.
+No uncommitted implementation files remain in this lane after this closeout commit. Private device evidence and dispatch parameters are retained in machine-local ignored memory. The maintainer authorized merge after subagent LGTM and green CI. Two merge-triage reviewers found no remaining code blockers; merge only after all checks, including the new Windows regression job, pass. Post-upgrade device qualification remains a separate rollout prerequisite.
