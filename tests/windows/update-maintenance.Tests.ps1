@@ -4,6 +4,72 @@ $env:RELIAN_DEPLOY_TEST='1'
 $actualUmCache=$script:UmCache
 $actualUmControl=$script:UmControl
 function Assert($value,$message) { if(-not $value) { throw $message } }
+
+foreach($helper in @('Grant-UmThemeReadAccess','Install-UmDialogTheme')) {
+ $mandatory=@((Get-Command $helper).Parameters.Values | ForEach-Object { $_.Attributes } | Where-Object { $_ -is [Management.Automation.ParameterAttribute] -and $_.Mandatory })
+ Assert ($mandatory.Count -eq 0) 'Theme helpers cannot prompt for missing arguments'
+ $refused=$false; try { & $helper } catch { $refused=$_.Exception.Message -match 'must not be empty' }
+ Assert $refused 'Missing theme helper arguments fail explicitly before work'
+}
+
+$migrationData=$env:ProgramData; if(-not $env:ProgramData) { $env:ProgramData=[IO.Path]::GetTempPath() }
+
+# Pilot regression: package evidence is independent of a pre-existing Relian root.
+$paths=@(Get-UmNativeMarkerPaths)
+Assert ($paths[0] -eq (Join-Path $env:ProgramData 'RelianMaintenance\native-active.json')) 'Owned maintenance marker root'
+Assert ($paths[1] -eq (Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json')) 'Legacy marker remains read-only guard evidence'
+$initializer=${function:Initialize-UmSecureDirectory}.ToString()
+Assert ($initializer.Contains("'RelianMaintenance'") -and $initializer.Contains('if(-not $created)')) 'Owned root itself is validated before existing-root reuse'
+$env:ProgramData=$migrationData
+# Run the real preparation block with only its ACL boundary replaced. Its requested
+# destination must be the owned root, independently of the legacy Relian tree.
+& {
+ $scratch=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $null=New-Item -ItemType Directory $scratch
+ $priorData=$env:ProgramData; $env:ProgramData=$scratch
+ try {
+  function Initialize-UmSecureDirectory { param($Path) Assert ($Path.StartsWith((Join-Path $env:ProgramData 'RelianMaintenance'))) 'Actual preparation only requests owned root'; $scratch }
+  function Test-UmSafePath { $true }
+  $prepared=& $script:UmPrepare
+  Assert ($prepared.StartsWith($scratch) -and (Test-Path -LiteralPath $scratch)) 'Actual evidence preparation succeeds with independent root'
+ } finally { $env:ProgramData=$priorData; Remove-Item -LiteralPath $scratch -Recurse -Force }
+}
+# Exercise both guard marker branches before a deliberately unavailable registry.
+& {
+ $priorData=$env:ProgramData; $env:ProgramData=[IO.Path]::GetTempPath()
+ try {
+  function Get-CimInstance { @() }
+  function Get-ItemProperty { throw 'offline registry boundary' }
+  foreach($script:migrationMarker in @(Get-UmNativeMarkerPaths)) {
+   function Test-Path { param($LiteralPath) $LiteralPath -eq $script:migrationMarker }
+   $guard=Get-UmGuards
+   Assert (-not $guard.Safe -and $guard.Light -and ($guard.Reasons -join ';') -match 'native-active marker present') 'New and legacy markers each fail closed'
+  }
+ } finally { $env:ProgramData=$priorData; Remove-Variable migrationMarker -Scope Script -ErrorAction SilentlyContinue }
+}
+Assert (${function:Get-UmGuards}.ToString().Contains('Relian\FeatureUpgrade\state.json')) 'FeatureUpgrade state remains at original read-only path'
+if($env:OS -eq 'Windows_NT') {
+ & {
+  $priorData=$env:ProgramData; $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $env:ProgramData=$root
+  $null=New-Item -ItemType Directory -Path (Join-Path $root 'Relian') -Force
+  $script:migrationAcl=[pscustomobject]@{Owner='S-1-5-18'}
+  $script:migrationAcl | Add-Member ScriptMethod GetOwner { param($Type) [pscustomobject]@{Value=$this.Owner} }
+  $script:migrationAcl | Add-Member ScriptMethod GetAccessRules { param($Explicit,$Inherited,$Type) @() }
+  $script:migrationAclPaths=@()
+  # Only the Windows ACL boundary is mocked. Path creation, ancestry walk,
+  # existing-directory checks and reparse checks are the actual initializer.
+  function Get-Acl { param($LiteralPath) $script:migrationAclPaths+=$LiteralPath; $script:migrationAcl }
+  function Set-Acl { param($LiteralPath,$AclObject) $script:migrationAclPaths+=$LiteralPath }
+  try {
+   $owned=Join-Path $root 'RelianMaintenance'
+   $result=Initialize-UmSecureDirectory (Join-Path $owned 'Update')
+   Assert (Test-Path -LiteralPath $result) 'Actual initialization creates independent report directory'
+   Assert (@($script:migrationAclPaths | Where-Object { -not $_.StartsWith($owned+'\') -and $_ -ne $owned }).Count -eq 0) 'Initialization never inspects or changes unrelated Relian ACL'
+   $script:migrationAcl.Owner='S-1-5-21-1-2-3-1001'; $refused=$false
+   try { Initialize-UmSecureDirectory $owned } catch { $refused=$_.Exception.Message -match 'untrusted owner' }
+   Assert $refused 'Existing untrusted owned root refused even when terminal target'
+  } finally { $env:ProgramData=$priorData; Remove-Item -LiteralPath $root -Recurse -Force; Remove-Variable migrationAcl,migrationAclPaths -Scope Script -ErrorAction SilentlyContinue }
+ }
+} else { 'Windows actual-directory initialization/ACL-boundary isolation test skipped on this platform' }
 # Consolidated review regressions: malformed evidence never establishes completion.
 foreach($state in @(@{status='staged';isoBuild=1;time='2026-11-04T00:00:00Z'},@{status='staged';isoBuild=26200;time='2099-01-01T00:00:00Z'})) {
  Assert ((Get-UmOwnUpgradeState $state 22631 ([datetime]'2026-11-03')) -eq 'unknown') 'Invalid/future staged evidence must block'
@@ -211,7 +277,7 @@ if($env:OS -eq 'Windows_NT') {
  # rewriting. This uses only an isolated temporary ProgramData substitute.
  $savedData=$env:ProgramData; $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
  try {
-  $env:ProgramData=$root; $ancestor=Join-Path $root 'Relian'; $null=New-Item -ItemType Directory -Path $ancestor -Force
+  $env:ProgramData=$root; $ancestor=Join-Path $root 'RelianMaintenance'; $null=New-Item -ItemType Directory -Path $ancestor -Force
   $acl=Get-Acl -LiteralPath $ancestor
   $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')),'Modify','ContainerInherit,ObjectInherit','None','Allow')))
   Set-Acl -LiteralPath $ancestor -AclObject $acl

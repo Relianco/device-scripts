@@ -69,12 +69,18 @@ function Get-UmOwnUpgradeState {
  if($State.status -in @('finished','alreadyCurrent','failed','rolledBack')) { return 'residual' }
  'unknown'
 }
+function Get-UmNativeMarkerPaths {
+ # Legacy markers are guard evidence only; never initialize, rewrite or remove them.
+ Join-Path $env:ProgramData 'RelianMaintenance\native-active.json'
+ Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
+}
 function Get-UmGuards {
  $reasons=New-Object Collections.Generic.List[string]; $light=$false
  try {
   if (@(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -match '^(setup|setuphost|setupprep|dism|sfc|TiWorker|TrustedInstaller|msiexec)\.exe$' }).Count) { $reasons.Add('setup/servicing process'); $light=$true }
-  $nativeMarker=Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
-  if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
+  foreach($nativeMarker in @(Get-UmNativeMarkerPaths)) {
+   if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
+  }
   $setup=Get-ItemProperty 'HKLM:\SYSTEM\Setup' -ErrorAction Stop
   foreach($n in @('SystemSetupInProgress','OOBEInProgress','SetupPhase')) { if($setup.$n) { $reasons.Add("Setup $n"); $light=$true } }
   foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
@@ -168,7 +174,8 @@ function Initialize-UmSecureDirectory {
  param([string]$Path)
  $base=[IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
  $full=[IO.Path]::GetFullPath($Path)
- if(-not $full.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Evidence path must be under ProgramData' }
+ $owned=Join-Path $base 'RelianMaintenance'
+ if($full -ne $owned -and -not $full.StartsWith($owned+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Evidence path must be under the owned maintenance root' }
  $current=$base
  if(-not (Test-UmSafePath $base ([IO.Path]::GetPathRoot($base)))) { throw 'Reparse ProgramData ancestor refused' }
  foreach($part in $full.Substring($base.Length+1).Split('\')) {
@@ -178,8 +185,8 @@ function Initialize-UmSecureDirectory {
   if(-not (Test-Path -LiteralPath $current -ErrorAction Stop)) { $null=New-Item -ItemType Directory -Path $current -ErrorAction Stop; $created=$true }
   $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
   if(-not $item.PSIsContainer -or ([int64]$item.Attributes -band 1024) -ne 0) { throw 'Reparse evidence directory refused' }
-  if(-not $created -and $current -ne $full) {
-   # Existing shared ancestors belong to other packages too: inspect, never rewrite.
+  if(-not $created) {
+   # Existing owned directories must already be trusted; never adopt or repair an untrusted root.
    $existing=Get-Acl -LiteralPath $current -ErrorAction Stop
    $ownerSid=$existing.GetOwner([Security.Principal.SecurityIdentifier]).Value
    if($ownerSid -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Shared evidence ancestor has an untrusted owner' }
@@ -198,7 +205,8 @@ function Initialize-UmSecureDirectory {
  return $full
 }
 function Grant-UmThemeReadAccess {
-    param([Parameter(Mandatory)][string]$Path)
+    param([string]$Path)
+    if([string]::IsNullOrWhiteSpace($Path)) { throw 'Path must not be empty' }
     $sessions = @(Get-ADTLoggedOnUser -ErrorAction Stop | Where-Object { $_.IsActiveUserSession })
     if (-not $sessions.Count) { throw 'no active user session for dialog theme' }
     foreach ($session in $sessions) {
@@ -218,7 +226,8 @@ function Grant-UmThemeReadAccess {
 # It stops about 4 seconds after the last window closes, or after 4000 styled
 # polls; what it painted stays. It never touches a dialog result.
 function Install-UmDialogTheme {
-    param([Parameter(Mandatory)][string]$ClientExe)
+    param([string]$ClientExe)
+    if([string]::IsNullOrWhiteSpace($ClientExe)) { throw 'ClientExe must not be empty' }
     $ErrorActionPreference = 'Stop'
     $dll = Join-Path (Split-Path -Parent $ClientExe) 'RelianRestartNoticeTheme.dll'
     $source = @'
@@ -542,7 +551,7 @@ $script:UmUi={ param($Step)
  if($script:UmThemeError) { 'shown; black theme unavailable: '+$script:UmThemeError } else { 'shown' }
 }
 
-# Every checkpoint validates ordinary ancestors and repairs restrictive ACLs before writing.
+# Every checkpoint validates ordinary, trusted owned directories before writing.
 function Write-UmJson {
  param($Value,[string]$Path)
  $dir=Initialize-UmSecureDirectory (Split-Path $Path -Parent)
@@ -553,7 +562,7 @@ function Write-UmJson {
  if(Test-Path -LiteralPath $Path) { [IO.File]::Replace(($Path+'.tmp'),$Path,$null) } else { [IO.File]::Move(($Path+'.tmp'),$Path) }
 }
 $script:UmPrepare={
- $script:UmRunDir=Initialize-UmSecureDirectory (Join-Path $env:ProgramData ('Relian\Maintenance\Update\'+[guid]::NewGuid().ToString('n')))
+ $script:UmRunDir=Initialize-UmSecureDirectory (Join-Path $env:ProgramData ('RelianMaintenance\Update\'+[guid]::NewGuid().ToString('n')))
  Join-Path $script:UmRunDir 'report.json'
 }
 $script:UmSave={ param($r) Write-UmJson $r $r.reportPath }
@@ -727,7 +736,7 @@ function Invoke-UmProcess {
  $stdout=Join-Path $script:UmRunDir ($Phase+'.stdout.txt'); $stderr=Join-Path $script:UmRunDir ($Phase+'.stderr.txt')
  foreach($file in @($stdout,$stderr)) { if(Test-Path -LiteralPath $file) { throw 'Native output collision' } }
  $p=Start-UmDurableProcess $Executable $Arguments $stdout $stderr
- $marker=Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
+ $marker=Join-Path $env:ProgramData 'RelianMaintenance\native-active.json'
  $record=@{pid=$p.Id;creationTimeUtc=$p.StartTime.ToUniversalTime().ToString('o');executable=$Executable;phase=$Phase;startedUtc=[datetime]::UtcNow.ToString('o');stdoutPath=$stdout;stderrPath=$stderr}
  try { Write-UmJson $record $marker } catch { $r.actions+=@{phase=$Phase;outcome='markerWriteFailedChildMayRun';pid=$p.Id}; throw 'Native marker unavailable; child may remain active' }
  $clock=[diagnostics.stopwatch]::StartNew()

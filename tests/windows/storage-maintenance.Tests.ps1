@@ -3,6 +3,72 @@ $env:RELIAN_DEPLOY_TEST = '1'
 . (Join-Path $PSScriptRoot '../../windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1')
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 
+foreach($helper in @('Grant-SmThemeReadAccess','Install-SmDialogTheme')) {
+ $mandatory=@((Get-Command $helper).Parameters.Values | ForEach-Object { $_.Attributes } | Where-Object { $_ -is [Management.Automation.ParameterAttribute] -and $_.Mandatory })
+ Assert ($mandatory.Count -eq 0) 'Theme helpers cannot prompt for missing arguments'
+ $refused=$false; try { & $helper } catch { $refused=$_.Exception.Message -match 'must not be empty' }
+ Assert $refused 'Missing theme helper arguments fail explicitly before work'
+}
+
+$migrationData=$env:ProgramData; if(-not $env:ProgramData) { $env:ProgramData=[IO.Path]::GetTempPath() }
+
+# Pilot regression: package evidence is independent of a pre-existing Relian root.
+$paths=@(Get-SmNativeMarkerPaths)
+Assert ($paths[0] -eq (Join-Path $env:ProgramData 'RelianMaintenance\native-active.json')) 'Owned maintenance marker root'
+Assert ($paths[1] -eq (Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json')) 'Legacy marker remains read-only guard evidence'
+$initializer=${function:Initialize-SmSecureDirectory}.ToString()
+Assert ($initializer.Contains("'RelianMaintenance'") -and $initializer.Contains('if(-not $created)')) 'Owned root itself is validated before existing-root reuse'
+$env:ProgramData=$migrationData
+# Run the real preparation block with only its ACL boundary replaced. Its requested
+# destination must be the owned root, independently of the legacy Relian tree.
+& {
+ $scratch=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $null=New-Item -ItemType Directory $scratch
+ $priorData=$env:ProgramData; $env:ProgramData=$scratch
+ try {
+  function Initialize-SmSecureDirectory { param($Path) Assert ($Path.StartsWith((Join-Path $env:ProgramData 'RelianMaintenance'))) 'Actual preparation only requests owned root'; $scratch }
+  function Test-SmSafePath { $true }
+  $prepared=& $script:SmPrepareReport
+  Assert ($prepared.StartsWith($scratch) -and (Test-Path -LiteralPath $scratch)) 'Actual evidence preparation succeeds with independent root'
+ } finally { $env:ProgramData=$priorData; Remove-Item -LiteralPath $scratch -Recurse -Force }
+}
+# Exercise both guard marker branches before a deliberately unavailable registry.
+& {
+ $priorData=$env:ProgramData; $env:ProgramData=[IO.Path]::GetTempPath()
+ try {
+  function Get-CimInstance { @() }
+  function Get-ItemProperty { throw 'offline registry boundary' }
+  foreach($script:migrationMarker in @(Get-SmNativeMarkerPaths)) {
+   function Test-Path { param($LiteralPath) $LiteralPath -eq $script:migrationMarker }
+   $guard=Get-SmGuards
+   Assert (-not $guard.Safe -and $guard.Light -and ($guard.Reasons -join ';') -match 'native-active marker present') 'New and legacy markers each fail closed'
+  }
+ } finally { $env:ProgramData=$priorData; Remove-Variable migrationMarker -Scope Script -ErrorAction SilentlyContinue }
+}
+Assert (${function:Get-SmGuards}.ToString().Contains('Relian\FeatureUpgrade\state.json')) 'FeatureUpgrade state remains at original read-only path'
+if($env:OS -eq 'Windows_NT') {
+ & {
+  $priorData=$env:ProgramData; $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $env:ProgramData=$root
+  $null=New-Item -ItemType Directory -Path (Join-Path $root 'Relian') -Force
+  $script:migrationAcl=[pscustomobject]@{Owner='S-1-5-18'}
+  $script:migrationAcl | Add-Member ScriptMethod GetOwner { param($Type) [pscustomobject]@{Value=$this.Owner} }
+  $script:migrationAcl | Add-Member ScriptMethod GetAccessRules { param($Explicit,$Inherited,$Type) @() }
+  $script:migrationAclPaths=@()
+  # Only the Windows ACL boundary is mocked. Path creation, ancestry walk,
+  # existing-directory checks and reparse checks are the actual initializer.
+  function Get-Acl { param($LiteralPath) $script:migrationAclPaths+=$LiteralPath; $script:migrationAcl }
+  function Set-Acl { param($LiteralPath,$AclObject) $script:migrationAclPaths+=$LiteralPath }
+  try {
+   $owned=Join-Path $root 'RelianMaintenance'
+   $result=Initialize-SmSecureDirectory (Join-Path $owned 'Storage')
+   Assert (Test-Path -LiteralPath $result) 'Actual initialization creates independent report directory'
+   Assert (@($script:migrationAclPaths | Where-Object { -not $_.StartsWith($owned+'\') -and $_ -ne $owned }).Count -eq 0) 'Initialization never inspects or changes unrelated Relian ACL'
+   $script:migrationAcl.Owner='S-1-5-21-1-2-3-1001'; $refused=$false
+   try { Initialize-SmSecureDirectory $owned } catch { $refused=$_.Exception.Message -match 'untrusted owner' }
+   Assert $refused 'Existing untrusted owned root refused even when terminal target'
+  } finally { $env:ProgramData=$priorData; Remove-Item -LiteralPath $root -Recurse -Force; Remove-Variable migrationAcl,migrationAclPaths -Scope Script -ErrorAction SilentlyContinue }
+ }
+} else { 'Windows actual-directory initialization/ACL-boundary isolation test skipped on this platform' }
+
 $triage=[pscustomobject]@{Status='partial';Mode='Report';Actions=@();Guards=@{Reasons=@('Setup active')};Scan=@{Partial=$true;TopFiles=@(@{Path='C:\large.bin';LogicalBytes=100});TempCategories=@(@{Root='C:\Windows\Temp';AgeQualifiedLogicalBytes=50})};Before=@(@{DeviceID='C:';Size=1000;FreeSpace=100});After=@();Profiles=@(@{Decision='Protected'},@{Decision='StaleCandidate'});FreeSpaceDelta=@();Notifications=@();Errors=@();Evidence=@{Opportunities=@(@{Present=$true},@{Present=$false})}}
 $triageSummary=ConvertTo-SmSummary $triage 'report.json' | ConvertFrom-Json
 Assert ($triageSummary.Before[0].FreeSpace -eq 100 -and $triageSummary.TopFiles[0].LogicalBytes -eq 100) 'Storage stdout includes free space and top consumers'
@@ -59,7 +125,7 @@ function New-TestAgeEvidence($Now) {
  $l=New-AgePair ($Now.AddDays(-300)); $u=New-AgePair ($Now.AddDays(-200))
  [pscustomobject]@{Registry=[pscustomobject]@{ReadState='ok';IdentityMatches=$true;Raw=@{};Load=(ConvertFrom-SmFileTimePair $l.Low $l.High $Now);Unload=(ConvertFrom-SmFileTimePair $u.Low $u.High $Now);Cleanup=(ConvertFrom-SmFileTimePair $null $null $Now)};Identity=[pscustomobject]@{Resolved=$true;Account='EXAMPLE\old'};Sessions=[pscustomobject]@{Known=$true;Sids=@();CurrentSid='S-1-5-18'};Hives=[pscustomobject]@{Known=$true;Loaded=$false;ClassesLoaded=$false};NtUser=[pscustomobject]@{DatUtc=$Now;ManUtc=$null;Errors=@()};Events=[pscustomobject]@{ProbeComplete=$true;Recent=@();Truncated=$false;Error=$null;Coverage='unknown'};Errors=@()}
 }
-$ageProfile=[pscustomobject]@{SID='S-1-5-21-1-2-3-1001';LocalPath='C:\Users\old';Loaded=$false;Special=$false;LastUseTime=$ageNow.AddDays(-90);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0}
+$ageProfile=[pscustomobject]@{SID='S-1-5-21-1-2-3-1001';LocalPath=(('C:','Users','old') -join '\');Loaded=$false;Special=$false;LastUseTime=$ageNow.AddDays(-90);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0}
 $ev=New-TestAgeEvidence $ageNow
 Assert (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible 'coherent old pair survives servicing NTUSER touch'
 $ageProfile.LastUseTime=$ageNow
@@ -107,7 +173,7 @@ Throws { Get-SmArguments -ProfileAgeDays '29' }
 Throws { Get-SmArguments -TempAgeDays '0' }
 Throws { Get-SmArguments -RemoveProfiles 'yes' }
 $now = [datetime]::UtcNow
-$p = [pscustomobject]@{ SID='S-1-5-21-1-2-3-1001'; LocalPath='C:\Users\old'; Loaded=$false; Special=$false; LastUseTime=$now.AddDays(-200);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0 }
+$p = [pscustomobject]@{ SID='S-1-5-21-1-2-3-1001'; LocalPath=(('C:','Users','old') -join '\'); Loaded=$false; Special=$false; LastUseTime=$now.AddDays(-200);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0 }
 Assert (Test-SmProfile $p 180 @() $now (New-TestAgeEvidence $now)).Eligible 'old profile'
 $p.Loaded=$true
 Assert (-not (Test-SmProfile $p 180 @() $now).Eligible) 'loaded protected'

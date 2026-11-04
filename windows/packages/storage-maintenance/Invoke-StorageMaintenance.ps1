@@ -367,12 +367,18 @@ function Get-SmOwnUpgradeState {
  if($State.status -in @('finished','alreadyCurrent','failed','rolledBack')) { return 'residual' }
  'unknown'
 }
+function Get-SmNativeMarkerPaths {
+ # Legacy markers are guard evidence only; never initialize, rewrite or remove them.
+ Join-Path $env:ProgramData 'RelianMaintenance\native-active.json'
+ Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
+}
 function Get-SmGuards {
  $reasons=New-Object Collections.Generic.List[string]; $light=$false
  try {
   if (@(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -match '^(setup|setuphost|setupprep|dism|sfc|TiWorker|TrustedInstaller|msiexec)\.exe$' }).Count) { $reasons.Add('setup/servicing process'); $light=$true }
-  $nativeMarker=Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
-  if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
+  foreach($nativeMarker in @(Get-SmNativeMarkerPaths)) {
+   if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
+  }
   $setup=Get-ItemProperty 'HKLM:\SYSTEM\Setup' -ErrorAction Stop
   foreach($n in @('SystemSetupInProgress','OOBEInProgress','SetupPhase')) { if($setup.$n) { $reasons.Add("Setup $n"); $light=$true } }
   foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
@@ -467,7 +473,8 @@ function Initialize-SmSecureDirectory {
  param([string]$Path)
  $base=[IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
  $full=[IO.Path]::GetFullPath($Path)
- if(-not $full.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Evidence path must be under ProgramData' }
+ $owned=Join-Path $base 'RelianMaintenance'
+ if($full -ne $owned -and -not $full.StartsWith($owned+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'Evidence path must be under the owned maintenance root' }
  $current=$base
  if(-not (Test-SmSafePath $base ([IO.Path]::GetPathRoot($base)))) { throw 'Reparse ProgramData ancestor refused' }
  foreach($part in $full.Substring($base.Length+1).Split('\')) {
@@ -477,8 +484,8 @@ function Initialize-SmSecureDirectory {
   if(-not (Test-Path -LiteralPath $current -ErrorAction Stop)) { $null=New-Item -ItemType Directory -Path $current -ErrorAction Stop; $created=$true }
   $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
   if(-not $item.PSIsContainer -or ([int64]$item.Attributes -band 1024) -ne 0) { throw 'Reparse evidence directory refused' }
-  if(-not $created -and $current -ne $full) {
-   # Existing shared ancestors belong to other packages too: inspect, never rewrite.
+  if(-not $created) {
+   # Existing owned directories must already be trusted; never adopt or repair an untrusted root.
    $existing=Get-Acl -LiteralPath $current -ErrorAction Stop
    $ownerSid=$existing.GetOwner([Security.Principal.SecurityIdentifier]).Value
    if($ownerSid -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Shared evidence ancestor has an untrusted owner' }
@@ -497,7 +504,7 @@ function Initialize-SmSecureDirectory {
  return $full
 }
 $script:SmPrepareReport={
- $dir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'Relian\StorageMaintenance')
+ $dir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance\Storage')
  $path=Join-Path $dir ((Get-Date -Format 'yyyyMMddTHHmmss')+'-'+[guid]::NewGuid().ToString('n')+'.json')
  if(-not (Test-SmSafePath $path $dir)) {
   # The new file does not exist yet; validate its ordinary, protected parent.
@@ -517,9 +524,9 @@ $script:SmRemoveProfile={ param($Profile) $Profile | Remove-CimInstance -ErrorAc
 $script:SmProfileHiveLoaded={ param($Sid) (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid) -ErrorAction Stop) -or (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid+'_Classes') -ErrorAction Stop) }
 $script:SmDiagnosticRoots={ @($env:ProgramData,$env:ProgramFiles,${env:ProgramFiles(x86)},$env:windir) | Where-Object { $_ } }
 $script:SmComponent={
- $logDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'Relian\StorageMaintenance')
+ $logDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance\Storage')
  $id=[guid]::NewGuid().ToString('n')
- $markerDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'Relian\Maintenance')
+ $markerDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance')
  $markerPath=Join-Path $markerDir 'native-active.json'
  if(Test-Path -LiteralPath $markerPath -ErrorAction Stop) { throw 'Native marker already exists; reconcile exact process identity first' }
  $native=[ordered]@{pid=$null;creationTimeUtc=$null;executable=(Join-Path $env:windir 'System32\dism.exe');phase='startingComponentCleanup';startedUtc=[datetime]::UtcNow.ToString('o');stdoutPath=(Join-Path $logDir ($id+'.stdout.log'));stderrPath=(Join-Path $logDir ($id+'.stderr.log'))}
@@ -545,7 +552,8 @@ $script:SmEvidence={
 }
 
 function Grant-SmThemeReadAccess {
-    param([Parameter(Mandatory)][string]$Path)
+    param([string]$Path)
+    if([string]::IsNullOrWhiteSpace($Path)) { throw 'Path must not be empty' }
     $sessions = @(Get-ADTLoggedOnUser -ErrorAction Stop | Where-Object { $_.IsActiveUserSession })
     if (-not $sessions.Count) { throw 'no active user session for dialog theme' }
     foreach ($session in $sessions) {
@@ -565,7 +573,8 @@ function Grant-SmThemeReadAccess {
 # It stops about 4 seconds after the last window closes, or after 4000 styled
 # polls; what it painted stays. It never touches a dialog result.
 function Install-SmDialogTheme {
-    param([Parameter(Mandatory)][string]$ClientExe)
+    param([string]$ClientExe)
+    if([string]::IsNullOrWhiteSpace($ClientExe)) { throw 'ClientExe must not be empty' }
     $ErrorActionPreference = 'Stop'
     $dll = Join-Path (Split-Path -Parent $ClientExe) 'RelianRestartNoticeTheme.dll'
     $source = @'
