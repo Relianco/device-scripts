@@ -32,8 +32,14 @@ try {
   $read=Read-MeReport $file
   Assert ($read.Report.Status -eq 'ok') 'Read stored JSON'
   Assert ((Get-MeHash $before) -eq (Get-MeHash ([IO.File]::ReadAllBytes($file)))) 'Read leaves file unchanged'
-  $stream=[IO.File]::OpenWrite($file); try { $stream.SetLength(16777217) } finally { $stream.Dispose() }
-  Refuses { Read-MeReport $file } 'Oversize report refused before parse'
+  # Valid JSON ensures a parse error cannot masquerade as the size guard.
+  [IO.File]::WriteAllText($file, ('{"Value":"'+('x'*16777216)+'"}'))
+  $sizeRefused=$false
+  try { $null=Read-MeReport $file } catch {
+   if ($_.Exception.Message -notlike 'Report size must be*') { throw }
+   $sizeRefused=$true
+  }
+  Assert $sizeRefused 'Oversize valid JSON rejected by size guard'
  }
  $oldData=$env:ProgramData; $env:ProgramData=$scratch
  try {
