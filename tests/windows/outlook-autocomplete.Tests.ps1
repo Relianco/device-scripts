@@ -266,11 +266,11 @@ foreach ($bad in @(
  if (-not $threw) { Fail "Get-OaOptions accepted invalid tuple [$($bad -join '|')]" }
 }
 
-# 6. Bounded JSON output stays <= 8000 UTF-8 bytes even with many files/errors.
+# 6. Bounded JSON output stays <= 8000 UTF-8 bytes even when errors alone exceed the budget after files are emptied.
 $bigRecord = [ordered]@{
  version = '1.0'; timestamp = '2026-11-04T00:00:00Z'; mode = 'check'; match = 'user@example.invalid'; verdict = 'checked'
  files = @(1..80 | ForEach-Object { [ordered]@{ profile = "user$_"; fileName = "Stream_Autocomplete_0_$('_' * 32).dat"; sizeBytes = 4096; validFormat = $true; rowCount = 20; matchedRowCount = 0; removedRowCount = 0 } })
- errors = @(1..50 | ForEach-Object { "error detail $_ " + ('x' * 120) })
+ errors = @(1..90 | ForEach-Object { "error detail $_ " + ('x' * 120) })
 }
 $boundedJson = ConvertTo-BoundedOaJson -Record $bigRecord
 Assert-True ([Text.Encoding]::UTF8.GetByteCount($boundedJson) -le 8000) 'bounded JSON stays within 8000 UTF-8 bytes'

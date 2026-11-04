@@ -444,7 +444,7 @@ function ConvertTo-BoundedOaJson {
 
  while ($filesList.Count -gt 0 -and [Text.Encoding]::UTF8.GetByteCount(($copy | ConvertTo-Json -Depth 6 -Compress)) -gt $MaxBytes) {
   $take = [Math]::Max(0, [int][Math]::Floor($filesList.Count / 2) - 1)
-  $filesList = if ($take -gt 0) { @($filesList[0..($take - 1)]) } else { @() }
+  if ($take -gt 0) { $filesList = @($filesList[0..($take - 1)]) } else { $filesList = @() }
   $copy['files'] = $filesList
  }
  while ($errList.Count -gt 1 -and [Text.Encoding]::UTF8.GetByteCount(($copy | ConvertTo-Json -Depth 6 -Compress)) -gt $MaxBytes) {
