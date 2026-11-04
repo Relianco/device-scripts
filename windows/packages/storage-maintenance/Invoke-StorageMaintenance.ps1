@@ -4,12 +4,12 @@ Logical bytes are observations, not guaranteed reclaimable physical space.
 #>
 [CmdletBinding()]
 param([string]$DeploymentType, [string]$Action, [string]$PinVersion,
- [string]$Mode='Report', [string]$TempAgeDays='7', [string]$ProfileAgeDays='180',
+ [string]$Mode='Report', [string]$TempAgeDays='7', [string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false', [string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000', [string]$MaxSeconds='30')
 
 function Get-SmArguments {
- param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='180',
+ param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false',[string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000',[string]$MaxSeconds='30')
  if ($Mode -cnotin @('Report','Cleanup')) { throw 'Mode must be Report or Cleanup' }
@@ -22,17 +22,126 @@ function Get-SmArguments {
  }; return $a
 }
 
-function Test-SmProfile {
- param($Profile,[int]$AgeDays,[string[]]$Exclusions,[datetime]$Now=[datetime]::UtcNow)
- $reason='eligible'; $last=$null
- try { if ($Profile.LastUseTime) { $last=([datetime]$Profile.LastUseTime).ToUniversalTime() } } catch {}
- if ($Profile.Loaded -ne $false -or $Profile.Special -ne $false) { $reason='loaded/special/unknown' }
- elseif ($Profile.SID -notmatch '^S-1-(5-21-|12-1-)') { $reason='protected SID' }
- elseif ($Profile.LocalPath -notmatch '^[A-Za-z]:\\Users\\[^\\]+$' -or (Split-Path $Profile.LocalPath -Leaf) -match '^(Public|Default.*|All Users|Administrator|defaultuser.*)$') { $reason='protected path' }
- elseif ($Exclusions -contains $Profile.SID -or $Exclusions -contains $Profile.LocalPath -or $Profile.LocalPath -eq $env:USERPROFILE) { $reason='excluded/current' }
- elseif (-not $last -or $last -gt $Now -or $last -gt $Now.AddDays(-$AgeDays)) { $reason='recent/unknown age' }
- [pscustomobject]@{ SID=$Profile.SID; Path=$Profile.LocalPath; LastUseTime=$last; Eligible=($reason -eq 'eligible'); Reason=$reason; LogicalBytes=$null; SizePartial=$true }
+# Registry profile-service dates are primary evidence on Windows 10 1809+.
+# https://learn.microsoft.com/en-us/troubleshoot/windows-server/support-tools/scripts-to-retrieve-profile-age
+function ConvertFrom-SmFileTimePair {
+ param($Low,$High,[datetime]$Now=[datetime]::UtcNow)
+ $r=[ordered]@{Low=$Low;High=$High;State='missing';TimestampUtc=$null}
+ if($null -eq $Low -or $null -eq $High) { return [pscustomobject]$r }
+ $words=@()
+ foreach($word in @($Low,$High)) {
+  if("$word" -notmatch '^-?\d{1,10}$') { $r.State='malformed'; return [pscustomobject]$r }
+  $n=[decimal]::Parse("$word",[Globalization.CultureInfo]::InvariantCulture)
+  if($n -lt -2147483648 -or $n -gt 4294967295) { $r.State='malformed'; return [pscustomobject]$r }
+  if($n -lt 0) { $n+=4294967296 }; $words+=([uint64]$n)
+ }
+ $ft=($words[1] -shl 32) -bor $words[0]
+ if($ft -eq 0) { $r.State='zero'; return [pscustomobject]$r }
+ try {
+  if($ft -gt [int64]::MaxValue) { throw 'FILETIME outside signed range' }
+  $time=[datetime]::FromFileTimeUtc([int64]$ft)
+  if($time -lt [datetime]'1970-01-01') { throw 'Implausible profile-service date before 1970' }
+  $r.TimestampUtc=$time; $r.State=if($time -gt $Now.ToUniversalTime()){'future'}else{'valid'}
+ } catch { $r.State='invalid' }
+ return [pscustomobject]$r
 }
+
+function Test-SmProfile {
+ param($Profile,[int]$AgeDays,[string[]]$Exclusions,[datetime]$Now=[datetime]::UtcNow,$Evidence=$null)
+ $nowUtc=$Now.ToUniversalTime(); $cutoff=$nowUtc.AddDays(-$AgeDays); $last=$null; $cimState='missing'
+ try { if($Profile.LastUseTime) { $last=([datetime]$Profile.LastUseTime).ToUniversalTime(); $cimState=if($last -gt $nowUtc){'future'}else{'valid'} } } catch { $cimState='invalid' }
+ $decision='ReviewInsufficientEvidence'; $reason='Required profile-service age, identity or activity evidence unavailable'; $age=$null; $fingerprint=$null
+ if($Profile.Loaded -ne $false -or $Profile.Special -ne $false) { $decision='Protected'; $reason='Loaded, special or unknown loaded/special state' }
+ elseif($Profile.SID -notmatch '^S-1-(5-21-|12-1-)' -or $Profile.SID -match '-(500|501|503|504)$') { $decision='Protected'; $reason='Protected SID' }
+ elseif($Profile.LocalPath -notmatch '^[A-Za-z]:\\Users\\[^\\]+$' -or ($Profile.LocalPath -split '\\')[-1] -match '^(Public|Default.*|All Users|Administrator|defaultuser.*)$') { $decision='Protected'; $reason='Protected profile path' }
+ elseif($Exclusions -contains $Profile.SID -or $Exclusions -contains $Profile.LocalPath -or $Profile.LocalPath -eq $env:USERPROFILE) { $decision='Protected'; $reason='Explicit exclusion or current profile' }
+ elseif($null -eq $Profile.Status -or $null -eq $Profile.RoamingConfigured -or $null -eq $Profile.RoamingPreference) { $reason='Unknown profile status/roaming state' }
+ elseif([int64]$Profile.Status -ne 0 -or $Profile.RoamingConfigured -or $Profile.RoamingPreference -or $Profile.refCount -gt 0) { $decision='Protected'; $reason='Temporary, roaming, mandatory, corrupt or referenced profile' }
+ elseif($null -ne $Evidence) {
+  $reg=$Evidence.Registry; $sessions=$Evidence.Sessions; $hives=$Evidence.Hives; $events=$Evidence.Events
+  if(-not $sessions.Known -or -not $hives.Known -or -not $Evidence.Identity.Resolved -or $reg.ReadState -ne 'ok' -or -not $reg.IdentityMatches) { $reason='Identity, session, hive or ProfileList mapping cannot be verified' }
+  elseif($sessions.CurrentSid -eq $Profile.SID -or $sessions.Sids -contains $Profile.SID -or $hives.Loaded -or $hives.ClassesLoaded -or $Evidence.NtUser.ManUtc) { $decision='Protected'; $reason='Current/session SID, loaded SID or SID_Classes hive, or mandatory NTUSER.MAN' }
+  elseif(@($events.Recent | Where-Object { $_.Sid -eq $Profile.SID -and $_.LogonType -in @(2,7,10,11,12,13) -and $_.TimeUtc -ge $cutoff }).Count) { $decision='KeepRecentConfirmed'; $reason='Positive recent interactive/unlock Security 4624 target SID' }
+  elseif(@($reg.Load,$reg.Unload,$reg.Cleanup | Where-Object { $_.State -in @('future','invalid','malformed') }).Count -or $cimState -in @('future','invalid')) { $decision='ReviewInconsistent'; $reason='Invalid, malformed or future source date' }
+  elseif(($reg.Load.State -eq 'valid' -and $reg.Load.TimestampUtc -ge $cutoff) -or ($reg.Unload.State -eq 'valid' -and $reg.Unload.TimestampUtc -ge $cutoff)) { $decision='KeepRecentProfileService'; $reason='Profile-service load/unload at or after cutoff' }
+  elseif($reg.Cleanup.State -eq 'valid' -and $reg.Cleanup.TimestampUtc -ge $cutoff) { $decision='ReviewPolicyTracking'; $reason='Recent cleanup-policy tracking date; not a logon date' }
+  elseif($reg.Load.State -ne 'valid' -or $reg.Unload.State -ne 'valid') { $decision='ReviewFallbackOnly'; $reason='Coherent registry load/unload pair missing; CIM, cleanup-only and NTUSER dates never authorize deletion' }
+  elseif($reg.Load.TimestampUtc -gt $reg.Unload.TimestampUtc) { $decision='ReviewInconsistent'; $reason='Load is newer than unload; crash or active-profile ambiguity' }
+  elseif($last -and $last -ge $cutoff) { $decision='ReviewTimestampConflict'; $reason='Recent CIM profile use conflicts with old profile-service evidence' }
+  elseif(-not $events.ProbeComplete -or $events.Truncated -or @($Evidence.Errors).Count -or @($Evidence.NtUser.Errors).Count) { $reason='Activity or required evidence collection failed/truncated; absence of events never proves inactivity' }
+  else {
+   $decision='StaleCandidate'; $reason='Coherent profile-service load <= unload strictly older than cutoff; no positive recent veto. Not proof of last human logon.'
+   $age=[math]::Floor(($nowUtc-$reg.Unload.TimestampUtc).TotalDays)
+   $fingerprint=(@($reg.Load.TimestampUtc.ToString('o'),$reg.Unload.TimestampUtc.ToString('o'),$reg.Cleanup.State,"$($reg.Cleanup.TimestampUtc)") -join '|')
+  }
+ }
+ [pscustomobject]@{SID=$Profile.SID;Path=$Profile.LocalPath;LastUseTime=$last;CimDateState=$cimState;CutoffUtc=$cutoff;ObservedAgeDays=$age;Decision=$decision;Eligible=($decision -eq 'StaleCandidate');Reason=$reason;AgeSource='ProfileList load/unload; NTUSER is diagnostic only';AgeEvidenceFingerprint=$fingerprint;ServicingTouchPossible=($null -ne $Evidence -and $Evidence.NtUser.DatUtc -and $Evidence.NtUser.DatUtc -ge $cutoff);Evidence=$Evidence;LogicalBytes=$null;SizePartial=$true}
+}
+
+function Get-SmProfileContext {
+ param([int]$AgeDays,[datetime]$Now=[datetime]::UtcNow)
+ $sessions=[ordered]@{Known=$false;Sids=@();CurrentSid=$null;Error=$null}
+ try {
+  $sessions.CurrentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  if(-not (Get-Command Get-ADTLoggedOnUser -ErrorAction SilentlyContinue)) { throw 'Toolkit user-session probe unavailable' }
+  $sessions.Sids=@(Get-ADTLoggedOnUser -ErrorAction Stop | Where-Object { $_.IsUserSession } | ForEach-Object { $account=New-Object Security.Principal.NTAccount("$($_.NTAccount)"); $account.Translate([Security.Principal.SecurityIdentifier]).Value })
+  $console=Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 5 -ErrorAction Stop
+  if($console.UserName) { $account=New-Object Security.Principal.NTAccount("$($console.UserName)"); $sessions.Sids+= $account.Translate([Security.Principal.SecurityIdentifier]).Value }
+  foreach($proc in @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)) {
+   $owner=Invoke-CimMethod -InputObject $proc -MethodName GetOwnerSid -OperationTimeoutSec 5 -ErrorAction Stop
+   if($owner.ReturnValue -ne 0 -or -not $owner.Sid) { throw 'Explorer owner SID unavailable' }; $sessions.Sids+="$($owner.Sid)"
+  }
+  $sessions.Sids=@($sessions.Sids | Select-Object -Unique); $sessions.Known=$true
+ } catch { $sessions.Error=$_.Exception.Message }
+ $events=[ordered]@{ProbeComplete=$false;Recent=@();Truncated=$false;Error=$null;Coverage='Positive evidence only: absent, rotated or cleared logs never establish inactivity. Historical audit continuity unknown.';EntriesRead=0}
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ try {
+  $records=@(Get-WinEvent -FilterHashtable @{LogName='Security';Id=4624;StartTime=$Now.AddDays(-$AgeDays)} -MaxEvents 2001 -ErrorAction Stop)
+  if($records.Count -gt 2000) { $events.Truncated=$true }
+  foreach($record in @($records | Select-Object -First 2000)) {
+   if($watch.Elapsed.TotalSeconds -gt 5) { $events.Truncated=$true; break }
+   $events.EntriesRead++; [xml]$xml=$record.ToXml(); $data=@{}
+   foreach($field in $xml.Event.EventData.Data) { $data["$($field.Name)"]="$($field.'#text')" }
+   if($data.LogonType -in @('2','7','10','11','12','13') -and $data.TargetUserSid -match '^S-1-') { $events.Recent+=[pscustomobject]@{Sid=$data.TargetUserSid;LogonType=[int]$data.LogonType;TimeUtc=$record.TimeCreated.ToUniversalTime()} }
+  }
+  $events.ProbeComplete=$true
+ } catch { if($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $events.ProbeComplete=$true } else { $events.Error=$_.Exception.Message } }
+ [pscustomobject]@{Sessions=[pscustomobject]$sessions;Events=[pscustomobject]$events;AssessedUtc=$Now}
+}
+
+function Get-SmProfileEvidence {
+ param($Profile,[int]$AgeDays,[datetime]$Now,$Context)
+ $errors=@(); $reg=[ordered]@{ReadState='unknown';IdentityMatches=$false;ProfileImagePath=$null;Raw=@{};Load=$null;Unload=$null;Cleanup=$null;Error=$null}
+ $pairs=@(@('Load','LocalProfileLoadTimeLow','LocalProfileLoadTimeHigh'),@('Unload','LocalProfileUnLoadTimeLow','LocalProfileUnLoadTimeHigh'),@('Cleanup','LocalProfileCleanupCheckTimeLow','LocalProfileCleanupCheckTimeHigh'))
+ try {
+  if($Profile.SID -notmatch '^S-1-\d+(?:-\d+)+$') { throw 'Malformed profile SID' }
+  $key='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\'+$Profile.SID
+  $values=Get-ItemProperty -LiteralPath $key -ErrorAction Stop; $reg.ReadState='ok'
+  $reg.ProfileImagePath=[Environment]::ExpandEnvironmentVariables("$($values.ProfileImagePath)")
+  $reg.IdentityMatches=[string]::Equals([IO.Path]::GetFullPath($reg.ProfileImagePath).TrimEnd('\'),[IO.Path]::GetFullPath($Profile.LocalPath).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase)
+  foreach($pair in $pairs) { $low=$values.($pair[1]); $high=$values.($pair[2]); $reg.Raw[$pair[1]]=$low; $reg.Raw[$pair[2]]=$high; $reg[$pair[0]]=ConvertFrom-SmFileTimePair $low $high $Now }
+ } catch { $reg.Error=$_.Exception.Message; $errors+='ProfileList: '+$_.Exception.Message }
+ foreach($pair in $pairs) { if(-not $reg[$pair[0]]) { $reg[$pair[0]]=ConvertFrom-SmFileTimePair $null $null $Now } }
+ $identity=[ordered]@{Resolved=$false;Account=$null;Error=$null}
+ try { $sid=New-Object Security.Principal.SecurityIdentifier($Profile.SID); $identity.Account=$sid.Translate([Security.Principal.NTAccount]).Value; $identity.Resolved=$true } catch { $identity.Error=$_.Exception.Message }
+ $hives=[ordered]@{Known=$false;Loaded=$false;ClassesLoaded=$false;Error=$null}
+ try {
+  $hives.Loaded=Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Profile.SID) -ErrorAction Stop
+  $hives.ClassesLoaded=Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Profile.SID+'_Classes') -ErrorAction Stop
+  $hives.Known=$true
+ } catch { $hives.Error=$_.Exception.Message }
+ $nt=[ordered]@{DatUtc=$null;ManUtc=$null;Errors=@();Meaning='Diagnostic only; servicing can touch hive files independently of profile-service aging'}
+ foreach($file in @(@('NTUSER.DAT','DatUtc'),@('NTUSER.MAN','ManUtc'))) {
+  try {
+   $path=Join-Path $Profile.LocalPath $file[0]
+   if(Test-Path -LiteralPath $path -ErrorAction Stop) { if(-not (Test-SmSafePath $path $Profile.LocalPath)) { throw 'Unsafe hive metadata path' }; $nt[$file[1]]=(Get-Item -LiteralPath $path -Force -ErrorAction Stop).LastWriteTimeUtc }
+  } catch { $nt.Errors+=$_.Exception.Message }
+ }
+ $events=[pscustomobject]@{ProbeComplete=$Context.Events.ProbeComplete;Truncated=$Context.Events.Truncated;Error=$Context.Events.Error;Coverage=$Context.Events.Coverage;EntriesRead=$Context.Events.EntriesRead;Recent=@($Context.Events.Recent | Where-Object {$_.Sid -eq $Profile.SID} | Select-Object -First 20)}
+ [pscustomobject]@{Registry=[pscustomobject]$reg;Identity=[pscustomobject]$identity;Sessions=$Context.Sessions;Hives=[pscustomobject]$hives;NtUser=[pscustomobject]$nt;Events=$events;Errors=$errors}
+}
+$script:SmProfileContext={ param($Days,$Now) Get-SmProfileContext $Days $Now }
+$script:SmProfileEvidence={ param($Profile,$Days,$Now,$Context) Get-SmProfileEvidence $Profile $Days $Now $Context }
 
 # Literal canonical containment and EVERY ancestor checked immediately before deletion.
 # Reparse points and offline/recall files are never enumerated or deleted.
@@ -150,9 +259,23 @@ function Initialize-SmSecureDirectory {
  foreach($part in $full.Substring($base.Length+1).Split('\')) {
   if(-not $part -or $part -in @('.','..')) { throw 'Invalid evidence directory' }
   $current=Join-Path $current $part
-  if(-not (Test-Path -LiteralPath $current -ErrorAction Stop)) { $null=New-Item -ItemType Directory -Path $current -ErrorAction Stop }
+  $created=$false
+  if(-not (Test-Path -LiteralPath $current -ErrorAction Stop)) { $null=New-Item -ItemType Directory -Path $current -ErrorAction Stop; $created=$true }
   $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
   if(-not $item.PSIsContainer -or ([int64]$item.Attributes -band 1024) -ne 0) { throw 'Reparse evidence directory refused' }
+  if(-not $created -and $current -ne $full) {
+   # Existing shared ancestors belong to other packages too: inspect, never rewrite.
+   $existing=Get-Acl -LiteralPath $current -ErrorAction Stop
+   $ownerSid=([Security.Principal.NTAccount]$existing.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
+   if($ownerSid -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Shared evidence ancestor has an untrusted owner' }
+   $writeMask=[Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+   foreach($rule in $existing.Access) {
+    if($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+    $ruleSid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    if($ruleSid -notin @('S-1-5-18','S-1-5-32-544') -and ($rule.FileSystemRights -band $writeMask)) { throw 'Shared evidence ancestor grants untrusted modification rights' }
+   }
+   continue
+  }
   $acl=New-Object Security.AccessControl.DirectorySecurity
   $acl.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
   Set-Acl -LiteralPath $current -AclObject $acl -ErrorAction Stop
@@ -177,7 +300,7 @@ $script:SmProfiles={ @(Get-CimInstance Win32_UserProfile -OperationTimeoutSec 5 
 $script:SmRoots={ @(Join-Path $env:windir 'Temp') }
 $script:SmDelete={ param($Path) Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
 $script:SmRemoveProfile={ param($Profile) $Profile | Remove-CimInstance -ErrorAction Stop }
-$script:SmProfileHiveLoaded={ param($Sid) Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid) -ErrorAction Stop }
+$script:SmProfileHiveLoaded={ param($Sid) (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid) -ErrorAction Stop) -or (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid+'_Classes') -ErrorAction Stop) }
 $script:SmDiagnosticRoots={ @($env:ProgramData,$env:ProgramFiles,${env:ProgramFiles(x86)},$env:windir) | Where-Object { $_ } }
 $script:SmComponent={
  $logDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'Relian\StorageMaintenance')
@@ -582,7 +705,8 @@ function Invoke-SmMaintenance {
    $profiles=@(); try { $profiles=@(& $script:SmProfiles) } catch { $r.Errors+=$_.Exception.Message }
    if($profiles.Count -gt 200) { $r.Status='partial'; $r.Omissions+='Profile list capped at 200.'; $profiles=@($profiles | Select-Object -First 200) }
    $r.Evidence['ApplicationCachePolicy']='Per-profile Edge/Chrome/WebView Cache, Code Cache, GPUCache, ShaderCache, CacheStorage, Teams LocalCache and Adobe AcroCef are report-only. Outlook OST, OfficeFileCache, Wef and offline documents are preserved.'
-   $r.Profiles=@($profiles | ForEach-Object { Test-SmProfile $_ $A.ProfileAgeDays $A.ExcludeProfiles })
+   $assessedUtc=[datetime]::UtcNow; $profileContext=& $script:SmProfileContext $A.ProfileAgeDays $assessedUtc
+   $r.Profiles=@($profiles | ForEach-Object { $profileEvidence=& $script:SmProfileEvidence $_ $A.ProfileAgeDays $assessedUtc $profileContext; Test-SmProfile $_ $A.ProfileAgeDays $A.ExcludeProfiles $assessedUtc $profileEvidence })
    # One globally bounded scan: safe temps plus profile trees (diagnostic only).
    $roots=@(& $script:SmRoots); $roots+=@($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' -and $_.Special -eq $false } | ForEach-Object { $_.LocalPath.TrimEnd('\')+'\AppData\Local\Temp' }); $scanRoots=@(& $script:SmRoots)+@($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' } | ForEach-Object { $_.LocalPath })
    try { $r.Notifications+=& $script:SmUi 'Measuring bounded folders and old temporary files; cloud placeholders are skipped.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
@@ -620,7 +744,12 @@ function Invoke-SmMaintenance {
         if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed' }
         $fresh=@(& $script:SmProfiles | Where-Object { $_.SID -eq $candidate.SID })
         if(& $script:SmProfileHiveLoaded $candidate.SID) { throw 'Profile hive is loaded' }
-        if($fresh.Count -ne 1 -or -not (Test-SmProfile $fresh[0] $A.ProfileAgeDays $A.ExcludeProfiles).Eligible -or $fresh[0].LocalPath -ne $candidate.Path) { throw 'Profile revalidation failed' }
+        if($fresh.Count -ne 1 -or $fresh[0].LocalPath -ne $candidate.Path) { throw 'Profile revalidation failed: SID/path changed or ambiguous' }
+        $recheckUtc=[datetime]::UtcNow; $recheckContext=& $script:SmProfileContext $A.ProfileAgeDays $recheckUtc
+        $recheckEvidence=& $script:SmProfileEvidence $fresh[0] $A.ProfileAgeDays $recheckUtc $recheckContext
+        $recheck=Test-SmProfile $fresh[0] $A.ProfileAgeDays $A.ExcludeProfiles $recheckUtc $recheckEvidence
+        $step['Revalidation']=$recheck
+        if(-not $recheck.Eligible -or $recheck.AgeEvidenceFingerprint -ne $candidate.AgeEvidenceFingerprint) { throw ('Profile revalidation failed: '+$recheck.Reason) }
         # Profile root and all ancestors must be ordinary directories.
         if(-not (Test-SmSafePath $candidate.Path ([IO.Path]::GetPathRoot($candidate.Path)))) { throw 'Unsafe profile path' }
         & $script:SmRemoveProfile $fresh[0]; $step.Status='removedByCim'

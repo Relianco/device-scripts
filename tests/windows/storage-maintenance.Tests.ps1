@@ -4,14 +4,78 @@ $env:RELIAN_DEPLOY_TEST = '1'
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 $script:SmScanGuard={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
 function Throws($Code) { try { & $Code; throw 'did not throw' } catch { if ($_.Exception.Message -eq 'did not throw') { throw } } }
+# Profile age sources are independent: registry pair is primary, not hive file time.
+function New-AgePair($Date) {
+ $ft=[uint64]$Date.ToFileTimeUtc()
+ @{ Low=[uint32]($ft -band [uint64]4294967295); High=[uint32]($ft -shr 32) }
+}
+$ageNow=[datetime]::SpecifyKind([datetime]'2026-11-04T12:00:00',[DateTimeKind]::Utc)
+$zeroLow=ConvertFrom-SmFileTimePair 0 30000000 $ageNow
+Assert ($zeroLow.State -eq 'valid') 'zero low DWORD valid'
+$smallLow=ConvertFrom-SmFileTimePair '00000015' 30000000 $ageNow
+Assert ($smallLow.TimestampUtc.ToFileTimeUtc() -eq (([int64]30000000 -shl 32)+15)) 'leading zero low DWORD stays decimal'
+$signed=ConvertFrom-SmFileTimePair -1 30000000 $ageNow
+Assert ($signed.TimestampUtc.ToFileTimeUtc() -eq (([int64]30000000 -shl 32)+4294967295)) 'signed DWORD normalized'
+Assert ((ConvertFrom-SmFileTimePair $null 30000000 $ageNow).State -eq 'missing') 'missing low is not zero'
+Assert ((ConvertFrom-SmFileTimePair 0 0 $ageNow).State -eq 'zero') 'zero combined rejected'
+Assert ((ConvertFrom-SmFileTimePair 'bad' 1 $ageNow).State -eq 'malformed') 'malformed DWORD rejected'
+Assert ((ConvertFrom-SmFileTimePair 0 4294967295 $ageNow).State -eq 'invalid') 'overflow FILETIME rejected'
+$future=New-AgePair ($ageNow.AddDays(1))
+Assert ((ConvertFrom-SmFileTimePair $future.Low $future.High $ageNow).State -eq 'future') 'future FILETIME rejected'
+function New-TestAgeEvidence($Now) {
+ $l=New-AgePair ($Now.AddDays(-300)); $u=New-AgePair ($Now.AddDays(-200))
+ [pscustomobject]@{Registry=[pscustomobject]@{ReadState='ok';IdentityMatches=$true;Raw=@{};Load=(ConvertFrom-SmFileTimePair $l.Low $l.High $Now);Unload=(ConvertFrom-SmFileTimePair $u.Low $u.High $Now);Cleanup=(ConvertFrom-SmFileTimePair $null $null $Now)};Identity=[pscustomobject]@{Resolved=$true;Account='EXAMPLE\old'};Sessions=[pscustomobject]@{Known=$true;Sids=@();CurrentSid='S-1-5-18'};Hives=[pscustomobject]@{Known=$true;Loaded=$false;ClassesLoaded=$false};NtUser=[pscustomobject]@{DatUtc=$Now;ManUtc=$null;Errors=@()};Events=[pscustomobject]@{ProbeComplete=$true;Recent=@();Truncated=$false;Error=$null;Coverage='unknown'};Errors=@()}
+}
+$ageProfile=[pscustomobject]@{SID='S-1-5-21-1-2-3-1001';LocalPath='C:\Users\old';Loaded=$false;Special=$false;LastUseTime=$ageNow.AddDays(-90);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0}
+$ev=New-TestAgeEvidence $ageNow
+Assert (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible 'coherent old pair survives servicing NTUSER touch'
+$ageProfile.LastUseTime=$ageNow
+Assert ((Test-SmProfile $ageProfile 60 @() $ageNow $ev).Decision -eq 'ReviewTimestampConflict') 'recent CIM conflicts with old pair'
+$ageProfile.LastUseTime=$ageNow.AddDays(-90)
+$ev.Registry.Load=$ev.Registry.Unload; $ev.Registry.Unload=(New-TestAgeEvidence $ageNow).Registry.Load
+Assert ((Test-SmProfile $ageProfile 60 @() $ageNow $ev).Decision -eq 'ReviewInconsistent') 'load newer than unload is review'
+$ev=New-TestAgeEvidence $ageNow; $cut=New-AgePair ($ageNow.AddDays(-60)); $ev.Registry.Unload=ConvertFrom-SmFileTimePair $cut.Low $cut.High $ageNow
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible) 'cutoff equality retained'
+$ev=New-TestAgeEvidence $ageNow; $ev.Hives.ClassesLoaded=$true
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible) 'SID Classes hive protected'
+$ev=New-TestAgeEvidence $ageNow; $ev.Sessions.Sids=@($ageProfile.SID)
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible) 'disconnected or active session SID protected'
+$ev=New-TestAgeEvidence $ageNow; $ev.Events.Recent=@([pscustomobject]@{Sid=$ageProfile.SID;LogonType=10;TimeUtc=$ageNow})
+Assert ((Test-SmProfile $ageProfile 60 @() $ageNow $ev).Decision -eq 'KeepRecentConfirmed') 'positive interactive event veto'
+$ev=New-TestAgeEvidence $ageNow; $ev.Registry.Load=ConvertFrom-SmFileTimePair $null 1 $ageNow
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible) 'CIM and file-only age cannot delete'
+$ev=New-TestAgeEvidence $ageNow; $ev.Events.ProbeComplete=$false
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible) 'failed event query requires review'
+$ev=New-TestAgeEvidence $ageNow; $ev.Sessions.Known=$false
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible) 'unknown sessions require review'
+$ev=New-TestAgeEvidence $ageNow; $recent=New-AgePair $ageNow; $ev.Registry.Cleanup=ConvertFrom-SmFileTimePair $recent.Low $recent.High $ageNow
+Assert ((Test-SmProfile $ageProfile 60 @() $ageNow $ev).Decision -eq 'ReviewPolicyTracking') 'cleanup-check date remains policy evidence'
+foreach($state in @(1,2,4,8,16)) { $ageProfile.Status=$state; Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow (New-TestAgeEvidence $ageNow)).Eligible) 'temporary/roaming/mandatory/corrupt/unknown status protected' }
+$ageProfile.Status=0; $ageProfile.RoamingConfigured=$true
+Assert (-not (Test-SmProfile $ageProfile 60 @() $ageNow (New-TestAgeEvidence $ageNow)).Eligible) 'roaming configured protected'
+$ageProfile.RoamingConfigured=$false
+# XML parsing uses TargetUserSid; all interactive/cached/unlock types are keep vetoes.
+$script:FakeEvents=@()
+foreach($type in @(2,7,10,11,12,13,3)) {
+ $record=[pscustomobject]@{TimeCreated=$ageNow;Xml="<Event><EventData><Data Name='SubjectUserSid'>S-1-5-18</Data><Data Name='TargetUserSid'>$($ageProfile.SID)</Data><Data Name='LogonType'>$type</Data></EventData></Event>"}
+ $record | Add-Member ScriptMethod ToXml { $this.Xml }; $script:FakeEvents+=$record
+}
+function Get-WinEvent { [CmdletBinding()]param($FilterHashtable,$MaxEvents); $script:FakeEvents }
+$context=Get-SmProfileContext 60 $ageNow
+Assert ($context.Events.ProbeComplete -and $context.Events.Recent.Count -eq 6) 'bounded event parser accepts only requested target interactive types'
+Assert (@($context.Events.Recent | Where-Object {$_.Sid -ne $ageProfile.SID}).Count -eq 0) 'subject SID not used for target activity'
+$script:FakeEvents=@($script:FakeEvents[0])*2001
+$context=Get-SmProfileContext 60 $ageNow
+Assert $context.Events.Truncated 'event cap cannot imply complete activity probe'
+Remove-Item Function:Get-WinEvent
 $a = Get-SmArguments
-Assert ($a.Mode -eq 'Report' -and -not $a.RemoveProfiles) 'safe defaults'
+Assert ($a.Mode -eq 'Report' -and $a.ProfileAgeDays -eq 60 -and -not $a.RemoveProfiles) 'safe defaults'
 Throws { Get-SmArguments -ProfileAgeDays '29' }
 Throws { Get-SmArguments -TempAgeDays '0' }
 Throws { Get-SmArguments -RemoveProfiles 'yes' }
 $now = [datetime]::UtcNow
-$p = [pscustomobject]@{ SID='S-1-5-21-1-2-3-1001'; LocalPath='C:\Users\old'; Loaded=$false; Special=$false; LastUseTime=$now.AddDays(-200) }
-Assert (Test-SmProfile $p 180 @() $now).Eligible 'old profile'
+$p = [pscustomobject]@{ SID='S-1-5-21-1-2-3-1001'; LocalPath='C:\Users\old'; Loaded=$false; Special=$false; LastUseTime=$now.AddDays(-200);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0 }
+Assert (Test-SmProfile $p 180 @() $now (New-TestAgeEvidence $now)).Eligible 'old profile'
 $p.Loaded=$true
 Assert (-not (Test-SmProfile $p 180 @() $now).Eligible) 'loaded protected'
 $p.Loaded=$false; $p.LastUseTime=$null
@@ -33,7 +97,7 @@ try {
  Assert ($s.Files.Count -eq 2) 'file scan'
  $script:SmGuards={ [pscustomobject]@{ Safe=$true; Light=$false; Reasons=@() } }
  $script:SmPrepareReport={ 'test-report.json' }; $script:SmAcquire={ $true }; $script:SmRelease={}; $script:SmVolumes={ @() }; $script:SmEvidence={ @{} }
- $script:SmDiagnosticRoots={ @() }; $script:SmProfiles={ @() }; $script:SmRoots={ @($root) }; $script:SmUi={ param($Step) 'noUser' }
+ $script:FixtureAgeEvidence=New-TestAgeEvidence $now; $script:SmProfileContext={ [pscustomobject]@{} }; $script:SmProfileEvidence={ $script:FixtureAgeEvidence }; $script:SmDiagnosticRoots={ @() }; $script:SmProfiles={ @() }; $script:SmRoots={ @($root) }; $script:SmUi={ param($Step) 'noUser' }
  $r=Invoke-SmMaintenance (Get-SmArguments)
  Assert (Test-Path -LiteralPath $old) 'report does not delete'
  Assert ($r.Actions.Count -eq 0) 'report zero actions'
@@ -97,7 +161,20 @@ try {
  $script:SmRemoveProfile={ $script:profileRemovals++ }
  $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true)
  Assert ($script:profileRemovals -eq 0) 'newly loaded profile protected at deletion'
- Assert ($r.Actions[0].Error -match 'revalidation') ('profile recheck reported: '+($r | ConvertTo-Json -Depth 4 -Compress))
+ Assert ($r.Actions[0].Error -match 'revalidation') ('profile recheck reported: '+($r | ConvertTo-Json -Depth 12 -Compress))
+ # A newly loaded Classes hive or new session also vetoes deletion on recheck.
+ $script:SmProfiles={ @($script:MockProfile) }; $script:MockProfile.Loaded=$false
+ foreach($race in @('classes','session')) {
+  $script:ageEvidenceReads=0; $script:ageRace=$race
+  $script:SmProfileEvidence={
+   $script:ageEvidenceReads++; $e=New-TestAgeEvidence $now
+   if($script:ageEvidenceReads -gt 1) { if($script:ageRace -eq 'classes') { $e.Hives.ClassesLoaded=$true } else { $e.Sessions.Sids=@($script:MockProfile.SID) } }
+   $e
+  }
+  $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true)
+  Assert ($script:profileRemovals -eq 0 -and $r.Actions[0].Error -match 'revalidation') ('fresh '+$race+' activity veto')
+ }
+ $script:SmProfileEvidence={ $script:FixtureAgeEvidence }
  ${function:Get-SmScan}=$realScan
  $r.Errors=@(('x'*10000)); $summary=ConvertTo-SmSummary $r 'report.json'
  Assert ([Text.Encoding]::UTF8.GetByteCount($summary) -le 8000) 'stdout summary byte bound'
