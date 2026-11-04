@@ -165,8 +165,15 @@ try {
  $script:stopCalled = 0
  $script:OaStopOutlookProcesses = { $script:stopCalled++ }
 
- # 4a. Check mode: reports match, writes no backup, modifies no file, does not leak non-matching email addresses.
- $checkRun = Invoke-OaRun -Match 'personal.stale@example.invalid'
+ # 4a. Check mode: reports match, writes no backup, modifies no file, does not leak non-matching email addresses, and reads while another handle holds ReadWrite with FileShare.ReadWrite.
+ $writerFs = [IO.FileStream]::new($dat1, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+ try {
+  $sharedBytes = & $script:OaReadFileBytes $dat1
+  Assert-Same ([Convert]::ToBase64String($sharedBytes)) ([Convert]::ToBase64String($streamBytes)) 'OaReadFileBytes reads file held open with ReadWrite share'
+  $checkRun = Invoke-OaRun -Match 'personal.stale@example.invalid'
+ } finally {
+  $writerFs.Dispose()
+ }
  Assert-Same $checkRun.exitCode 0 'check mode exitCode 0'
  Assert-Same $checkRun.record.mode 'check' 'check mode label'
  Assert-Same $checkRun.record.matchedFiles 1 'check mode matched 1 file'
@@ -192,11 +199,21 @@ try {
  Assert-Same $script:stopCalled 1 'stop called once'
  Assert-Same ([Convert]::ToBase64String([IO.File]::ReadAllBytes($dat1))) ([Convert]::ToBase64String($streamBytes)) 'dat1 untouched when Outlook failed to stop'
 
- # 4d. Fix mode when CloseOutlook stops Outlook: backs up dat1, removes the matched row, leaves dat2 untouched.
+ # 4d. Fix mode when CloseOutlook stops Outlook before reading locked .dat file: backs up dat1, removes the matched row, leaves dat2 untouched.
+ $realReadBytes = $script:OaReadFileBytes
  $script:outlookAlive = $true
  $script:OaGetOutlookProcesses = { if ($script:outlookAlive) { return @([pscustomobject]@{ Id = 4444; ProcessName = 'OUTLOOK' }) }; return @() }
  $script:OaStopOutlookProcesses = { $script:stopCalled++; $script:outlookAlive = $false }
- $fixRun = Invoke-OaRun -Match 'personal.stale@example.invalid' -Fix -CloseOutlook
+ $script:OaReadFileBytes = {
+  param([string]$Path)
+  if ($script:outlookAlive) { throw "The process cannot access the file '$Path' because it is being used by another process." }
+  return (& $realReadBytes $Path)
+ }
+ try {
+  $fixRun = Invoke-OaRun -Match 'personal.stale@example.invalid' -Fix -CloseOutlook
+ } finally {
+  $script:OaReadFileBytes = $realReadBytes
+ }
  Assert-Same $fixRun.exitCode 0 'fix mode exitCode 0'
  Assert-Same $fixRun.record.mode 'fix' 'fix mode label'
  Assert-Same $fixRun.record.matchedFiles 1 'fix mode matched 1 file'
