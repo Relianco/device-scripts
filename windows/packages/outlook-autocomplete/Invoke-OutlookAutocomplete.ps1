@@ -213,7 +213,35 @@ $script:OaStopOutlookProcesses = {
  foreach ($p in @(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue)) {
   try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
  }
- Start-Sleep -Milliseconds 300
+ $forceDeadline = [DateTime]::UtcNow.AddSeconds(5)
+ while ([DateTime]::UtcNow -lt $forceDeadline) {
+  if (@(Get-Process -Name 'OUTLOOK' -ErrorAction SilentlyContinue).Count -eq 0) { break }
+  Start-Sleep -Milliseconds 250
+ }
+}
+
+$script:OaReadFileBytes = {
+ param([string]$Path)
+ $fs = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+ try {
+  $len = $fs.Length
+  if ($len -gt $OaMaxStreamBytes) { throw "Autocomplete stream exceeds size limit ($len bytes)" }
+  $buf = New-Object byte[] ([int]$len)
+  $readOffset = 0
+  while ($readOffset -lt $buf.Length) {
+   $n = $fs.Read($buf, $readOffset, ($buf.Length - $readOffset))
+   if ($n -le 0) { break }
+   $readOffset += $n
+  }
+  if ($readOffset -ne $buf.Length) {
+   $trimmed = New-Object byte[] $readOffset
+   if ($readOffset -gt 0) { [Array]::Copy($buf, 0, $trimmed, 0, $readOffset) }
+   return ,$trimmed
+  }
+  return ,$buf
+ } finally {
+  $fs.Dispose()
+ }
 }
 
 function Initialize-OaBackupDirectory {
@@ -279,11 +307,14 @@ function Invoke-OaRun {
  $errors = [System.Collections.Generic.List[string]]::new()
  $fileSummaries = [System.Collections.Generic.List[object]]::new()
  $candidates = [System.Collections.Generic.List[object]]::new()
+ $outlookClosed = $false
+ $outlookStopAttempted = $false
 
  $profiles = @()
  try { $profiles = @(& $script:OaGetProfiles) } catch { $errors.Add("profile enumeration failed: $(Limit-OaText "$_" 140)") }
 
  foreach ($prof in $profiles) {
+  if ($outlookStopAttempted -and -not $outlookClosed -and $errors.Count -gt 0) { break }
   $profName = [string]$prof.Name; $profPath = [string]$prof.Path; $profRoot = [string]$prof.Root
   if (-not (Test-OaSafePath -Path $profPath -Root $profRoot)) { $errors.Add("unsafe profile path for '$profName'"); continue }
   $curSub = $profPath; $roamMissing = $false; $roamUnsafe = $false
@@ -314,14 +345,39 @@ function Invoke-OaRun {
     $errors.Add("unsafe or reparse autocomplete stream '$($entry.Name)' in '$profName'")
     $fileSummaries.Add((New-OaFileSummary -Profile $profName -FileName $entry.Name)); continue
    }
+   if ($isFix -and $allowClose -and -not $outlookStopAttempted) {
+    $outlookStopAttempted = $true
+    $runningPre = @()
+    try { $runningPre = @(& $script:OaGetOutlookProcesses) } catch { $errors.Add("cannot query Outlook processes: $(Limit-OaText "$_" 120)"); break }
+    if ($runningPre.Count -gt 0) {
+     try { & $script:OaStopOutlookProcesses } catch { $errors.Add("failed to stop Outlook: $(Limit-OaText "$_" 120)"); break }
+     $stillPre = @()
+     try { $stillPre = @(& $script:OaGetOutlookProcesses) } catch { $errors.Add("cannot query Outlook processes: $(Limit-OaText "$_" 120)"); break }
+     if ($stillPre.Count -gt 0) {
+      $errors.Add("Outlook is still running after stop attempt ($($stillPre.Count) process(es))"); break
+     }
+     $outlookClosed = $true
+     if (-not (Test-OaSafePath -Path $fullPath -Root $roamCache)) {
+      $errors.Add("unsafe or reparse autocomplete stream '$($entry.Name)' in '$profName'")
+      $fileSummaries.Add((New-OaFileSummary -Profile $profName -FileName $entry.Name)); continue
+     }
+     try { $entry = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop }
+     catch { $errors.Add("cannot stat '$($entry.Name)' in '$profName' after closing Outlook: $(Limit-OaText "$_" 120)"); continue }
+    }
+   }
    $lw = $entry.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
    if ($entry.Length -gt $OaMaxStreamBytes) {
     $errors.Add("autocomplete stream '$($entry.Name)' in '$profName' exceeds size limit")
     $fileSummaries.Add((New-OaFileSummary -Profile $profName -FileName $entry.Name -SizeBytes $entry.Length -LastWriteUtc $lw)); continue
    }
    $bytes = $null
-   try { $bytes = [IO.File]::ReadAllBytes($fullPath) } catch {
-    $errors.Add("cannot read '$($entry.Name)' in '$profName': $(Limit-OaText "$_" 120)")
+   try {
+    $bytes = & $script:OaReadFileBytes $fullPath
+   } catch {
+    $readErr = $_
+    $runningHint = ''
+    try { if (@(& $script:OaGetOutlookProcesses).Count -gt 0) { $runningHint = " (Outlook is running; close Outlook or pass CloseOutlook='true')" } } catch { }
+    $errors.Add("cannot read '$($entry.Name)' in '$profName': $(Limit-OaText "$readErr" 100)$runningHint")
     $fileSummaries.Add((New-OaFileSummary -Profile $profName -FileName $entry.Name -SizeBytes $entry.Length -LastWriteUtc $lw)); continue
    }
    $parsed = Read-OaStream -Bytes $bytes -Match $needle
@@ -336,9 +392,9 @@ function Invoke-OaRun {
 
  $matchedFiles = $candidates.Count; $matchedRows = 0
  foreach ($c in $candidates) { $matchedRows += [int]$c.Parsed.matchedRowCount }
- $modifiedFiles = 0; $removedRows = 0; $outlookClosed = $false; $runBackupDir = $null
+ $modifiedFiles = 0; $removedRows = 0; $runBackupDir = $null
 
- if ($isFix -and $matchedFiles -gt 0) {
+ if ($isFix -and $matchedFiles -gt 0 -and $errors.Count -eq 0) {
   $running = @()
   try { $running = @(& $script:OaGetOutlookProcesses) } catch { $errors.Add("cannot query Outlook processes: $(Limit-OaText "$_" 120)") }
   if ($errors.Count -eq 0 -and $running.Count -gt 0) {
@@ -370,7 +426,7 @@ function Invoke-OaRun {
      if ($freshItem.PSIsContainer -or $freshItem.Length -gt $OaMaxStreamBytes) {
       $errors.Add("invalid stream '$($cand.FileName)' in '$($cand.ProfileName)' after Outlook close"); continue
      }
-     $freshBytes = [IO.File]::ReadAllBytes($cand.FilePath)
+     $freshBytes = & $script:OaReadFileBytes $cand.FilePath
     } catch { $errors.Add("cannot re-read '$($cand.FileName)' in '$($cand.ProfileName)': $(Limit-OaText "$_" 120)"); continue }
 
     $freshParsed = Read-OaStream -Bytes $freshBytes -Match $needle
@@ -399,7 +455,7 @@ function Invoke-OaRun {
     }
     try {
      [IO.File]::WriteAllBytes($cand.FilePath, $newBytes)
-     $diskBytes = [IO.File]::ReadAllBytes($cand.FilePath)
+     $diskBytes = & $script:OaReadFileBytes $cand.FilePath
      $verifyDisk = Read-OaStream -Bytes $diskBytes -Match $needle
      if (-not $verifyDisk.validFormat -or $verifyDisk.rowCount -ne $expectedRows -or $verifyDisk.matchedRowCount -ne 0) {
       [IO.File]::Copy($backupPath, $cand.FilePath, $true)
