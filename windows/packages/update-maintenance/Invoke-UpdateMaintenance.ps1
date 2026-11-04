@@ -559,7 +559,7 @@ function Write-UmJson {
  foreach($f in @($Path,($Path+'.tmp'))) { if(Test-Path -LiteralPath $f) { if(-not (Test-UmSafePath $f $dir)) { throw 'Unsafe evidence file' }; $fileAcl=New-Object Security.AccessControl.FileSecurity; $fileAcl.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'); Set-Acl -LiteralPath $f -AclObject $fileAcl -ErrorAction Stop } }
  if(Test-Path -LiteralPath ($Path+'.tmp')) { Remove-Item -LiteralPath ($Path+'.tmp') -ErrorAction Stop }
  $Value | ConvertTo-Json -Depth 15 | Set-Content -LiteralPath ($Path+'.tmp') -Encoding UTF8 -ErrorAction Stop
- if(Test-Path -LiteralPath $Path) { [IO.File]::Replace(($Path+'.tmp'),$Path,$null) } else { [IO.File]::Move(($Path+'.tmp'),$Path) }
+ if(Test-Path -LiteralPath $Path) { [IO.File]::Replace(($Path+'.tmp'),$Path,[System.Management.Automation.Language.NullString]::Value) } else { [IO.File]::Move(($Path+'.tmp'),$Path) }
 }
 $script:UmPrepare={
  $script:UmRunDir=Initialize-UmSecureDirectory (Join-Path $env:ProgramData ('RelianMaintenance\Update\'+[guid]::NewGuid().ToString('n')))
@@ -786,7 +786,7 @@ function Get-UmFailureCategory {
 }
 function Invoke-UmMaintenance {
  param($a)
- $r=@{schemaVersion=1;runId=[guid]::NewGuid().ToString('n');mode=$a.Mode;status='reported';reportPath=$null;updateCurrency='notEstablished';featureOffer='notEstablished';guard=$null;before=$null;after=$null;actions=@();cacheBackups=@();scan=@{outcome='notRequested'};rebootRequired=$false;notification=@();errors=@();omissions=@('No Ninja history; no authoritative release currency comparison; no feature offer guarantee')}
+ $r=@{schemaVersion=1;runId=[guid]::NewGuid().ToString('n');mode=$a.Mode;status='reported';reportPath=$null;updateCurrency='notEstablished';featureOffer='notEstablished';guard=$null;before=$null;after=$null;actions=@();cacheBackups=@();scan=@{outcome='notRequested';count=$null;hresult=$null};rebootRequired=$false;notification=@();errors=@();omissions=@('No Ninja history; no authoritative release currency comparison; no feature offer guarantee')}
  $locked=$false; $changed=$false
  try {
   $r.reportPath=& $script:UmPrepare; & $script:UmSave $r
@@ -824,6 +824,13 @@ function Invoke-UmMaintenance {
  }
  return $r
 }
+function ConvertTo-UmSummary {
+ param($Report)
+  $summary=@{schemaVersion=$Report.schemaVersion;runId=$Report.runId;mode=$Report.mode;status=$Report.status;reportPath=$Report.reportPath;guard=$Report.guard;actions=$Report.actions;scan=@{outcome=$Report.scan.outcome;count=$Report.scan.count;hresult=$Report.scan.hresult};rebootRequired=$Report.rebootRequired;notification=$Report.notification;updateCurrency=$Report.updateCurrency;osLifecycle=$Report.before.osLifecycle;truncation=$false;omissions=$Report.omissions;errors=@($Report.errors | Select-Object -First 3);eventEvidence=@{outcome=$Report.eventEvidence.outcome}}
+  $json=$summary | ConvertTo-Json -Depth 8 -Compress
+  if([text.encoding]::UTF8.GetByteCount($json) -gt 7500) { $summary.guard=@{Safe=$Report.guard.Safe;Reasons=@('See durable report')}; $summary.actions=@{count=$Report.actions.Count;details='See durable report'}; $summary.truncation=$true; $json=$summary | ConvertTo-Json -Depth 8 -Compress }
+ return $json
+}
 if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $ErrorActionPreference='Stop'
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { '{"status":"nothingToUninstall"}'; exit 0 }
@@ -831,9 +838,7 @@ if($env:RELIAN_DEPLOY_TEST -ne '1') {
   $a=Get-UmOptions -Mode $Mode -ResetCache $ResetCache -RepairImage $RepairImage -Notify $Notify -Scan $Scan -ScanTimeoutSeconds $ScanTimeoutSeconds -NativeTimeoutSeconds $NativeTimeoutSeconds
   $r=Invoke-UmMaintenance $a
   if($script:UmUiOpen) { try { Close-ADTInstallationProgress } catch { $r.notification+='UI close failed' }; try { & $script:UmSave $r } catch { $r.status='failed' } }
-  $summary=@{schemaVersion=$r.schemaVersion;runId=$r.runId;mode=$r.mode;status=$r.status;reportPath=$r.reportPath;guard=$r.guard;actions=$r.actions;scan=@{outcome=$r.scan.outcome;count=$r.scan.count;hresult=$r.scan.hresult};rebootRequired=$r.rebootRequired;notification=$r.notification;updateCurrency=$r.updateCurrency;osLifecycle=$r.before.osLifecycle;truncation=$false;omissions=$r.omissions;errors=@($r.errors | Select-Object -First 3);eventEvidence=@{outcome=$r.eventEvidence.outcome}}
-  $json=$summary | ConvertTo-Json -Depth 8 -Compress
-  if([text.encoding]::UTF8.GetByteCount($json) -gt 7500) { $summary.guard=@{Safe=$r.guard.Safe;Reasons=@('See durable report')}; $summary.actions=@{count=$r.actions.Count;details='See durable report'}; $summary.truncation=$true; $json=$summary | ConvertTo-Json -Depth 8 -Compress }
+  $json=ConvertTo-UmSummary $r
   Write-Output $json
   if($r.status -eq 'deferred') { exit 2 }; if($r.status -in @('failed','partial')) { exit 1 }; exit 0
  } catch { @{status='failed';reason='Options or initialization failed';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} | ConvertTo-Json -Compress; exit 1 }

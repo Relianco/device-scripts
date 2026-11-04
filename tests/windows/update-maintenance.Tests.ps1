@@ -1,6 +1,7 @@
 $ErrorActionPreference='Stop'
 $env:RELIAN_DEPLOY_TEST='1'
 . "$PSScriptRoot/../../windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1"
+$actualUmSave=$script:UmSave
 $actualUmCache=$script:UmCache
 $actualUmControl=$script:UmControl
 function Assert($value,$message) { if(-not $value) { throw $message } }
@@ -301,3 +302,41 @@ try {
  $transitionReport=Invoke-UmMaintenance (Get-UmOptions -Mode Repair)
  Assert ($transitionReport.status -eq 'deferred' -and $transitionReport.actions.Count -eq 0) 'Event Setup transition defers repair before mutation'
 } finally { $script:UmEvents=$realEvents; $script:UmGuard=$realGuard }
+# Pilot regression: real create + two File.Replace checkpoints, including a
+# serialized snapshot. Only Windows ACL/path validation boundaries are stubbed.
+& {
+ $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $null=New-Item -ItemType Directory $root
+ function Initialize-UmSecureDirectory { param($Path) $Path }
+ function Test-UmSafePath { $true }
+ function New-Object {
+  param($TypeName)
+  Assert ($TypeName -eq 'Security.AccessControl.FileSecurity') 'Only platform file ACL constructor is stubbed'
+  $acl=[pscustomobject]@{}; $acl | Add-Member ScriptMethod SetSecurityDescriptorSddlForm { param($Sddl) }; $acl
+ }
+ function Set-Acl { param($LiteralPath,$AclObject) }
+ try {
+  $path=Join-Path $root 'report.json'
+  Write-UmJson @{status='started';before=$null} $path
+  Write-UmJson @{status='reported';before=@{services=@(@{Name='BITS';StartMode='Manual'});volumes=@(@{DeviceID='C:';FreeSpace=12345})}} $path
+  $first=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+  Assert ($first.before.volumes[0].FreeSpace -eq 12345) 'First real replacement persists JSON snapshot'
+  Write-UmJson @{status='reported';before=$first.before;checkpoint=3} $path
+  $last=Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+  Assert ($last.checkpoint -eq 3 -and $last.before.services[0].Name -eq 'BITS') 'Second real replacement preserves snapshot'
+  Assert (-not (Test-Path -LiteralPath ($path+'.tmp'))) 'Real replacement consumes temporary checkpoint file'
+  $savedSave=$script:UmSave; $savedPrepare=$script:UmPrepare; $savedGuard=$script:UmGuard; $savedEvents=$script:UmEvents; $savedSnapshot=$script:UmSnapshot
+  try {
+   $script:UmSave=$actualUmSave
+   $script:UmPrepare={ Join-Path $root 'passive-report.json' }
+   $script:UmGuard={ @{Safe=$true;Light=$false;Reasons=@()} }; $script:UmEvents={ @{outcome='complete';events=@()} }
+   $script:UmSnapshot={ @{osLifecycle=@{status='unknown'};services=@(@{Name='BITS';StartMode='Manual'});volumes=@(@{DeviceID='C:';FreeSpace=12345})} }
+   $passive=Invoke-UmMaintenance (Get-UmOptions -Notify false)
+   Assert ($passive.status -eq 'reported' -and $passive.errors.Count -eq 0) 'Actual passive Report performs repeated real checkpoints successfully'
+   $persisted=Get-Content -LiteralPath $passive.reportPath -Raw | ConvertFrom-Json
+   Assert ($persisted.before.volumes[0].FreeSpace -eq 12345 -and $persisted.status -eq 'reported') 'Actual Report persists structured snapshot through real replacement'
+   $passiveSummary=ConvertTo-UmSummary $passive | ConvertFrom-Json
+   Assert ($passiveSummary.scan.outcome -eq 'notRequested' -and $null -eq $passiveSummary.scan.count -and $null -eq $passiveSummary.scan.hresult) 'Actual passive Report stdout has no invented scan count'
+  } finally { $script:UmSave=$savedSave; $script:UmPrepare=$savedPrepare; $script:UmGuard=$savedGuard; $script:UmEvents=$savedEvents; $script:UmSnapshot=$savedSnapshot }
+
+ } finally { Remove-Item -LiteralPath $root -Recurse -Force }
+}
