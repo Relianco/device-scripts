@@ -66,3 +66,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/update-maintenance.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/maintenance-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/maintenance-session-close.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
