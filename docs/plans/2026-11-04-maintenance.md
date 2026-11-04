@@ -28,3 +28,10 @@ Tests cover active/unknown upgrade guard, staged/pending reboot, managed policy 
 ## Task 3: Review, documentation and pilot
 
 Independent task reviews and whole-branch review. Run complete PowerShell suite and secret scan. Document copyable runner argument construction and report interpretation, safe defaults, optional destructive profile action. Pilot only user-authorized targets, fresh identity and online/job checks, report first while USB setup runs. No profile deletion pilot without agreed age/exclusions. Commit reports only sanitized; private target/evidence stays .agents. Open PR with tested limitations and update docs/STATUS.md.
+
+## Execution checkpoint
+
+- [x] Task 1 implemented, reviewed and Report-piloted with active-Setup deferral.
+- [x] Task 2 implemented, reviewed and Report-piloted with active-Setup deferral.
+- [x] Task 3 code review, checks, runbook and draft PR complete.
+- [ ] Post-upgrade full-triage/profile-candidate and Windows servicing qualification remains; no destructive pilot was attempted during Setup.
