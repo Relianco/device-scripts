@@ -1,18 +1,12 @@
 # Status
 
-Branch: `lane/maintenance`. Reviewed and Windows-tested HEAD: `a685c68449982812005e7c96c1b15334e8a9a521`; this documentation closeout follows it. Latest main `6ecf780` is integrated.
+Branch: `lane/postupgrade-qualification`. Last implementation HEAD: `5887de8`; this documentation commit follows it. Base main: `209c727` (maintenance PR 90 merged).
 
-Pull request: [90](https://github.com/Relianco/device-scripts/pull/90).
-Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md).
-Runbook: [Maintenance](maintenance.md).
-Evidence and limits: [Review and pilot record](reviews/2026-11-04-maintenance.md).
+Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md). Runbook: [Maintenance](maintenance.md).
 
-- [x] Storage package, configurable 60-day profile aging and independent reviews.
-- [x] Update maintenance package and independent reviews.
-- [x] Whole-branch review, qualification fixes, focused/full PowerShell checks and secret scanning.
-- [x] Both packages piloted in Report mode on the two authorized Windows devices with PSADT notifications; active Setup correctly withheld changes.
-- [ ] After USB upgrades/restarts finish, run full reports and review profile candidates. The Windows CI gate now executes harmless native-process/NTFS regressions; qualify actual servicing separately before relying on it. Cleanup/repair/deletion paths are not yet live-qualified.
+- Maintenance packages and Windows native-process/NTFS CI are merged.
+- Post-upgrade qualification resumed with confirmed upgraded, restarted targets. Fresh storage reports are report-only; servicing guards still control eligibility.
+- Added a bounded read-only evidence package to inspect detailed reports through the pinned runner. Focused tests and independent review pass.
+- Next: finish report retrieval, inspect servicing/upgrade state and profile candidates, then qualify cleanup/repair only with clear guards. No reboot or servicing-state bypass is authorized by this status.
 
-Next task: post-upgrade qualification above. No automatic follow-up job or reboot is scheduled. Existing installer P1 work remains separate and was not modified.
-
-No uncommitted implementation files remain in this lane after this closeout commit. Private device evidence and dispatch parameters are retained in machine-local ignored memory. The maintainer authorized merge after subagent LGTM and green CI. Two merge-triage reviewers found no remaining code blockers; merge only after all checks, including the new Windows regression job, pass. Post-upgrade device qualification remains a separate rollout prerequisite.
+Private target identities, activities and evidence remain under ignored machine memory. No uncommitted implementation files are expected after this closeout.
