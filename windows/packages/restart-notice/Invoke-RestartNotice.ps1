@@ -47,7 +47,8 @@ param(
     [string]$SnoozeMinutes = '',
     [string]$PromptMinutes = '',
     [string]$CountdownMinutes = '',
-    [string]$ReportOnly = ''
+    [string]$ReportOnly = '',
+    [string]$MaintenanceRestart = 'false'
 )
 
 $ProgressPreference = 'SilentlyContinue'
@@ -65,8 +66,10 @@ function Write-Status {
 
 # Pure: validated arguments. Throws on anything malformed.
 function Get-RnArgs {
-    param([string]$Message, [string]$SnoozeMinutes, [string]$PromptMinutes, [string]$CountdownMinutes, [string]$ReportOnly = '')
+    param([string]$Message, [string]$SnoozeMinutes, [string]$PromptMinutes, [string]$CountdownMinutes, [string]$ReportOnly = '', [string]$MaintenanceRestart = 'false')
     $a = @{ Message = $RnDefaultMessage; SnoozeMinutes = 60; PromptMinutes = 10; CountdownMinutes = 15; ReportOnly = $false }
+    if($MaintenanceRestart -cnotmatch '\A(true|false)\z') { throw 'MaintenanceRestart must be true or false.' }
+    $a.MaintenanceRestart=$MaintenanceRestart -ceq 'true'
     if ($ReportOnly -ne '') {
         if ($ReportOnly -cnotmatch '\A(true|false)\z') { throw 'ReportOnly must be true or false.' }
         $a.ReportOnly = $ReportOnly -ceq 'true'
@@ -100,8 +103,9 @@ function ConvertTo-RnUtc {
 # staged, the build has not reached the ISO's build, and the device has not
 # booted since it was staged (the same test as that package's Get-FupStateVerdict).
 function Get-RnPendingReasons {
-    param([bool]$Cbs, [bool]$WindowsUpdate, $FupState, [int]$CurrentBuild, [datetime]$LastBoot)
+    param([bool]$Cbs, [bool]$WindowsUpdate, $FupState, [int]$CurrentBuild, [datetime]$LastBoot, [bool]$MaintenanceRestart=$false, $PendingRename=@())
     $r = @()
+    if($MaintenanceRestart -and (Test-RnPendingRenamePairs $PendingRename)) { $r += 'pendingFileRename' }
     if ($Cbs) { $r += 'servicing' }
     if ($WindowsUpdate) { $r += 'windowsUpdate' }
     if ($FupState -and "$($FupState.status)" -eq 'staged' -and $FupState.time) {
@@ -293,10 +297,57 @@ function New-RnResult {
     return [ordered]@{ status = $Status; message = $Text; pending = @($Pending); button = $Button; snoozeUsed = $SnoozeUsed }
 }
 
+# REG_MULTI_SZ pairs: a nonempty source with an empty destination is a pending deletion.
+function Test-RnPendingRenamePairs {
+    param($Entries)
+    $items=@($Entries)
+    if($items.Count -eq 0) { return $false }
+    if($items.Count % 2) { throw 'Pending rename pairs unavailable.' }
+    $pending=$false
+    for($i=0;$i -lt $items.Count;$i+=2) {
+        if($items[$i] -isnot [string] -or $items[$i+1] -isnot [string]) { throw 'Invalid pending rename pair.' }
+        if(-not [string]::IsNullOrWhiteSpace($items[$i])) { $pending=$true }
+        elseif(-not [string]::IsNullOrWhiteSpace($items[$i+1])) { throw 'Invalid pending rename source.' }
+    }
+    return $pending
+}
+
+function Get-RnMaintenanceGuard {
+    try {
+        $processes=@(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='sfc.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe' OR Name='msiexec.exe'" -OperationTimeoutSec 5 -ErrorAction Stop)
+        if($processes.Count) { return @{Safe=$false;Reason='setupOrServicingProcess'} }
+        $setup=Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\Setup' -ErrorAction Stop
+        if($null -eq $setup) { throw 'Setup probe missing' }
+        foreach($name in @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')) {
+            if($setup.PSObject.Properties[$name]) {
+                if([string]$setup.$name -notmatch '^\d{1,10}$') { throw 'Setup flag unknown' }
+                if([long]$setup.$name -ne 0) { return @{Safe=$false;Reason='setupInProgress'} }
+            } elseif($name -eq 'SystemSetupInProgress') { throw 'Setup state missing' }
+        }
+        foreach($relative in @('RelianMaintenance\native-active.json','Relian\Maintenance\native-active.json')) {
+            if(Test-Path -LiteralPath (Join-Path $env:ProgramData $relative) -ErrorAction Stop) { return @{Safe=$false;Reason='nativeServicingMarker'} }
+        }
+        return @{Safe=$true;Reason='clear'}
+    } catch { return @{Safe=$false;Reason='servicingStateUnknown'} }
+}
+
+# Every opt-in prompt and shutdown uses this fail-closed boundary. No diagnostic
+# text, command line, legacy running marker or MoSetup assumption authorizes reboot.
+function Test-RnMaintenanceDeferred {
+    param([string[]]$Pending)
+    if(-not $script:RnMaintenanceRestart) { return $false }
+    $safe=$false
+    try { $guard=& $script:RnMaintenanceGuard; $safe=($null -ne $guard -and $guard.Safe -is [bool] -and $guard.Safe) } catch { }
+    if($safe) { return $false }
+    Out-RnResult (New-RnResult 'deferred' 'maintenance restart deferred: setup/servicing is active or its safety state is unknown' $Pending)
+    return $true
+}
+
 # Writes the result, then restarts. Returns the exit code.
 function Invoke-RnRestartNow {
     param([System.Collections.Specialized.OrderedDictionary]$Result)
     Out-RnResult $Result
+    if(Test-RnMaintenanceDeferred $Result.pending) { return 0 }
     $code = [int](& $script:RnRestart)
     if ($code -ne 0) {
         $Result['status'] = 'failed'
@@ -311,8 +362,14 @@ function Invoke-RnRestartNow {
 # replace them. Returns the exit code.
 function Invoke-RnMain {
     param($A)
+    $script:RnMaintenanceRestart=$A.ContainsKey('MaintenanceRestart') -and $A.MaintenanceRestart
+    if(Test-RnMaintenanceDeferred @()) { return 0 }
     $now = (& $script:RnNow).ToUniversalTime()
-    $pending = @(& $script:RnGetPending)
+    try { $pending = @(& $script:RnGetPending) } catch {
+        if(-not $script:RnMaintenanceRestart) { throw }
+        Out-RnResult (New-RnResult 'deferred' 'maintenance restart deferred: pending-state probe failed' @())
+        return 0
+    }
     if ($pending.Count -eq 0) {
         & $script:RnClearSnooze
         Out-RnResult (New-RnResult 'none' 'no restart pending' @())
@@ -343,6 +400,7 @@ function Invoke-RnMain {
     elseif (-not $snoozeUsed) {
         $snoozeText = Get-RnSnoozeText $A.SnoozeMinutes
         $shown = $null
+        if(Test-RnMaintenanceDeferred $pending) { return 0 }
         try { $shown = & $script:RnPrompt $A.Message $snoozeText ($A.PromptMinutes * 60) }
         catch {
             if (-not (Test-RnNoUserError $_)) { throw }
@@ -379,12 +437,34 @@ function Invoke-RnMain {
     # without it. Checked on the used-snooze path too, where notice 1 was skipped.
     if ($reason -ne 'NotShown' -and -not (& $script:RnCanShow)) { $reason = 'NotShown' }
 
+    if(Test-RnMaintenanceDeferred $pending) { return 0 }
+
     # Countdown, then restart. Written first: the dialog's own Restart now may restart
     # the device before this run gets another chance.
     $seconds = $A.CountdownMinutes * 60
     $r = New-RnResult 'restartedAfterCountdown' "countdown of $($A.CountdownMinutes) minutes ($reason), then restart" $pending $button $snoozeUsed
     $r['reason'] = $reason
     Out-RnResult $r
+    if($script:RnMaintenanceRestart -and $reason -ne 'NotShown') {
+        # This ordinary toolkit prompt cannot reboot independently. The parent
+        # owns both its timeout and Restart now action, then rechecks servicing.
+        $countdownWatch=[Diagnostics.Stopwatch]::StartNew()
+        try {
+            $choice=& $script:RnMaintenanceCountdown $A.Message $seconds
+            if($choice -eq '__maintenanceDeferred') { return 0 }
+            if((Get-RnButton $choice '') -eq 'Restart now') {
+                $r['status']='restarted'; $r['button']='Restart now'; $r['message']='user chose Restart now on the maintenance countdown'
+            } else {
+                # A null/early return does not establish that the countdown elapsed.
+                $left=[int][Math]::Ceiling($seconds-$countdownWatch.Elapsed.TotalSeconds)
+                if($left -gt 0) { & $script:RnSleep $left }
+            }
+        } catch {
+            if(-not (Test-RnNoUserError $_)) { throw }
+            & $script:RnSleep $seconds
+        }
+        return (Invoke-RnRestartNow $r)
+    }
     $waited = $false
     if ($reason -ne 'NotShown') {
         # The user left between the check and the dialog: the field is written, so
@@ -462,6 +542,7 @@ function Invoke-RnReport {
 # run) and returns 1, so a run never ends silent.
 function Invoke-RnRun {
     param($A)
+    $script:RnMaintenanceRestart=$A.ContainsKey('MaintenanceRestart') -and $A.MaintenanceRestart
     try {
         if ($A.ReportOnly) { return (Invoke-RnReport) }
         return (Invoke-RnMain $A)
@@ -475,6 +556,21 @@ function Invoke-RnRun {
 
 # --- Real implementations. Tests replace these. -------------------------------
 
+$script:RnMaintenanceRestart=$false
+$script:RnMaintenanceGuard={ Get-RnMaintenanceGuard }
+$script:RnMaintenanceCountdown={
+    param($Text,$Seconds)
+    Open-RnSession
+    $remaining=$Seconds
+    while($remaining -gt 0) {
+        if(Test-RnMaintenanceDeferred @()) { return '__maintenanceDeferred' }
+        $interval=[Math]::Min(3300,$remaining)
+        $answer=Show-ADTInstallationPrompt -Message ($Text+" Windows will restart in $([Math]::Ceiling($remaining/60)) minutes. Save your work.") -ButtonLeftText 'Restart now' -Title 'Restart needed' -Subtitle 'Windows update' -NoExitOnTimeout -Timeout $interval
+        if((Get-RnButton $answer '') -eq 'Restart now') { return $answer }
+        $remaining-=$interval
+    }
+    return 'Timeout'
+}
 $script:RnNow = { (Get-Date).ToUniversalTime() }
 $script:RnSetField = { param($Json, $Name) Set-RnField $Json $Name }
 $script:RnSleep = { param($Seconds) Start-Sleep -Seconds $Seconds }
@@ -484,14 +580,20 @@ $script:RnLastBoot = { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.To
 $script:RnBuild = { [int](Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name CurrentBuild).CurrentBuild }
 
 $script:RnGetPending = {
-    $cbs = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
-    $wu = Test-Path -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
+    $probeError=if($script:RnMaintenanceRestart) { 'Stop' } else { 'Continue' }
+    $cbs = Test-Path -ErrorAction $probeError -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+    $wu = Test-Path -ErrorAction $probeError -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
     $state = $null
     if (Test-Path -LiteralPath $RnFupState) {
         try { $state = [IO.File]::ReadAllText($RnFupState) | ConvertFrom-Json } catch { $state = $null }
     }
+    $renames=@()
+    if($script:RnMaintenanceRestart) {
+        $session=Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
+        if($session.PSObject.Properties['PendingFileRenameOperations']) { $renames=@($session.PendingFileRenameOperations) }
+    }
     $build = & $script:RnBuild
-    Get-RnPendingReasons -Cbs $cbs -WindowsUpdate $wu -FupState $state -CurrentBuild $build -LastBoot (& $script:RnLastBoot)
+    Get-RnPendingReasons -MaintenanceRestart $script:RnMaintenanceRestart -PendingRename $renames -Cbs $cbs -WindowsUpdate $wu -FupState $state -CurrentBuild $build -LastBoot (& $script:RnLastBoot)
 }
 
 # The probes behind Get-RnDetection.
@@ -956,7 +1058,7 @@ if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Act
 }
 if ($Action -eq 'Uninstall') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
 try {
-    $rnArgs = Get-RnArgs -Message $Message -SnoozeMinutes $SnoozeMinutes -PromptMinutes $PromptMinutes -CountdownMinutes $CountdownMinutes -ReportOnly $ReportOnly
+    $rnArgs = Get-RnArgs -Message $Message -SnoozeMinutes $SnoozeMinutes -PromptMinutes $PromptMinutes -CountdownMinutes $CountdownMinutes -ReportOnly $ReportOnly -MaintenanceRestart $MaintenanceRestart
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 
 $script:RnJson = $null
