@@ -190,3 +190,11 @@ Fix mode is off unless `Fix` is `"true"` in `-PackageArguments`, for example `{"
 - `windows/collectors/` and `windows/bootstrap.ps1` are the inventory path.
 - `scripts/` holds the pin and publish tools.
 - `tests/windows/` holds the PowerShell suite. `tests/` holds `run-all.ps1` and the reviewer unit tests.
+
+## Storage and Windows Update maintenance
+
+`windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1` reports disk usage, profile-age evidence and cleanup opportunities. Explicit Cleanup mode removes old temporary files; profile removal is separately enabled with a configurable inactivity threshold (60 days by default), protected-profile exclusions and fresh evidence checks. Windows servicing timestamps are not treated as user logins.
+
+`windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1` reports update services, policy, OS lifecycle and servicing state. Explicit Repair mode recovers selected disabled services and verifies an update search; cache reset and DISM/SFC are separate options. Empty search results never mean the installed OS is necessarily current.
+
+Both use the existing hash-pinned `Invoke-RelianRunner`, show Relian PSADT progress when a user session is available, keep protected local reports, and defer mutations during active/staged Setup or uncertain servicing state. Neither starts an upgrade or reboots. See [the maintenance runbook](docs/maintenance.md) for runner parameters, report interpretation and limits.
