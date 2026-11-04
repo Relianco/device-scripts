@@ -51,13 +51,13 @@ try {
  } finally { $env:ProgramData=$oldData }
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
 # Compact projections retain exact ordinals/counts without identifiers or paths.
-$profiles=[pscustomobject]@{Profiles=@([pscustomobject]@{SID='private';Path='C:\Users\Private';Decision='StaleCandidate';Eligible=$true},[pscustomobject]@{Decision='Keep';Eligible=$false})}
+$profiles=[pscustomobject]@{Profiles=@([pscustomobject]@{SID='private';Path='C:\TestData\Private';Decision='StaleCandidate';Eligible=$true},[pscustomobject]@{Decision='Keep';Eligible=$false})}
 $pi=Get-MeSection $profiles ProfileIndex 0
 Assert ($pi.Count -eq 2 -and $pi.Rows[0].Ordinal -eq 0 -and $pi.Rows[0].Eligible) 'Compact profile ordinals and eligibility'
 Assert (($pi | ConvertTo-Json -Depth 8) -notmatch 'private|C:') 'Profile index omits identifiers'
 $actions=[pscustomobject]@{Actions=@(
  @{Kind='temp';Status='deleted';LogicalBytes=100},@{Kind='temp';Status='deleted';LogicalBytes=200},
- @{Kind='temp';Status='withheld';LogicalBytes=300;Error='Locked C:\Users\Private\file'},
+ @{Kind='temp';Status='withheld';LogicalBytes=300;Error='Locked C:\TestData\Private\file'},
  @{Kind='profile';Status='removedByCim'},@{Kind='componentCleanup';Status='commandCompleted'},
  @{phase='imageRepair';result=@{outcome='commandCompleted'}},@{phase='service';outcome='failed';errorCategory='AccessDenied'},
  @{unexpected='unknown'});Errors=@(@{category='ProbeFailed';detail='not available'})}
