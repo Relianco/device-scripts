@@ -18,6 +18,18 @@ Assert ((Get-SmOwnUpgradeState $own 26200 $install) -eq 'residual') 'target buil
 Assert ((Get-SmOwnUpgradeState $own 26100 $install.AddDays(3)) -eq 'residual') 'boot after own stage makes marker residual'
 Assert ((Get-SmOwnUpgradeState $own 26100 $install) -eq 'staged') 'unbuilt own stage before reboot blocks'
 $own.time='bad'; Assert ((Get-SmOwnUpgradeState $own 26200 $install) -eq 'unknown') 'malformed own stage unknown even when target build reached'
+# Read-only evidence workers have an absolute parent-side timeout and Setup veto.
+$script:workerKilled=$false
+$fakeWorker=[pscustomobject]@{}
+$fakeWorker | Add-Member ScriptMethod WaitForExit { param($Milliseconds) $false }
+$fakeWorker | Add-Member ScriptMethod Kill { $script:workerKilled=$true }
+$script:SmGuards={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
+$wait=Wait-SmEvidenceWorker $fakeWorker 0.03
+Assert ($wait.TimedOut -and $script:workerKilled) 'blocked identity/event child killed on deadline'
+$script:workerKilled=$false
+$script:SmGuards={ [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('Setup started')} }
+$wait=Wait-SmEvidenceWorker $fakeWorker 1
+Assert ($wait.GuardChanged -and $script:workerKilled) 'Setup transition interrupts evidence worker'
 # Profile age sources are independent: registry pair is primary, not hive file time.
 function New-AgePair($Date) {
  $ft=[uint64]$Date.ToFileTimeUtc()
@@ -111,6 +123,11 @@ try {
  Assert ($s.Files.Count -eq 2) 'file scan'
  $script:SmGuards={ [pscustomobject]@{ Safe=$true; Light=$false; Reasons=@() } }
  $script:SmPrepareReport={ 'test-report.json' }; $script:SmAcquire={ $true }; $script:SmRelease={}; $script:SmVolumes={ @() }; $script:SmEvidence={ @{} }
+ $script:SmCollectProfiles={ param($Profiles,$Days,$Now,$Seconds,$Directory,$Mode)
+  if($Mode -eq 'Final') { return [pscustomobject]@{Complete=$true;TimedOut=$false;GuardChanged=$false;FinalVeto=[pscustomobject]@{Clear=$true};Entries=@();ElapsedSeconds=0.01;Error=$null} }
+  $context=& $script:SmProfileContext $Days $Now
+  [pscustomobject]@{Complete=$true;TimedOut=$false;GuardChanged=$false;Entries=@($Profiles | ForEach-Object { [pscustomobject]@{SID=$_.SID;Path=$_.LocalPath;Evidence=(& $script:SmProfileEvidence $_ $Days $Now $context)} });ElapsedSeconds=0.01;Error=$null}
+ };
  $script:FixtureAgeEvidence=New-TestAgeEvidence $now; $script:SmProfileContext={ [pscustomobject]@{} }; $script:SmProfileEvidence={ $script:FixtureAgeEvidence }; $script:SmDiagnosticRoots={ @() }; $script:SmProfiles={ @() }; $script:SmRoots={ @($root) }; $script:SmUi={ param($Step) 'noUser' }
  $r=Invoke-SmMaintenance (Get-SmArguments)
  Assert (Test-Path -LiteralPath $old) 'report does not delete'
@@ -193,6 +210,47 @@ try {
  $r.Errors=@(('x'*10000)); $summary=ConvertTo-SmSummary $r 'report.json'
  Assert ([Text.Encoding]::UTF8.GetByteCount($summary) -le 8000) 'stdout summary byte bound'
  Assert (($summary | ConvertFrom-Json).ReportPath -eq 'report.json') 'summary remains JSON'
+ # A blocked provider cannot silently qualify a profile after the aggregate deadline.
+ $realCollector=$script:SmCollectProfiles
+ $script:SmCollectProfiles={ [pscustomobject]@{Complete=$false;TimedOut=$true;GuardChanged=$false;Reasons=@();Entries=@();ElapsedSeconds=30;Error='provider timeout'} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true)
+ Assert ($r.Profiles[0].Decision -eq 'ReviewInsufficientEvidence' -and $script:profileRemovals -eq 0) 'timed-out aggregate collection yields review and no deletion'
+ $script:SmCollectProfiles={ [pscustomobject]@{Complete=$false;TimedOut=$false;GuardChanged=$true;Reasons=@('Setup started');Entries=@();ElapsedSeconds=0.1;Error='guard transition'} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true)
+ Assert ($r.Scan.Light -and $r.Scan.EntriesVisited -eq 0 -and $script:profileRemovals -eq 0) 'guard transition during collection withholds scan/removal'
+ $script:SmCollectProfiles=$realCollector
+ $script:SmGuards={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
+ # Simulate Setup starting inside expensive fresh evidence, after the first guard.
+ $script:SmProfileEvidence={ $script:FixtureAgeEvidence }
+ $script:evidenceCollectCalls=0
+ $script:SmCollectProfiles={ param($Profiles,$Days,$Now,$Seconds,$Directory,$Mode)
+  $script:evidenceCollectCalls++
+  $result=& $realCollector $Profiles $Days $Now $Seconds $Directory $Mode
+  if($script:evidenceCollectCalls -ge 2) { $script:SmGuards={ [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('Setup started during identity lookup')} } }
+  $result
+ }
+ # Keep filesystem validation independently mocked so the last guard is reached.
+ $realSafePath=${function:Test-SmSafePath}; function Test-SmSafePath { $true }
+ $realScan=${function:Get-SmScan}
+ function Get-SmScan { [pscustomobject]@{Roots=@();Files=@();TopFiles=@();TopFolders=@();Partial=$false;EntriesVisited=0;SkippedReparseOrCloud=0;Errors=@();Seconds=0} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true)
+ Assert ($script:profileRemovals -eq 0 -and $r.Actions[0].Error -match 'guard changed immediately') 'fresh servicing guard after expensive evidence blocks removal'
+ ${function:Test-SmSafePath}=$realSafePath; ${function:Get-SmScan}=$realScan
+ $script:SmCollectProfiles=$realCollector
+ # Exercise actual child-process/output plumbing with unavailable Windows toolkit.
+ # No OS evidence is read: missing toolkit must return incomplete safely.
+ $savedProgramData=$env:ProgramData; $savedSystemRoot=$env:SystemRoot
+ $env:ProgramData=$root; $env:SystemRoot=$root
+ $workerDir=Join-Path $root 'worker-evidence'; $null=New-Item -ItemType Directory -Path $workerDir
+ function Start-Process {
+  [CmdletBinding()]param($FilePath,$ArgumentList,$RedirectStandardOutput,$RedirectStandardError,$WindowStyle,[switch]$PassThru)
+  Microsoft.PowerShell.Management\Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $ArgumentList -RedirectStandardOutput $RedirectStandardOutput -RedirectStandardError $RedirectStandardError -PassThru
+ }
+ $script:SmGuards={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
+ try {
+  $workerResult=Invoke-SmProfileWorker @() 60 $now 5 $workerDir Full
+  Assert (-not $workerResult.Complete -and $workerResult.Error -match 'module|PSAppDeployToolkit' -and -not $workerResult.TimedOut -and @(Get-ChildItem -LiteralPath $workerDir -Filter '*.output.xml').Count -eq 1) 'provider/module failure crosses read-only child boundary as incomplete evidence'
+ } finally { Remove-Item Function:Start-Process; $env:ProgramData=$savedProgramData; $env:SystemRoot=$savedSystemRoot }
  $script:SmPrepareReport={ throw 'Evidence destination denied' }
  $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)
  Assert ($r.Status -eq 'failed' -and $r.Actions.Count -eq 0) 'evidence failure blocks cleanup'

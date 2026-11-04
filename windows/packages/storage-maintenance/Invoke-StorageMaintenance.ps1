@@ -8,6 +8,8 @@ param([string]$DeploymentType, [string]$Action, [string]$PinVersion,
  [string]$RemoveProfiles='false', [string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000', [string]$MaxSeconds='30')
 
+$script:SmPackagePath=$PSCommandPath
+
 function Get-SmArguments {
  param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false',[string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
@@ -78,8 +80,7 @@ function Test-SmProfile {
  [pscustomobject]@{SID=$Profile.SID;Path=$Profile.LocalPath;LastUseTime=$last;CimDateState=$cimState;CutoffUtc=$cutoff;ObservedAgeDays=$age;Decision=$decision;Eligible=($decision -eq 'StaleCandidate');Reason=$reason;AgeSource='ProfileList load/unload; NTUSER is diagnostic only';AgeEvidenceFingerprint=$fingerprint;ServicingTouchPossible=($null -ne $Evidence -and $Evidence.NtUser.DatUtc -and $Evidence.NtUser.DatUtc -ge $cutoff);Evidence=$Evidence;LogicalBytes=$null;SizePartial=$true}
 }
 
-function Get-SmProfileContext {
- param([int]$AgeDays,[datetime]$Now=[datetime]::UtcNow)
+function Get-SmSessionEvidence {
  $sessions=[ordered]@{Known=$false;Sids=@();CurrentSid=$null;Error=$null}
  try {
   $sessions.CurrentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -93,6 +94,12 @@ function Get-SmProfileContext {
   }
   $sessions.Sids=@($sessions.Sids | Select-Object -Unique); $sessions.Known=$true
  } catch { $sessions.Error=$_.Exception.Message }
+ return [pscustomobject]$sessions
+}
+
+function Get-SmProfileContext {
+ param([int]$AgeDays,[datetime]$Now=[datetime]::UtcNow)
+ $sessions=Get-SmSessionEvidence
  $events=[ordered]@{ProbeComplete=$false;Recent=@();Truncated=$false;Error=$null;Coverage='Positive evidence only: absent, rotated or cleared logs never establish inactivity. Historical audit continuity unknown.';EntriesRead=0}
  $watch=[Diagnostics.Stopwatch]::StartNew()
  try {
@@ -142,6 +149,108 @@ function Get-SmProfileEvidence {
 }
 $script:SmProfileContext={ param($Days,$Now) Get-SmProfileContext $Days $Now }
 $script:SmProfileEvidence={ param($Profile,$Days,$Now,$Context) Get-SmProfileEvidence $Profile $Days $Now $Context }
+
+# All domain identity lookups and event-provider work run in a disposable read-only
+# process. The parent owns the absolute deadline and observes Setup between waits.
+function Wait-SmEvidenceWorker {
+ param($Process,[double]$Seconds)
+ $watch=[Diagnostics.Stopwatch]::StartNew(); $nextGuard=0.0
+ $r=[ordered]@{TimedOut=$false;GuardChanged=$false;Reasons=@();ElapsedSeconds=0.0}
+ while($true) {
+  if($watch.Elapsed.TotalSeconds -ge $Seconds) { $r.TimedOut=$true; break }
+  if($watch.Elapsed.TotalSeconds -ge $nextGuard) {
+   try { $g=& $script:SmGuards; if($null -eq $g -or $g.Light) { $r.GuardChanged=$true; $r.Reasons=@($g.Reasons); break } }
+   catch { $r.GuardChanged=$true; $r.Reasons=@('unknown worker servicing guard'); break }
+   $nextGuard=$watch.Elapsed.TotalSeconds+2
+  }
+  if($watch.Elapsed.TotalSeconds -ge $Seconds) { $r.TimedOut=$true; break }
+  $waitMs=[int][math]::Max(1,[math]::Min(200,($Seconds-$watch.Elapsed.TotalSeconds)*1000))
+  if($Process.WaitForExit($waitMs)) { break }
+ }
+ if($r.TimedOut -or $r.GuardChanged) { try { $Process.Kill() } catch { $r.Reasons+=('Read-only worker termination failed: '+$_.Exception.Message) } }
+ $r.ElapsedSeconds=$watch.Elapsed.TotalSeconds
+ [pscustomobject]$r
+}
+
+function Get-SmFinalProfileVeto {
+ param($Profile)
+ $sessions=Get-SmSessionEvidence
+ $r=[ordered]@{Clear=$false;Reason='Final session identity unavailable';Sessions=$sessions;Profile=$null;LoadedHive=$null}
+ if(-not $sessions.Known) { return [pscustomobject]$r }
+ if($sessions.Sids -contains $Profile.SID -or $sessions.CurrentSid -eq $Profile.SID) { $r.Reason='Session SID appeared'; return [pscustomobject]$r }
+ try {
+  if($Profile.SID -notmatch '^S-1-\d+(?:-\d+)+$') { throw 'Malformed SID' }
+  $fresh=@(Get-CimInstance Win32_UserProfile -Filter ("SID='"+$Profile.SID+"'") -OperationTimeoutSec 5 -ErrorAction Stop)
+  if($fresh.Count -ne 1) { throw 'Final profile identity ambiguous' }
+  $p=$fresh[0]; $r.Profile=$p
+  if($p.LocalPath -ne $Profile.LocalPath -or $p.Loaded -ne $false -or $p.Special -ne $false -or $null -eq $p.Status -or [int64]$p.Status -ne 0 -or $p.RoamingConfigured -ne $false -or $p.RoamingPreference -ne $false -or $p.refCount -gt 0) { throw 'Final profile loaded/status/identity changed' }
+  $r.LoadedHive=(Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Profile.SID) -ErrorAction Stop) -or (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Profile.SID+'_Classes') -ErrorAction Stop)
+  if($r.LoadedHive) { throw 'Final profile hive appeared' }
+  $r.Clear=$true; $r.Reason='Final session, CIM identity/loaded/status and hive vetoes clear'
+ } catch { $r.Reason=$_.Exception.Message }
+ [pscustomobject]$r
+}
+
+function Invoke-SmProfileWorker {
+ param($Profiles,[int]$Days,[datetime]$Now,[double]$Seconds,[string]$Directory,[string]$Mode='Full')
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ $r=[ordered]@{Complete=$false;TimedOut=$false;GuardChanged=$false;Reasons=@();Error=$null;Entries=@();FinalVeto=$null;ElapsedSeconds=0.0}
+ $process=$null
+ try {
+  if($Seconds -le 0) { $r.TimedOut=$true; throw 'Aggregate profile evidence budget exhausted' }
+  if(-not (Test-SmSafePath $Directory $env:ProgramData)) { throw 'Unsafe profile evidence directory' }
+  $id=[guid]::NewGuid().ToString('n')
+  $inputPath=Join-Path $Directory ($id+'.input.xml'); $outputPath=Join-Path $Directory ($id+'.output.xml'); $workerPath=Join-Path $Directory ($id+'.worker.ps1')
+  [pscustomobject]@{Profiles=@($Profiles);Days=$Days;Now=$Now;Mode=$Mode} | Export-Clixml -LiteralPath $inputPath -Depth 6 -ErrorAction Stop
+  $worker=@'
+param([string]$PackagePath,[string]$InputPath,[string]$OutputPath)
+$ErrorActionPreference='Stop'
+$env:RELIAN_DEPLOY_TEST='1'
+. $PackagePath
+$result=[ordered]@{Complete=$false;Error=$null;Entries=@();FinalVeto=$null}
+try {
+ $data=Import-Clixml -LiteralPath $InputPath
+ $manifest=Join-Path (Split-Path -Parent $PackagePath) 'PSAppDeployToolkit\PSAppDeployToolkit.psd1'
+ Import-Module -FullyQualifiedName @{ModuleName=$manifest;ModuleVersion='4.1.8';Guid='8c3c366b-8606-4576-9f2d-4051144f7ca2'} -Force -ErrorAction Stop
+ if($data.Mode -eq 'Final') { $result.FinalVeto=Get-SmFinalProfileVeto $data.Profiles[0] }
+ else {
+  $context=Get-SmProfileContext $data.Days $data.Now
+  foreach($profile in $data.Profiles) {
+   $evidence=Get-SmProfileEvidence $profile $data.Days $data.Now $context
+   $result.Entries+=[pscustomobject]@{SID=$profile.SID;Path=$profile.LocalPath;Evidence=$evidence}
+  }
+ }
+ $result.Complete=$true
+} catch { $result.Error=$_.Exception.Message }
+[pscustomobject]$result | Export-Clixml -LiteralPath $OutputPath -Depth 16
+'@
+  Set-Content -LiteralPath $workerPath -Value $worker -Encoding UTF8 -ErrorAction Stop
+  $quote={ param($Text) "'"+$Text.Replace("'","''")+"'" }
+  $command='& '+(& $quote $workerPath)+' -PackagePath '+(& $quote $script:SmPackagePath)+' -InputPath '+(& $quote $inputPath)+' -OutputPath '+(& $quote $outputPath)
+  $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+  $exe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $remaining=$Seconds-$watch.Elapsed.TotalSeconds
+  if($remaining -le 0) { $r.TimedOut=$true; throw 'Aggregate profile evidence budget exhausted before launch' }
+  $process=Start-Process -FilePath $exe -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand '+$encoded) -RedirectStandardOutput (Join-Path $Directory ($id+'.stdout.log')) -RedirectStandardError (Join-Path $Directory ($id+'.stderr.log')) -WindowStyle Hidden -PassThru -ErrorAction Stop
+  $wait=Wait-SmEvidenceWorker $process ($Seconds-$watch.Elapsed.TotalSeconds)
+  $r.TimedOut=$wait.TimedOut; $r.GuardChanged=$wait.GuardChanged; $r.Reasons=$wait.Reasons
+  if($r.TimedOut -or $r.GuardChanged) { throw 'Read-only profile evidence interrupted; all profiles require review' }
+  if($process.ExitCode -ne 0 -or -not (Test-SmSafePath $outputPath $Directory)) { throw 'Read-only evidence worker failed or produced unsafe output' }
+  $out=Import-Clixml -LiteralPath $outputPath -ErrorAction Stop
+  $r.Complete=$out.Complete; $r.Entries=@($out.Entries); $r.FinalVeto=$out.FinalVeto; $r.Error=$out.Error
+ } catch {
+  $r.Error=$_.Exception.Message
+  if($process) { try { if(-not $process.HasExited) { $process.Kill() } } catch { $r.Reasons+='Read-only worker could not be confirmed stopped' } }
+ }
+ finally { if($process) { $process.Dispose() }; $r.ElapsedSeconds=$watch.Elapsed.TotalSeconds }
+ [pscustomobject]$r
+}
+
+function New-SmMissingEvidence {
+ param([string]$Reason)
+ [pscustomobject]@{Registry=@{ReadState='unknown'};Identity=@{Resolved=$false};Sessions=@{Known=$false};Hives=@{Known=$false};Events=@{ProbeComplete=$false;Recent=@()};NtUser=@{DatUtc=$null;Errors=@()};Errors=@($Reason);CollectionError=$Reason}
+}
+$script:SmCollectProfiles={ param($Profiles,$Days,$Now,$Seconds,$Directory,$Mode='Full') Invoke-SmProfileWorker $Profiles $Days $Now $Seconds $Directory $Mode }
 
 # Literal canonical containment and EVERY ancestor checked immediately before deletion.
 # Reparse points and offline/recall files are never enumerated or deleted.
@@ -310,12 +419,12 @@ function Initialize-SmSecureDirectory {
   if(-not $created -and $current -ne $full) {
    # Existing shared ancestors belong to other packages too: inspect, never rewrite.
    $existing=Get-Acl -LiteralPath $current -ErrorAction Stop
-   $ownerSid=([Security.Principal.NTAccount]$existing.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
+   $ownerSid=$existing.GetOwner([Security.Principal.SecurityIdentifier]).Value
    if($ownerSid -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Shared evidence ancestor has an untrusted owner' }
    $writeMask=[Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-   foreach($rule in $existing.Access) {
+   foreach($rule in $existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
     if($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
-    $ruleSid=$rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+    $ruleSid=$rule.IdentityReference.Value
     if($ruleSid -notin @('S-1-5-18','S-1-5-32-544') -and ($rule.FileSystemRights -band $writeMask)) { throw 'Shared evidence ancestor grants untrusted modification rights' }
    }
    continue
@@ -746,17 +855,29 @@ function Invoke-SmMaintenance {
    $r.Omissions+='Profile, cache, health and recursive scans withheld to avoid competing with Setup.'
   } else {
    try { $r.Evidence=& $script:SmEvidence } catch { $r.Errors+=$_.Exception.Message }
+   $initialEvidenceWatch=[Diagnostics.Stopwatch]::StartNew()
    $profiles=@(); try { $profiles=@(& $script:SmProfiles) } catch { $r.Errors+=$_.Exception.Message }
    if($profiles.Count -gt 200) { $r.Status='partial'; $r.Omissions+='Profile list capped at 200.'; $profiles=@($profiles | Select-Object -First 200) }
    $r.Evidence['ApplicationCachePolicy']='Per-profile Edge/Chrome/WebView Cache, Code Cache, GPUCache, ShaderCache, CacheStorage, Teams LocalCache and Adobe AcroCef are report-only. Outlook OST, OfficeFileCache, Wef and offline documents are preserved.'
-   $assessedUtc=[datetime]::UtcNow; $profileContext=& $script:SmProfileContext $A.ProfileAgeDays $assessedUtc
-   $r.Profiles=@($profiles | ForEach-Object { $profileEvidence=& $script:SmProfileEvidence $_ $A.ProfileAgeDays $assessedUtc $profileContext; Test-SmProfile $_ $A.ProfileAgeDays $A.ExcludeProfiles $assessedUtc $profileEvidence })
+   $evidenceLimit=[double][math]::Min(30,$A.MaxSeconds); $evidenceRemaining=$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds; $assessedUtc=[datetime]::UtcNow
+   $evidenceDirectory=Split-Path -Parent $r.ReportPath
+   $collected=& $script:SmCollectProfiles $profiles $A.ProfileAgeDays $assessedUtc $evidenceRemaining $evidenceDirectory 'Full'
+   $evidenceRemaining-=[double]$collected.ElapsedSeconds
+   $evidenceRemaining=[math]::Min($evidenceRemaining,$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds)
+   if($evidenceRemaining -le 0) { $collected.Complete=$false; $collected.Error='Aggregate profile evidence deadline exhausted' }
+   if(-not $collected.Complete) { $r.Status='partial'; $r.Omissions+=('Profile evidence incomplete: '+$collected.Error) }
+   if($collected.GuardChanged) { $g=[pscustomobject]@{Safe=$false;Light=$true;Reasons=@($collected.Reasons)}; $r.Guards=$g }
+   $r.Profiles=@($profiles | ForEach-Object {
+    $profile=$_; $found=@($collected.Entries | Where-Object { $_.SID -eq $profile.SID -and $_.Path -eq $profile.LocalPath })
+    $profileEvidence=if($collected.Complete -and $found.Count -eq 1){$found[0].Evidence}else{New-SmMissingEvidence ('Collection incomplete/timeout/guard transition: '+$collected.Error)}
+    Test-SmProfile $profile $A.ProfileAgeDays $A.ExcludeProfiles $assessedUtc $profileEvidence
+   })
    # One globally bounded scan: safe temps plus profile trees (diagnostic only).
    $roots=@(& $script:SmRoots); $roots+=@($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' -and $_.Special -eq $false } | ForEach-Object { $_.LocalPath.TrimEnd('\')+'\AppData\Local\Temp' }); $scanRoots=@(& $script:SmRoots)+@($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' } | ForEach-Object { $_.LocalPath })
    try { $r.Notifications+=& $script:SmUi 'Measuring bounded folders and old temporary files; cloud placeholders are skipped.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
    $scanRoots+=@(& $script:SmDiagnosticRoots)
    $scanRoots+=@($r.Before | Where-Object { $_.DeviceID -match '^[A-Za-z]:$' } | ForEach-Object { $_.DeviceID+'\' })
-   $scan=Get-SmScan $scanRoots $A.MaxFiles $A.MaxSeconds $A.TempAgeDays; $r.Scan=$scan
+   $scan=if($collected.GuardChanged){[pscustomobject]@{Roots=@();Files=@();TopFiles=@();TopFolders=@();Partial=$true;Light=$true;GuardReasons=@($collected.Reasons);EntriesVisited=0;SkippedReparseOrCloud=0;Errors=@();Seconds=0}}else{Get-SmScan $scanRoots $A.MaxFiles $A.MaxSeconds $A.TempAgeDays}; $r.Scan=$scan
    if($scan.Light) { $g=[pscustomobject]@{Safe=$false;Light=$true;Reasons=@($scan.GuardReasons)}; $r.Guards=$g; $r.Omissions+='Traversal abandoned because Setup/unknown servicing state appeared during scan.' }
    foreach($f in $scan.Files) { $f | Add-Member -NotePropertyName CleanupRoot -NotePropertyValue $null; foreach($tempRoot in $roots) { if($f.Path.StartsWith($tempRoot.TrimEnd('\')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { $f.CleanupRoot=$tempRoot; break } } }
    if($scan.Partial -or $scan.Errors.Count) { $r.Status='partial' }
@@ -783,21 +904,38 @@ function Invoke-SmMaintenance {
      if($A.RemoveProfiles) {
       foreach($candidate in @($r.Profiles | Where-Object { $_.Eligible })) {
        if($cleanupWatch.Elapsed.TotalSeconds -ge $A.MaxSeconds) { $r.Status='partial'; $r.Omissions+='Profile cleanup time budget exhausted.'; break }
+       $remainingAtStepStart=$evidenceRemaining; $profileStepWatch=[Diagnostics.Stopwatch]::StartNew()
        $step=[ordered]@{Kind='profile';Path=$candidate.Path;Status='withheld';Error=$null}
        try {
         if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed' }
         $fresh=@(& $script:SmProfiles | Where-Object { $_.SID -eq $candidate.SID })
         if(& $script:SmProfileHiveLoaded $candidate.SID) { throw 'Profile hive is loaded' }
         if($fresh.Count -ne 1 -or $fresh[0].LocalPath -ne $candidate.Path) { throw 'Profile revalidation failed: SID/path changed or ambiguous' }
-        $recheckUtc=[datetime]::UtcNow; $recheckContext=& $script:SmProfileContext $A.ProfileAgeDays $recheckUtc
-        $recheckEvidence=& $script:SmProfileEvidence $fresh[0] $A.ProfileAgeDays $recheckUtc $recheckContext
-        $recheck=Test-SmProfile $fresh[0] $A.ProfileAgeDays $A.ExcludeProfiles $recheckUtc $recheckEvidence
+        $evidenceRemaining=[math]::Min($evidenceRemaining,$remainingAtStepStart-$profileStepWatch.Elapsed.TotalSeconds)
+        if($evidenceRemaining -le 0) { throw 'Aggregate profile evidence budget exhausted' }
+        $recheckUtc=[datetime]::UtcNow
+        $recollected=& $script:SmCollectProfiles $fresh $A.ProfileAgeDays $recheckUtc $evidenceRemaining $evidenceDirectory 'Full'
+        $evidenceRemaining-=[double]$recollected.ElapsedSeconds
+        if(-not $recollected.Complete -or $recollected.TimedOut -or $recollected.GuardChanged -or $evidenceRemaining -le 0) { throw 'Profile revalidation failed: evidence deadline or servicing transition' }
+        $found=@($recollected.Entries | Where-Object { $_.SID -eq $candidate.SID -and $_.Path -eq $candidate.Path })
+        if($found.Count -ne 1) { throw 'Profile revalidation failed: incomplete identity evidence' }
+        $recheck=Test-SmProfile $fresh[0] $A.ProfileAgeDays $A.ExcludeProfiles $recheckUtc $found[0].Evidence
         $step['Revalidation']=$recheck
         if(-not $recheck.Eligible -or $recheck.AgeEvidenceFingerprint -ne $candidate.AgeEvidenceFingerprint) { throw ('Profile revalidation failed: '+$recheck.Reason) }
         # Profile root and all ancestors must be ordinary directories.
         if(-not (Test-SmSafePath $candidate.Path ([IO.Path]::GetPathRoot($candidate.Path)))) { throw 'Unsafe profile path' }
+        # Refresh cheap session/CIM/hive vetoes AFTER expensive age/event work.
+        $final=& $script:SmCollectProfiles $fresh $A.ProfileAgeDays ([datetime]::UtcNow) ([math]::Min(5,[math]::Min($evidenceRemaining,$remainingAtStepStart-$profileStepWatch.Elapsed.TotalSeconds))) $evidenceDirectory 'Final'
+        $evidenceRemaining-=[double]$final.ElapsedSeconds
+        $step['FinalVeto']=$final.FinalVeto
+        if(-not $final.Complete -or $final.TimedOut -or $final.GuardChanged -or -not $final.FinalVeto.Clear) { throw 'Profile final session/loaded/hive veto failed or unavailable' }
+        if($evidenceRemaining -le 0 -or $cleanupWatch.Elapsed.TotalSeconds -ge $A.MaxSeconds) { throw 'Profile cleanup/evidence deadline exhausted before removal' }
+        if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed immediately before profile removal' }
+        if($evidenceRemaining -le 0 -or $profileStepWatch.Elapsed.TotalSeconds -ge $remainingAtStepStart -or $cleanupWatch.Elapsed.TotalSeconds -ge $A.MaxSeconds -or (& $script:SmProfileHiveLoaded $candidate.SID)) { throw 'Final profile deadline or loaded hive veto' }
         & $script:SmRemoveProfile $fresh[0]; $step.Status='removedByCim'
-       } catch { $step.Error=$_.Exception.Message; $r.Status='partial' }; $r.Actions+=[pscustomobject]$step
+       } catch { $step.Error=$_.Exception.Message; $r.Status='partial' }
+       $evidenceRemaining=[math]::Min($evidenceRemaining,$remainingAtStepStart-$profileStepWatch.Elapsed.TotalSeconds)
+       $r.Actions+=[pscustomobject]$step
       }
      }
      if($A.ComponentCleanup) {
