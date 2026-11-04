@@ -268,13 +268,24 @@ if($env:OS -eq 'Windows_NT') {
    Assert ($parent.WaitForExit(10000) -and $parent.ExitCode -eq 0) 'Native launching parent exits successfully'
    $nativeIdentity=Import-Clixml -LiteralPath $identity
    $observedChild=[Diagnostics.Process]::GetProcessById([int]$nativeIdentity.pid)
+   # Retain a kernel process handle while alive, as the production launcher does.
+   $null=$observedChild.Handle
    Assert ($observedChild.StartTime.ToUniversalTime().ToString('o') -eq $nativeIdentity.start) 'Synthetic child identity matches exact creation time'
    $nativeChild=$observedChild
    Assert ($parentOut.Wait(1000) -and $parentErr.Wait(1000)) 'Native child does not retain ancestor stdout/stderr pipes'
    Assert (-not $nativeChild.HasExited) 'Synthetic native child outlives its launching parent'
    # Output can arrive before process teardown closes its native log handles.
    # Observe process completion before opening/deleting logs, rather than racing it.
-   Assert ($nativeChild.WaitForExit(15000) -and $nativeChild.ExitCode -eq 0) 'Synthetic native child completes after parent exit'
+   $childCompleted=$nativeChild.WaitForExit(15000)
+   $childExitCode=$null; if($childCompleted) { $childExitCode=$nativeChild.ExitCode }
+   if(-not $childCompleted -or $childExitCode -ne 0) {
+    Write-Host ('Native regression '+$prefix+': waited='+$childCompleted+'; hasExited='+$nativeChild.HasExited+'; exitCode='+$childExitCode+'; exitCodeNull='+($null -eq $childExitCode))
+    foreach($log in @($out,$err)) {
+     try { $logText=Get-Content -LiteralPath $log -Raw -ErrorAction Stop; if($logText -and $logText.Length -gt 4000) { $logText=$logText.Substring(0,4000) }; Write-Host ([IO.Path]::GetFileName($log)+': '+$logText) } catch { Write-Host ('Native log unavailable: '+$_.Exception.Message) }
+    }
+   }
+   Assert $childCompleted 'Synthetic native child completion timed out after parent exit'
+   Assert ($childExitCode -eq 0) ('Synthetic native child failed after parent exit: exitCode='+$childExitCode)
    Assert ((Get-Content -LiteralPath $out -Raw).Trim() -eq ('late-out:'+$nativeIdentity.pid)) 'Late stdout survives launcher exit with exact native PID'
    Assert ((Get-Content -LiteralPath $err -Raw).Trim() -eq ('late-error:'+$nativeIdentity.pid)) 'Late stderr survives launcher exit'
   } catch { $nativeFailure=$_; throw } finally {
