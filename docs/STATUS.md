@@ -1,12 +1,14 @@
 # Status
 
-Branch: `lane/postupgrade-qualification`. Last implementation HEAD: `5887de8`; this documentation commit follows it. Base main: `209c727` (maintenance PR 90 merged).
+Branch: `lane/postupgrade-qualification`. Base main: `209c727` (maintenance PR 90 merged). This closeout follows the reviewed historical-residue and confirmed-absent-marker guard fixes.
 
+Pull request: [92](https://github.com/Relianco/device-scripts/pull/92).
 Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md). Runbook: [Maintenance](maintenance.md).
 
-- Maintenance packages and Windows native-process/NTFS CI are merged.
-- Post-upgrade qualification resumed with confirmed upgraded, restarted targets. Fresh storage reports are report-only; servicing guards still control eligibility.
-- Added a bounded read-only evidence package to inspect detailed reports through the pinned runner. Focused tests and independent review pass.
-- Next: finish report retrieval, inspect servicing/upgrade state and profile candidates, then qualify cleanup/repair only with clear guards. No reboot or servicing-state bypass is authorized by this status.
+- Bounded stored-report reader and exact post-upgrade guard diagnostics implemented and independently reviewed. Reader live qualification passed with verified section hash.
+- Fresh target reports confirm completed images but retain pending file-renames and intermittent servicing vetoes; no cleanup or repair has been performed during those holds.
+- Maintainer authorized conditional PSADT reboot prompts. Opt-in MaintenanceRestart adds rename detection and pre-prompt/pre-shutdown servicing checks; defaults unchanged.
+- Historical residue handling now requires corroborating image/build/time/source evidence, with distinct confirmed-absent and existing-marker cases. No metadata is removed; unknown, active, staged and reboot states remain protected. Focused tests and independent reviews pass.
+- Next: confirm authorized reboot outcomes, rerun reports, review profile candidates and qualify cleanup/update recovery only after clear guards. A snooze or safety deferral does not schedule another attempt.
 
-Private target identities, activities and evidence remain under ignored machine memory. No uncommitted implementation files are expected after this closeout.
+Private identities, activities and evidence remain in ignored machine memory. Working implementation is committed; any remaining local files are review artifacts only.
