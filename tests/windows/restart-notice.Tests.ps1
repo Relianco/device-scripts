@@ -600,5 +600,74 @@ Assert-Same (($pairs | ForEach-Object { $_.Name }) -join ',') 'Message,SnoozeMin
 $self = [IO.File]::ReadAllText($PSCommandPath)
 if ($self.IndexOf("exit 0`n", [StringComparison]::Ordinal) -lt $self.IndexOf("Assert-Same ((`$pairs", [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
 
+# Maintenance restart is opt-in and preserves all default decisions.
+Assert-Same (Get-RnArgs).MaintenanceRestart $false 'maintenance default off'
+Assert-Same (Get-RnArgs -MaintenanceRestart 'true').MaintenanceRestart $true 'maintenance opt-in'
+Assert-Throws { Get-RnArgs -MaintenanceRestart 'yes' } 'invalid maintenance flag'
+Assert-Same (@(Get-RnPendingReasons -PendingRename @('C:\driver.tmp','') -MaintenanceRestart $true).Count) 1 'real pending deletion pair'
+Assert-Same (@(Get-RnPendingReasons -PendingRename @('C:\driver.tmp','')).Count) 0 'default ignores rename pair'
+Assert-Throws { Test-RnPendingRenamePairs @('C:\unpaired') } 'malformed rename pairs unknown'
+$maintenanceArgs=Get-RnArgs -MaintenanceRestart 'true'
+Reset-Mocks -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ @{Safe=$false;Reason='servicingBusy'} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'busy restart deferred'
+Assert-Same (Get-Last).status 'deferred' 'busy deferred result'
+Assert-NoRestart 'busy servicing'
+Reset-Mocks -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ throw 'failed OS probe' }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'unknown restart deferred'
+Assert-NoRestart 'unknown servicing'
+Reset-Mocks -PromptResult 'Restart now' -OnPrompt { $script:RnMaintenanceGuard={ @{Safe=$false;Reason='servicingBusy'} } }
+$script:RnMaintenanceGuard={ @{Safe=$true;Reason='clear'} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'guard flips during user prompt'
+Assert-Same (Get-Last).status 'deferred' 'prompt guard flip deferred'
+Assert-NoRestart 'guard flip'
+Reset-Mocks -PromptResult 'Timeout'
+$script:RnMaintenanceGuard={ @{Safe=$true;Reason='clear'} }
+$script:RnMaintenanceCountdown={ param($Text,$Seconds) $script:Log.Add('controlledCountdown'); $script:RnMaintenanceGuard={ @{Safe=$false;Reason='servicingBusy'} }; 'Timeout' }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'guard flips during controlled countdown'
+Assert-Same (Get-Last).status 'deferred' 'countdown guard flip deferred'
+Assert-NoRestart 'countdown flip'
+if($script:Log -match '^countdown:') { Fail 'opt-in called autonomous restart dialog' }
+
+& {
+ $oldData=$env:ProgramData; $env:ProgramData=[IO.Path]::GetTempPath()
+ try {
+  $script:guardSetup=[pscustomobject]@{SystemSetupInProgress=0;OOBEInProgress=0;SetupPhase=0;SetupType=0;RestartSetup=0}
+  $script:guardProcesses=@(); $script:guardMarker=$false; $script:guardProbeFails=$false
+  function Get-CimInstance { param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) if($script:guardProbeFails) { throw 'probe failed' }; Assert-Same $OperationTimeoutSec 5 'guard CIM timeout'; $script:guardProcesses }
+  function Get-ItemProperty { param($LiteralPath,$ErrorAction) $script:guardSetup }
+  function Test-Path { param($LiteralPath,$ErrorAction) $script:guardMarker }
+  Assert-Same (Get-RnMaintenanceGuard).Safe $true 'clear guard evidence'
+  foreach($flag in @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')) {
+   $script:guardSetup.$flag=1
+   Assert-Same (Get-RnMaintenanceGuard).Safe $false "active $flag deferred"
+   $script:guardSetup.$flag=0
+  }
+  $script:guardMarker=$true
+  Assert-Same (Get-RnMaintenanceGuard).Safe $false 'native marker defers'
+  $script:guardMarker=$false; $script:guardProcesses=@([pscustomobject]@{Name='TiWorker.exe'})
+  Assert-Same (Get-RnMaintenanceGuard).Safe $false 'active servicing process defers'
+  $script:guardProcesses=@(); $script:guardProbeFails=$true
+  Assert-Same (Get-RnMaintenanceGuard).Safe $false 'CIM failure defers'
+ } finally { $env:ProgramData=$oldData }
+}
+Reset-Mocks -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ @{Safe=$true} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'clear no-user maintenance reboot'
+Assert-Same (@($script:Log | Where-Object { $_ -eq 'restart' }).Count) 1 'exactly one guarded restart'
+Reset-Mocks -Sessions @() -Users @()
+$script:guardCalls=0
+$script:RnMaintenanceGuard={ $script:guardCalls++; @{Safe=($script:guardCalls -eq 1)} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'no-user guard flip defers'
+Assert-Same (Get-Last).status 'deferred' 'no-user final guard result'
+Assert-NoRestart 'no-user guard flip'
+
+Reset-Mocks -PromptResult 'Timeout'
+$script:RnMaintenanceGuard={ @{Safe=$true} }
+$script:RnMaintenanceCountdown={ param($Text,$Seconds) $null }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'early missing countdown UI safely waited'
+if($script:Log -notcontains 'sleep:900') { Fail 'early missing UI collapsed maintenance countdown' }
+
 Write-Output 'restart-notice tests passed'
 exit 0

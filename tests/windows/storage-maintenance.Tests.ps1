@@ -3,6 +3,41 @@ $env:RELIAN_DEPLOY_TEST = '1'
 . (Join-Path $PSScriptRoot '../../windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1')
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 
+# Strict historical inference is conjunctive; every missing or contradictory proof vetoes.
+$proof=@{RegistryImage='IMAGE_STATE_COMPLETE'; IniImage='IMAGE_STATE_COMPLETE'; Setup=@{SystemSetupInProgress=0;OOBEInProgress=0;SetupPhase=0;SetupType=0;RestartSetup=0}; Values=@{SetupHostResult=0;DownlevelBuildNumber=26200;InstallScenario=1;DownlevelProductName='Windows'}; State=@{status='running';isoBuild=28000;time='2026-10-01T00:00:00Z'}; CurrentBuild=28000; PriorBuilds=@(26200); InstalledUtc=[datetime]'2026-10-02Z'; BootUtc=[datetime]'2026-10-03Z'}
+Assert (Test-SmHistoricalUpgrade @proof) 'Complete bounded conjunction permits historical inference'
+foreach($key in @('RegistryImage','IniImage','Setup','Values','State','PriorBuilds')) {
+ $bad=$proof.Clone(); $bad[$key]=$null; Assert (-not (Test-SmHistoricalUpgrade @bad)) "Missing $key vetoes"
+}
+foreach($key in @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')) {
+ $bad=$proof.Clone(); $bad.Setup=$proof.Setup.Clone(); $bad.Setup.Remove($key); Assert (-not (Test-SmHistoricalUpgrade @bad)) "Missing $key vetoes"
+ $bad.Setup[$key]=1; Assert (-not (Test-SmHistoricalUpgrade @bad)) "Active $key vetoes"
+}
+foreach($change in @(@{SetupHostResult=1},@{SetupHostError=1},@{SetupPhase=1},@{Unknown=0},@{DownlevelBuildNumber=28000},@{DownlevelBuildNumber='invalid'})) {
+ $bad=$proof.Clone(); $bad.Values=$proof.Values.Clone(); foreach($k in $change.Keys){$bad.Values[$k]=$change[$k]}; Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Conflicting MoSetup vetoes'
+}
+foreach($target in @(27999,28001)) { $bad=$proof.Clone();$bad.State=$proof.State.Clone();$bad.State.isoBuild=$target; Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Exact target required' }
+foreach($stamp in @('bad','2026-10-03Z','2099-01-01Z')) { $bad=$proof.Clone();$bad.State=$proof.State.Clone();$bad.State.time=$stamp; Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Invalid chronology vetoes' }
+
+
+foreach($key in @('RegistryImage','IniImage')) { $bad=$proof.Clone();$bad[$key]='IMAGE_STATE_UNDEPLOYABLE';Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Noncomplete image vetoes' }
+foreach($key in @('SetupHostResult','DownlevelBuildNumber')) { $bad=$proof.Clone();$bad.Values=$proof.Values.Clone();$bad.Values.Remove($key);Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Required MoSetup proof missing vetoes' }
+$bad=$proof.Clone();$bad.PriorBuilds=@(28000);Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Same build source vetoes'
+$bad=$proof.Clone();$bad.BootUtc=[datetime]'2099-01-01Z';Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Future boot vetoes'
+$bad=$proof.Clone();$bad.Values=$proof.Values.Clone();$bad.Values.SetupHostError=0;$bad.Values.SetupPhase=0;Assert (Test-SmHistoricalUpgrade @bad) 'Optional error and phase numeric zero allowed'
+
+
+# Confirmed marker absence uses dated matching Source OS provenance, never a broken marker.
+$absentProof=$proof.Clone();$absentProof.State=$null;$absentProof.MarkerAbsent=$true;$absentProof.SourceEntries=@([pscustomobject]@{CurrentBuild=26200;InstallDate=1759276800})
+Assert (Test-SmHistoricalUpgrade @absentProof) 'Confirmed absent marker with matching dated Source OS permits inference'
+foreach($key in @('RegistryImage','IniImage','Setup','Values','PriorBuilds')) { $bad=$absentProof.Clone();$bad[$key]=$null;Assert (-not (Test-SmHistoricalUpgrade @bad)) "Absent-marker missing $key vetoes" }
+$bad=$absentProof.Clone();$bad.Values=$absentProof.Values.Clone();$bad.Values.Unknown=0;Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Absent-marker unknown metadata vetoes'
+
+foreach($stamp in @($null,'bad',0,1790899200,4102444800,[double]::NaN)) { $bad=$absentProof.Clone();$bad.SourceEntries=@([pscustomobject]@{CurrentBuild=26200;InstallDate=$stamp});Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Missing malformed equal or future source time vetoes' }
+$bad=$absentProof.Clone();$bad.State=@{status='broken'};Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Absence proof cannot accompany present marker'
+$bad=$absentProof.Clone();$bad.SourceEntries=@([pscustomobject]@{CurrentBuild=28000;InstallDate=1759276800});Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Same build source cannot prove historical upgrade'
+$bad=$absentProof.Clone();$bad.SourceEntries=@();Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Absent source proof vetoes'
+
 foreach($helper in @('Grant-SmThemeReadAccess','Install-SmDialogTheme')) {
  $mandatory=@((Get-Command $helper).Parameters.Values | ForEach-Object { $_.Attributes } | Where-Object { $_ -is [Management.Automation.ParameterAttribute] -and $_.Mandatory })
  Assert ($mandatory.Count -eq 0) 'Theme helpers cannot prompt for missing arguments'
@@ -354,3 +389,33 @@ foreach($state in @(@{status='staged';isoBuild=1;time='2026-11-04T00:00:00Z'},@{
 
 ${function:Test-SmProfilePath}=$realProfilePath
 Remove-Item -LiteralPath $profileFixtureRoot -Recurse -Force
+
+# Runtime guards retain independent vetoes while historical inference is re-evaluated.
+& {
+ $env:SystemDrive='/'; $env:SystemRoot='/'; $env:ProgramData='/tmp'
+ $script:guardCase='clear';$script:guardStateAbsent=$false
+ function Get-CimInstance { param($ClassName) if($script:guardCase -eq 'probeError'){throw 'probe failed'}; if($ClassName -eq 'Win32_OperatingSystem'){return [pscustomobject]@{LastBootUpTime=[datetime]'2026-10-03Z'}}; if($script:guardCase -eq 'process'){[pscustomobject]@{Name='setuphost.exe'}} }
+ function Test-Path { param($LiteralPath) if($LiteralPath -match 'state.json'){if($script:guardCase -eq 'stateProbeError'){throw 'state probe failed'};if($script:guardCase -eq 'stateProbeUnknown'){return $null};return (-not $script:guardStateAbsent)};if($LiteralPath -match 'MoSetup'){return $true}; if($script:guardCase -eq 'native' -and $LiteralPath -match 'native-active'){return $true}; if($script:guardCase -eq 'staging' -and $LiteralPath -match '~BT'){return $true}; return $false }
+ function Get-ItemProperty { param($Path,$LiteralPath)
+  if(-not $Path){$Path=$LiteralPath}
+  if($Path -match 'Session Manager'){return [pscustomobject]@{PendingFileRenameOperations=$(if($script:guardCase -eq 'rename'){@('pending')})}}
+  if($Path -match 'CurrentVersion\\Setup\\State'){return [pscustomobject]@{ImageState='IMAGE_STATE_COMPLETE'}}
+  if($Path -match 'Windows NT'){return [pscustomobject]@{CurrentBuild='28000';InstallDate=1790899200}}
+  if($Path -eq 'prior'){if($script:guardCase -eq 'sourceReadError'){throw 'source read failed'};return [pscustomobject]@{CurrentBuild='26200';InstallDate=1759276800}}
+  [pscustomobject]@{SystemSetupInProgress=0;OOBEInProgress=0;SetupPhase=0;SetupType=0;RestartSetup=0}
+ }
+ function Get-ChildItem { [pscustomobject]@{PSChildName='Source OS';PSPath='prior'} }
+ function Get-Item { param($LiteralPath)
+  if($LiteralPath -match '~BT'){return [pscustomobject]@{PSIsContainer=$true;Attributes=0;CreationTimeUtc=[datetime]'2026-10-01Z'}}
+  $k=[pscustomobject]@{}; $k | Add-Member ScriptMethod GetValueNames { @('SetupHostResult','DownlevelBuildNumber','InstallScenario') }; $k | Add-Member ScriptMethod GetValueKind { param($n) 'DWord' }; $k | Add-Member ScriptMethod GetValue { param($n) switch($n){SetupHostResult{0};DownlevelBuildNumber{26200};InstallScenario{1}} }; $k
+ }
+ function Read-SmBoundedText { param($Path,$MaxBytes) if($script:guardCase -eq 'fileError'){throw 'unreadable'}; if($script:guardCase -eq 'badMarker' -and $Path -match 'state.json'){return '{broken'};if($Path -match 'State.ini'){return '[State]`nImageState="IMAGE_STATE_COMPLETE"'.Replace('`n',"`n")}; return '{"status":"running","isoBuild":28000,"time":"2026-10-01T00:00:00Z"}' }
+ $g=Get-SmGuards; Assert ($g.Safe -and $g.HistoricalUpgradeInference) 'Runtime conjunction infers residue'
+ $script:guardCase='rename';$g=Get-SmGuards; Assert (-not $g.Safe -and $g.HistoricalUpgradeInference) 'Pending rename always vetoes mutations'
+ foreach($case in @('probeError','fileError','process','native','staging')) { $script:guardCase=$case;$g=Get-SmGuards; Assert (-not $g.Safe -and -not $g.HistoricalUpgradeInference) "Runtime $case vetoes inference" }
+ $script:guardCase='badMarker';$g=Get-SmGuards;Assert (-not $g.Safe -and -not $g.HistoricalUpgradeInference) 'Present malformed marker never becomes absence'
+ $script:guardStateAbsent=$true;$script:guardCase='clear';$g=Get-SmGuards;Assert ($g.Safe -and $g.HistoricalUpgradeInference -and $g.HistoricalUpgradeEvidence.MarkerAbsent) 'Runtime confirmed absence with dated source infers historical residue'
+ $script:guardCase='rename';$g=Get-SmGuards;Assert (-not $g.Safe -and $g.HistoricalUpgradeInference) 'Absent marker still retains pending rename veto'
+ foreach($case in @('probeError','fileError','process','native','staging','sourceReadError','stateProbeError','stateProbeUnknown')) { $script:guardCase=$case;$g=Get-SmGuards;Assert (-not $g.Safe -and -not $g.HistoricalUpgradeInference) "Absent-marker runtime $case vetoes" }
+
+}

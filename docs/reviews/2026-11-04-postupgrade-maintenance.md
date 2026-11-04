@@ -1,0 +1,11 @@
+# Post-upgrade maintenance qualification
+
+The initial maintenance packages merged in PR90. PR92 addresses issues found while qualifying two upgraded laptops: bounded stored-report retrieval, exact guard diagnostics, strict historical upgrade-residue inference, an opt-in guarded restart flow, and terminal PSADT session closure after evidence/stdout.
+
+Independent gpt-6.1-sol agents implemented and reviewed the changes. Focused tests cover unknown evidence, source/install/boot chronology and UTC conversion, confirmed absence versus unreadable markers, active/staged/native/reboot vetoes, pending rename pairs, all reboot paths, parent-owned countdown timing, bounded section transport, compact summaries, ancestor replacement permissions, and actual child exits during toolkit closure. Windows CI additionally executes native handle, ACL, evidence-sharing and session-finalization regressions.
+
+The stored-report reader was piloted successfully and the section hash verified. Updated diagnostics confirmed completed Windows images, pending printer-file renames and intermittent installer/servicing processes. Report pilots performed zero cleanup or repair actions. Both conditional restart attempts deferred at fresh safety checks; no restart occurred. The maintainer confirmed other installations are running and requested that they finish, so further live polling and dispatch stopped with empty job queues. Private target identities, full paths, activity IDs and raw evidence remain in ignored local memory.
+
+No temp cleanup, profile deletion, online update search, service/cache/image repair or post-restart qualification is claimed complete. The next live step is fresh diagnostics after the other installations finish, followed by authorized guarded reboot and report/candidate review. No automatic retry is scheduled. Historical metadata is never deleted to force a guard clear.
+
+A package emitted its completed report about ten minutes before the RMM job completed. Pinned PSADT4.1.8 source confirms that closing only the progress dialog does not close the toolkit client/server session; the packages now perform terminal session closure after preserving evidence. This is a lifecycle correction, not proof of the observed delay's precise cause.

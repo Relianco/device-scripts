@@ -1,18 +1,16 @@
 # Status
 
-Branch: `lane/maintenance`. Reviewed and Windows-tested HEAD: `a685c68449982812005e7c96c1b15334e8a9a521`; this documentation closeout follows it. Latest main `6ecf780` is integrated.
+Branch: `lane/postupgrade-qualification`. Base main: `209c727` (maintenance PR 90 merged). Last reviewed implementation HEAD: `ba563dd9e43784b48ef942277bc0acb729a8afb5`. This documentation closeout follows it.
 
-Pull request: [90](https://github.com/Relianco/device-scripts/pull/90).
-Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md).
-Runbook: [Maintenance](maintenance.md).
-Evidence and limits: [Review and pilot record](reviews/2026-11-04-maintenance.md).
+Pull request: [92](https://github.com/Relianco/device-scripts/pull/92).
+Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md). Runbook: [Maintenance](maintenance.md).
 
-- [x] Storage package, configurable 60-day profile aging and independent reviews.
-- [x] Update maintenance package and independent reviews.
-- [x] Whole-branch review, qualification fixes, focused/full PowerShell checks and secret scanning.
-- [x] Both packages piloted in Report mode on the two authorized Windows devices with PSADT notifications; active Setup correctly withheld changes.
-- [ ] After USB upgrades/restarts finish, run full reports and review profile candidates. The Windows CI gate now executes harmless native-process/NTFS regressions; qualify actual servicing separately before relying on it. Cleanup/repair/deletion paths are not yet live-qualified.
+- Bounded stored-report reader (including compact profile/action indexes) and exact post-upgrade guard diagnostics implemented and independently reviewed. Reader live qualification passed with verified section hash.
+- Fresh target reports confirm completed images but retain pending file-renames and intermittent servicing vetoes; no cleanup or repair has been performed during those holds.
+- Maintainer authorized conditional PSADT reboot prompts. Opt-in MaintenanceRestart adds rename detection and pre-prompt/pre-shutdown servicing checks; defaults unchanged.
+- Historical residue handling now requires corroborating image/build/time/source evidence, with distinct confirmed-absent and existing-marker cases. No metadata is removed; unknown, active, staged and reboot states remain protected. Focused tests and independent reviews pass.
+- Toolkit sessions now close only after durable reports and stdout summaries; source review and real child-exit tests cover terminal closure.
+- Both conditional reboot attempts deferred at safety checks; no restart occurred. The maintainer confirmed other installations are running and requested that they finish. Live polling and dispatch are now held; both job queues were empty at handoff.
+- Next: after those installations finish, collect fresh diagnostics, confirm safe authorized reboot outcomes, rerun reports, review profile candidates and qualify cleanup/update recovery only with clear guards. No automatic retry is scheduled.
 
-Next task: post-upgrade qualification above. No automatic follow-up job or reboot is scheduled. Existing installer P1 work remains separate and was not modified.
-
-No uncommitted implementation files remain in this lane after this closeout commit. Private device evidence and dispatch parameters are retained in machine-local ignored memory. The maintainer authorized merge after subagent LGTM and green CI. Two merge-triage reviewers found no remaining code blockers; merge only after all checks, including the new Windows regression job, pass. Post-upgrade device qualification remains a separate rollout prerequisite.
+Private identities, activities and evidence remain in ignored machine memory. Working implementation is committed; any remaining local files are review artifacts only.

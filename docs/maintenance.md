@@ -85,3 +85,23 @@ A retained marker requires administrator reconciliation; packages do not clear o
 4. Run Report again. Active Setup, staged upgrade, pending reboot or unknown state must still defer work. Review that fresh report before explicitly requesting Repair or Cleanup.
 
 This is a deliberate recovery boundary: a timed-out operation is not proof of completion or success. Automatic PID-only cleanup would discard evidence while servicing may still be active.
+
+## Retrieve stored evidence
+
+`windows/packages/maintenance-evidence/Invoke-MaintenanceEvidence.ps1` runs through the same pinned runner to read an existing report without starting maintenance. Set `Package` to `Storage` or `Update`, and `ReportId` to the exact Storage filename without `.json` or Update run-directory identifier from the original ReportPath. It accepts only those owned report locations; it does not accept arbitrary paths. The reader checks ownership, modification rights and reparse ancestors, refuses concurrent writers and caps report size at 16 MiB.
+
+Start with `Section='Index'`, then choose `Guards`, `Snapshot`, `Policy`, `ProfileIndex`, `Profiles`, `Scan`, `ActionSummary`, `Actions`, `Errors`, `Evidence` or `Omissions`. `Profiles` uses a zero-based `Ordinal`; `Page` defaults to zero. Each bounded JSON response contains a base64 UTF-8 JSON byte page, page count, offset, section length/hash and report length/hash. Concatenate decoded bytes in page order and verify the section SHA256 and length before parsing; all pages must refer to the same report hash. Do not review deletion candidates from aggregate counts alone.
+
+The reader performs no new scan, notification, repair or deletion. Maintenance operations retain their PSADT notifications. Missing, changed, untrusted, oversized or invalid evidence fails closed; a failed fetch does not authorize a cleanup.
+
+## Post-upgrade evidence and restarts
+
+`Invoke-DiagnoseFeatureUpgrade.ps1` accepts `Section='Maintenance'` for bounded read-only evidence: completed-image state, current and source OS versions/install dates, exact Setup and numeric MoSetup inputs, pending-reboot indicators, sanitized rename examples, servicing processes and native-marker presence. Unknown or failed probes remain explicit; this diagnostic does not change a guard or authorize a repair.
+
+Historical upgrade-state classification is an inference from corroborating evidence, not a claim that a registry value alone proves success. Maintenance preserves active-process, native-marker, staging and reboot vetoes. It requires complete image state and coherent build/install/boot evidence before treating a previous upgrade's metadata as historical; unknown or malformed evidence still defers work. No marker or MoSetup metadata is deleted.
+
+After a maintainer authorizes a restart, the existing restart-notice package accepts optional `MaintenanceRestart='true'`. This mode recognizes pending file-rename pairs and refuses a prompt or reboot when servicing is active or unknown. It preserves the usual snooze and countdown, but the parent controls the countdown and rechecks safety immediately before shutdown. A late safety failure returns `deferred`; no automatic retry is scheduled. The default restart-notice behavior is unchanged. Do not dispatch other maintenance while a reboot job is running.
+
+`ProfileIndex` lists stored profile-row ordinals, decisions and eligibility so full evidence can be fetched for the relevant rows. `ActionSummary` groups stored action outcomes and counts, provides known logical-byte coverage and bounded error examples, and distinguishes missing evidence. Logical bytes include withheld actions and are never a reclaimed-space claim. These summaries describe stored rows; assess the parent report guards, status and omissions before treating them as complete device coverage.
+
+Both maintenance packages persist final evidence and emit their summary before terminal `Close-ADTSession`, which closes the toolkit client/server lifetime. The chosen success/deferred/failure exit code is retained. A returning session-close exception yields an operator error and marks durable evidence failed; do not accept an earlier summary over a later failure or failed runner outcome.

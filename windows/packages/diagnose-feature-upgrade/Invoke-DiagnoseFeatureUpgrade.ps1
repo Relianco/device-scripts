@@ -2,7 +2,7 @@
 .SYNOPSIS
     Read-only evidence for a failed or running Windows feature upgrade.
 .DESCRIPTION
-    Section is Summary (default), Rollback, Servicing, Setup or Boot. Prints bounded JSON to stdout. Reads fixed setup/rollback/servicing logs,
+    Section is Summary (default), Rollback, Servicing, Setup, Boot or Maintenance. Prints bounded JSON to stdout. Reads fixed setup/rollback/servicing logs,
     allowlisted upgrade state and registry values, current setup process names,
     OS, boot, disk and hardware. No custom-field writes, WU scans, installers,
     service changes, state deletion, or restarts. Safe to inspect a running worker.
@@ -12,7 +12,7 @@
     Windows PowerShell 5.1+, run as SYSTEM through the Relian deploy runner.
 #>
 [CmdletBinding()]
-param([string]$DeploymentType, [string]$Action, [string]$PinVersion, [ValidateSet('Summary','Rollback','Servicing','Setup','Boot')][string]$Section = 'Summary')
+param([string]$DeploymentType, [string]$Action, [string]$PinVersion, [ValidateSet('Summary','Rollback','Servicing','Setup','Boot','Maintenance')][string]$Section = 'Summary')
 $ProgressPreference = 'SilentlyContinue'
 
 function Protect-DiagnosticText {
@@ -237,10 +237,139 @@ function Read-DiagnosticBitLocker {
     } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
 }
 
+# Numeric-only registry values: unknown names are listed, their values are never read.
+function Read-DiagnosticNumericRegistry {
+    param([string]$Path,[string[]]$Names,[switch]$ListUnknown)
+    try {
+        $key=Get-Item -LiteralPath $Path -ErrorAction Stop
+        $all=@($key.GetValueNames())
+        $values=[ordered]@{}
+        foreach($name in $Names) {
+            if($all -contains $name) {
+                $value=$key.GetValue($name)
+                if($value -is [ValueType] -and [string]$value -match '^-?\d{1,19}$') {
+                    try { $values[$name]=[long]$value } catch { $values[$name]='invalidNumeric' }
+                } elseif($value -is [string] -and $value -match '^\d{1,12}$') { $values[$name]=[long]$value }
+                else { $values[$name]='nonNumericOmitted' }
+            }
+        }
+        $result=[ordered]@{status='read';values=$values}
+        if($ListUnknown) {
+            $unknown=@($all | Where-Object { $_ -notin $Names })
+            $result.unknownNames=@($unknown | Select-Object -First 12 | ForEach-Object { Protect-DiagnosticText ([string]$_) -Max 64 })
+            $result.unknownCount=$unknown.Count
+        }
+        return $result
+    } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
+}
+
+# Windows Setup completion evidence from fixed locations; unknown states stay opaque.
+function Read-DiagnosticImageState {
+    param([switch]$Ini)
+    $allowed=@('IMAGE_STATE_COMPLETE','IMAGE_STATE_UNDEPLOYABLE','IMAGE_STATE_GENERALIZE_RESEAL_TO_OOBE','IMAGE_STATE_GENERALIZE_RESEAL_TO_AUDIT','IMAGE_STATE_SPECIALIZE_RESEAL_TO_OOBE','IMAGE_STATE_SPECIALIZE_RESEAL_TO_AUDIT')
+    try {
+        if($Ini) {
+            $read=Read-DiagnosticBytes (Join-Path $env:SystemRoot 'Setup\State\State.ini') -MaxBytes 4096 -FromStart
+            if($read.status -ne 'read') { return $read }
+            if($read.truncated) { return @{status='oversize'} }
+            $match=[regex]::Match($read.text,'(?im)^\s*ImageState\s*=\s*([^\r\n]+)')
+            if(-not $match.Success) { return @{status='missingValue'} }
+            $state=$match.Groups[1].Value.Trim()
+            if($state.Length -ge 2 -and $state[0] -eq [char]34 -and $state[$state.Length-1] -eq [char]34) { $state=$state.Substring(1,$state.Length-2) }
+        } else {
+            $path='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State'
+            if(-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return @{status='missing'} }
+            $value=Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+            if(-not $value.PSObject.Properties['ImageState']) { return @{status='missingValue'} }
+            $state=[string]$value.ImageState
+        }
+        if($state -notin $allowed) { return @{status='unknownValueOmitted'} }
+        return @{status='read';value=$state}
+    } catch { return @{status='unavailable';error=$_.Exception.GetType().Name} }
+}
+
+function Read-DiagnosticMaintenance {
+    param($Clock)
+    $r=[ordered]@{logs=@();notes=@('Read-only guard inputs; this report does not establish that servicing is safe or change maintenance guards.')}
+    $r.imageState=@{registry=(Read-DiagnosticImageState);ini=(Read-DiagnosticImageState -Ini)}
+    $r.os=Read-DiagnosticNumericRegistry 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' @('CurrentBuild','UBR','InstallDate')
+    $r.setup=Read-DiagnosticNumericRegistry 'HKLM:\SYSTEM\Setup' @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')
+    $r.moSetup=Read-DiagnosticNumericRegistry 'HKLM:\SYSTEM\Setup\MoSetup\Volatile' @('SetupHostResult','SetupHostError','SetupPhase','SetupSubPhase','SetupProgress','BoxResult','InstallScenario','DownlevelBuildNumber') -ListUnknown
+    $r.sourceOS=@()
+    try {
+        $keys=@(Get-ChildItem -LiteralPath 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | Select-Object -First 9)
+        $r.sourceOSTruncated=$keys.Count -gt 8
+        foreach($key in @($keys | Select-Object -First 8)) {
+            if($Clock.Elapsed.TotalSeconds -gt 40) { $r.sourceOS+=@{status='timeBudget'}; break }
+            $r.sourceOS+=Read-DiagnosticNumericRegistry $key.PSPath @('CurrentBuild','UBR','InstallDate')
+        }
+    } catch { $r.sourceOS=@(@{status='unavailable';error=$_.Exception.GetType().Name}) }
+    $r.pendingReboot=[ordered]@{}
+    foreach($entry in @(
+        @('cbs','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'),
+        @('windowsUpdate','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'))) {
+        try { $r.pendingReboot[$entry[0]]=Test-Path -LiteralPath $entry[1] -ErrorAction Stop } catch { $r.pendingReboot[$entry[0]]='unknown' }
+    }
+    try {
+        $session=Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
+        $renames=@(); if($session.PSObject.Properties['PendingFileRenameOperations']) { $renames=@($session.PendingFileRenameOperations | Where-Object { $null -ne $_ }) }
+        $r.pendingReboot.renameEntryCount=$renames.Count
+        $r.pendingReboot.renamePaths=@($renames | Select-Object -First 4 | ForEach-Object { Protect-DiagnosticText ([string]$_) -Max 160 })
+        $r.pendingReboot.renamePathsTruncated=$renames.Count -gt 4
+    } catch { $r.pendingReboot.renames='unknown' }
+    $r.staging=@()
+    foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) {
+        try {
+            $path=Join-Path $env:SystemDrive $name
+            if(Test-Path -LiteralPath $path -ErrorAction Stop) {
+                $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                $r.staging+=@{name=$name;exists=$true;createdUtc=$item.CreationTimeUtc.ToString('o');ordinaryDirectory=($item.PSIsContainer -and (($item.Attributes -band 5120) -eq 0))}
+            } else { $r.staging+=@{name=$name;exists=$false} }
+        } catch { $r.staging+=@{name=$name;status='unavailable'} }
+    }
+    $r.nativeMarkers=[ordered]@{}
+    foreach($relative in @('RelianMaintenance\native-active.json','Relian\Maintenance\native-active.json')) {
+        try { $r.nativeMarkers[$relative]=Test-Path -LiteralPath (Join-Path $env:ProgramData $relative) -ErrorAction Stop } catch { $r.nativeMarkers[$relative]='unknown' }
+    }
+    # Existing bounded, allowlisted state reader excludes command lines and download URLs.
+    $r.state=Read-DiagnosticState (Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json')
+    foreach($field in @('message','setupErr')) { $r.state.Remove($field) }
+    foreach($probe in @('boot','processes')) {
+        if($Clock.Elapsed.TotalSeconds -gt 40) { $r[$probe]=@{status='timeBudget'}; continue }
+        try {
+            if($probe -eq 'boot') { $r.boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o') }
+            else {
+                $rows=@(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='sfc.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe' OR Name='msiexec.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 21)
+                $r.processesTruncated=$rows.Count -gt 20
+                $r.processes=@($rows | Select-Object -First 20 | ForEach-Object {
+                    $row=[ordered]@{name=Protect-DiagnosticText ([string]$_.Name) -Max 32;pid=[long]$_.ProcessId;createdUtc=$null;cpuSeconds=$null;executablePath=$null;parentProcessId=$null;sessionId=$null}
+                    # Existing CIM row only: never read a command line or query a parent.
+                    try { if($_.PSObject.Properties['ExecutablePath'] -and $_.ExecutablePath) { $row.executablePath=Protect-DiagnosticText ([string]$_.ExecutablePath) -Max 160 } } catch { }
+                    foreach($field in @('ParentProcessId','SessionId')) {
+                        try {
+                            if($_.PSObject.Properties[$field] -and $null -ne $_.$field -and [string]$_.$field -match '^\d{1,10}$' -and [long]$_.$field -le [uint32]::MaxValue) { $row[$field]=[long]$_.$field }
+                        } catch { }
+                    }
+                    if($_.CreationDate) { $row.createdUtc=([datetime]$_.CreationDate).ToUniversalTime().ToString('o') }
+                    if($_.PSObject.Properties['KernelModeTime'] -and $_.PSObject.Properties['UserModeTime']) { $row.cpuSeconds=[Math]::Round(([double]$_.KernelModeTime+[double]$_.UserModeTime)/10000000,2) }
+                    $row
+                })
+            }
+        } catch { $r[$probe]=@{status='unavailable';error=$_.Exception.GetType().Name} }
+    }
+    return $r
+}
+
 function Invoke-FeatureUpgradeDiagnostic {
-    param([ValidateSet('Summary','Rollback','Servicing','Setup','Boot')][string]$Section = 'Summary')
+    param([ValidateSet('Summary','Rollback','Servicing','Setup','Boot','Maintenance')][string]$Section = 'Summary')
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $report = [ordered]@{ version='5'; timestamp=[datetime]::UtcNow.ToString('o'); status='collected'; section=$Section }
+    if($Section -eq 'Maintenance') {
+        $data=Read-DiagnosticMaintenance $clock
+        foreach($key in $data.Keys) { $report[$key]=$data[$key] }
+        $report.elapsedSeconds=[Math]::Round($clock.Elapsed.TotalSeconds,1)
+        return ConvertTo-BoundedDiagnosticJson $report
+    }
     $win = $env:SystemRoot
     $drive = $env:SystemDrive
     $fup = Join-Path $env:ProgramData 'Relian\FeatureUpgrade'

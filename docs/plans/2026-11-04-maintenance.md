@@ -6,7 +6,7 @@
 - Windows PowerShell 5.1 compatible standalone Invoke-* packages, launched by existing hash-pinned Invoke-RelianRunner with base64 JSON PackageArguments. No runner edits, no Ninja API calls or credential access in packages.
 - Plain offline pwsh tests: failing test first; RELIAN_DEPLOY_TEST=1 prevents runtime execution. Small mockable OS boundaries; no mandatory parameters.
 - Existing PSADT 4.1.8 branded session and user-session notification patterns. Progress messages explain actual steps. Diagnostics still work without signed-in user. UI failure is reported, not confused with repair success.
-- Never reboot or start an OS upgrade. Detect active Setup, staged upgrade, servicing and pending reboot conservatively. Unknown guard state blocks mutations. During USB upgrade only bounded low-impact read-only evidence; no cleanup, servicing, cache resets, profile deletion, or scan competing with Setup.
+- Storage and update maintenance never reboot or start an OS upgrade. A separate restart-notice invocation requires explicit maintainer authorization; its opt-in MaintenanceRestart mode rechecks servicing before prompts and shutdown. Detect active Setup, staged upgrade, servicing and pending reboot conservatively. Unknown guard state blocks mutations. During USB upgrade only bounded low-impact read-only evidence; no cleanup, servicing, cache resets, profile deletion, or scan competing with Setup.
 - Preserve Windows.old, $WINDOWS.~BT/~WS, rollback/recovery, installer cache, user documents/downloads, system/component files. No ResetBase. No blanket policy deletion or automatic removal of management controls/safeguards.
 - Machine-wide maintenance mutex shared across packages, recheck guards before destructive steps, bounded work and explicit partial/incomplete results. Structured JSON report and stdout summary. Never claim all updates fixed merely because a command returned success.
 - Changes join main via PR. Workers own only their assigned package/release/test files and do not edit docs/STATUS.md or plans.
@@ -35,3 +35,11 @@ Independent task reviews and whole-branch review. Run complete PowerShell suite 
 - [x] Task 2 implemented, reviewed and Report-piloted with active-Setup deferral.
 - [x] Task 3 code review, checks, runbook and draft PR complete.
 - [ ] Post-upgrade full-triage/profile-candidate and Windows servicing qualification remains; no destructive pilot was attempted during Setup.
+
+## Post-upgrade continuation
+
+- [x] Read-only guard diagnostics and bounded stored-report transport reviewed, tested and piloted.
+- [x] Conservative historical-residue inference reviewed with separate existing-marker and confirmed-absent cases; unknown and active evidence stays blocked.
+- [x] Opt-in guarded restart prompts implemented and independently reviewed; maintainer approved conditional use for the pilot.
+- [ ] Confirm actual restart outcomes and fresh clear guards before cleanup or update-search qualification.
+- [ ] Review profile evidence and cleanup action results; qualify optional removals only under the agreed retention policy.

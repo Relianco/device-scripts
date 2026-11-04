@@ -47,6 +47,48 @@ function Get-UmUpgradeDirectoryState {
  foreach($created in $DirectoryCreatedUtc) { if(-not $created -or [datetime]$created -gt $InstalledUtc) { return 'unknownStaging' } }
  'completedResidual'
 }
+function Test-UmHistoricalUpgrade {
+ param($RegistryImage,$IniImage,$Setup,$Values,$State,[int]$CurrentBuild,$PriorBuilds,[datetime]$InstalledUtc,[datetime]$BootUtc,[bool]$MarkerAbsent=$false,$SourceEntries)
+ try {
+  $InstalledUtc=$InstalledUtc.ToUniversalTime(); $BootUtc=$BootUtc.ToUniversalTime()
+  if($RegistryImage -cne 'IMAGE_STATE_COMPLETE' -or $IniImage -cne 'IMAGE_STATE_COMPLETE') { return $false }
+  foreach($n in @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')) { if($Setup.$n -isnot [ValueType] -or [string]$Setup.$n -cne '0') { return $false } }
+  if($MarkerAbsent) {
+   if($null -ne $State -or [string]$CurrentBuild -notmatch '^\d{5,6}$' -or $CurrentBuild -lt 10240 -or $InstalledUtc.Year -lt 2000 -or $InstalledUtc -gt $BootUtc -or $BootUtc -gt [datetime]::UtcNow) { return $false }
+  } else {
+   if($State.status -cne 'running' -or [string]$State.isoBuild -notmatch '^\d{5,6}$' -or [int]$State.isoBuild -ne $CurrentBuild) { return $false }
+   $stamp=[datetime]::Parse([string]$State.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+   if($stamp.Year -lt 2000 -or $stamp -ge $InstalledUtc -or $InstalledUtc -gt $BootUtc -or $BootUtc -gt [datetime]::UtcNow) { return $false }
+  }
+  if(-not $Values.ContainsKey('SetupHostResult') -or -not $Values.ContainsKey('DownlevelBuildNumber')) { return $false }
+  foreach($n in $Values.Keys) {
+   switch -Exact ($n) {
+    {$_ -in @('SetupHostResult','SetupHostError','SetupPhase')} { if($Values[$n] -isnot [ValueType] -or [string]$Values[$n] -cne '0') { return $false } }
+    'DownlevelBuildNumber' { if([string]$Values[$n] -notmatch '^\d{5,6}$') { return $false } }
+    'InstallScenario' { if($Values[$n] -isnot [ValueType] -or [string]$Values[$n] -notmatch '^\d{1,10}$') { return $false } }
+    'DownlevelProductName' { if($Values[$n] -isnot [string] -or $Values[$n].Length -gt 256) { return $false } }
+    default { return $false }
+   }
+  }
+  if(-not @($PriorBuilds).Count) { return $false }
+  foreach($p in $PriorBuilds) { if([string]$p -notmatch '^\d{5,6}$' -or [int]$p -lt 10240 -or [int]$p -ge $CurrentBuild) { return $false } }
+  if($MarkerAbsent) {
+   $matching=@($SourceEntries | Where-Object { [string]$_.CurrentBuild -eq [string]$Values.DownlevelBuildNumber })
+   if(-not $matching.Count) { return $false }
+   foreach($entry in $matching) {
+    if($entry.InstallDate -isnot [ValueType] -or [string]$entry.InstallDate -notmatch '^\d{1,12}$') { return $false }
+    $sourceInstalled=([datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).AddSeconds([double]$entry.InstallDate)
+    if($sourceInstalled.Year -lt 2000 -or $sourceInstalled -ge $InstalledUtc) { return $false }
+   }
+  }
+  return ([int]$Values.DownlevelBuildNumber -in @($PriorBuilds | ForEach-Object { [int]$_ }))
+ } catch { return $false }
+}
+function Read-UmBoundedText {
+ param([string]$Path,[int]$MaxBytes)
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+ try { if($stream.Length -gt $MaxBytes) { throw 'Guard file exceeds bound' }; $reader=[IO.StreamReader]::new($stream); try { $buffer=New-Object char[] ($MaxBytes+1); $count=$reader.ReadBlock($buffer,0,$buffer.Length); if($count -gt $MaxBytes) { throw 'Guard file exceeds bound' }; [string]::new($buffer,0,$count) } finally { $reader.Dispose() } } finally { $stream.Dispose() }
+}
 function Get-UmMoSetupState {
  param($Values,[bool]$Completed)
  if(-not $Values.Count) { return 'residual' }
@@ -75,9 +117,9 @@ function Get-UmNativeMarkerPaths {
  Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
 }
 function Get-UmGuards {
- $reasons=New-Object Collections.Generic.List[string]; $light=$false
+ $reasons=New-Object Collections.Generic.List[string]; $light=$false; $historical=$false; $observations=@(); $historicalEvidence=$null
  try {
-  if (@(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -match '^(setup|setuphost|setupprep|dism|sfc|TiWorker|TrustedInstaller|msiexec)\.exe$' }).Count) { $reasons.Add('setup/servicing process'); $light=$true }
+  if (@(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='sfc.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe' OR Name='msiexec.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -match '^(setup|setuphost|setupprep|dism|sfc|TiWorker|TrustedInstaller|msiexec)\.exe$' }).Count) { $reasons.Add('setup/servicing process'); $light=$true }
   foreach($nativeMarker in @(Get-UmNativeMarkerPaths)) {
    if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
   }
@@ -91,21 +133,36 @@ function Get-UmGuards {
   $created=@(); foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) { $path=Join-Path $env:SystemDrive $name; if(Test-Path -LiteralPath $path -ErrorAction Stop) { $created+=(Get-Item -LiteralPath $path -Force -ErrorAction Stop).CreationTimeUtc } }
   $moPath='HKLM:\SYSTEM\Setup\MoSetup\Volatile'; $hasMo=Test-Path -LiteralPath $moPath -ErrorAction Stop
   $state=Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json'; $hasState=Test-Path -LiteralPath $state -ErrorAction Stop
+  if($hasState -isnot [bool]) { throw 'Feature upgrade marker presence unknown' }
   if($created.Count -or $hasMo -or $hasState) {
    $os=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
-   $prior=@(Get-ChildItem 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop).CurrentBuild })
-   $installed=([datetime]'1970-01-01Z').AddSeconds([double]$os.InstallDate)
+   $sourceKeys=@(Get-ChildItem 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | Select-Object -First 17)
+   if($sourceKeys.Count -gt 16) { throw 'Source OS metadata exceeds bound' }
+   $sourceEntries=@($sourceKeys | ForEach-Object { $source=Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop; [pscustomobject]@{CurrentBuild=$source.CurrentBuild;InstallDate=$source.InstallDate} })
+   $prior=@($sourceEntries | ForEach-Object { $_.CurrentBuild })
+   $installed=([datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).AddSeconds([double]$os.InstallDate)
    $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
    $completed=(Get-UmUpgradeDirectoryState @($installed) ([int]$os.CurrentBuild) $prior $installed $boot) -eq 'completedResidual'
    if($created.Count -and (Get-UmUpgradeDirectoryState $created ([int]$os.CurrentBuild) $prior $installed $boot) -ne 'completedResidual') { $reasons.Add('unknown upgrade staging; completion not established'); $light=$true }
   }
+  $values=@{}; $s=$null
   if($hasMo) {
-   $moKey=Get-Item -LiteralPath $moPath -ErrorAction Stop; $values=@{}; foreach($name in $moKey.GetValueNames()) { $values[$name]=$moKey.GetValue($name) }
-   if((Get-UmMoSetupState $values $completed) -ne 'residual') { $reasons.Add('MoSetup state active or unknown'); $light=$true }
+   $moKey=Get-Item -LiteralPath $moPath -ErrorAction Stop; $names=@($moKey.GetValueNames()); if($names.Count -gt 32) { throw 'MoSetup metadata exceeds bound' }
+   foreach($name in $names) { if($name -notin @('SetupHostResult','SetupHostError','SetupPhase','DownlevelBuildNumber','InstallScenario','DownlevelProductName')) { $values[$name]=$null; continue }; if($moKey.GetValueKind($name) -notin @('DWord','QWord','String')) { throw 'MoSetup metadata type unknown' }; $values[$name]=$moKey.GetValue($name) }
   }
-  if($hasState) { $s=Get-Content -LiteralPath $state -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if((Get-UmOwnUpgradeState $s ([int]$os.CurrentBuild) $boot) -ne 'residual') { $reasons.Add('feature upgrade staged or unknown'); $light=$true } }
+  if($hasState) { $s=Read-UmBoundedText $state 65536 | ConvertFrom-Json -ErrorAction Stop }
+  if($hasMo -and ((-not $hasState) -or $s.status -eq 'running') -and -not $light -and -not $created.Count) {
+   $image=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
+   $ini=Read-UmBoundedText (Join-Path $env:SystemRoot 'Setup\State\State.ini') 16384
+   $matches=@([regex]::Matches($ini,'(?m)^\s*ImageState\s*=\s*("?)(IMAGE_STATE_[A-Z_]+)\1\s*$'))
+   $iniImage=$null; if($matches.Count -eq 1 -and [regex]::Matches($ini,'(?m)^\s*ImageState\s*=').Count -eq 1) { $iniImage=$matches[0].Groups[2].Value }
+   $historical=Test-UmHistoricalUpgrade $image $iniImage $setup $values $s ([int]$os.CurrentBuild) $prior $installed $boot (-not $hasState) $sourceEntries
+   if($historical) { $historicalEvidence=[pscustomobject]@{MarkerAbsent=(-not $hasState); MatchingSource=@($sourceEntries | Where-Object { [string]$_.CurrentBuild -eq [string]$values.DownlevelBuildNumber }); CurrentBuild=[int]$os.CurrentBuild; DownlevelBuildNumber=[int]$values.DownlevelBuildNumber; SourceBuilds=$prior; InstalledUtc=$installed; BootUtc=$boot; LegacyTime=$s.time; SetupHostResult=$values.SetupHostResult; SetupHostError=$values.SetupHostError; SetupPhase=$values.SetupPhase; InstallScenario=$values.InstallScenario}; $observations=@('INFERENCE: corroborated historical upgrade residue; marker absence or exact legacy target, image states, chronology and downlevel build agree; not proof of repair or update currency') }
+  }
+  if($hasMo -and -not $historical -and (Get-UmMoSetupState $values $completed) -ne 'residual') { $reasons.Add('MoSetup state active or unknown'); $light=$true }
+  if($hasState -and -not $historical -and (Get-UmOwnUpgradeState $s ([int]$os.CurrentBuild) $boot) -ne 'residual') { $reasons.Add('feature upgrade staged or unknown'); $light=$true }
  } catch { $reasons.Add('unknown guard: evidence unavailable'); $light=$true }
- [pscustomobject]@{ Safe=($reasons.Count -eq 0); Light=$light; Reasons=@($reasons.ToArray()) }
+ [pscustomobject]@{ Safe=($reasons.Count -eq 0); Light=$light; Reasons=@($reasons.ToArray()); HistoricalUpgradeInference=$historical; HistoricalUpgradeEvidence=$historicalEvidence; Observations=$observations }
 }
 
 # Protect the local evidence directory before any cleanup is authorized.
@@ -831,15 +888,41 @@ function ConvertTo-UmSummary {
   if([text.encoding]::UTF8.GetByteCount($json) -gt 7500) { $summary.guard=@{Safe=$Report.guard.Safe;Reasons=@('See durable report')}; $summary.actions=@{count=$Report.actions.Count;details='See durable report'}; $summary.truncation=$true; $json=$summary | ConvertTo-Json -Depth 8 -Compress }
  return $json
 }
+# Close the toolkit session only after durable evidence and stdout: the final
+# PSADT 4.1.8 session close may terminate PowerShell and owns client-server disposal.
+function Close-UmSession {
+ param([int]$Code)
+ if($script:UmUiOpen) {
+  $script:UmUiOpen=$false
+  Close-ADTSession -ExitCode $Code
+ }
+}
+function Complete-UmRun {
+ param($Report)
+ $script:UmExitCode=1
+ try {
+  if($script:UmUiOpen) {
+   try { Close-ADTInstallationProgress } catch { $Report.notification+='UI close failed' }
+   try { & $script:UmSave $Report } catch { $Report.status='failed'; $Report.errors+='Report checkpoint failed' }
+  }
+  Write-Output (ConvertTo-UmSummary $Report)
+  $script:UmExitCode=if($Report.status -eq 'deferred') {2}elseif($Report.status -in @('failed','partial')) {1}else{0}
+ } finally { Close-UmSession $script:UmExitCode }
+}
+
 if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $ErrorActionPreference='Stop'
+ $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { '{"status":"nothingToUninstall"}'; exit 0 }
  try {
   $a=Get-UmOptions -Mode $Mode -ResetCache $ResetCache -RepairImage $RepairImage -Notify $Notify -Scan $Scan -ScanTimeoutSeconds $ScanTimeoutSeconds -NativeTimeoutSeconds $NativeTimeoutSeconds
   $r=Invoke-UmMaintenance $a
-  if($script:UmUiOpen) { try { Close-ADTInstallationProgress } catch { $r.notification+='UI close failed' }; try { & $script:UmSave $r } catch { $r.status='failed' } }
-  $json=ConvertTo-UmSummary $r
-  Write-Output $json
-  if($r.status -eq 'deferred') { exit 2 }; if($r.status -in @('failed','partial')) { exit 1 }; exit 0
- } catch { @{status='failed';reason='Options or initialization failed';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} | ConvertTo-Json -Compress; exit 1 }
+  Complete-UmRun $r
+  exit $script:UmExitCode
+ } catch {
+  if($r) { $r.status='failed'; $r.errors+='Runtime or toolkit session closure failed'; try { & $script:UmSave $r } catch { } }
+  @{status='failed';reason='Options, runtime or toolkit session closure failed';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} | ConvertTo-Json -Compress
+  try { Close-UmSession 1 } catch { }
+  exit 1
+ }
 }
