@@ -1,6 +1,6 @@
 # Status
 
-Branch: `lane/maintenance`. Reviewed implementation HEAD: `d0a37c212bef4a5f5ea65e38de1463e014a2ef5f`; this documentation closeout follows it. Latest main `6ecf780` is integrated.
+Branch: `lane/maintenance`. Reviewed and Windows-tested HEAD: `a685c68449982812005e7c96c1b15334e8a9a521`; this documentation closeout follows it. Latest main `6ecf780` is integrated.
 
 Pull request: [90](https://github.com/Relianco/device-scripts/pull/90).
 Plan: [Windows storage and update maintenance](plans/2026-11-04-maintenance.md).
