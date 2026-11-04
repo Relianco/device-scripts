@@ -28,13 +28,19 @@ function Assert-MeTrustedPath {
  while($current) {
   $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
   if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse evidence path refused' }
-  if($current -eq $owned -or $current.StartsWith($owned+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
-   $acl=Get-Acl -LiteralPath $current -ErrorAction Stop
-   if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Untrusted report owner' }
-   $mask=[Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
-   foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
-    if($rule.AccessControlType -eq 'Allow' -and -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and $rule.IdentityReference.Value -notin @('S-1-5-18','S-1-5-32-544') -and ($rule.FileSystemRights -band $mask)) { throw 'Untrusted report modification rights' }
-   }
+  $withinOwned=$current -eq $owned -or $current.StartsWith($owned+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)
+  $trusted=@('S-1-5-18','S-1-5-32-544')
+  # Windows parents may be owned by TrustedInstaller; owned reports may not.
+  if(-not $withinOwned) { $trusted+=@('S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464') }
+  $acl=Get-Acl -LiteralPath $current -ErrorAction Stop
+  if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $trusted) { throw 'Untrusted evidence path owner' }
+  $mask=[Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+  # Creating unrelated siblings in ProgramData does not authorize replacing this tree.
+  if($withinOwned) { $mask=$mask -bor [Security.AccessControl.FileSystemRights]::Write }
+  foreach($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+   # Inherit-only ACEs do not grant rights on this object. Any effective inherited
+   # grant on a descendant is checked when inspecting that descendant itself.
+   if($rule.AccessControlType -eq 'Allow' -and -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -and $rule.IdentityReference.Value -notin $trusted -and ($rule.FileSystemRights -band $mask)) { throw 'Untrusted evidence path replacement or modification rights' }
   }
   $current=[IO.Path]::GetDirectoryName($current)
  }

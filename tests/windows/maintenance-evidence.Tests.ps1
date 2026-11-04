@@ -27,11 +27,21 @@ $null=New-Item -ItemType Directory $scratch
 try {
  $file=Join-Path $scratch 'report.json'; [IO.File]::WriteAllText($file,'{"Status":"ok"}')
  & {
-  function Assert-MeTrustedPath { param($Path) }
+  $realHash=${function:Get-MeHash};$script:readerTrustChecked=$false
+  function Assert-MeTrustedPath { param($Path) $script:readerTrustChecked=$true }
+  function Get-MeHash {
+   param([byte[]]$Bytes)
+   Assert $script:readerTrustChecked 'Reader validates trust before hashing the opened report'
+   if($env:OS -ne 'Windows_NT') { return (& $realHash $Bytes) }
+   $writer=$null;$denied=$false
+   try { $writer=[IO.File]::Open($file,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite) } catch [IO.IOException] { $denied=$true } finally { if($writer){$writer.Dispose()} }
+   Assert $denied 'Reader retains share-read handle through content hashing'
+   & $realHash $Bytes
+  }
   $before=[IO.File]::ReadAllBytes($file)
   $read=Read-MeReport $file
   Assert ($read.Report.Status -eq 'ok') 'Read stored JSON'
-  Assert ((Get-MeHash $before) -eq (Get-MeHash ([IO.File]::ReadAllBytes($file)))) 'Read leaves file unchanged'
+  Assert ((& $realHash $before) -eq (& $realHash ([IO.File]::ReadAllBytes($file)))) 'Read leaves file unchanged'
   # Valid JSON ensures a parse error cannot masquerade as the size guard.
   [IO.File]::WriteAllText($file, ('{"Value":"'+('x'*16777216)+'"}'))
   $sizeRefused=$false
@@ -90,4 +100,53 @@ Assert ($nullRow.Count -eq 1 -and $nullRow.PartialCounts) 'Unrecognized null act
 
 Assert ((Get-MeSection ([pscustomobject]@{}) ProfileIndex 0).Partial) 'Missing profiles are unavailable, not exact empty'
 Assert (-not (Get-MeSection ([pscustomobject]@{Profiles=@()}) ProfileIndex 0).Partial) 'Explicit empty profiles are exact'
+
+
+# An owned report is trustworthy only when no ancestor can be replaced by users.
+& {
+ $savedData=$env:ProgramData
+ $driveRoot=[IO.Path]::GetPathRoot([IO.Path]::GetTempPath())
+ $env:ProgramData=Join-Path (Join-Path $driveRoot 'EvidenceTrustFixture') 'ProgramData'
+ $script:aclParent=$env:ProgramData
+ $script:aclOwned=Join-Path $env:ProgramData 'RelianMaintenance'
+ $reportPath=Join-Path (Join-Path $script:aclOwned 'Storage') 'report.json'
+ $script:aclCase='normal';$script:aclVisited=@()
+ function Get-Item { param($LiteralPath,[switch]$Force,$ErrorAction) [pscustomobject]@{Attributes=$(if($script:aclCase -eq 'reparseParent' -and $LiteralPath -eq $script:aclParent){[IO.FileAttributes]::ReparsePoint}else{[IO.FileAttributes]::Directory})} }
+ function Get-Acl {
+  param($LiteralPath,$ErrorAction)
+  $script:aclVisited+=@($LiteralPath)
+  if($script:aclCase -eq 'unreadableParent' -and $LiteralPath -eq $script:aclParent){throw 'ACL unavailable'}
+  $a=[pscustomobject]@{Path=$LiteralPath}
+  $a | Add-Member ScriptMethod GetOwner { param($type)
+   $owner='S-1-5-18'
+   if($this.Path -eq $script:aclParent){if($script:aclCase -eq 'ownerParent'){$owner='S-1-5-32-545'};if($script:aclCase -eq 'trustedInstallerParent'){$owner='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'}}
+   if($this.Path -eq $script:aclOwned -and $script:aclCase -eq 'trustedInstallerOwned'){$owner='S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'}
+   [pscustomobject]@{Value=$owner}
+  }
+  $a | Add-Member ScriptMethod GetAccessRules { param($explicit,$inherited,$type)
+   if($this.Path -eq $script:aclOwned -and $script:aclCase -eq 'inheritedOwned') { return [pscustomobject]@{AccessControlType='Allow';PropagationFlags=[Security.AccessControl.PropagationFlags]::None;IdentityReference=[pscustomobject]@{Value='S-1-5-32-545'};FileSystemRights=[Security.AccessControl.FileSystemRights]::Write;IsInherited=$true} }
+   if($this.Path -eq $script:aclParent){
+    $rights=[Security.AccessControl.FileSystemRights]::CreateDirectories -bor [Security.AccessControl.FileSystemRights]::CreateFiles
+    if($script:aclCase -in @('Delete','DeleteSubdirectoriesAndFiles','ChangePermissions','TakeOwnership')){$rights=[Security.AccessControl.FileSystemRights]$script:aclCase}
+    $prop=if($script:aclCase -eq 'inheritOnlyParent'){[Security.AccessControl.PropagationFlags]::InheritOnly}else{[Security.AccessControl.PropagationFlags]::None}
+    if($script:aclCase -eq 'inheritOnlyParent'){$rights=[Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles}
+    [pscustomobject]@{AccessControlType='Allow';PropagationFlags=$prop;IdentityReference=[pscustomobject]@{Value='S-1-5-32-545'};FileSystemRights=$rights}
+   }
+  }
+  $a
+ }
+ foreach($case in @('Delete','DeleteSubdirectoriesAndFiles','ChangePermissions','TakeOwnership','ownerParent','unreadableParent','reparseParent','trustedInstallerOwned','inheritedOwned')) {
+  $script:aclCase=$case;Refuses { Assert-MeTrustedPath $reportPath } "Untrusted ancestor/report $case refused"
+ }
+ foreach($case in @('normal','trustedInstallerParent','inheritOnlyParent')) {
+  $script:aclCase=$case;$script:aclVisited=@();Assert-MeTrustedPath $reportPath
+  Assert ($script:aclVisited -contains $driveRoot -and $script:aclVisited -contains $script:aclParent) 'ACL chain reaches volume root'
+ }
+ foreach($ancestor in @([IO.Path]::GetDirectoryName($env:ProgramData),$driveRoot)) {
+  $script:aclParent=$ancestor
+  foreach($case in @('DeleteSubdirectoriesAndFiles','ownerParent','reparseParent')) { $script:aclCase=$case;Refuses { Assert-MeTrustedPath $reportPath } "Higher ancestor $case refused" }
+ }
+ $env:ProgramData=$savedData
+}
+
 Write-Output 'maintenance-evidence tests passed'
