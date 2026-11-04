@@ -294,7 +294,7 @@ function Read-DiagnosticMaintenance {
     $r.imageState=@{registry=(Read-DiagnosticImageState);ini=(Read-DiagnosticImageState -Ini)}
     $r.os=Read-DiagnosticNumericRegistry 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' @('CurrentBuild','UBR','InstallDate')
     $r.setup=Read-DiagnosticNumericRegistry 'HKLM:\SYSTEM\Setup' @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')
-    $r.moSetup=Read-DiagnosticNumericRegistry 'HKLM:\SYSTEM\Setup\MoSetup\Volatile' @('SetupHostResult','SetupHostError','SetupPhase','SetupSubPhase','SetupProgress','BoxResult','InstallScenario') -ListUnknown
+    $r.moSetup=Read-DiagnosticNumericRegistry 'HKLM:\SYSTEM\Setup\MoSetup\Volatile' @('SetupHostResult','SetupHostError','SetupPhase','SetupSubPhase','SetupProgress','BoxResult','InstallScenario','DownlevelBuildNumber') -ListUnknown
     $r.sourceOS=@()
     try {
         $keys=@(Get-ChildItem -LiteralPath 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | Select-Object -First 9)

@@ -159,12 +159,14 @@ foreach ($forbidden in @('Set-ItemProperty','New-ItemProperty','Remove-Item','St
  try {
   # Numeric registry probe must never retrieve unknown values.
   $script:maintenanceKey=[pscustomobject]@{}
-  $script:maintenanceKey | Add-Member ScriptMethod GetValueNames { @('CurrentBuild','InstallDate','InstallScenario','SetupHostResult','SystemSetupInProgress','Unrecognized') }
-  $script:maintenanceKey | Add-Member ScriptMethod GetValue { param($Name) switch($Name) { CurrentBuild {26300}; InstallDate {1793800000}; InstallScenario {1}; SetupHostResult {0}; SystemSetupInProgress {0}; default {throw 'Unknown value must not be read'} } }
+  $script:maintenanceKey | Add-Member ScriptMethod GetValueNames { @('CurrentBuild','InstallDate','InstallScenario','SetupHostResult','DownlevelBuildNumber','SystemSetupInProgress','Unrecognized') }
+  $script:maintenanceKey | Add-Member ScriptMethod GetValue { param($Name) switch($Name) { CurrentBuild {26300}; InstallDate {1793800000}; InstallScenario {1}; DownlevelBuildNumber {26200}; SetupHostResult {0}; SystemSetupInProgress {0}; default {throw 'Unknown value must not be read'} } }
   function Get-Item { param($LiteralPath,$ErrorAction) $script:maintenanceKey }
   function Get-ChildItem { param($LiteralPath,$ErrorAction) @([pscustomobject]@{PSChildName='Source OS (Prior)';PSPath='HKLM:\SYSTEM\Setup\Source OS (Prior)'}) }
   function Test-Path { param($LiteralPath,$ErrorAction) $LiteralPath -like '*RebootPending' }
-  function Get-ItemProperty { param($LiteralPath,$ErrorAction) [pscustomobject]@{PendingFileRenameOperations=@('C:\Users\PrivateName\file','C:\Windows\Temp\file')} }
+  $script:syntheticRenamePath=('{0}:\{1}\{2}\file' -f 'Z','Users',('Fixture'+[guid]::NewGuid().ToString('N')))
+  $script:syntheticRenameIdentity=($script:syntheticRenamePath -split '\\')[2]
+  function Get-ItemProperty { param($LiteralPath,$ErrorAction) [pscustomobject]@{PendingFileRenameOperations=@($script:syntheticRenamePath,'Z:\Windows\Temp\file')} }
   function Read-DiagnosticImageState { param([switch]$Ini) @{status='read';value='IMAGE_STATE_COMPLETE'} }
   function Read-DiagnosticState { param($Path) @{status='running';isoBuild='26300';time='2026-11-03T00:00:00Z'} }
   function Get-CimInstance {
@@ -179,8 +181,8 @@ foreach ($forbidden in @('Set-ItemProperty','New-ItemProperty','Remove-Item','St
   $json=Invoke-FeatureUpgradeDiagnostic -Section Maintenance
   $m=$json | ConvertFrom-Json
   Assert ($m.imageState.registry.value -eq 'IMAGE_STATE_COMPLETE') 'Image state completion evidence'
-  Assert ($m.moSetup.values.InstallScenario -eq 1 -and $m.sourceOS.Count -eq 1) 'Maintenance exact guard metadata'
-  Assert ($m.pendingReboot.renameEntryCount -eq 2 -and $json -notmatch 'PrivateName') 'Pending renames counted and profile names sanitized'
+  Assert ($m.moSetup.values.InstallScenario -eq 1 -and $m.moSetup.values.DownlevelBuildNumber -eq 26200 -and $m.sourceOS.Count -eq 1) 'Maintenance exact guard metadata'
+  Assert ($m.pendingReboot.renameEntryCount -eq 2 -and $json -notmatch [regex]::Escape($script:syntheticRenameIdentity)) 'Pending renames counted and profile names sanitized'
   Assert ($m.processes.Count -eq 20 -and $m.processesTruncated -and $m.processes[0].cpuSeconds -eq 2) 'Process evidence bounded with CPU time'
   Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 8000) 'Maintenance output bounded'
  } finally { $env:ProgramData=$priorData; $env:SystemDrive=$priorDrive; Remove-Variable maintenanceKey -Scope Script }
