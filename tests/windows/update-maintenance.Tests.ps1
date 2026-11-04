@@ -1,6 +1,7 @@
 $ErrorActionPreference='Stop'
 $env:RELIAN_DEPLOY_TEST='1'
 . "$PSScriptRoot/../../windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1"
+$actualUmCache=$script:UmCache
 function Assert($value,$message) { if(-not $value) { throw $message } }
 $a=Get-UmOptions
 Assert ($a.Mode -eq 'Report' -and -not $a.Scan) 'Passive default'
@@ -70,3 +71,40 @@ $source=Get-Content "$PSScriptRoot/../../windows/packages/update-maintenance/Inv
 Assert ($source -notmatch '(?i)Restart-Computer|shutdown\.exe|ResetBase|Ninja-Property|relian_git_deploy_token') 'No reboot or tenant APIs'
 Assert ($source -match 'RedirectStandardOutput' -and $source -match 'creationTimeUtc' -and $source -match 'Global\\RelianWindowsMaintenance') 'Detached native shared guard contract'
 'Update maintenance tests passed'
+# Round 1 regressions exercise actual operation boundaries.
+Assert ((Get-UmUpgradeDirectoryState @([datetime]'2026-10-01') 26200 @('22631') ([datetime]'2026-10-02') ([datetime]'2026-10-03')) -eq 'completedResidual') 'Completed upgrade keeps rollback directories without permanent block'
+Assert ((Get-UmUpgradeDirectoryState @([datetime]'2026-10-04') 26200 @('22631') ([datetime]'2026-10-02') ([datetime]'2026-10-03')) -eq 'unknownStaging') 'New staging remains blocked'
+Assert ((Get-UmUpgradeDirectoryState @([datetime]'2026-10-01') 26200 @() ([datetime]'2026-10-02') ([datetime]'2026-10-03')) -eq 'unknownStaging') 'Missing completion evidence blocked'
+$script:UmGetController={ param($name) [pscustomobject]@{Status='StartPending'} }
+$script:UmControl={ param($name,$desired) }
+$script:UmDelay={}
+$script:tick=0; $script:UmMilliseconds={ $script:tick+=1000; $script:tick }
+$pending=Invoke-UmServiceState 'BITS' 'Running' 2
+Assert ($pending.outcome -eq 'timeout' -and $pending.service -eq 'BITS') 'Pending service bounded'
+# Actual descendant retains redirected output after shell process has exited.
+if($IsLinux) {
+ $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $null=New-Item -ItemType Directory $root
+ try {
+  $childScript=Join-Path $root 'child.sh'; "sleep 3 &`nexit 0" | Set-Content $childScript
+  $child=Start-Process /bin/sh -ArgumentList $childScript -RedirectStandardOutput (Join-Path $root 'out') -RedirectStandardError (Join-Path $root 'err') -PassThru
+  while(-not $child.HasExited) { Start-Sleep -Milliseconds 10; $child.Refresh() }
+  $watch=[diagnostics.stopwatch]::StartNew(); $completed=Complete-UmExitedProcess $child
+  Assert ($watch.ElapsedMilliseconds -lt 700 -and $completed.outputComplete -eq 'notEstablished') 'Exited child never drains descendant-held streams'
+ } finally { Remove-Item $root -Recurse -Force }
+}
+'Round 1 regressions passed'
+
+# Exercise cache implementation: first stop succeeds, second remains pending,
+# and finally records failed restoration rather than attempting any rename.
+$script:UmCache=$actualUmCache
+$script:UmGuard={ @{Safe=$true;Reasons=@()} }
+$script:UmSave={ param($r) }
+$script:states=@{BITS='Running';wuauserv='StopPending';CryptSvc='Running'}
+$script:UmGetController={ param($name) [pscustomobject]@{Status=$script:states[$name]} }
+$script:UmControl={ param($name,$desired) if($name -eq 'BITS') { if($desired -eq 'Running') { throw 'restoration denied' }; $script:states[$name]='Stopped' } }
+$script:tick=0; $cacheReport=@{actions=@();errors=@();cacheBackups=@()}; $cacheFailed=$false
+try { & $script:UmCache $cacheReport } catch { $cacheFailed=$true }
+Assert ($cacheFailed -and @($cacheReport.actions | Where-Object { $_.phase -eq 'cacheRename' }).Count -eq 0) 'Partial stop never renames cache'
+$restored=@($cacheReport.actions | Where-Object { $_.phase -eq 'cacheServiceRestoration' })
+Assert ($restored.Count -eq 1 -and $restored[0].service -eq 'BITS' -and $restored[0].outcome -eq 'failed' -and $restored[0].errorCategory) 'Finally persists per-service restoration failure'
+'Actual cache boundary regressions passed'

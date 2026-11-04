@@ -39,6 +39,14 @@ function Test-UmSafePath {
  } catch { return $false }; return $true
 }
 
+# Residual rollback folders are safe only with independent completed-upgrade evidence.
+function Get-UmUpgradeDirectoryState {
+ param($DirectoryCreatedUtc,[int]$CurrentBuild,$PriorBuilds,[datetime]$InstalledUtc,[datetime]$BootUtc)
+ if(-not @($DirectoryCreatedUtc).Count) { return 'absent' }
+ if($InstalledUtc.Year -lt 2000 -or $BootUtc -lt $InstalledUtc -or -not @($PriorBuilds | Where-Object { $_ -match '^\d+$' -and [int]$_ -lt $CurrentBuild }).Count) { return 'unknownStaging' }
+ foreach($created in $DirectoryCreatedUtc) { if(-not $created -or [datetime]$created -gt $InstalledUtc) { return 'unknownStaging' } }
+ 'completedResidual'
+}
 function Get-UmGuards {
  $reasons=New-Object Collections.Generic.List[string]; $light=$false
  try {
@@ -52,7 +60,14 @@ function Get-UmGuards {
   }
   $session=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
   if($session.PendingFileRenameOperations) { $reasons.Add('pending file rename') }
-  foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) { if(Test-Path -LiteralPath (Join-Path $env:SystemDrive $name) -ErrorAction Stop) { $reasons.Add('upgrade staging present') } }
+  $created=@(); foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) { $path=Join-Path $env:SystemDrive $name; if(Test-Path -LiteralPath $path -ErrorAction Stop) { $created+=(Get-Item -LiteralPath $path -Force -ErrorAction Stop).CreationTimeUtc } }
+  if($created.Count) {
+   $os=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+   $prior=@(Get-ChildItem 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop).CurrentBuild })
+   $installed=([datetime]'1970-01-01Z').AddSeconds([double]$os.InstallDate)
+   $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
+   if((Get-UmUpgradeDirectoryState $created ([int]$os.CurrentBuild) $prior $installed $boot) -ne 'completedResidual') { $reasons.Add('unknown upgrade staging; completion not established') }
+  }
   $state=Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json'
   if(Test-Path -LiteralPath $state -ErrorAction Stop) { $s=Get-Content -LiteralPath $state -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if($s.status -eq 'staged') { $reasons.Add('feature upgrade staged') } }
  } catch { $reasons.Add('unknown guard: evidence unavailable'); $light=$true }
@@ -454,32 +469,75 @@ $script:UmSnapshot={
 }
 $script:UmEvents={ @(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WindowsUpdateClient/Operational';StartTime=[datetime]::Now.AddDays(-14)} -MaxEvents 30 -ErrorAction Stop | Select-Object TimeCreated,Id,LevelDisplayName) }
 function Assert-UmSafe { $g=& $script:UmGuard; if(-not $g.Safe) { throw 'Guard blocked or unknown' } }
-$script:UmService={ param($s)
+# ServiceController sends SCM control without Start/Stop-Service pending-status waits.
+$script:UmGetController={ param($name) $c=New-Object ServiceProcess.ServiceController($name); $c.Refresh(); $c }
+$script:UmControl={ param($name,$desired) $c=& $script:UmGetController $name; try { if($desired -eq 'Running') { $c.Start() } else { $c.Stop() } } finally { $c.Dispose() } }
+$script:UmDelay={ Start-Sleep -Milliseconds 200 }
+$script:UmMilliseconds={ [diagnostics.stopwatch]::GetTimestamp()*1000.0/[diagnostics.stopwatch]::Frequency }
+function Get-UmServiceStatus {
+ param($Name)
+ $svc=& $script:UmGetController $Name
+ try { [string]$svc.Status } finally { if($svc.PSObject.Methods['Dispose']) { $svc.Dispose() } }
+}
+function Invoke-UmServiceState {
+ param([string]$Name,[string]$Desired,[int]$Seconds=20)
+ $step=@{phase='serviceControl';service=$Name;desired=$Desired;outcome='incomplete';errorCategory=$null}
+ try {
+  $start=& $script:UmMilliseconds
+  $status=Get-UmServiceStatus $Name
+  if($status -eq $Desired) { $step.outcome='alreadyInState'; return $step }
+  & $script:UmControl $Name $Desired
+  while(((& $script:UmMilliseconds)-$start) -lt $Seconds*1000) {
+   $status=Get-UmServiceStatus $Name
+   if($status -eq $Desired) { $step.outcome='reachedState'; return $step }
+   & $script:UmDelay
+  }
+  $step.outcome='timeout'; $step.errorCategory='pendingServiceTimeout'
+ } catch { $step.outcome='failed'; $step.errorCategory=$_.Exception.GetType().Name }
+ $step
+}
+$script:UmService={ param($s,$r)
  Assert-UmSafe
- Set-Service -Name $s.Name -StartupType $s.StartupType -ErrorAction Stop
- Assert-UmSafe
- Start-Service -Name $s.Name -ErrorAction Stop
- $svc=Get-Service $s.Name -ErrorAction Stop; $svc.WaitForStatus('Running',[timespan]::FromSeconds(20)); $svc.Refresh()
- if($svc.Status -ne 'Running') { throw 'Service did not reach Running' }
+ $step=@{phase='serviceConfiguration';service=$s.Name;outcome='incomplete'}; $r.actions+=$step
+ try { Set-Service -Name $s.Name -StartupType $s.StartupType -ErrorAction Stop; $step.outcome='enabled' }
+ catch { $step.outcome='failed'; $step.errorCategory=$_.Exception.GetType().Name; & $script:UmSave $r; throw 'Service configuration failed' }
+ & $script:UmSave $r; Assert-UmSafe
+ $step=Invoke-UmServiceState $s.Name 'Running'; $r.actions+=$step; & $script:UmSave $r
+ if($step.outcome -notin @('alreadyInState','reachedState')) { throw 'Service start incomplete' }
 }
 $script:UmCache={ param($r)
  $running=@(); $failure=$null
  try {
   foreach($name in @('BITS','wuauserv','CryptSvc')) {
-   Assert-UmSafe; $svc=Get-Service $name -ErrorAction Stop
-   if($svc.Status -eq 'Running') { $running+=$name; Stop-Service $name -ErrorAction Stop; $svc.WaitForStatus('Stopped',[timespan]::FromSeconds(20)) }
-   $svc.Refresh(); if($svc.Status -ne 'Stopped') { throw 'Cache service not stopped' }
+   Assert-UmSafe; $status=Get-UmServiceStatus $name
+   if($status -eq 'Running') { $running+=$name }
+   $step=Invoke-UmServiceState $name 'Stopped'; $r.actions+=$step; & $script:UmSave $r
+   if($step.outcome -notin @('alreadyInState','reachedState')) { throw 'Cache service stop incomplete' }
   }
   foreach($relative in @('SoftwareDistribution','System32\catroot2')) {
    Assert-UmSafe; $path=Join-Path $env:windir $relative
    if(-not (Test-UmSafePath $path $env:windir)) { throw 'Unsafe cache path' }
    $backup=$path+'.relian-backup-'+[datetime]::UtcNow.ToString('yyyyMMddTHHmmss')+'-'+[guid]::NewGuid().ToString('n')
-   Move-Item -LiteralPath $path -Destination $backup -ErrorAction Stop
+   $step=@{phase='cacheRename';cache=$relative;outcome='incomplete'}; $r.actions+=$step
+   try { Move-Item -LiteralPath $path -Destination $backup -ErrorAction Stop; $step.outcome='renamed' }
+   catch { $step.outcome='failed'; $step.errorCategory=$_.Exception.GetType().Name; throw 'Cache rename failed' }
    $r.cacheBackups+=@{source=$relative;backup=$backup;restore='Manual recovery only; never overwrite regenerated cache'}; & $script:UmSave $r
   }
- } catch { $failure='Cache reset incomplete' }
- finally { foreach($name in $running) { try { Start-Service $name -ErrorAction Stop; (Get-Service $name).WaitForStatus('Running',[timespan]::FromSeconds(20)) } catch { $failure='Service restoration incomplete' } } }
+ } catch { $failure='Cache reset incomplete'; $r.errors+=@{phase='cacheReset';category=$_.Exception.GetType().Name} }
+ finally {
+  foreach($name in $running) {
+   $step=Invoke-UmServiceState $name 'Running'; $step.phase='cacheServiceRestoration'; $r.actions+=$step
+   if($step.outcome -notin @('alreadyInState','reachedState')) { $failure='Service restoration incomplete' }
+   try { & $script:UmSave $r } catch { $failure='Restoration checkpoint failed' }
+  }
+ }
  if($failure) { throw $failure }
+}
+# No parameterless WaitForExit: redirected managed pumps may await descendants forever.
+function Complete-UmExitedProcess {
+ param($Process)
+ if(-not $Process.HasExited) { throw 'Process not exited' }
+ @{outcome='commandCompleted';exitCode=$Process.ExitCode;outputComplete='notEstablished'}
 }
 function Invoke-UmProcess {
  param([string]$Executable,[string]$Arguments,[int]$Timeout,[string]$Phase,$r,[switch]$ScanOnly)
@@ -499,10 +557,10 @@ function Invoke-UmProcess {
   Remove-Item -LiteralPath $marker -ErrorAction Stop
   return @{outcome='scanTimeout';stdoutPath=$stdout;stderrPath=$stderr}
  }
- $p.WaitForExit() # Already observed exited; never wait unbounded on a live process.
- $code=$p.ExitCode
+ $completed=Complete-UmExitedProcess $p
+ $code=$completed.exitCode
  Remove-Item -LiteralPath $marker -ErrorAction Stop
- @{outcome='commandCompleted';exitCode=$code;stdoutPath=$stdout;stderrPath=$stderr}
+ @{outcome='commandCompleted';exitCode=$code;stdoutPath=$stdout;stderrPath=$stderr;outputComplete='notEstablished'}
 }
 $script:UmNative={ param($phase,$a,$r)
  if($phase -eq 'DISM') { Invoke-UmProcess (Join-Path $env:windir 'System32\dism.exe') '/Online /Cleanup-Image /RestoreHealth' $a.NativeTimeoutSeconds 'DISM' $r }
@@ -542,7 +600,7 @@ function Invoke-UmMaintenance {
   $locked=& $script:UmAcquire; if(-not $locked) { $r.status='deferred'; $r.errors+='Maintenance mutex busy'; return $r }
   if($a.Mode -eq 'Repair') {
    $r.plan=@(Get-UmServicePlan $r.before.services); & $script:UmSave $r
-   foreach($s in $r.plan) { Assert-UmSafe; & $script:UmSave $r; $changed=$true; & $script:UmService $s; $r.actions+=@{phase='service';name=$s.Name;outcome='enabledAndRunning'}; & $script:UmSave $r }
+   foreach($s in $r.plan) { Assert-UmSafe; & $script:UmSave $r; $changed=$true; & $script:UmService $s $r; $r.actions+=@{phase='service';name=$s.Name;outcome='enabledAndRunning'}; & $script:UmSave $r }
    if($a.ResetCache) { Assert-UmSafe; & $script:UmSave $r; $changed=$true; & $script:UmCache $r; $r.actions+=@{phase='cache';outcome='renamed; not proof of repair'}; & $script:UmSave $r }
    if($a.RepairImage) {
     foreach($phase in @('DISM','SFC')) {
@@ -560,7 +618,7 @@ function Invoke-UmMaintenance {
   $r.after=& $script:UmSnapshot
   if(@(Get-UmServicePlan $r.after.services).Count) { throw 'Disabled required services remain after repair' }
   if($a.Mode -eq 'Repair' -and $changed) { $r.status='repaired' }
- } catch { if($changed) { $r.status='partial' } else { $r.status='failed' }; $r.errors+='Operation failed; consult completed steps and local evidence' }
+ } catch { if($changed) { $r.status='partial' } else { $r.status='failed' }; $r.errors+=@{phase='maintenance';category=$_.Exception.GetType().Name;detail='Operation incomplete; consult structured actions'} }
  finally {
   if($locked) { & $script:UmRelease }
   try { & $script:UmSave $r } catch { $r.status='failed'; $r.errors+='Report checkpoint failed' }
