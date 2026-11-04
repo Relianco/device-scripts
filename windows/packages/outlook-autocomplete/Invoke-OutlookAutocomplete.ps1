@@ -17,6 +17,14 @@ $oaProgramData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramDa
 $script:OaBackupRoot = "$oaProgramData\Relian\OutlookAutocomplete"
 $OaMaxStreamBytes = 67108864
 
+function Get-OaString8Encoding {
+ try { [Text.Encoding]::RegisterProvider([Text.CodePagesEncodingProvider]::Instance) } catch { }
+ $cp = [Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage
+ if ($cp -le 0) { $cp = 1252 }
+ return [Text.Encoding]::GetEncoding($cp)
+}
+$script:OaString8Encoding = Get-OaString8Encoding
+
 function Write-Status {
  param([string]$Message, [string]$Level = 'INFO')
  Write-Host "[$( (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') )] [$Level] [outlook-autocomplete] $Message"
@@ -135,7 +143,7 @@ function Read-OaStream {
       if ($str.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $rowMatched = $true }
      }
     } elseif ($baseType -eq 0x001E -and $needle.Length -gt 0 -and -not $rowMatched -and $valLen -gt 0) {
-     $str = [Text.Encoding]::UTF8.GetString($Bytes, [int]$offset, [int]$valLen).TrimEnd([char]0)
+     $str = $script:OaString8Encoding.GetString($Bytes, [int]$offset, [int]$valLen).TrimEnd([char]0)
      if ($str.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $rowMatched = $true }
     }
     $offset += $valLen

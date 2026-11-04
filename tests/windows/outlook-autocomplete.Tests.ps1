@@ -28,7 +28,7 @@ function New-TestProp {
   $b.AddRange([BitConverter]::GetBytes([uint32]$bytes.Length)); $b.AddRange($bytes)
  } elseif ($Type -eq 0x001E) {
   $b.AddRange([BitConverter]::GetBytes([uint64]0))
-  $bytes = [Text.Encoding]::UTF8.GetBytes([string]$Val + [char]0)
+  $bytes = $script:OaString8Encoding.GetBytes([string]$Val + [char]0)
   $b.AddRange([BitConverter]::GetBytes([uint32]$bytes.Length)); $b.AddRange($bytes)
  } elseif ($Type -eq 0x0102) {
   $b.AddRange([BitConverter]::GetBytes([uint64]0))
@@ -76,7 +76,7 @@ $rowWork = New-TestRow @(
  (New-TestProp 0x6001 0x0003 42)
 )
 $rowPersonal = New-TestRow @(
- (New-TestProp 0x3001 0x001F 'Targets Personal'),
+ (New-TestProp 0x3001 0x001E "Ren$([char]0xE9) Personal"),
  (New-TestProp 0x39FE 0x001E 'personal.stale@example.invalid'),
  (New-TestProp 0x0FF6 0x0102 ([byte[]]@(9, 8, 7)))
 )
@@ -88,7 +88,9 @@ $rowColleague = New-TestRow @(
 
 $streamBytes = New-TestStream -Rows @($rowWork, $rowPersonal, $rowColleague)
 
-# 1. Binary parser accurately parses rows, properties, trailer, and case-insensitive match.
+# 1. Binary parser accurately parses rows, properties, trailer, and case-insensitive match (including non-ASCII ANSI PtypString8).
+$parsedAnsi = Read-OaStream -Bytes $streamBytes -Match "ren$([char]0xE9) personal"
+Assert-Same $parsedAnsi.matchedRowCount 1 'non-ASCII ANSI PtypString8 matched'
 $parsed = Read-OaStream -Bytes $streamBytes -Match 'PERSONAL.STALE@example.invalid'
 Assert-True $parsed.validFormat 'valid stream parsed'
 Assert-Same $parsed.rowCount 3 '3 rows parsed'
