@@ -497,7 +497,36 @@ $script:UmEvents={ @(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-
 function Assert-UmSafe { $g=& $script:UmGuard; if(-not $g.Safe) { throw 'Guard blocked or unknown' } }
 # ServiceController sends SCM control without Start/Stop-Service pending-status waits.
 $script:UmGetController={ param($name) $c=New-Object ServiceProcess.ServiceController($name); $c.Refresh(); $c }
-$script:UmControl={ param($name,$desired) $c=& $script:UmGetController $name; try { if($desired -eq 'Running') { $c.Start() } else { $c.Stop() } } finally { $c.Dispose() } }
+# ControlService(SERVICE_CONTROL_STOP) is nonrecursive: SCM returns 1051 when
+# live dependents exist. Never use ServiceController.Stop(), which recurses.
+$script:UmStopRequest={ param($controller)
+ if(-not ('RelianMaintenance.ServiceControl' -as [type])) {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace RelianMaintenance {
+ public static class ServiceControl {
+  [StructLayout(LayoutKind.Sequential)] public struct Status {
+   public uint Type, CurrentState, ControlsAccepted, Win32ExitCode, ServiceSpecificExitCode, CheckPoint, WaitHint;
+  }
+  [DllImport("advapi32.dll", SetLastError=true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  private static extern bool ControlService(IntPtr service, uint control, out Status status);
+  public static int RequestStop(IntPtr service) {
+   Status status;
+   return ControlService(service, 1, out status) ? 0 : Marshal.GetLastWin32Error();
+  }
+ }
+}
+'@ -ErrorAction Stop
+ }
+ [RelianMaintenance.ServiceControl]::RequestStop($controller.ServiceHandle.DangerousGetHandle())
+}
+$script:UmControl={ param($name,$desired)
+ $c=& $script:UmGetController $name
+ try { if($desired -eq 'Running') { $c.Start(); return 0 }; & $script:UmStopRequest $c }
+ finally { $c.Dispose() }
+}
 $script:UmDelay={ Start-Sleep -Milliseconds 200 }
 $script:UmMilliseconds={ [diagnostics.stopwatch]::GetTimestamp()*1000.0/[diagnostics.stopwatch]::Frequency }
 function Get-UmServiceStatus {
@@ -512,7 +541,12 @@ function Invoke-UmServiceState {
   $start=& $script:UmMilliseconds
   $status=Get-UmServiceStatus $Name
   if($status -eq $Desired) { $step.outcome='alreadyInState'; return $step }
-  & $script:UmControl $Name $Desired
+  $code=& $script:UmControl $Name $Desired
+  if($null -ne $code -and [int]$code -ne 0) {
+   $step.outcome='failed'; $step.nativeCode=[int]$code; $step.errorCategory='scmControlRefused'
+   if([int]$code -eq 1051) { $step.errorCategory='runningDependentServices' }
+   return $step
+  }
   while(((& $script:UmMilliseconds)-$start) -lt $Seconds*1000) {
    $status=Get-UmServiceStatus $Name
    if($status -eq $Desired) { $step.outcome='reachedState'; return $step }

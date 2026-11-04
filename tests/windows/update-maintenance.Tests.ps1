@@ -2,6 +2,7 @@ $ErrorActionPreference='Stop'
 $env:RELIAN_DEPLOY_TEST='1'
 . "$PSScriptRoot/../../windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1"
 $actualUmCache=$script:UmCache
+$actualUmControl=$script:UmControl
 function Assert($value,$message) { if(-not $value) { throw $message } }
 $a=Get-UmOptions
 Assert ($a.Mode -eq 'Report' -and -not $a.Scan) 'Passive default'
@@ -114,3 +115,36 @@ Assert ((Get-UmMoSetupState @{SetupPhase=1} $true) -eq 'unknownOrActive') 'Posit
 Assert ((Get-UmOwnUpgradeState @{status='staged';time='2026-10-01T00:00:00Z';isoBuild=26200} 26200 ([datetime]'2026-10-02')) -eq 'residual') 'Own marker build completed'
 Assert ((Get-UmOwnUpgradeState @{status='staged';time='2026-10-03T00:00:00Z';isoBuild=26200} 22631 ([datetime]'2026-10-02')) -eq 'staged') 'Own staged pending reboot'
 Assert ((Get-UmOwnUpgradeState @{status='staged';time='invalid';isoBuild=26200} 26200 ([datetime]'2026-10-02')) -eq 'unknown') 'Unreadable actual state blocks'
+
+# Round 2: exercise the real control adapter, only the Win32 syscall is mocked.
+$script:recursiveCalls=0; $script:rawStops=0
+$fake=[pscustomobject]@{Status='Running';Name='CryptSvc'}
+$fake | Add-Member ScriptMethod Stop { $script:recursiveCalls++; throw 'dependent recursively stopped' }
+$fake | Add-Member ScriptMethod Dispose {}
+$script:UmGetController={ param($name) $fake }
+$script:UmStopRequest={ param($controller) $script:rawStops++; 1051 }
+$script:UmControl=$actualUmControl
+$script:tick=0
+$dependent=Invoke-UmServiceState 'CryptSvc' 'Stopped' 2
+Assert ($dependent.outcome -eq 'failed' -and $dependent.nativeCode -eq 1051 -and $dependent.errorCategory -eq 'runningDependentServices') 'Running dependent safely refused by SCM'
+Assert ($script:recursiveCalls -eq 0 -and $script:rawStops -eq 1) 'Never recursively stops dependent services'
+'Nonrecursive SCM regression passed'
+$script:states=@{BITS='Running';wuauserv='Stopped';CryptSvc='Running';DependentService='Running'}
+$script:UmGetController={ param($name)
+ $c=[pscustomobject]@{Name=$name;Status=$script:states[$name]}
+ $c | Add-Member ScriptMethod Stop { $script:recursiveCalls++; $script:states.DependentService='Stopped' }
+ $c | Add-Member ScriptMethod Start { $script:states[$this.Name]='Running' }
+ $c | Add-Member ScriptMethod Dispose {}
+ $c
+}
+$script:UmStopRequest={ param($controller)
+ if($controller.Name -eq 'CryptSvc') { return 1051 }
+ $script:states[$controller.Name]='Stopped'; 0
+}
+$script:tick=0; $dependentReport=@{actions=@();errors=@();cacheBackups=@()}; $refused=$false
+try { & $actualUmCache $dependentReport } catch { $refused=$true }
+Assert ($refused -and $script:states.DependentService -eq 'Running' -and $script:recursiveCalls -eq 0) 'Cache reset preserves live dependent'
+Assert ($script:states.BITS -eq 'Running' -and $script:states.CryptSvc -eq 'Running') 'Cache finally restores only explicitly stopped services'
+Assert (@($dependentReport.actions | Where-Object { $_.nativeCode -eq 1051 -and $_.service -eq 'CryptSvc' }).Count -eq 1) 'Dependent refusal persisted'
+Assert (@($dependentReport.actions | Where-Object { $_.phase -eq 'cacheRename' }).Count -eq 0) 'Dependent refusal prevents rename'
+'Nonrecursive cache restoration regression passed'
