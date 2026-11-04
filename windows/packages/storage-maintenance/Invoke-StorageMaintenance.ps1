@@ -228,6 +228,36 @@ function Get-SmScan {
  [pscustomobject]@{ Roots=@($Roots); Files=@($files.ToArray()); TopFiles=@($files | Sort-Object LogicalBytes -Descending | Select-Object -First 20); TopFolders=@($folders.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 20 | ForEach-Object { [pscustomobject]@{Path=$_.Key;DirectFileLogicalBytes=$_.Value} }); Partial=($partial -or $errors.Count -gt 0 -or $skipped -gt 0); Light=$light; GuardReasons=$guardReasons; EntriesVisited=$visited; SkippedReparseOrCloud=$skipped; Errors=@($errors.ToArray()); Seconds=$watch.Elapsed.TotalSeconds }
 }
 
+# Residual rollback folders are safe only with independent completed-upgrade evidence.
+function Get-SmUpgradeDirectoryState {
+ param($DirectoryCreatedUtc,[int]$CurrentBuild,$PriorBuilds,[datetime]$InstalledUtc,[datetime]$BootUtc)
+ if(-not @($DirectoryCreatedUtc).Count) { return 'absent' }
+ if($InstalledUtc.Year -lt 2000 -or $BootUtc -lt $InstalledUtc -or -not @($PriorBuilds | Where-Object { $_ -match '^\d+$' -and [int]$_ -lt $CurrentBuild }).Count) { return 'unknownStaging' }
+ foreach($created in $DirectoryCreatedUtc) { if(-not $created -or [datetime]$created -gt $InstalledUtc) { return 'unknownStaging' } }
+ 'completedResidual'
+}
+function Get-SmMoSetupState {
+ param($Values,[bool]$Completed)
+ if(-not $Values.Count) { return 'residual' }
+ if(-not $Completed) { return 'unknownOrActive' }
+ foreach($name in $Values.Keys) { if($name -notin @('SetupHostResult','SetupHostError','SetupPhase') -or [string]$Values[$name] -ne '0') { return 'unknownOrActive' } }
+ 'residual'
+}
+function Get-SmOwnUpgradeState {
+ param($State,[int]$CurrentBuild,[datetime]$BootUtc)
+ if($State.status -eq 'staged') {
+  try {
+   if($CurrentBuild -lt 10240) { return 'unknown' }
+   if([string]$State.isoBuild -notmatch '^\d{5,6}$' -or [int]$State.isoBuild -lt 10240 -or -not $State.time) { return 'unknown' }
+   $staged=[datetime]::Parse([string]$State.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+   if($staged -gt [datetime]::UtcNow) { return 'unknown' }
+   if($CurrentBuild -ge [int]$State.isoBuild -or $BootUtc -gt $staged) { return 'residual' }
+   return 'staged'
+  } catch { return 'unknown' }
+ }
+ if($State.status -in @('finished','alreadyCurrent','failed','rolledBack')) { return 'residual' }
+ 'unknown'
+}
 function Get-SmGuards {
  $reasons=New-Object Collections.Generic.List[string]; $light=$false
  try {
@@ -236,15 +266,29 @@ function Get-SmGuards {
   if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
   $setup=Get-ItemProperty 'HKLM:\SYSTEM\Setup' -ErrorAction Stop
   foreach($n in @('SystemSetupInProgress','OOBEInProgress','SetupPhase')) { if($setup.$n) { $reasons.Add("Setup $n"); $light=$true } }
-  foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired','HKLM:\SYSTEM\Setup\MoSetup\Volatile')) {
+  foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
    if(Test-Path -LiteralPath $key -ErrorAction Stop) { $reasons.Add($key) }
   }
   $session=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
   if($session.PendingFileRenameOperations) { $reasons.Add('pending file rename') }
-  foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) { if(Test-Path -LiteralPath (Join-Path $env:SystemDrive $name) -ErrorAction Stop) { $reasons.Add('upgrade staging present') } }
-  $state=Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json'
-  if(Test-Path -LiteralPath $state -ErrorAction Stop) { $s=Get-Content -LiteralPath $state -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if($s.status -eq 'staged') { $reasons.Add('feature upgrade staged') } }
- } catch { $reasons.Add('unknown guard: '+$_.Exception.Message); $light=$true }
+  $created=@(); foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) { $path=Join-Path $env:SystemDrive $name; if(Test-Path -LiteralPath $path -ErrorAction Stop) { $stageItem=Get-Item -LiteralPath $path -Force -ErrorAction Stop; if(-not $stageItem.PSIsContainer -or ([int64]$stageItem.Attributes -band (1024 -bor 4096)) -ne 0) { throw 'Upgrade staging metadata is not an ordinary readable directory' }; $created+=$stageItem.CreationTimeUtc } }
+  $moPath='HKLM:\SYSTEM\Setup\MoSetup\Volatile'; $hasMo=Test-Path -LiteralPath $moPath -ErrorAction Stop
+  $state=Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json'; $hasState=Test-Path -LiteralPath $state -ErrorAction Stop
+  if($created.Count -or $hasMo -or $hasState) {
+   $os=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+   if([string]$os.CurrentBuild -notmatch '^\d{5,6}$') { throw 'Current Windows build unknown' }
+   $prior=@(Get-ChildItem 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop).CurrentBuild })
+   $installed=([datetime]'1970-01-01Z').AddSeconds([double]$os.InstallDate)
+   $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
+   $completed=(Get-SmUpgradeDirectoryState @($installed) ([int]$os.CurrentBuild) $prior $installed $boot) -eq 'completedResidual'
+   if($created.Count -and (Get-SmUpgradeDirectoryState $created ([int]$os.CurrentBuild) $prior $installed $boot) -ne 'completedResidual') { $reasons.Add('unknown upgrade staging; completion not established'); $light=$true }
+  }
+  if($hasMo) {
+   $moKey=Get-Item -LiteralPath $moPath -ErrorAction Stop; $values=@{}; foreach($name in $moKey.GetValueNames()) { $values[$name]=$moKey.GetValue($name) }
+   if((Get-SmMoSetupState $values $completed) -ne 'residual') { $reasons.Add('MoSetup state active or unknown'); $light=$true }
+  }
+  if($hasState) { $s=Get-Content -LiteralPath $state -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if((Get-SmOwnUpgradeState $s ([int]$os.CurrentBuild) $boot) -ne 'residual') { $reasons.Add('feature upgrade staged or unknown'); $light=$true } }
+ } catch { $reasons.Add('unknown guard: evidence unavailable'); $light=$true }
  [pscustomobject]@{ Safe=($reasons.Count -eq 0); Light=$light; Reasons=@($reasons.ToArray()) }
 }
 
@@ -688,7 +732,7 @@ function ConvertTo-SmSummary {
 
 function Invoke-SmMaintenance {
  param($A)
- $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging blocks cleanup conservatively even after Setup exits; review staging and reboot state in a maintenance window before retrying.'); Evidence=$null }
+ $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null }
  $acquired=$false
  try {
   $acquired=& $script:SmAcquire

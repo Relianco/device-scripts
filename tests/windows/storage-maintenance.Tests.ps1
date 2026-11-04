@@ -4,6 +4,20 @@ $env:RELIAN_DEPLOY_TEST = '1'
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 $script:SmScanGuard={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
 function Throws($Code) { try { & $Code; throw 'did not throw' } catch { if ($_.Exception.Message -eq 'did not throw') { throw } } }
+# Upgrade history distinguishes preserved residue from unestablished staging.
+$install=[datetime]::SpecifyKind([datetime]'2026-10-01T12:00:00',[DateTimeKind]::Utc)
+Assert ((Get-SmUpgradeDirectoryState @($install.AddDays(-1)) 26200 @('26100') $install $install.AddDays(1)) -eq 'completedResidual') 'completed upgrade residue preserved without blocking'
+Assert ((Get-SmUpgradeDirectoryState @($install.AddDays(1)) 26200 @('26100') $install $install.AddDays(2)) -eq 'unknownStaging') 'new staging after OS install blocks'
+Assert ((Get-SmUpgradeDirectoryState @($install.AddDays(-1)) 26200 @() $install $install.AddDays(1)) -eq 'unknownStaging') 'missing SourceOS completion evidence blocks'
+Assert ((Get-SmMoSetupState @{} $false) -eq 'residual') 'empty Volatile key is not active evidence'
+Assert ((Get-SmMoSetupState @{SetupHostResult=0;SetupPhase=0} $true) -eq 'residual') 'known zero MoSetup result with proven completion residual'
+Assert ((Get-SmMoSetupState @{SetupHostResult=0} $false) -eq 'unknownOrActive') 'zero MoSetup values still need completion evidence'
+Assert ((Get-SmMoSetupState @{SetupProgress=100} $true) -eq 'unknownOrActive') 'unsupported MoSetup fields fail closed'
+$own=[pscustomobject]@{status='staged';isoBuild=26200;time='2026-10-02T12:00:00Z'}
+Assert ((Get-SmOwnUpgradeState $own 26200 $install) -eq 'residual') 'target build reached clears stale own stage'
+Assert ((Get-SmOwnUpgradeState $own 26100 $install.AddDays(3)) -eq 'residual') 'boot after own stage makes marker residual'
+Assert ((Get-SmOwnUpgradeState $own 26100 $install) -eq 'staged') 'unbuilt own stage before reboot blocks'
+$own.time='bad'; Assert ((Get-SmOwnUpgradeState $own 26200 $install) -eq 'unknown') 'malformed own stage unknown even when target build reached'
 # Profile age sources are independent: registry pair is primary, not hive file time.
 function New-AgePair($Date) {
  $ft=[uint64]$Date.ToFileTimeUtc()
