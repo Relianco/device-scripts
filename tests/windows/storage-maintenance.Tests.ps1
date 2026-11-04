@@ -2,6 +2,13 @@ $ErrorActionPreference = 'Stop'
 $env:RELIAN_DEPLOY_TEST = '1'
 . (Join-Path $PSScriptRoot '../../windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1')
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+
+$triage=[pscustomobject]@{Status='partial';Mode='Report';Actions=@();Guards=@{Reasons=@('Setup active')};Scan=@{Partial=$true;TopFiles=@(@{Path='C:\large.bin';LogicalBytes=100});TempCategories=@(@{Root='C:\Windows\Temp';AgeQualifiedLogicalBytes=50})};Before=@(@{DeviceID='C:';Size=1000;FreeSpace=100});After=@();Profiles=@(@{Decision='Protected'},@{Decision='StaleCandidate'});FreeSpaceDelta=@();Notifications=@();Errors=@();Evidence=@{Opportunities=@(@{Present=$true},@{Present=$false})}}
+$triageSummary=ConvertTo-SmSummary $triage 'report.json' | ConvertFrom-Json
+Assert ($triageSummary.Before[0].FreeSpace -eq 100 -and $triageSummary.TopFiles[0].LogicalBytes -eq 100) 'Storage stdout includes free space and top consumers'
+Assert ($triageSummary.ProfileDecisions.Count -eq 2 -and $triageSummary.TempOpportunities.Count -eq 1) 'Storage stdout includes profile and temp decisions'
+Assert ($triageSummary.OpportunityCount -eq 2 -and $triageSummary.ProfileCount -eq 2) 'Storage stdout reports opportunity and profile counts'
+Assert ($null -ne $triageSummary.Truncated) 'Storage stdout declares truncation'
 $script:SmScanGuard={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
 function Throws($Code) { try { & $Code; throw 'did not throw' } catch { if ($_.Exception.Message -eq 'did not throw') { throw } } }
 # Upgrade history distinguishes preserved residue from unestablished staging.
@@ -259,3 +266,14 @@ try {
  Assert ($r.Status -eq 'busy') 'mutex exclusion'
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 Write-Output 'storage-maintenance tests passed'
+
+$triage.Guards=@{Light=$true;Reasons=@('Setup active')}; $triage.Scan=@{Partial=$true;Light=$true}; $triage.Profiles=@()
+$light=ConvertTo-SmSummary $triage 'report.json' | ConvertFrom-Json
+Assert ($light.ScanWithheld -and $light.Before[0].FreeSpace -eq 100 -and @($light.TopFiles).Count -eq 0) 'Light stdout retains volume snapshot while scans withheld'
+$triage.Scan=@{Partial=$true;TopFiles=@(1..20 | ForEach-Object { @{Path=('漢'*1000);LogicalBytes=100} });TopFolders=@(1..20 | ForEach-Object { @{Path=('漢'*1000);DirectFileLogicalBytes=100} });TempCategories=@(1..20 | ForEach-Object { @{Root=('漢'*1000);LogicalBytes=100;AgeQualifiedLogicalBytes=50} })}; $triage.Errors=@(('漢'*10000)); $triage.Guards.Reasons=@(('漢'*10000))
+$bounded=ConvertTo-SmSummary $triage 'report.json'
+Assert ([Text.Encoding]::UTF8.GetByteCount($bounded) -le 8000 -and ($bounded | ConvertFrom-Json).Truncated) 'UTF8 triage stdout is explicitly truncated within byte cap'
+
+foreach($state in @(@{status='staged';isoBuild=1;time='2026-11-04T00:00:00Z'},@{status='staged';isoBuild=26200;time='2099-01-01T00:00:00Z'})) {
+ Assert ((Get-SmOwnUpgradeState $state 22631 ([datetime]'2026-11-03')) -eq 'unknown') 'Paired storage invalid/future staged evidence must block'
+}

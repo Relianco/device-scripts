@@ -402,6 +402,67 @@ function Get-SmGuards {
 }
 
 # Protect the local evidence directory before any cleanup is authorized.
+# Direct native file handles: no parent-owned managed stream pumps. The explicit
+# inheritance list also prevents a servicing child retaining the runner's pipes.
+function Start-SmDurableProcess {
+ param([string]$Executable,[string]$Arguments,[string]$Stdout,[string]$Stderr)
+ if(-not ('RelianSmNative' -as [type])) {
+ Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class RelianSmNative {
+ [StructLayout(LayoutKind.Sequential)] struct SA { public int length; public IntPtr descriptor; public int inherit; }
+ [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct SI { public int cb; public string reserved,desktop,title; public int x,y,xsize,ysize,xchars,ychars,fill,flags; public short show,reservedSize; public IntPtr reservedBytes,input,output,error; }
+ [StructLayout(LayoutKind.Sequential)] struct SIX { public SI startup; public IntPtr attributes; }
+ [StructLayout(LayoutKind.Sequential)] struct PI { public IntPtr process,thread; public int pid,tid; }
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SA security,uint disposition,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,int flags,ref IntPtr size);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list,uint flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr returned);
+ [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateProcess(string app,StringBuilder command,IntPtr processSecurity,IntPtr threadSecurity,bool inherit,uint flags,IntPtr environment,string directory,ref SIX startup,out PI process);
+ [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateProcess(IntPtr process,uint exitCode);
+ static Exception Error() { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
+ public static Process Start(string executable,string arguments,string stdout,string stderr) {
+  SA sa=new SA(); sa.length=Marshal.SizeOf(typeof(SA)); sa.inherit=1;
+  using(SafeFileHandle output=CreateFile(stdout,0x40000000,1,ref sa,1,0x80,IntPtr.Zero))
+  using(SafeFileHandle error=CreateFile(stderr,0x40000000,1,ref sa,1,0x80,IntPtr.Zero))
+  using(SafeFileHandle input=CreateFile("NUL",0x80000000,3,ref sa,3,0x80,IntPtr.Zero)) {
+   if(output.IsInvalid||error.IsInvalid||input.IsInvalid) throw Error();
+   IntPtr bytes=IntPtr.Zero,list=IntPtr.Zero,handles=IntPtr.Zero; bool initialized=false;
+   PI pi=new PI(); bool created=false,resumed=false; Process acquired=null;
+   try {
+    InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref bytes);
+    list=Marshal.AllocHGlobal(bytes);
+    if(!InitializeProcThreadAttributeList(list,1,0,ref bytes)) throw Error(); initialized=true;
+    handles=Marshal.AllocHGlobal(3*IntPtr.Size);
+    Marshal.WriteIntPtr(handles,0,input.DangerousGetHandle()); Marshal.WriteIntPtr(handles,IntPtr.Size,output.DangerousGetHandle()); Marshal.WriteIntPtr(handles,2*IntPtr.Size,error.DangerousGetHandle());
+    if(!UpdateProcThreadAttribute(list,0,new IntPtr(0x20002),handles,new IntPtr(3*IntPtr.Size),IntPtr.Zero,IntPtr.Zero)) throw Error();
+    SIX si=new SIX(); si.startup.cb=Marshal.SizeOf(typeof(SIX)); si.attributes=list; si.startup.flags=0x100; si.startup.input=input.DangerousGetHandle(); si.startup.output=output.DangerousGetHandle(); si.startup.error=error.DangerousGetHandle();
+    // Create suspended so the exact managed identity/handle is acquired before a
+    // very short process can exit. No shell interprets executable or arguments.
+    if(!CreateProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,true,0x08080004,IntPtr.Zero,System.IO.Path.GetDirectoryName(stdout),ref si,out pi)) throw Error(); created=true;
+    acquired=Process.GetProcessById(pi.pid); IntPtr retained=acquired.Handle; DateTime started=acquired.StartTime;
+    if(ResumeThread(pi.thread)==0xffffffff) throw Error(); resumed=true;
+    return acquired;
+   } finally {
+    if(created&&!resumed) TerminateProcess(pi.process,1);
+    if(!resumed&&acquired!=null) acquired.Dispose();
+    if(pi.thread!=IntPtr.Zero) CloseHandle(pi.thread); if(pi.process!=IntPtr.Zero) CloseHandle(pi.process);
+    if(initialized) DeleteProcThreadAttributeList(list); if(list!=IntPtr.Zero) Marshal.FreeHGlobal(list); if(handles!=IntPtr.Zero) Marshal.FreeHGlobal(handles);
+   }
+  }
+ }
+}
+'@
+ }
+ [RelianSmNative]::Start($Executable,$Arguments,$Stdout,$Stderr)
+}
+
 function Initialize-SmSecureDirectory {
  param([string]$Path)
  $base=[IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
@@ -463,7 +524,7 @@ $script:SmComponent={
  if(Test-Path -LiteralPath $markerPath -ErrorAction Stop) { throw 'Native marker already exists; reconcile exact process identity first' }
  $native=[ordered]@{pid=$null;creationTimeUtc=$null;executable=(Join-Path $env:windir 'System32\dism.exe');phase='startingComponentCleanup';startedUtc=[datetime]::UtcNow.ToString('o');stdoutPath=(Join-Path $logDir ($id+'.stdout.log'));stderrPath=(Join-Path $logDir ($id+'.stderr.log'))}
  $native | ConvertTo-Json -Compress | Set-Content -LiteralPath $markerPath -Encoding UTF8 -ErrorAction Stop
- $p=Start-Process -FilePath (Join-Path $env:windir 'System32\dism.exe') -ArgumentList '/Online /Cleanup-Image /StartComponentCleanup /NoRestart' -RedirectStandardOutput (Join-Path $logDir ($id+'.stdout.log')) -RedirectStandardError (Join-Path $logDir ($id+'.stderr.log')) -PassThru -WindowStyle Hidden
+ $p=Start-SmDurableProcess (Join-Path $env:windir 'System32\dism.exe') '/Online /Cleanup-Image /StartComponentCleanup /NoRestart' $native.stdoutPath $native.stderrPath
  $native.pid=$p.Id; $native.creationTimeUtc=$p.StartTime.ToUniversalTime().ToString('o'); $native.phase='componentCleanup'
  $native | ConvertTo-Json -Compress | Set-Content -LiteralPath $markerPath -Encoding UTF8 -ErrorAction Stop
  if(-not $p.WaitForExit(300000)) { throw 'Component cleanup still running after five minutes; not terminated; do not start another maintenance job.' }
@@ -830,10 +891,14 @@ $script:SmUi={ param($Step)
 
 function ConvertTo-SmSummary {
  param($Report,[string]$ReportPath)
- $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=$ReportPath;ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5);PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};FreeSpaceDelta=$Report.FreeSpaceDelta;Notifications=@($Report.Notifications | Select-Object -First 3);Errors=@($Report.Errors | Select-Object -First 3)}
+ # All strings are clipped before serialization; item limits and the UTF8 byte
+ # fallback make truncation explicit without losing measured volume evidence.
+ $clip={ param($Value,[int]$Limit=180) $text=[string]$Value; if($text.Length -gt $Limit) { return $text.Substring(0,$Limit)+'...' }; $text }
+ $volumes={ param($Items) @($Items | Select-Object -First 4 | ForEach-Object { @{DeviceID=(& $clip $_.DeviceID 20);Size=$_.Size;FreeSpace=$_.FreeSpace} }) }
+ $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true)}
  $json=$summary | ConvertTo-Json -Depth 6 -Compress
  if([Text.Encoding]::UTF8.GetByteCount($json) -gt 8000) {
-  $summary.GuardReasons=@('See full local report'); $summary.Notifications=@('See full local report'); $summary.Errors=@('See full local report'); $summary.FreeSpaceDelta=@()
+  $summary.GuardReasons=@($summary.GuardReasons | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.Notifications=@(); $summary.Errors=@($summary.Errors | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.FreeSpaceDelta=@(); $summary.TopFolders=@($summary.TopFolders | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TopFiles=@($summary.TopFiles | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TempOpportunities=@($summary.TempOpportunities | Select-Object -First 1 | ForEach-Object { $_.Root=& $clip $_.Root 80; $_ }); $summary.Truncation='Byte cap reached; volume measurements, one consumer/category, first error and decision counts retained. See full local report.'
   $json=$summary | ConvertTo-Json -Depth 6 -Compress
  }
  return $json

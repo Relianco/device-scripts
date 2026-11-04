@@ -6,6 +6,8 @@ Start with a report. Both packages default to reporting, even when the runner ac
 
 ## Reading storage results
 
+The compact stdout JSON includes measured before/after volume free bytes, a few top file/folder consumers, age-qualified temp opportunities and profile decision counts. Item/string limits and any byte-cap fallback are explicitly marked as truncated; the local JSON retains full evidence. During Setup, stdout still includes the permitted volume snapshot while scans are withheld.
+
 Logical file size is not guaranteed recoverable space. Sparse files, compression, hard links and online-only files can make it differ substantially from allocated space. Do not add parent directory totals to their children or add overlapping cache categories. Before/after free-space measurements include concurrent Windows activity.
 
 Temp cleanup retains recent files. Profile removal is separate and disabled by default; its default inactivity threshold is 60 days, configurable with ProfileAgeDays, with fresh eligibility checks. Directory modification dates from a WizTree export do not establish profile inactivity. Keep exclusions for accounts whose local data must remain. Mail stores, unsynced documents and application state require review before an entire profile is removed.
@@ -15,6 +17,8 @@ Browser/WebView/Teams caches can dwarf general temporary files. The report ident
 A bounded scan marks incomplete coverage. During active Setup, only a light snapshot is collected. A broader scan should run after the upgrade finishes and the device has restarted successfully. Existing WizTree exports can supplement the bounded report without competing with Setup on the device.
 
 ## Reading update results
+
+Recent update events run in a read-only worker with a 15-second observation deadline and servicing guard checks between waits. Timeout, unavailable history and a Setup transition are reported as omitted evidence; a transition defers further work.
 
 A successful search returning zero applicable updates does not establish that Windows is current or that a feature upgrade should be offered. Distinguish search errors, paused or targeted releases, update-source management, compatibility safeguards, servicing/reboot state, and an unsupported installed Windows release. Recent Defender or application updates do not establish current OS cumulative servicing, but they also do not support a claim that every Ninja update mechanism is broken.
 
@@ -67,3 +71,5 @@ For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires
 The normal scan budget is 20,000 entries and 30 seconds. `MaxFiles` and `MaxSeconds` allow a longer explicitly requested scan; partial coverage remains visible. Long scans belong after the upgrade, and the RMM job timeout must allow the requested budget plus diagnostics and cleanup.
 
 For updates, select `windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1`. Start with `Mode='Report'`; use explicit `Mode='Repair'` for guarded service recovery and scan verification. `ResetCache='true'` enables cache backup/reset and `RepairImage='true'` enables DISM/SFC. `Scan='true'` requests an online search from Report mode only when guards pass. Timeouts are configurable via `ScanTimeoutSeconds` and `NativeTimeoutSeconds` (10–3600 seconds). Do not use cache reset or image repair as an automatic response to an empty update list.
+
+Native servicing logs use OS file handles owned by the child, with inheritance restricted to its log and NUL input handles. They remain writable after the launching PowerShell exits. Native markers retain the exact PID, creation time and executable; a timeout never authorizes starting another servicing operation.

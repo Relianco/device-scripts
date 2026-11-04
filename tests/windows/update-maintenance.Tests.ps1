@@ -4,6 +4,14 @@ $env:RELIAN_DEPLOY_TEST='1'
 $actualUmCache=$script:UmCache
 $actualUmControl=$script:UmControl
 function Assert($value,$message) { if(-not $value) { throw $message } }
+# Consolidated review regressions: malformed evidence never establishes completion.
+foreach($state in @(@{status='staged';isoBuild=1;time='2026-11-04T00:00:00Z'},@{status='staged';isoBuild=26200;time='2099-01-01T00:00:00Z'})) {
+ Assert ((Get-UmOwnUpgradeState $state 22631 ([datetime]'2026-11-03')) -eq 'unknown') 'Invalid/future staged evidence must block'
+}
+$aclSource=${function:Initialize-UmSecureDirectory}.ToString()
+Assert ($aclSource.Contains('GetOwner') -and $aclSource.Contains('DeleteSubdirectoriesAndFiles')) 'Updater validates ordinary existing ancestor ACL trust'
+Assert (${function:Wait-UmEventWorker}.ToString().Contains('UmGuard')) 'Event wait checks Setup transitions'
+
 $a=Get-UmOptions
 Assert ($a.Mode -eq 'Report' -and -not $a.Scan) 'Passive default'
 foreach($bad in @('TRUE','1','yes')) { $threw=$false; try { Get-UmOptions -ResetCache $bad } catch { $threw=$true }; Assert $threw 'Strict boolean' }
@@ -70,7 +78,7 @@ Assert ($r.status -eq 'failed') 'Fresh pre-step guard blocks race'
 Assert ($r.before.policy.TargetReleaseVersionInfo -eq '23H2') 'Managed policy preserved'
 $source=Get-Content "$PSScriptRoot/../../windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1" -Raw
 Assert ($source -notmatch '(?i)Restart-Computer|shutdown\.exe|ResetBase|Ninja-Property|relian_git_deploy_token') 'No reboot or tenant APIs'
-Assert ($source -match 'RedirectStandardOutput' -and $source -match 'creationTimeUtc' -and $source -match 'Global\\RelianWindowsMaintenance') 'Detached native shared guard contract'
+Assert ($source -match 'CreateProcess' -and $source -match 'UpdateProcThreadAttribute' -and $source -match 'creationTimeUtc' -and $source -match 'Global\\RelianWindowsMaintenance') 'Detached native shared guard contract'
 'Update maintenance tests passed'
 # Round 1 regressions exercise actual operation boundaries.
 Assert ((Get-UmUpgradeDirectoryState @([datetime]'2026-10-01') 26200 @('22631') ([datetime]'2026-10-02') ([datetime]'2026-10-03')) -eq 'completedResidual') 'Completed upgrade keeps rollback directories without permanent block'
@@ -148,3 +156,82 @@ Assert ($script:states.BITS -eq 'Running' -and $script:states.CryptSvc -eq 'Runn
 Assert (@($dependentReport.actions | Where-Object { $_.nativeCode -eq 1051 -and $_.service -eq 'CryptSvc' }).Count -eq 1) 'Dependent refusal persisted'
 Assert (@($dependentReport.actions | Where-Object { $_.phase -eq 'cacheRename' }).Count -eq 0) 'Dependent refusal prevents rename'
 'Nonrecursive cache restoration regression passed'
+
+# A blocked event provider is a real disposable local process, never a live query.
+$eventGuard=$script:UmGuard
+$hang=Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"' -PassThru
+try {
+ $script:UmGuard={ @{Safe=$true;Reasons=@()} }
+ $wait=Wait-UmEventWorker $hang 0.3
+ Assert ($wait.outcome -eq 'timeout' -and $wait.elapsedSeconds -lt 3) 'Blocked event provider has parent deadline'
+ Assert ($hang.WaitForExit(2000)) 'Timed-out evidence child stopped'
+} finally { if(-not $hang.HasExited) { $hang.Kill() }; $hang.Dispose() }
+$hang=Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 30"' -PassThru
+try {
+ $script:UmGuard={ @{Safe=$false;Light=$true;Reasons=@('Setup began')} }
+ $wait=Wait-UmEventWorker $hang 10
+ Assert ($wait.outcome -eq 'guardChanged' -and $wait.elapsedSeconds -lt 3) 'Setup transition interrupts event provider'
+ Assert ($hang.WaitForExit(2000)) 'Servicing-interrupted evidence child stopped'
+} finally { if(-not $hang.HasExited) { $hang.Kill() }; $hang.Dispose(); $script:UmGuard=$eventGuard }
+# Compile the standalone Windows interop on every platform. Execution below is
+# Windows-only: POSIX redirection is not evidence for Windows handle inheritance.
+foreach($prefix in @('Um','Sm')) {
+ if($prefix -eq 'Sm') { . "$PSScriptRoot/../../windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1" }
+ $native=(Get-Item ('Function:Start-'+$prefix+'DurableProcess')).Definition
+ $match=[regex]::Match($native,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+ Assert $match.Success 'Standalone native launcher source present'
+ if(-not (('Relian'+$prefix+'Native') -as [type])) { Add-Type -TypeDefinition $match.Groups[1].Value }
+ Assert ($native.Contains('0x20002') -and $native.Contains('3*IntPtr.Size') -and $native.Contains('ResumeThread')) 'Only exact three native handles inherited, exact identity acquired before resume'
+}
+if($env:OS -eq 'Windows_NT') {
+ foreach($prefix in @('Um','Sm')) {
+  $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $null=New-Item -ItemType Directory $root
+  $parent=$null
+  try {
+   $late=Join-Path $root 'late.ps1'; $out=Join-Path $root 'native.out'; $err=Join-Path $root 'native.err'; $identity=Join-Path $root 'identity.xml'
+   # The child writes after its launching PowerShell has already exited.
+   'Start-Sleep -Seconds 6; [Console]::Out.WriteLine("late-out:"+$PID); [Console]::Error.WriteLine("late-error:"+$PID)' | Set-Content -LiteralPath $late
+   $package=Join-Path $PSScriptRoot ('../../windows/packages/'+$(if($prefix -eq 'Um'){'update-maintenance/Invoke-UpdateMaintenance.ps1'}else{'storage-maintenance/Invoke-StorageMaintenance.ps1'}))
+   $quote={param($v) "'"+$v.Replace("'","''")+"'"}
+   $exe=(Get-Process -Id $PID).Path
+   $command='$env:RELIAN_DEPLOY_TEST="1"; . '+(& $quote $package)+'; $p=Start-'+$prefix+'DurableProcess '+(& $quote $exe)+' '+(& $quote ('-NoProfile -NonInteractive -File "'+$late+'"'))+' '+(& $quote $out)+' '+(& $quote $err)+'; @{pid=$p.Id;start=$p.StartTime.ToUniversalTime().ToString("o")} | Export-Clixml -LiteralPath '+(& $quote $identity)
+   $psi=New-Object Diagnostics.ProcessStartInfo
+   $psi.FileName=$exe; $psi.Arguments='-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)); $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
+   $parent=[Diagnostics.Process]::Start($psi); $parentOut=$parent.StandardOutput.ReadToEndAsync(); $parentErr=$parent.StandardError.ReadToEndAsync()
+   Assert ($parent.WaitForExit(10000) -and $parent.ExitCode -eq 0) 'Native launching parent exits successfully'
+   Assert ($parentOut.Wait(1000) -and $parentErr.Wait(1000)) 'Native child does not retain ancestor stdout/stderr pipes'
+   $nativeIdentity=Import-Clixml -LiteralPath $identity
+   $deadline=[Diagnostics.Stopwatch]::StartNew()
+   while($deadline.Elapsed.TotalSeconds -lt 12 -and (((Get-Content -LiteralPath $out -Raw) -notmatch 'late-out:') -or ((Get-Content -LiteralPath $err -Raw) -notmatch 'late-error:'))) { Start-Sleep -Milliseconds 100 }
+   Assert ((Get-Content -LiteralPath $out -Raw).Trim() -eq ('late-out:'+$nativeIdentity.pid)) 'Late stdout survives launcher exit with exact native PID'
+   Assert ((Get-Content -LiteralPath $err -Raw).Trim() -eq ('late-error:'+$nativeIdentity.pid)) 'Late stderr survives launcher exit'
+  } finally { if($parent) { $parent.Dispose() }; Remove-Item -LiteralPath $root -Recurse -Force }
+ }
+ # Ordinary directory with untrusted ownership/rights must fail before child ACL
+ # rewriting. This uses only an isolated temporary ProgramData substitute.
+ $savedData=$env:ProgramData; $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
+ try {
+  $env:ProgramData=$root; $ancestor=Join-Path $root 'Relian'; $null=New-Item -ItemType Directory -Path $ancestor -Force
+  $acl=Get-Acl -LiteralPath $ancestor
+  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')),'Modify','ContainerInherit,ObjectInherit','None','Allow')))
+  Set-Acl -LiteralPath $ancestor -AclObject $acl
+  $refused=$false; try { Initialize-UmSecureDirectory (Join-Path $ancestor 'Maintenance\Update') } catch { $refused=$true }
+  Assert $refused 'Ordinary untrusted common ancestor refused'
+ } finally { $env:ProgramData=$savedData; Remove-Item -LiteralPath $root -Recurse -Force }
+} else { 'Windows native parent-exit/pipe-inheritance and NTFS ACL execution tests skipped on this platform' }
+'Consolidated final regressions passed'
+
+$realPrepare=$script:UmPrepare
+$script:UmPrepare={ throw 'Shared evidence ancestor grants untrusted modification rights' }
+try { $failure=Invoke-UmMaintenance (Get-UmOptions); Assert ($failure.status -eq 'failed' -and $failure.errors[0].detail -eq 'EvidenceAncestorUntrustedRights') 'Initialization refusal carries sanitized actionable category' }
+finally { $script:UmPrepare=$realPrepare }
+$realEvents=$script:UmEvents; $realGuard=$script:UmGuard
+try {
+ $script:UmGuard={ @{Safe=$true;Light=$false;Reasons=@()} }
+ $script:UmEvents={ @{outcome='timeout';events=@()} }
+ $timeoutReport=Invoke-UmMaintenance (Get-UmOptions)
+ Assert ($timeoutReport.eventEvidence.outcome -eq 'timeout' -and ($timeoutReport.omissions -join ';') -match 'timeout') 'Event deadline produces explicit omitted evidence'
+ $script:UmEvents={ @{outcome='guardChanged';events=@();reasons=@('Setup began')} }
+ $transitionReport=Invoke-UmMaintenance (Get-UmOptions -Mode Repair)
+ Assert ($transitionReport.status -eq 'deferred' -and $transitionReport.actions.Count -eq 0) 'Event Setup transition defers repair before mutation'
+} finally { $script:UmEvents=$realEvents; $script:UmGuard=$realGuard }

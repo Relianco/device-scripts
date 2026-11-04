@@ -58,8 +58,10 @@ function Get-UmOwnUpgradeState {
  param($State,[int]$CurrentBuild,[datetime]$BootUtc)
  if($State.status -eq 'staged') {
   try {
-   if([string]$State.isoBuild -notmatch '^\d+$' -or -not $State.time) { return 'unknown' }
+   if($CurrentBuild -lt 10240) { return 'unknown' }
+   if([string]$State.isoBuild -notmatch '^\d{5,6}$' -or [int]$State.isoBuild -lt 10240 -or -not $State.time) { return 'unknown' }
    $staged=[datetime]::Parse([string]$State.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+   if($staged -gt [datetime]::UtcNow) { return 'unknown' }
    if($CurrentBuild -ge [int]$State.isoBuild -or $BootUtc -gt $staged) { return 'residual' }
    return 'staged'
   } catch { return 'unknown' }
@@ -101,6 +103,67 @@ function Get-UmGuards {
 }
 
 # Protect the local evidence directory before any cleanup is authorized.
+# Direct native file handles: no parent-owned managed stream pumps. The explicit
+# inheritance list also prevents a servicing child retaining the runner's pipes.
+function Start-UmDurableProcess {
+ param([string]$Executable,[string]$Arguments,[string]$Stdout,[string]$Stderr)
+ if(-not ('RelianUmNative' -as [type])) {
+ Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class RelianUmNative {
+ [StructLayout(LayoutKind.Sequential)] struct SA { public int length; public IntPtr descriptor; public int inherit; }
+ [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct SI { public int cb; public string reserved,desktop,title; public int x,y,xsize,ysize,xchars,ychars,fill,flags; public short show,reservedSize; public IntPtr reservedBytes,input,output,error; }
+ [StructLayout(LayoutKind.Sequential)] struct SIX { public SI startup; public IntPtr attributes; }
+ [StructLayout(LayoutKind.Sequential)] struct PI { public IntPtr process,thread; public int pid,tid; }
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFile(string path,uint access,uint share,ref SA security,uint disposition,uint flags,IntPtr template);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,int flags,ref IntPtr size);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list,uint flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr returned);
+ [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+ [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool CreateProcess(string app,StringBuilder command,IntPtr processSecurity,IntPtr threadSecurity,bool inherit,uint flags,IntPtr environment,string directory,ref SIX startup,out PI process);
+ [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern uint ResumeThread(IntPtr thread);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool TerminateProcess(IntPtr process,uint exitCode);
+ static Exception Error() { return new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
+ public static Process Start(string executable,string arguments,string stdout,string stderr) {
+  SA sa=new SA(); sa.length=Marshal.SizeOf(typeof(SA)); sa.inherit=1;
+  using(SafeFileHandle output=CreateFile(stdout,0x40000000,1,ref sa,1,0x80,IntPtr.Zero))
+  using(SafeFileHandle error=CreateFile(stderr,0x40000000,1,ref sa,1,0x80,IntPtr.Zero))
+  using(SafeFileHandle input=CreateFile("NUL",0x80000000,3,ref sa,3,0x80,IntPtr.Zero)) {
+   if(output.IsInvalid||error.IsInvalid||input.IsInvalid) throw Error();
+   IntPtr bytes=IntPtr.Zero,list=IntPtr.Zero,handles=IntPtr.Zero; bool initialized=false;
+   PI pi=new PI(); bool created=false,resumed=false; Process acquired=null;
+   try {
+    InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref bytes);
+    list=Marshal.AllocHGlobal(bytes);
+    if(!InitializeProcThreadAttributeList(list,1,0,ref bytes)) throw Error(); initialized=true;
+    handles=Marshal.AllocHGlobal(3*IntPtr.Size);
+    Marshal.WriteIntPtr(handles,0,input.DangerousGetHandle()); Marshal.WriteIntPtr(handles,IntPtr.Size,output.DangerousGetHandle()); Marshal.WriteIntPtr(handles,2*IntPtr.Size,error.DangerousGetHandle());
+    if(!UpdateProcThreadAttribute(list,0,new IntPtr(0x20002),handles,new IntPtr(3*IntPtr.Size),IntPtr.Zero,IntPtr.Zero)) throw Error();
+    SIX si=new SIX(); si.startup.cb=Marshal.SizeOf(typeof(SIX)); si.attributes=list; si.startup.flags=0x100; si.startup.input=input.DangerousGetHandle(); si.startup.output=output.DangerousGetHandle(); si.startup.error=error.DangerousGetHandle();
+    // Create suspended so the exact managed identity/handle is acquired before a
+    // very short process can exit. No shell interprets executable or arguments.
+    if(!CreateProcess(executable,new StringBuilder("\""+executable+"\" "+arguments),IntPtr.Zero,IntPtr.Zero,true,0x08080004,IntPtr.Zero,System.IO.Path.GetDirectoryName(stdout),ref si,out pi)) throw Error(); created=true;
+    acquired=Process.GetProcessById(pi.pid); IntPtr retained=acquired.Handle; DateTime started=acquired.StartTime;
+    if(ResumeThread(pi.thread)==0xffffffff) throw Error(); resumed=true;
+    return acquired;
+   } finally {
+    if(created&&!resumed) TerminateProcess(pi.process,1);
+    if(!resumed&&acquired!=null) acquired.Dispose();
+    if(pi.thread!=IntPtr.Zero) CloseHandle(pi.thread); if(pi.process!=IntPtr.Zero) CloseHandle(pi.process);
+    if(initialized) DeleteProcThreadAttributeList(list); if(list!=IntPtr.Zero) Marshal.FreeHGlobal(list); if(handles!=IntPtr.Zero) Marshal.FreeHGlobal(handles);
+   }
+  }
+ }
+}
+'@
+ }
+ [RelianUmNative]::Start($Executable,$Arguments,$Stdout,$Stderr)
+}
+
 function Initialize-UmSecureDirectory {
  param([string]$Path)
  $base=[IO.Path]::GetFullPath($env:ProgramData).TrimEnd('\')
@@ -111,10 +174,23 @@ function Initialize-UmSecureDirectory {
  foreach($part in $full.Substring($base.Length+1).Split('\')) {
   if(-not $part -or $part -in @('.','..')) { throw 'Invalid evidence directory' }
   $current=Join-Path $current $part
-  if(-not (Test-Path -LiteralPath $current -ErrorAction Stop)) { $null=New-Item -ItemType Directory -Path $current -ErrorAction Stop }
+  $created=$false
+  if(-not (Test-Path -LiteralPath $current -ErrorAction Stop)) { $null=New-Item -ItemType Directory -Path $current -ErrorAction Stop; $created=$true }
   $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
   if(-not $item.PSIsContainer -or ([int64]$item.Attributes -band 1024) -ne 0) { throw 'Reparse evidence directory refused' }
-  if($current -eq (Join-Path $base 'Relian')) { continue }
+  if(-not $created -and $current -ne $full) {
+   # Existing shared ancestors belong to other packages too: inspect, never rewrite.
+   $existing=Get-Acl -LiteralPath $current -ErrorAction Stop
+   $ownerSid=$existing.GetOwner([Security.Principal.SecurityIdentifier]).Value
+   if($ownerSid -notin @('S-1-5-18','S-1-5-32-544')) { throw 'Shared evidence ancestor has an untrusted owner' }
+   $writeMask=[Security.AccessControl.FileSystemRights]::Write -bor [Security.AccessControl.FileSystemRights]::Delete -bor [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor [Security.AccessControl.FileSystemRights]::ChangePermissions -bor [Security.AccessControl.FileSystemRights]::TakeOwnership
+   foreach($rule in $existing.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+    if($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+    $ruleSid=$rule.IdentityReference.Value
+    if($ruleSid -notin @('S-1-5-18','S-1-5-32-544') -and ($rule.FileSystemRights -band $writeMask)) { throw 'Shared evidence ancestor grants untrusted modification rights' }
+   }
+   continue
+  }
   $acl=New-Object Security.AccessControl.DirectorySecurity
   $acl.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
   Set-Acl -LiteralPath $current -AclObject $acl -ErrorAction Stop
@@ -493,7 +569,52 @@ $script:UmSnapshot={
  }
  @{os=@{edition=$os.EditionID;build=$os.CurrentBuild;release=$os.DisplayVersion;ubr=$os.UBR};osLifecycle=(Get-UmLifecycle $os.EditionID $os.CurrentBuild $os.DisplayVersion);services=$services;serviceConfig=$serviceConfig;policy=$policy;volumes=@(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 5 | Select-Object DeviceID,FreeSpace,Size);featureOffer='notEstablished';managementAction='Preserve policy, targeting, pauses and safeguards; consult administrator. AUOptions=2 is notify before download; UI restriction does not establish failed detection.'}
 }
-$script:UmEvents={ @(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WindowsUpdateClient/Operational';StartTime=[datetime]::Now.AddDays(-14)} -MaxEvents 30 -ErrorAction Stop | Select-Object TimeCreated,Id,LevelDisplayName) }
+# Event-provider latency is isolated from the controller. MaxEvents alone is not
+# a deadline; this read-only child can be cancelled when Setup begins.
+function Wait-UmEventWorker {
+ param($Process,[double]$Seconds)
+ $watch=[Diagnostics.Stopwatch]::StartNew(); $nextGuard=0.0
+ $r=@{outcome='complete';reasons=@()}
+ while($true) {
+  if($watch.Elapsed.TotalSeconds -ge $Seconds) { $r.outcome='timeout'; break }
+  if($watch.Elapsed.TotalSeconds -ge $nextGuard) {
+   try { $g=& $script:UmGuard; if($null -eq $g -or -not $g.Safe) { $r.outcome='guardChanged'; $r.reasons=@($g.Reasons); break } }
+   catch { $r.outcome='guardChanged'; $r.reasons=@('Unknown servicing guard'); break }
+   $nextGuard=$watch.Elapsed.TotalSeconds+2
+  }
+  if($watch.Elapsed.TotalSeconds -ge $Seconds) { $r.outcome='timeout'; break }
+  $ms=[int][math]::Max(1,[math]::Min(200,($Seconds-$watch.Elapsed.TotalSeconds)*1000))
+  if($Process.WaitForExit($ms)) { break }
+ }
+ if($r.outcome -ne 'complete') { try { $Process.Kill() } catch { $r.reasons+='Read-only event worker termination unconfirmed' } }
+ $r.elapsedSeconds=$watch.Elapsed.TotalSeconds
+ $r
+}
+function Get-UmBoundedEvents {
+ param([int]$Seconds=15)
+ $p=$null
+ try {
+  $helper=Join-Path $script:UmRunDir 'events.ps1'; $result=Join-Path $script:UmRunDir 'events.xml'
+  $body=@'
+$ErrorActionPreference='Stop'
+try {
+ $events=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-WindowsUpdateClient/Operational';StartTime=[datetime]::Now.AddDays(-14)} -MaxEvents 30 -ErrorAction Stop | Select-Object TimeCreated,Id,LevelDisplayName)
+ @{outcome='complete';events=$events} | Export-Clixml -LiteralPath (Join-Path $PSScriptRoot 'events.xml') -Depth 4
+} catch { @{outcome='unavailable';events=@()} | Export-Clixml -LiteralPath (Join-Path $PSScriptRoot 'events.xml') }
+'@
+  foreach($path in @($helper,$result)) { if(Test-Path -LiteralPath $path -ErrorAction Stop) { throw 'Event evidence output collision' } }
+  Set-Content -LiteralPath $helper -Value $body -Encoding UTF8 -ErrorAction Stop
+  $exe=Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $p=Start-Process -FilePath $exe -ArgumentList ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$helper+'"') -PassThru -WindowStyle Hidden -ErrorAction Stop
+  $wait=Wait-UmEventWorker $p $Seconds
+  if($wait.outcome -ne 'complete') { return @{outcome=$wait.outcome;events=@();reasons=$wait.reasons} }
+  if($p.ExitCode -ne 0 -or -not (Test-UmSafePath $result $script:UmRunDir)) { throw 'Event worker output unavailable' }
+  Import-Clixml -LiteralPath $result -ErrorAction Stop
+ } catch { @{outcome='unavailable';events=@()} }
+ finally { if($p) { try { if(-not $p.HasExited) { $p.Kill() } } catch {}; $p.Dispose() } }
+}
+$script:UmEvents={ Get-UmBoundedEvents }
+
 function Assert-UmSafe { $g=& $script:UmGuard; if(-not $g.Safe) { throw 'Guard blocked or unknown' } }
 # ServiceController sends SCM control without Start/Stop-Service pending-status waits.
 $script:UmGetController={ param($name) $c=New-Object ServiceProcess.ServiceController($name); $c.Refresh(); $c }
@@ -605,7 +726,7 @@ function Invoke-UmProcess {
  $null=Initialize-UmSecureDirectory $script:UmRunDir
  $stdout=Join-Path $script:UmRunDir ($Phase+'.stdout.txt'); $stderr=Join-Path $script:UmRunDir ($Phase+'.stderr.txt')
  foreach($file in @($stdout,$stderr)) { if(Test-Path -LiteralPath $file) { throw 'Native output collision' } }
- $p=Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -ErrorAction Stop
+ $p=Start-UmDurableProcess $Executable $Arguments $stdout $stderr
  $marker=Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
  $record=@{pid=$p.Id;creationTimeUtc=$p.StartTime.ToUniversalTime().ToString('o');executable=$Executable;phase=$Phase;startedUtc=[datetime]::UtcNow.ToString('o');stdoutPath=$stdout;stderrPath=$stderr}
  try { Write-UmJson $record $marker } catch { $r.actions+=@{phase=$Phase;outcome='markerWriteFailedChildMayRun';pid=$p.Id}; throw 'Native marker unavailable; child may remain active' }
@@ -645,6 +766,15 @@ $out | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $PSScriptRo
  if($result.outcome -ne 'commandCompleted' -or $result.exitCode -ne 0) { return $result }
  Get-Content -LiteralPath (Join-Path $script:UmRunDir 'scan-result.json') -Raw -ErrorAction Stop | ConvertFrom-Json
 }
+function Get-UmFailureCategory {
+ param($Failure)
+ switch -Regex ($Failure.Exception.Message) {
+  '^Shared evidence ancestor has an untrusted owner$' { 'EvidenceAncestorUntrustedOwner'; return }
+  '^Shared evidence ancestor grants untrusted modification rights$' { 'EvidenceAncestorUntrustedRights'; return }
+  '^Reparse (evidence directory|ProgramData ancestor) refused$' { 'EvidencePathReparseRefused'; return }
+  default { 'OperationIncomplete' }
+ }
+}
 function Invoke-UmMaintenance {
  param($a)
  $r=@{schemaVersion=1;runId=[guid]::NewGuid().ToString('n');mode=$a.Mode;status='reported';reportPath=$null;updateCurrency='notEstablished';featureOffer='notEstablished';guard=$null;before=$null;after=$null;actions=@();cacheBackups=@();scan=@{outcome='notRequested'};rebootRequired=$false;notification=@();errors=@();omissions=@('No Ninja history; no authoritative release currency comparison; no feature offer guarantee')}
@@ -653,7 +783,7 @@ function Invoke-UmMaintenance {
   $r.reportPath=& $script:UmPrepare; & $script:UmSave $r
   if($env:RELIAN_DEPLOY_TEST -ne '1') { Write-Host ('Update maintenance report: '+$r.reportPath) }
   $r.guard=& $script:UmGuard; $r.before=& $script:UmSnapshot
-  if($r.guard.Safe) { try { $r.recentUpdateEvents=@(& $script:UmEvents) } catch { $r.omissions+='Update event history unavailable' } } else { $r.omissions+='Busy/unknown: low-impact evidence only' }; & $script:UmSave $r
+  if($r.guard.Safe) { try { $events=& $script:UmEvents; $r.eventEvidence=$events; $r.recentUpdateEvents=@($events.events); if($events.outcome -ne 'complete') { $r.omissions+=('Update event evidence omitted: '+$events.outcome) }; if($events.outcome -eq 'guardChanged') { $r.guard=& $script:UmGuard; $r.status='deferred'; return $r } } catch { $r.omissions+='Update event history unavailable' } } else { $r.omissions+='Busy/unknown: low-impact evidence only' }; & $script:UmSave $r
   if($a.Notify) { try { $r.notification+=& $script:UmUi 'Inspecting Windows Update services, policy and release lifecycle.' } catch { $r.notification+='UI unavailable' } }
   if(-not $r.guard.Safe) { $r.status='deferred'; return $r }
   if($a.Mode -eq 'Report' -and -not $a.Scan) { return $r }
@@ -678,7 +808,7 @@ function Invoke-UmMaintenance {
   $r.after=& $script:UmSnapshot
   if(@(Get-UmServicePlan $r.after.services).Count) { throw 'Disabled required services remain after repair' }
   if($a.Mode -eq 'Repair' -and $changed) { $r.status='repaired' }
- } catch { if($changed) { $r.status='partial' } else { $r.status='failed' }; $r.errors+=@{phase='maintenance';category=$_.Exception.GetType().Name;detail='Operation incomplete; consult structured actions'} }
+ } catch { if($changed) { $r.status='partial' } else { $r.status='failed' }; $r.errors+=@{phase='maintenance';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} }
  finally {
   if($locked) { & $script:UmRelease }
   try { & $script:UmSave $r } catch { $r.status='failed'; $r.errors+='Report checkpoint failed' }
@@ -692,10 +822,10 @@ if($env:RELIAN_DEPLOY_TEST -ne '1') {
   $a=Get-UmOptions -Mode $Mode -ResetCache $ResetCache -RepairImage $RepairImage -Notify $Notify -Scan $Scan -ScanTimeoutSeconds $ScanTimeoutSeconds -NativeTimeoutSeconds $NativeTimeoutSeconds
   $r=Invoke-UmMaintenance $a
   if($script:UmUiOpen) { try { Close-ADTInstallationProgress } catch { $r.notification+='UI close failed' }; try { & $script:UmSave $r } catch { $r.status='failed' } }
-  $summary=@{schemaVersion=$r.schemaVersion;runId=$r.runId;mode=$r.mode;status=$r.status;reportPath=$r.reportPath;guard=$r.guard;actions=$r.actions;scan=@{outcome=$r.scan.outcome;count=$r.scan.count;hresult=$r.scan.hresult};rebootRequired=$r.rebootRequired;notification=$r.notification;updateCurrency=$r.updateCurrency;osLifecycle=$r.before.osLifecycle;truncation=$false;omissions=$r.omissions}
+  $summary=@{schemaVersion=$r.schemaVersion;runId=$r.runId;mode=$r.mode;status=$r.status;reportPath=$r.reportPath;guard=$r.guard;actions=$r.actions;scan=@{outcome=$r.scan.outcome;count=$r.scan.count;hresult=$r.scan.hresult};rebootRequired=$r.rebootRequired;notification=$r.notification;updateCurrency=$r.updateCurrency;osLifecycle=$r.before.osLifecycle;truncation=$false;omissions=$r.omissions;errors=@($r.errors | Select-Object -First 3);eventEvidence=@{outcome=$r.eventEvidence.outcome}}
   $json=$summary | ConvertTo-Json -Depth 8 -Compress
   if([text.encoding]::UTF8.GetByteCount($json) -gt 7500) { $summary.guard=@{Safe=$r.guard.Safe;Reasons=@('See durable report')}; $summary.actions=@{count=$r.actions.Count;details='See durable report'}; $summary.truncation=$true; $json=$summary | ConvertTo-Json -Depth 8 -Compress }
   Write-Output $json
   if($r.status -eq 'deferred') { exit 2 }; if($r.status -in @('failed','partial')) { exit 1 }; exit 0
- } catch { Write-Output '{"status":"failed","reason":"Invalid options or initialization failed"}'; exit 1 }
+ } catch { @{status='failed';reason='Options or initialization failed';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} | ConvertTo-Json -Compress; exit 1 }
 }
