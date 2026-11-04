@@ -48,6 +48,11 @@ function ConvertFrom-SmFileTimePair {
  return [pscustomobject]$r
 }
 
+function Test-SmProfilePath {
+ param([string]$Path)
+ return ($Path -match '^[A-Za-z]:\\Users\\[^\\]+$' -and ($Path -split '\\')[-1] -notmatch '^(Public|Default.*|All Users|Administrator|defaultuser.*)$')
+}
+
 function Test-SmProfile {
  param($Profile,[int]$AgeDays,[string[]]$Exclusions,[datetime]$Now=[datetime]::UtcNow,$Evidence=$null)
  $nowUtc=$Now.ToUniversalTime(); $cutoff=$nowUtc.AddDays(-$AgeDays); $last=$null; $cimState='missing'
@@ -55,7 +60,7 @@ function Test-SmProfile {
  $decision='ReviewInsufficientEvidence'; $reason='Required profile-service age, identity or activity evidence unavailable'; $age=$null; $fingerprint=$null
  if($Profile.Loaded -ne $false -or $Profile.Special -ne $false) { $decision='Protected'; $reason='Loaded, special or unknown loaded/special state' }
  elseif($Profile.SID -notmatch '^S-1-(5-21-|12-1-)' -or $Profile.SID -match '-(500|501|503|504)$') { $decision='Protected'; $reason='Protected SID' }
- elseif($Profile.LocalPath -notmatch '^[A-Za-z]:\\Users\\[^\\]+$' -or ($Profile.LocalPath -split '\\')[-1] -match '^(Public|Default.*|All Users|Administrator|defaultuser.*)$') { $decision='Protected'; $reason='Protected profile path' }
+ elseif(-not (Test-SmProfilePath $Profile.LocalPath)) { $decision='Protected'; $reason='Protected profile path' }
  elseif($Exclusions -contains $Profile.SID -or $Exclusions -contains $Profile.LocalPath -or $Profile.LocalPath -eq $env:USERPROFILE) { $decision='Protected'; $reason='Explicit exclusion or current profile' }
  elseif($null -eq $Profile.Status -or $null -eq $Profile.RoamingConfigured -or $null -eq $Profile.RoamingPreference) { $reason='Unknown profile status/roaming state' }
  elseif([int64]$Profile.Status -ne 0 -or $Profile.RoamingConfigured -or $Profile.RoamingPreference -or $Profile.refCount -gt 0) { $decision='Protected'; $reason='Temporary, roaming, mandatory, corrupt or referenced profile' }

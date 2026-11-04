@@ -125,7 +125,15 @@ function New-TestAgeEvidence($Now) {
  $l=New-AgePair ($Now.AddDays(-300)); $u=New-AgePair ($Now.AddDays(-200))
  [pscustomobject]@{Registry=[pscustomobject]@{ReadState='ok';IdentityMatches=$true;Raw=@{};Load=(ConvertFrom-SmFileTimePair $l.Low $l.High $Now);Unload=(ConvertFrom-SmFileTimePair $u.Low $u.High $Now);Cleanup=(ConvertFrom-SmFileTimePair $null $null $Now)};Identity=[pscustomobject]@{Resolved=$true;Account='EXAMPLE\old'};Sessions=[pscustomobject]@{Known=$true;Sids=@();CurrentSid='S-1-5-18'};Hives=[pscustomobject]@{Known=$true;Loaded=$false;ClassesLoaded=$false};NtUser=[pscustomobject]@{DatUtc=$Now;ManUtc=$null;Errors=@()};Events=[pscustomobject]@{ProbeComplete=$true;Recent=@();Truncated=$false;Error=$null;Coverage='unknown'};Errors=@()}
 }
-$ageProfile=[pscustomobject]@{SID='S-1-5-21-1-2-3-1001';LocalPath=(('C:','Users','old') -join '\');Loaded=$false;Special=$false;LastUseTime=$ageNow.AddDays(-90);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0}
+Assert (-not (Test-SmProfilePath ([IO.Path]::GetTempPath()))) 'Temporary directories do not expand production profile eligibility'
+Assert (-not (Test-SmProfilePath '')) 'Empty profile path protected'
+$profileFixtureRoot=Join-Path ([IO.Path]::GetTempPath()) ('profile-fixtures-'+[guid]::NewGuid().ToString('n'))
+$null=New-Item -ItemType Directory -Path $profileFixtureRoot
+$realProfilePath=${function:Test-SmProfilePath}
+# Age evidence tests isolate the conventional Windows path policy from their data.
+function Test-SmProfilePath($Path) { $Path.StartsWith($profileFixtureRoot+[IO.Path]::DirectorySeparatorChar) }
+$ageProfile=[pscustomobject]@{SID='S-1-5-21-1-2-3-1001';LocalPath=(Join-Path $profileFixtureRoot 'synthetic-profile');Loaded=$false;Special=$false;LastUseTime=$ageNow.AddDays(-90);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0}
+Assert ($ageProfile.LocalPath.StartsWith($profileFixtureRoot+[IO.Path]::DirectorySeparatorChar)) 'Profile fixture belongs to isolated temporary root'
 $ev=New-TestAgeEvidence $ageNow
 Assert (Test-SmProfile $ageProfile 60 @() $ageNow $ev).Eligible 'coherent old pair survives servicing NTUSER touch'
 $ageProfile.LastUseTime=$ageNow
@@ -173,7 +181,7 @@ Throws { Get-SmArguments -ProfileAgeDays '29' }
 Throws { Get-SmArguments -TempAgeDays '0' }
 Throws { Get-SmArguments -RemoveProfiles 'yes' }
 $now = [datetime]::UtcNow
-$p = [pscustomobject]@{ SID='S-1-5-21-1-2-3-1001'; LocalPath=(('C:','Users','old') -join '\'); Loaded=$false; Special=$false; LastUseTime=$now.AddDays(-200);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0 }
+$p = [pscustomobject]@{ SID='S-1-5-21-1-2-3-1001'; LocalPath=(Join-Path $profileFixtureRoot 'synthetic-profile'); Loaded=$false; Special=$false; LastUseTime=$now.AddDays(-200);Status=0;RoamingConfigured=$false;RoamingPreference=$false;refCount=0 }
 Assert (Test-SmProfile $p 180 @() $now (New-TestAgeEvidence $now)).Eligible 'old profile'
 $p.Loaded=$true
 Assert (-not (Test-SmProfile $p 180 @() $now).Eligible) 'loaded protected'
@@ -343,3 +351,6 @@ Assert ([Text.Encoding]::UTF8.GetByteCount($bounded) -le 8000 -and ($bounded | C
 foreach($state in @(@{status='staged';isoBuild=1;time='2026-11-04T00:00:00Z'},@{status='staged';isoBuild=26200;time='2099-01-01T00:00:00Z'})) {
  Assert ((Get-SmOwnUpgradeState $state 22631 ([datetime]'2026-11-03')) -eq 'unknown') 'Paired storage invalid/future staged evidence must block'
 }
+
+${function:Test-SmProfilePath}=$realProfilePath
+Remove-Item -LiteralPath $profileFixtureRoot -Recurse -Force

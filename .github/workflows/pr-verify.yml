@@ -49,3 +49,20 @@ jobs:
 
       - name: Run the macOS runner tests
         run: bash tests/macos/run-tests.sh
+
+  maintenance-windows:
+    name: Windows maintenance regressions
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run offline maintenance tests including native handles and NTFS ACLs
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests/windows/storage-maintenance.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/update-maintenance.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
