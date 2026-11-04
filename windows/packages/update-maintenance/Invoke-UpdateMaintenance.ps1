@@ -47,6 +47,26 @@ function Get-UmUpgradeDirectoryState {
  foreach($created in $DirectoryCreatedUtc) { if(-not $created -or [datetime]$created -gt $InstalledUtc) { return 'unknownStaging' } }
  'completedResidual'
 }
+function Get-UmMoSetupState {
+ param($Values,[bool]$Completed)
+ if(-not $Values.Count) { return 'residual' }
+ if(-not $Completed) { return 'unknownOrActive' }
+ foreach($name in $Values.Keys) { if($name -notin @('SetupHostResult','SetupHostError','SetupPhase') -or [string]$Values[$name] -ne '0') { return 'unknownOrActive' } }
+ 'residual'
+}
+function Get-UmOwnUpgradeState {
+ param($State,[int]$CurrentBuild,[datetime]$BootUtc)
+ if($State.status -eq 'staged') {
+  try {
+   if([string]$State.isoBuild -notmatch '^\d+$' -or -not $State.time) { return 'unknown' }
+   $staged=[datetime]::Parse([string]$State.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+   if($CurrentBuild -ge [int]$State.isoBuild -or $BootUtc -gt $staged) { return 'residual' }
+   return 'staged'
+  } catch { return 'unknown' }
+ }
+ if($State.status -in @('finished','alreadyCurrent','failed','rolledBack')) { return 'residual' }
+ 'unknown'
+}
 function Get-UmGuards {
  $reasons=New-Object Collections.Generic.List[string]; $light=$false
  try {
@@ -55,21 +75,27 @@ function Get-UmGuards {
   if(Test-Path -LiteralPath $nativeMarker -ErrorAction Stop) { $reasons.Add('native-active marker present; verified process reconciliation required'); $light=$true }
   $setup=Get-ItemProperty 'HKLM:\SYSTEM\Setup' -ErrorAction Stop
   foreach($n in @('SystemSetupInProgress','OOBEInProgress','SetupPhase')) { if($setup.$n) { $reasons.Add("Setup $n"); $light=$true } }
-  foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired','HKLM:\SYSTEM\Setup\MoSetup\Volatile')) {
+  foreach($key in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')) {
    if(Test-Path -LiteralPath $key -ErrorAction Stop) { $reasons.Add($key) }
   }
   $session=Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -ErrorAction Stop
   if($session.PendingFileRenameOperations) { $reasons.Add('pending file rename') }
   $created=@(); foreach($name in @('$WINDOWS.~BT','$WINDOWS.~WS')) { $path=Join-Path $env:SystemDrive $name; if(Test-Path -LiteralPath $path -ErrorAction Stop) { $created+=(Get-Item -LiteralPath $path -Force -ErrorAction Stop).CreationTimeUtc } }
-  if($created.Count) {
+  $moPath='HKLM:\SYSTEM\Setup\MoSetup\Volatile'; $hasMo=Test-Path -LiteralPath $moPath -ErrorAction Stop
+  $state=Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json'; $hasState=Test-Path -LiteralPath $state -ErrorAction Stop
+  if($created.Count -or $hasMo -or $hasState) {
    $os=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
    $prior=@(Get-ChildItem 'HKLM:\SYSTEM\Setup' -ErrorAction Stop | Where-Object { $_.PSChildName -like 'Source OS*' } | ForEach-Object { (Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction Stop).CurrentBuild })
    $installed=([datetime]'1970-01-01Z').AddSeconds([double]$os.InstallDate)
    $boot=(Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
-   if((Get-UmUpgradeDirectoryState $created ([int]$os.CurrentBuild) $prior $installed $boot) -ne 'completedResidual') { $reasons.Add('unknown upgrade staging; completion not established') }
+   $completed=(Get-UmUpgradeDirectoryState @($installed) ([int]$os.CurrentBuild) $prior $installed $boot) -eq 'completedResidual'
+   if($created.Count -and (Get-UmUpgradeDirectoryState $created ([int]$os.CurrentBuild) $prior $installed $boot) -ne 'completedResidual') { $reasons.Add('unknown upgrade staging; completion not established'); $light=$true }
   }
-  $state=Join-Path $env:ProgramData 'Relian\FeatureUpgrade\state.json'
-  if(Test-Path -LiteralPath $state -ErrorAction Stop) { $s=Get-Content -LiteralPath $state -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if($s.status -eq 'staged') { $reasons.Add('feature upgrade staged') } }
+  if($hasMo) {
+   $moKey=Get-Item -LiteralPath $moPath -ErrorAction Stop; $values=@{}; foreach($name in $moKey.GetValueNames()) { $values[$name]=$moKey.GetValue($name) }
+   if((Get-UmMoSetupState $values $completed) -ne 'residual') { $reasons.Add('MoSetup state active or unknown'); $light=$true }
+  }
+  if($hasState) { $s=Get-Content -LiteralPath $state -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop; if((Get-UmOwnUpgradeState $s ([int]$os.CurrentBuild) $boot) -ne 'residual') { $reasons.Add('feature upgrade staged or unknown'); $light=$true } }
  } catch { $reasons.Add('unknown guard: evidence unavailable'); $light=$true }
  [pscustomobject]@{ Safe=($reasons.Count -eq 0); Light=$light; Reasons=@($reasons.ToArray()) }
 }
