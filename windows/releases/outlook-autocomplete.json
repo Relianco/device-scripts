@@ -1,0 +1,7 @@
+{
+  "name": "Microsoft Outlook Autocomplete Cache",
+  "kind": "check",
+  "installsSoftware": false,
+  "ninjaField": "relianOutlookAutocomplete",
+  "packageArguments": "Optional base64-encoded UTF-8 JSON object. Pass {\"Match\":\"personal.stale@example.invalid\"} (eyJNYXRjaCI6InBlcnNvbmFsLnN0YWxlQGV4YW1wbGUuaW52YWxpZCJ9) to check for a cached address, or {\"Match\":\"personal.stale@example.invalid\",\"Fix\":\"true\",\"CloseOutlook\":\"true\"} (eyJNYXRjaCI6InBlcnNvbmFsLnN0YWxlQGV4YW1wbGUuaW52YWxpZCIsIkZpeCI6InRydWUiLCJDbG9zZU91dGxvb2siOiJ0cnVlIn0=) to back up the stream and remove matching rows."
+}
