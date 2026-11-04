@@ -47,31 +47,63 @@ function Test-SmSafePath {
   while ($cur) {
    $item=Get-Item -LiteralPath $cur -Force -ErrorAction Stop
    if (([int64]$item.Attributes -band (1024 -bor 4096 -bor 262144 -bor 4194304)) -ne 0) { return $false }
-   if ($cur.TrimEnd([IO.Path]::DirectorySeparatorChar) -eq $r) { return $true }
    $cur=[IO.Path]::GetDirectoryName($cur)
   }
- } catch { return $false }; return $false
+ } catch { return $false }; return $true
 }
 
+function Test-SmScanDirectory {
+ param([string]$Path)
+ try {
+  $cur=[IO.Path]::GetFullPath($Path)
+  while($cur) {
+   $item=Get-Item -LiteralPath $cur -Force -ErrorAction Stop
+   if(-not $item.PSIsContainer -or ([int64]$item.Attributes -band (1024 -bor 4096 -bor 262144 -bor 4194304)) -ne 0) { return $false }
+   $cur=[IO.Path]::GetDirectoryName($cur)
+  }
+  return $true
+ } catch { return $false }
+}
+
+function Get-SmProfileSize {
+ param($Scan,[string]$Path)
+ if(-not $Path) { return [pscustomobject]@{LogicalBytes=0;Partial=$true} }
+ $prefix=[IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar
+ $covered=@($Scan.Roots | Where-Object { $_ } | Where-Object { $scanRoot=[IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar; $prefix.StartsWith($scanRoot,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+ $observed=@($Scan.Files | Where-Object { [IO.Path]::GetFullPath($_.Path).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) })
+ [pscustomobject]@{LogicalBytes=[int64]($observed | Measure-Object LogicalBytes -Sum).Sum;Partial=(-not $covered -or $Scan.Partial -or @($Scan.Errors).Count -gt 0 -or $Scan.SkippedReparseOrCloud -gt 0)}
+}
+
+$script:SmScanGuard={ & $script:SmGuards }
 function Get-SmScan {
  param([string[]]$Roots,[int]$FileLimit,[int]$Seconds,[int]$AgeDays)
  $watch=[Diagnostics.Stopwatch]::StartNew(); $files=New-Object Collections.Generic.List[object]; $errors=New-Object Collections.Generic.List[string]
- $folders=@{}; $partial=$false; $visited=0; $skipped=0
+ $folders=@{}; $partial=$false; $visited=0; $skipped=0; $light=$false; $guardReasons=@(); $nextGuardEntry=0; $lastGuardSeconds=-2
  $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
  $queue=New-Object 'Collections.Generic.Queue[object]'
  foreach($root in $Roots) {
-  if (Test-Path -LiteralPath $root -PathType Container) { $queue.Enqueue(@($root,$root)) }
+  try { if (Test-Path -LiteralPath $root -PathType Container -ErrorAction Stop) { $queue.Enqueue(@($root,$root)) } else { $partial=$true; if($errors.Count -lt 50) { $errors.Add('Scan root unavailable: '+$root) } } } catch { $partial=$true; if($errors.Count -lt 50) { $errors.Add($_.Exception.Message) } }
  }
- while($queue.Count) {
+ :scanLoop while($queue.Count) {
+    if($visited -ge $nextGuardEntry -or $watch.Elapsed.TotalSeconds - $lastGuardSeconds -ge 2) {
+     try { $scanGuard=& $script:SmScanGuard; if($null -eq $scanGuard -or $scanGuard.Light) { $light=$true; $guardReasons=@($scanGuard.Reasons) } } catch { $light=$true; $guardReasons=@('unknown scan guard: '+$_.Exception.Message) }
+     $lastGuardSeconds=$watch.Elapsed.TotalSeconds; $nextGuardEntry=$visited+128
+     if($light) { $partial=$true; break scanLoop }
+    }
   if($visited -ge $FileLimit -or $watch.Elapsed.TotalSeconds -ge $Seconds) { $partial=$true; break }
   $pair=$queue.Dequeue(); $dir=$pair[0]; $root=$pair[1]
   if(-not $seen.Add([IO.Path]::GetFullPath($dir))) { continue }
   try {
-   if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT -and -not (Test-SmSafePath $dir ([IO.Path]::GetPathRoot($dir)))) { $skipped++; continue }
+   if (-not (Test-SmScanDirectory $dir)) { $skipped++; continue }
    $di=Get-Item -LiteralPath $dir -Force -ErrorAction Stop
    if (([int64]$di.Attributes -band (1024 -bor 4096 -bor 262144 -bor 4194304)) -ne 0) { $skipped++; continue }
    # Streaming enumeration; do not materialize an unbounded directory listing.
    foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($dir)) {
+    if($visited -ge $nextGuardEntry -or $watch.Elapsed.TotalSeconds - $lastGuardSeconds -ge 2) {
+     try { $scanGuard=& $script:SmScanGuard; if($null -eq $scanGuard -or $scanGuard.Light) { $light=$true; $guardReasons=@($scanGuard.Reasons) } } catch { $light=$true; $guardReasons=@('unknown scan guard: '+$_.Exception.Message) }
+     $lastGuardSeconds=$watch.Elapsed.TotalSeconds; $nextGuardEntry=$visited+128
+     if($light) { $partial=$true; break scanLoop }
+    }
     if($visited -ge $FileLimit -or $watch.Elapsed.TotalSeconds -ge $Seconds) { $partial=$true; break }
     $visited++
     try {
@@ -84,7 +116,7 @@ function Get-SmScan {
    }
   } catch { if($errors.Count -lt 50) { $errors.Add($_.Exception.Message) } }
  }
- [pscustomobject]@{ Files=@($files.ToArray()); TopFiles=@($files | Sort-Object LogicalBytes -Descending | Select-Object -First 20); TopFolders=@($folders.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 20 | ForEach-Object { [pscustomobject]@{Path=$_.Key;DirectFileLogicalBytes=$_.Value} }); Partial=$partial; EntriesVisited=$visited; SkippedReparseOrCloud=$skipped; Errors=@($errors.ToArray()); Seconds=$watch.Elapsed.TotalSeconds }
+ [pscustomobject]@{ Roots=@($Roots); Files=@($files.ToArray()); TopFiles=@($files | Sort-Object LogicalBytes -Descending | Select-Object -First 20); TopFolders=@($folders.GetEnumerator() | Sort-Object Value -Descending | Select-Object -First 20 | ForEach-Object { [pscustomobject]@{Path=$_.Key;DirectFileLogicalBytes=$_.Value} }); Partial=($partial -or $errors.Count -gt 0 -or $skipped -gt 0); Light=$light; GuardReasons=$guardReasons; EntriesVisited=$visited; SkippedReparseOrCloud=$skipped; Errors=@($errors.ToArray()); Seconds=$watch.Elapsed.TotalSeconds }
 }
 
 function Get-SmGuards {
@@ -557,11 +589,12 @@ function Invoke-SmMaintenance {
    $scanRoots+=@(& $script:SmDiagnosticRoots)
    $scanRoots+=@($r.Before | Where-Object { $_.DeviceID -match '^[A-Za-z]:$' } | ForEach-Object { $_.DeviceID+'\' })
    $scan=Get-SmScan $scanRoots $A.MaxFiles $A.MaxSeconds $A.TempAgeDays; $r.Scan=$scan
+   if($scan.Light) { $g=[pscustomobject]@{Safe=$false;Light=$true;Reasons=@($scan.GuardReasons)}; $r.Guards=$g; $r.Omissions+='Traversal abandoned because Setup/unknown servicing state appeared during scan.' }
    foreach($f in $scan.Files) { $f | Add-Member -NotePropertyName CleanupRoot -NotePropertyValue $null; foreach($tempRoot in $roots) { if($f.Path.StartsWith($tempRoot.TrimEnd('\')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { $f.CleanupRoot=$tempRoot; break } } }
    if($scan.Partial -or $scan.Errors.Count) { $r.Status='partial' }
    $cacheFiles=@($scan.Files | Where-Object { $_.Path -match '(?i)\\(Cache|Code Cache|GPUCache|ShaderCache|CacheStorage)\\|\\MSTeams_[^\\]+\\LocalCache\\|\\Adobe\\AcroCef\\' })
    $r.Evidence['ApplicationCaches']=@($cacheFiles | Group-Object { if($_.Path -match '(?i)^(.+?\\(?:Cache|Code Cache|GPUCache|ShaderCache|CacheStorage))\\') { $Matches[1] } else { $_.Root } } | Sort-Object Count -Descending | Select-Object -First 30 | ForEach-Object { @{Path=$_.Name;ObservedLogicalBytes=($_.Group | Measure-Object LogicalBytes -Sum).Sum;Partial=$scan.Partial;Policy='report only; close owning application and review before manual cleanup';ReclaimableBytes=$null} })
-   foreach($p in $r.Profiles) { $pf=@($scan.Files | Where-Object { $_.Root -eq $p.Path }); $p.LogicalBytes=($pf | Measure-Object LogicalBytes -Sum).Sum; $p.SizePartial=$scan.Partial }
+   foreach($p in $r.Profiles) { $size=Get-SmProfileSize $scan $p.Path; $p.LogicalBytes=$size.LogicalBytes; $p.SizePartial=$size.Partial }
    if($A.Mode -eq 'Cleanup') {
     if(-not $g.Safe) { $r.Status='withheld' }
     else {
@@ -601,7 +634,7 @@ function Invoke-SmMaintenance {
     }
    }
    # Full file list is internal only; output bounded top lists and category totals.
-   $r.Scan=[pscustomobject]@{Partial=$scan.Partial;EntriesVisited=$scan.EntriesVisited;Seconds=$scan.Seconds;SkippedReparseOrCloud=$scan.SkippedReparseOrCloud;Errors=$scan.Errors;TopFiles=$scan.TopFiles;TopFolders=$scan.TopFolders;TempCategories=@($roots | ForEach-Object { $root=$_; $fs=@($scan.Files | Where-Object {$_.CleanupRoot -eq $root}); @{Root=$root;LogicalBytes=($fs | Measure-Object LogicalBytes -Sum).Sum;AgeQualifiedLogicalBytes=($fs | Where-Object {$_.Old} | Measure-Object LogicalBytes -Sum).Sum;ReclaimableBytes=$null} })}
+   $r.Scan=[pscustomobject]@{Partial=$scan.Partial;Light=$scan.Light;GuardReasons=$scan.GuardReasons;EntriesVisited=$scan.EntriesVisited;Seconds=$scan.Seconds;SkippedReparseOrCloud=$scan.SkippedReparseOrCloud;Errors=$scan.Errors;TopFiles=$scan.TopFiles;TopFolders=$scan.TopFolders;TempCategories=@($roots | ForEach-Object { $root=$_; $fs=@($scan.Files | Where-Object {$_.CleanupRoot -eq $root}); @{Root=$root;LogicalBytes=($fs | Measure-Object LogicalBytes -Sum).Sum;AgeQualifiedLogicalBytes=($fs | Where-Object {$_.Old} | Measure-Object LogicalBytes -Sum).Sum;ReclaimableBytes=$null} })}
   }
   try { $r.Notifications+=& $script:SmUi ('Storage inspection '+$r.Status+'. Checking final free-space measurements.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
   try { $r.After=@(& $script:SmVolumes); $r.FreeSpaceDelta=@($r.After | ForEach-Object { $after=$_; $before=@($r.Before | Where-Object {$_.DeviceID -eq $after.DeviceID}); if($before.Count -eq 1) { @{DeviceID=$after.DeviceID;Bytes=([int64]$after.FreeSpace-[int64]$before[0].FreeSpace);IncludesConcurrentActivity=$true} } }) } catch { $r.Errors+=$_.Exception.Message }

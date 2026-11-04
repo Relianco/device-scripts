@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $env:RELIAN_DEPLOY_TEST = '1'
 . (Join-Path $PSScriptRoot '../../windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1')
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
+$script:SmScanGuard={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
 function Throws($Code) { try { & $Code; throw 'did not throw' } catch { if ($_.Exception.Message -eq 'did not throw') { throw } } }
 $a = Get-SmArguments
 Assert ($a.Mode -eq 'Report' -and -not $a.RemoveProfiles) 'safe defaults'
@@ -61,6 +62,31 @@ try {
  Assert (-not (Test-SmSafePath (Join-Path $link 'anything') $root)) 'symlink ancestor blocked'
  $scan=Get-SmScan @($root) 100 30 7
  Assert ($scan.SkippedReparseOrCloud -ge 1) 'symlink not traversed'
+ # The cleanup root itself can be ordinary while an ancestor was replaced.
+ $outside=Join-Path $root 'outside'; $null=New-Item -ItemType Directory -Path $outside
+ $outsideTemp=Join-Path $outside 'Temp'; $null=New-Item -ItemType Directory -Path $outsideTemp
+ $outsideFile=Join-Path $outsideTemp 'keep'; Set-Content -LiteralPath $outsideFile -Value 'keep'
+ $ancestor=Join-Path $root 'ancestor'; $null=New-Item -ItemType SymbolicLink -Path $ancestor -Target $outside
+ Assert (-not (Test-SmSafePath (Join-Path $ancestor 'Temp/keep') (Join-Path $ancestor 'Temp'))) 'junction above temp cleanup root blocked'
+ # A scan can validate the filesystem root without authorizing root deletion.
+ Assert (Test-SmScanDirectory ([IO.Path]::GetPathRoot($root))) 'volume root is valid for scanning'
+ $profile=Join-Path $root 'profile'; $profileTemp=Join-Path $profile 'AppData/Local/Temp'
+ $null=New-Item -ItemType Directory -Path $profileTemp -Force
+ Set-Content -LiteralPath (Join-Path $profileTemp 'only.tmp') -Value 'temporary bytes'
+ $scan=Get-SmScan @($profileTemp,$profile) 100 30 7
+ $size=Get-SmProfileSize $scan $profile
+ Assert ($size.LogicalBytes -eq (Get-Item (Join-Path $profileTemp 'only.tmp')).Length -and -not $size.Partial) 'profile includes temp queued as another scan root'
+ $scan.Errors=@('unreadable subtree')
+ Assert (Get-SmProfileSize $scan $profile).Partial 'enumeration errors make profile size partial'
+ $scan.Errors=@(); $scan.SkippedReparseOrCloud=1
+ Assert (Get-SmProfileSize $scan $profile).Partial 'omitted cloud subtree makes profile size partial'
+ $many=Join-Path $root 'many'; $null=New-Item -ItemType Directory -Path $many
+ 1..140 | ForEach-Object { Set-Content -LiteralPath (Join-Path $many "$_.tmp") -Value 'sample' }
+ $script:scanGuardReads=0
+ $script:SmScanGuard={ $script:scanGuardReads++; [pscustomobject]@{Safe=($script:scanGuardReads -lt 2);Light=($script:scanGuardReads -ge 2);Reasons=@('Setup started')} }
+ $scan=Get-SmScan @($many) 1000 30 7
+ Assert ($scan.Partial -and $scan.Light -and $scan.EntriesVisited -lt 140) 'Setup starting during scan stops traversal'
+ $script:SmScanGuard={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
  # A changed profile cannot be deleted after the first inventory.
  $script:profileReads=0; $script:profileRemovals=0
  $script:SmProfileHiveLoaded={ $false }
