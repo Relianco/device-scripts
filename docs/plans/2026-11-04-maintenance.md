@@ -1,0 +1,30 @@
+# Windows storage and update maintenance
+
+## Global Constraints
+
+- Public repository: no client identifiers, device IDs, credentials, or home paths in committed files.
+- Windows PowerShell 5.1 compatible standalone Invoke-* packages, launched by existing hash-pinned Invoke-RelianRunner with base64 JSON PackageArguments. No runner edits, no Ninja API calls or credential access in packages.
+- Plain offline pwsh tests: failing test first; RELIAN_DEPLOY_TEST=1 prevents runtime execution. Small mockable OS boundaries; no mandatory parameters.
+- Existing PSADT 4.1.8 branded session and user-session notification patterns. Progress messages explain actual steps. Diagnostics still work without signed-in user. UI failure is reported, not confused with repair success.
+- Never reboot or start an OS upgrade. Detect active Setup, staged upgrade, servicing and pending reboot conservatively. Unknown guard state blocks mutations. During USB upgrade only bounded low-impact read-only evidence; no cleanup, servicing, cache resets, profile deletion, or scan competing with Setup.
+- Preserve Windows.old, $WINDOWS.~BT/~WS, rollback/recovery, installer cache, user documents/downloads, system/component files. No ResetBase. No blanket policy deletion or automatic removal of management controls/safeguards.
+- Machine-wide maintenance mutex shared across packages, recheck guards before destructive steps, bounded work and explicit partial/incomplete results. Structured JSON report and stdout summary. Never claim all updates fixed merely because a command returned success.
+- Changes join main via PR. Workers own only their assigned package/release/test files and do not edit docs/STATUS.md or plans.
+
+## Task 1: Storage triage and cleanup
+
+Create windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1, windows/releases/storage-maintenance.json, tests/windows/storage-maintenance.Tests.ps1.
+Read existing restart-notice, diagnose-feature-upgrade, runner contracts, and the private rmm-scripts cleanup/profile scripts for inspiration (do not copy private identifiers). Default Mode Report; support Cleanup with safe age-qualified temp cleanup and explicit optional profile removal via ProfileAgeDays and RemoveProfiles. Profile deletion is off by default; age alone must not delete loaded, special, current, unknown-age or protected profiles. Use Win32_UserProfile removal, never raw recursive profile deletion. Default conservative age e.g.180 days; reject unsafe ages, revalidate at deletion. Include exclusions.
+Report volumes/free bytes before/after, bounded top folders and large files, profile age/size/eligibility, temp/cache categories, Windows.old/upgrade staging, component store, reserved/pagefile/hibernation/shadow space where accessible, storage health, known app caches, omissions/errors/truncation. Avoid reparse points and cloud placeholder hydration. Full scan bounded by time/files; only light summary while Setup active. Distinguish logical bytes from reclaimable estimates. No arbitrary recursive wipe. Expose optional supported component cleanup only when all servicing guards pass; diagnostics should show opportunities even if cleanup withheld. Preserve recent temp files. Deletion validates canonical root and ancestors, no symlink/junction escape, no wildcard injection. Report per-action changes/errors and actual free-space delta.
+Show PSADT progress with restart-notice style. Test guards, report mode zero mutations, traversal safety, partial scan, profile eligibility and removal recheck, cleanup thresholds, failures, concurrent exclusion, notification/no-user behavior.
+
+## Task 2: Update triage and repair
+
+Create windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1, release record and dedicated tests.
+Default Report; explicit Repair supports staged conservative repair. Collect OS/build, space, pending reboot/setup/servicing, Windows Update services/start types, policy (including WSUS/MDM/GPO, pause/target/deferral), recent error history, safeguard evidence, Windows Update search when safe, Ninja service presence/status as evidence only. Differentiate no applicable updates, scan failure, policy blocks, pending reboot, managed policy, setup busy and unknown.
+Repair can recover disabled required update services with recorded originals, perform bounded scan verification, optionally reset update caches with backup/restore service handling, and optionally run DISM RestoreHealth then SFC with bounded timeout and explicit deferred results. Policy repair must preserve management sources, pins and safeguards; allow only narrowly scoped explicit policy options after backup and prove reread. No forced updates, no Ninja policy mutation. Repair after active/staged Setup or pending reboot is deferred. Report external-management actions clearly. Do not promise feature upgrade availability from empty search results.
+Tests cover active/unknown upgrade guard, staged/pending reboot, managed policy preservation, partial service failures/restoration, reset failure, scan HRESULT/no-updates distinction, native timeouts, rerun/idempotence, UI failure/no user, no automatic reboot.
+
+## Task 3: Review, documentation and pilot
+
+Independent task reviews and whole-branch review. Run complete PowerShell suite and secret scan. Document copyable runner argument construction and report interpretation, safe defaults, optional destructive profile action. Pilot only user-authorized targets, fresh identity and online/job checks, report first while USB setup runs. No profile deletion pilot without agreed age/exclusions. Commit reports only sanitized; private target/evidence stays .agents. Open PR with tested limitations and update docs/STATUS.md.
