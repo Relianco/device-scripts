@@ -253,7 +253,7 @@ foreach($prefix in @('Um','Sm')) {
 if($env:OS -eq 'Windows_NT') {
  foreach($prefix in @('Um','Sm')) {
   $root=Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n')); $null=New-Item -ItemType Directory $root
-  $parent=$null
+  $parent=$null; $nativeChild=$null; $nativeFailure=$null
   try {
    $late=Join-Path $root 'late.ps1'; $out=Join-Path $root 'native.out'; $err=Join-Path $root 'native.err'; $identity=Join-Path $root 'identity.xml'
    # The child writes after its launching PowerShell has already exited.
@@ -266,13 +266,33 @@ if($env:OS -eq 'Windows_NT') {
    $psi.FileName=$exe; $psi.Arguments='-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command)); $psi.UseShellExecute=$false; $psi.CreateNoWindow=$true; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true
    $parent=[Diagnostics.Process]::Start($psi); $parentOut=$parent.StandardOutput.ReadToEndAsync(); $parentErr=$parent.StandardError.ReadToEndAsync()
    Assert ($parent.WaitForExit(10000) -and $parent.ExitCode -eq 0) 'Native launching parent exits successfully'
-   Assert ($parentOut.Wait(1000) -and $parentErr.Wait(1000)) 'Native child does not retain ancestor stdout/stderr pipes'
    $nativeIdentity=Import-Clixml -LiteralPath $identity
-   $deadline=[Diagnostics.Stopwatch]::StartNew()
-   while($deadline.Elapsed.TotalSeconds -lt 12 -and (((Get-Content -LiteralPath $out -Raw) -notmatch 'late-out:') -or ((Get-Content -LiteralPath $err -Raw) -notmatch 'late-error:'))) { Start-Sleep -Milliseconds 100 }
+   $observedChild=[Diagnostics.Process]::GetProcessById([int]$nativeIdentity.pid)
+   Assert ($observedChild.StartTime.ToUniversalTime().ToString('o') -eq $nativeIdentity.start) 'Synthetic child identity matches exact creation time'
+   $nativeChild=$observedChild
+   Assert ($parentOut.Wait(1000) -and $parentErr.Wait(1000)) 'Native child does not retain ancestor stdout/stderr pipes'
+   Assert (-not $nativeChild.HasExited) 'Synthetic native child outlives its launching parent'
+   # Output can arrive before process teardown closes its native log handles.
+   # Observe process completion before opening/deleting logs, rather than racing it.
+   Assert ($nativeChild.WaitForExit(15000) -and $nativeChild.ExitCode -eq 0) 'Synthetic native child completes after parent exit'
    Assert ((Get-Content -LiteralPath $out -Raw).Trim() -eq ('late-out:'+$nativeIdentity.pid)) 'Late stdout survives launcher exit with exact native PID'
    Assert ((Get-Content -LiteralPath $err -Raw).Trim() -eq ('late-error:'+$nativeIdentity.pid)) 'Late stderr survives launcher exit'
-  } finally { if($parent) { $parent.Dispose() }; Remove-Item -LiteralPath $root -Recurse -Force }
+  } catch { $nativeFailure=$_; throw } finally {
+   try {
+    # Only this exact test-created process handle may be stopped on a failed test.
+    if($nativeChild) {
+     if(-not $nativeChild.HasExited -and -not $nativeChild.WaitForExit(15000)) { $nativeChild.Kill(); Assert ($nativeChild.WaitForExit(5000)) 'Synthetic child cleanup completed' }
+     $nativeChild.Dispose()
+    }
+    if($parent) {
+     if(-not $parent.HasExited) { $parent.Kill(); $null=$parent.WaitForExit(5000) }
+     $parent.Dispose()
+    }
+    Remove-Item -LiteralPath $root -Recurse -Force
+   } catch {
+    if($nativeFailure) { Write-Warning ('Native regression cleanup also failed: '+$_.Exception.Message) } else { throw }
+   }
+  }
  }
  # Ordinary directory with untrusted ownership/rights must fail before child ACL
  # rewriting. This uses only an isolated temporary ProgramData substitute.
