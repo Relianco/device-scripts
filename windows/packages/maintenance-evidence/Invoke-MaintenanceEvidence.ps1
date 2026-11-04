@@ -55,10 +55,89 @@ function Read-MeReport {
   [pscustomobject]@{Report=$report;Sha256=(Get-MeHash $bytes);Length=$bytes.Length}
  } finally { $stream.Dispose() }
 }
+function Get-MeField {
+ param($Value,[string]$Name)
+ if($null -eq $Value) { return $null }
+ if($Value -is [Collections.IDictionary]) { return $Value[$Name] }
+ $property=$Value.PSObject.Properties[$Name]
+ if($property) { return $property.Value }
+ return $null
+}
+function Protect-MeSample {
+ param($Value,[int]$Max=160)
+ $text=[string]$Value
+ if($text -match '(?i)password|passwd|secret|token|authorization|bearer|credential|api.?key|accountkey|command.?line') { return '[sensitive text omitted]' }
+ $text=$text -replace '(?i)[a-z][a-z0-9+.-]*://\S+','[url omitted]'
+ $text=$text -replace '(?i)(?:[a-z]:\\|\\\\)[^\r\n]*','[path omitted]'
+ $text=($text -replace '[\x00-\x1f]',' ').Trim()
+ if($text.Length -gt $Max) { return $text.Substring(0,$Max) }
+ return $text
+}
+function Get-MeProfileIndex {
+ param($Report)
+ $hasProfiles=if($Report -is [Collections.IDictionary]) { $Report.Contains('Profiles') -and $null -ne $Report['Profiles'] } else { $null -ne $Report.PSObject.Properties['Profiles'] -and $null -ne $Report.PSObject.Properties['Profiles'].Value }
+ $rows=New-Object Collections.Generic.List[object]; $partial=(-not $hasProfiles)
+ foreach($profile in @(Get-MeField $Report Profiles | Where-Object { $null -ne $_ })) {
+  $decision=Get-MeField $profile Decision; $eligible=Get-MeField $profile Eligible
+  if($decision -isnot [string] -or -not $decision -or $decision.Length -gt 64) { $decision='[unknown]'; $partial=$true }
+  if($eligible -isnot [bool]) { $eligible=$null; $partial=$true }
+  $rows.Add([ordered]@{Ordinal=$rows.Count;Decision=$decision;Eligible=$eligible})
+ }
+ [ordered]@{Count=$rows.Count;Partial=$partial;Rows=@($rows.ToArray())}
+}
+function Get-MeActionSummary {
+ param($Report)
+ $groups=[ordered]@{}; $samples=New-Object Collections.Generic.List[object]
+ $hasActions=if($Report -is [Collections.IDictionary]) { $Report.Contains('Actions') -and $null -ne $Report['Actions'] } else { $null -ne $Report.PSObject.Properties['Actions'] -and $null -ne $Report.PSObject.Properties['Actions'].Value }
+ $rows=@()
+ if($hasActions) {
+  if($Report -is [Collections.IDictionary]) { $rows=@($Report['Actions']) }
+  else { $rows=@($Report.PSObject.Properties['Actions'].Value) }
+ }
+ $total=[decimal]0; $coverage=0; $errorCount=0; $partial=(-not $hasActions)
+ foreach($row in $rows) {
+  $kind=Get-MeField $row Kind; if(-not $kind) { $kind=Get-MeField $row phase }
+  $status=Get-MeField $row Status; if(-not $status) { $status=Get-MeField $row outcome }
+  $result=Get-MeField $row result; if(-not $status) { $status=Get-MeField $result outcome }
+  if($kind -isnot [string] -or -not $kind -or $kind.Length -gt 80) { $kind='[unknown]'; $partial=$true }
+  if($status -isnot [string] -or -not $status -or $status.Length -gt 80) { $status='[unknown]'; $partial=$true }
+  # Length prefix avoids delimiter collisions; first-observed report order is stable.
+  $key=[string]$kind.Length+':'+$kind+$status
+  if(-not $groups.Contains($key)) { $groups[$key]=[ordered]@{KindOrPhase=$kind;StatusOrOutcome=$status;Count=0;LogicalBytesReported=[decimal]0;LogicalBytesCoverageCount=0;ErrorCount=0} }
+  $group=$groups[$key]; $group.Count++
+  $bytes=Get-MeField $row LogicalBytes
+  if($null -ne $bytes -and [string]$bytes -match '^\d{1,28}$') {
+   try {
+    $amount=[decimal]::Parse([string]$bytes,[Globalization.CultureInfo]::InvariantCulture)
+    # Compute both before assignment; overflow cannot silently corrupt totals.
+    $newTotal=$total+$amount; $newGroup=$group.LogicalBytesReported+$amount
+    $total=$newTotal; $group.LogicalBytesReported=$newGroup; $coverage++; $group.LogicalBytesCoverageCount++
+   } catch { }
+  }
+  $errorValue=Get-MeField $row Error; if(-not $errorValue) { $errorValue=Get-MeField $result Error }
+  $category=Get-MeField $row errorCategory; if(-not $category) { $category=Get-MeField $result errorCategory }
+  if(-not $category) { $category=Get-MeField $errorValue category }
+  $message=if($errorValue -is [string]) { $errorValue } else { Get-MeField $errorValue message }
+  if($errorValue -or $category -or $status -match '(?i)fail|error') {
+   $errorCount++; $group.ErrorCount++
+   if($samples.Count -lt 5) { $samples.Add([ordered]@{Source='action';Category=(Protect-MeSample $category 64);Message=(Protect-MeSample $message)}) }
+  }
+ }
+ $reportErrors=@(Get-MeField $Report Errors | Where-Object { $null -ne $_ })
+ foreach($errorValue in $reportErrors) {
+  if($samples.Count -ge 5) { break }
+  $category=Get-MeField $errorValue category
+  $message=if($errorValue -is [string]) { $errorValue } else { Get-MeField $errorValue message }
+  if(-not $message) { $message=Get-MeField $errorValue detail }
+  $samples.Add([ordered]@{Source='report';Category=(Protect-MeSample $category 64);Message=(Protect-MeSample $message)})
+ }
+ [ordered]@{Count=$rows.Count;PartialCounts=$partial;Groups=@($groups.Values);LogicalBytesReported=$total;LogicalBytesCoverageCount=$coverage;PartialLogicalBytes=($coverage -ne $rows.Count);BytesMeaning='Reported logical bytes only, including withheld actions; NOT reclaimed space.';ErrorCount=$errorCount;ReportErrorCount=$reportErrors.Count;ErrorSamples=@($samples.ToArray());ErrorSourcesMayOverlap=$true}
+}
+
 function Get-MeSection {
  param($Report,[string]$Section,[int]$Ordinal)
  if($Ordinal -lt 0) { throw 'Invalid ordinal' }
- $sections=@('Index','Profiles','Snapshot','Policy','Scan','Actions','Errors','Guards','Evidence','Omissions')
+ $sections=@('Index','Profiles','ProfileIndex','ActionSummary','Snapshot','Policy','Scan','Actions','Errors','Guards','Evidence','Omissions')
  if($Section -notin $sections) { throw 'Unsupported section' }
  if($Section -eq 'Profiles') {
   $profiles=@($Report.Profiles | Where-Object { $null -ne $_ })
@@ -67,6 +146,8 @@ function Get-MeSection {
  }
  if($Ordinal -ne 0) { throw 'Ordinal is only supported for Profiles' }
  switch($Section) {
+  ProfileIndex { return Get-MeProfileIndex $Report }
+  ActionSummary { return Get-MeActionSummary $Report }
   Index { return [ordered]@{SchemaVersion=$Report.schemaVersion;Timestamp=$Report.Timestamp;RunId=$Report.runId;Status=$Report.Status;Mode=$Report.Mode;ProfileCount=@($Report.Profiles | Where-Object { $null -ne $_ }).Count;Sections=$sections;Properties=@($Report.PSObject.Properties.Name)} }
   Snapshot { return [ordered]@{Before=$Report.Before;After=$Report.After;FreeSpaceDelta=$Report.FreeSpaceDelta;UpdateCurrency=$Report.UpdateCurrency;FeatureOffer=$Report.FeatureOffer;RebootRequired=$Report.RebootRequired} }
   Policy { return $Report.before.policy }

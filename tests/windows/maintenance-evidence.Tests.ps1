@@ -50,4 +50,44 @@ try {
   Assert ((Get-MeReportPath Update ('a'*32)) -eq (Join-Path (Join-Path (Join-Path $owned 'Update') ('a'*32)) 'report.json')) 'Fixed update layout'
  } finally { $env:ProgramData=$oldData }
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }
+# Compact projections retain exact ordinals/counts without identifiers or paths.
+$profiles=[pscustomobject]@{Profiles=@([pscustomobject]@{SID='private';Path='C:\Users\Private';Decision='StaleCandidate';Eligible=$true},[pscustomobject]@{Decision='Keep';Eligible=$false})}
+$pi=Get-MeSection $profiles ProfileIndex 0
+Assert ($pi.Count -eq 2 -and $pi.Rows[0].Ordinal -eq 0 -and $pi.Rows[0].Eligible) 'Compact profile ordinals and eligibility'
+Assert (($pi | ConvertTo-Json -Depth 8) -notmatch 'private|C:') 'Profile index omits identifiers'
+$actions=[pscustomobject]@{Actions=@(
+ @{Kind='temp';Status='deleted';LogicalBytes=100},@{Kind='temp';Status='deleted';LogicalBytes=200},
+ @{Kind='temp';Status='withheld';LogicalBytes=300;Error='Locked C:\Users\Private\file'},
+ @{Kind='profile';Status='removedByCim'},@{Kind='componentCleanup';Status='commandCompleted'},
+ @{phase='imageRepair';result=@{outcome='commandCompleted'}},@{phase='service';outcome='failed';errorCategory='AccessDenied'},
+ @{unexpected='unknown'});Errors=@(@{category='ProbeFailed';detail='not available'})}
+$summary=Get-MeSection $actions ActionSummary 0
+Assert ($summary.Count -eq 8 -and $summary.LogicalBytesReported -eq 600 -and $summary.LogicalBytesCoverageCount -eq 3) 'Exact action count and known logical bytes'
+$deleted=@($summary.Groups | Where-Object { $_.KindOrPhase -eq 'temp' -and $_.StatusOrOutcome -eq 'deleted' })
+Assert ($deleted.Count -eq 1 -and $deleted[0].Count -eq 2 -and $deleted[0].LogicalBytesReported -eq 300) 'Grouped counts and logical-byte sums'
+Assert ($summary.ErrorCount -eq 2 -and $summary.ReportErrorCount -eq 1 -and $summary.PartialCounts) 'Errors and unknown-action coverage explicit'
+Assert (($summary | ConvertTo-Json -Depth 8) -notmatch 'Private|C:') 'Error samples omit paths'
+Assert (@($summary.Groups | Where-Object { $_.KindOrPhase -eq 'imageRepair' -and $_.StatusOrOutcome -eq 'commandCompleted' }).Count -eq 1) 'Nested update result outcome supported'
+$empty=Get-MeSection ([pscustomobject]@{Actions=@();Errors=@()}) ActionSummary 0
+Assert ($empty.Count -eq 0 -and $empty.Groups.Count -eq 0 -and -not $empty.PartialCounts) 'Empty actions are an exact empty summary'
+$many=Get-MeSection ([pscustomobject]@{Actions=@(1..20 | ForEach-Object { @{Kind='temp';Status='withheld';Error=('é'*500)} });Errors=@()}) ActionSummary 0
+Assert ($many.ErrorSamples.Count -eq 5 -and $many.ErrorSamples[0].Message.Length -le 160) 'Error sample count and length bounded'
+$summaryPage=Get-MePage $many 0
+Assert (($summaryPage | ConvertTo-Json -Compress).Length -lt 7500) 'New summary uses bounded page transport'
+Assert ((Get-MePage $many 0).SectionSha256 -eq $summaryPage.SectionSha256) 'Summary paging stable'
+
+
+$beforeSummary=ConvertTo-Json -InputObject $actions -Depth 15 -Compress
+$null=Get-MeSection $actions ActionSummary 0
+Assert ((ConvertTo-Json -InputObject $actions -Depth 15 -Compress) -eq $beforeSummary) 'Projection never mutates full action evidence'
+Refuses { Get-MeSection $actions ActionSummary 1 } 'Summary ordinal must be zero'
+$updateOnly=Get-MeSection ([pscustomobject]@{Actions=@(@{phase='cacheRename';outcome='renamed'},@{phase='imageRepair';result=@{outcome='commandCompleted'}});Errors=@()}) ActionSummary 0
+Assert ($updateOnly.Count -eq 2 -and -not $updateOnly.PartialCounts -and $updateOnly.PartialLogicalBytes -and $updateOnly.LogicalBytesCoverageCount -eq 0) 'Update summary distinguishes exact counts from absent logical byte coverage'
+Assert ((Get-MeSection ([pscustomobject]@{}) ActionSummary 0).PartialCounts) 'Missing action collection is not an exact empty result'
+
+$nullRow=Get-MeSection ([pscustomobject]@{Actions=@($null);Errors=@()}) ActionSummary 0
+Assert ($nullRow.Count -eq 1 -and $nullRow.PartialCounts) 'Unrecognized null action row still counted'
+
+Assert ((Get-MeSection ([pscustomobject]@{}) ProfileIndex 0).Partial) 'Missing profiles are unavailable, not exact empty'
+Assert (-not (Get-MeSection ([pscustomobject]@{Profiles=@()}) ProfileIndex 0).Partial) 'Explicit empty profiles are exact'
 Write-Output 'maintenance-evidence tests passed'
