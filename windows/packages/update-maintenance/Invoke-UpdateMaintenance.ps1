@@ -888,15 +888,41 @@ function ConvertTo-UmSummary {
   if([text.encoding]::UTF8.GetByteCount($json) -gt 7500) { $summary.guard=@{Safe=$Report.guard.Safe;Reasons=@('See durable report')}; $summary.actions=@{count=$Report.actions.Count;details='See durable report'}; $summary.truncation=$true; $json=$summary | ConvertTo-Json -Depth 8 -Compress }
  return $json
 }
+# Close the toolkit session only after durable evidence and stdout: the final
+# PSADT 4.1.8 session close may terminate PowerShell and owns client-server disposal.
+function Close-UmSession {
+ param([int]$Code)
+ if($script:UmUiOpen) {
+  $script:UmUiOpen=$false
+  Close-ADTSession -ExitCode $Code
+ }
+}
+function Complete-UmRun {
+ param($Report)
+ $script:UmExitCode=1
+ try {
+  if($script:UmUiOpen) {
+   try { Close-ADTInstallationProgress } catch { $Report.notification+='UI close failed' }
+   try { & $script:UmSave $Report } catch { $Report.status='failed'; $Report.errors+='Report checkpoint failed' }
+  }
+  Write-Output (ConvertTo-UmSummary $Report)
+  $script:UmExitCode=if($Report.status -eq 'deferred') {2}elseif($Report.status -in @('failed','partial')) {1}else{0}
+ } finally { Close-UmSession $script:UmExitCode }
+}
+
 if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $ErrorActionPreference='Stop'
+ $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { '{"status":"nothingToUninstall"}'; exit 0 }
  try {
   $a=Get-UmOptions -Mode $Mode -ResetCache $ResetCache -RepairImage $RepairImage -Notify $Notify -Scan $Scan -ScanTimeoutSeconds $ScanTimeoutSeconds -NativeTimeoutSeconds $NativeTimeoutSeconds
   $r=Invoke-UmMaintenance $a
-  if($script:UmUiOpen) { try { Close-ADTInstallationProgress } catch { $r.notification+='UI close failed' }; try { & $script:UmSave $r } catch { $r.status='failed' } }
-  $json=ConvertTo-UmSummary $r
-  Write-Output $json
-  if($r.status -eq 'deferred') { exit 2 }; if($r.status -in @('failed','partial')) { exit 1 }; exit 0
- } catch { @{status='failed';reason='Options or initialization failed';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} | ConvertTo-Json -Compress; exit 1 }
+  Complete-UmRun $r
+  exit $script:UmExitCode
+ } catch {
+  if($r) { $r.status='failed'; $r.errors+='Runtime or toolkit session closure failed'; try { & $script:UmSave $r } catch { } }
+  @{status='failed';reason='Options, runtime or toolkit session closure failed';category=$_.Exception.GetType().Name;detail=(Get-UmFailureCategory $_)} | ConvertTo-Json -Compress
+  try { Close-UmSession 1 } catch { }
+  exit 1
+ }
 }

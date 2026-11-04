@@ -1091,22 +1091,47 @@ function Invoke-SmMaintenance {
  return [pscustomobject]$r
 }
 
+# Final evidence and stdout must precede Close-ADTSession: PSADT 4.1.8 can
+# terminate PowerShell while closing its final session/client-server process.
+$script:SmSave={
+ param($Report)
+ $path=$Report.ReportPath
+ if(-not $path) { throw 'Report destination unavailable' }
+ if(-not (Test-SmSafePath $path (Split-Path -Parent $path))) { throw 'Report path changed or became unsafe' }
+ $Report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
+}
+function Close-SmSession {
+ param([int]$Code)
+ if($script:SmUiOpen) {
+  $script:SmUiOpen=$false
+  Close-ADTSession -ExitCode $Code
+ }
+}
+function Complete-SmRun {
+ param($Report)
+ $script:SmExitCode=1
+ try {
+  if($script:SmUiOpen) { try { Close-ADTInstallationProgress } catch { $Report.Notifications+=('close failed: '+$_.Exception.Message) } }
+  try { & $script:SmSave $Report } catch { $Report.Errors+=('Report file write failed: '+$_.Exception.Message); $Report.Status='failed' }
+  Write-Host "Storage maintenance: $($Report.Status); mode $($Report.Mode); actions $($Report.Actions.Count). Free-space delta includes concurrent system activity."
+  ConvertTo-SmSummary $Report $Report.ReportPath
+  $script:SmExitCode=if($Report.Status -eq 'failed') {1}else{0}
+ } finally { Close-SmSession $script:SmExitCode }
+}
+
 if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $ErrorActionPreference='Stop'
+ $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { Write-Output '{"Status":"notApplicable","Reason":"Maintenance has no uninstall action"}'; exit 0 }
  try {
   $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds
   $r=Invoke-SmMaintenance $a
-  if($script:SmUiOpen) { try { Close-ADTInstallationProgress } catch { $r.Notifications+=('close failed: '+$_.Exception.Message) } }
-  Write-Host "Storage maintenance: $($r.Status); mode $($r.Mode); actions $($r.Actions.Count). Free-space delta includes concurrent system activity."
-  $reportPath=$r.ReportPath
-  try {
-   if(-not $reportPath) { throw 'Report destination unavailable' }
-   $reportDir=Split-Path -Parent $reportPath
-   if(-not (Test-SmSafePath $reportPath $reportDir)) { throw 'Report path changed or became unsafe' }
-   $r | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding UTF8 -ErrorAction Stop
-  } catch { $r.Errors+=('Report file write failed: '+$_.Exception.Message); $r.Status='failed' }
-  ConvertTo-SmSummary $r $reportPath
-  if($r.Status -eq 'failed') { exit 1 }; exit 0
- } catch { Write-Error $_; exit 1 }
+  Complete-SmRun $r
+  exit $script:SmExitCode
+ } catch {
+  if($r) { $r.Status='failed'; $r.Errors+='Runtime or toolkit session closure failed'; try { & $script:SmSave $r } catch { } }
+  Write-Output '{"Status":"failed","Reason":"Runtime or toolkit session closure failed; inspect durable report and runner exit code"}'
+  try { Close-SmSession 1 } catch { }
+  exit 1
+ }
 }
