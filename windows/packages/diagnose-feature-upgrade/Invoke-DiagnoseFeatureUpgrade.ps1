@@ -342,7 +342,14 @@ function Read-DiagnosticMaintenance {
                 $rows=@(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='sfc.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe' OR Name='msiexec.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Select-Object -First 21)
                 $r.processesTruncated=$rows.Count -gt 20
                 $r.processes=@($rows | Select-Object -First 20 | ForEach-Object {
-                    $row=[ordered]@{name=Protect-DiagnosticText ([string]$_.Name) -Max 32;pid=[long]$_.ProcessId;createdUtc=$null;cpuSeconds=$null}
+                    $row=[ordered]@{name=Protect-DiagnosticText ([string]$_.Name) -Max 32;pid=[long]$_.ProcessId;createdUtc=$null;cpuSeconds=$null;executablePath=$null;parentProcessId=$null;sessionId=$null}
+                    # Existing CIM row only: never read a command line or query a parent.
+                    try { if($_.PSObject.Properties['ExecutablePath'] -and $_.ExecutablePath) { $row.executablePath=Protect-DiagnosticText ([string]$_.ExecutablePath) -Max 160 } } catch { }
+                    foreach($field in @('ParentProcessId','SessionId')) {
+                        try {
+                            if($_.PSObject.Properties[$field] -and $null -ne $_.$field -and [string]$_.$field -match '^\d{1,10}$' -and [long]$_.$field -le [uint32]::MaxValue) { $row[$field]=[long]$_.$field }
+                        } catch { }
+                    }
                     if($_.CreationDate) { $row.createdUtc=([datetime]$_.CreationDate).ToUniversalTime().ToString('o') }
                     if($_.PSObject.Properties['KernelModeTime'] -and $_.PSObject.Properties['UserModeTime']) { $row.cpuSeconds=[Math]::Round(([double]$_.KernelModeTime+[double]$_.UserModeTime)/10000000,2) }
                     $row
