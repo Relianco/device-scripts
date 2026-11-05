@@ -171,6 +171,16 @@ Fix mode is off unless `Fix` is `"true"` in `-PackageArguments`, for example `{"
 
 `windows/releases/outlook-autocomplete.json` records the field name and the package arguments. The package hash goes in the runner's `-PackageSha256`.
 
+## Outlook suggestion sources
+
+`windows/packages/outlook-suggestion-sources/Invoke-OutlookSuggestionSources.ps1` looks for what on a PC could hold or surface one address in Classic Outlook suggestions, when the nickname cache has no matching row. Run it through the deploy runner as SYSTEM with `{"Match":"personal.stale@example.invalid"}` in `PackageArguments` (base64 `eyJNYXRjaCI6InBlcnNvbmFsLnN0YWxlQGV4YW1wbGUuaW52YWxpZCJ9`). Add `"Hours":"168"` to change the event log window (default 72, cap 720). Every value is a JSON string. A `Match` that is not one ASCII email address, or an invalid `Hours`, exits 1. Any completed run exits 0, even with partial failures, and lists them. `Uninstall` exits 0 and changes nothing.
+
+It is read-only. It writes no file, registry value, service, or custom field, does not load `NTUSER.DAT`, and leaves Outlook running. For each profile under `C:\Users` and each loaded hive it reports running processes, Outlook profiles, accounts, attached stores and suggestion settings, the PST and OST inventory, the RoamCache listing, and Application log counts. It then scans Outlook folders and browser Outlook-on-the-web storage for `Match`, case-insensitive, in ASCII/UTF-8 and UTF-16LE. Account names and addresses from the profile are printed because they are the point of the check. Match itself, matched text, neighbouring bytes, and Outlook event text are never printed. An address can still appear when it is part of a file name or an account.
+
+The scan skips PST, OST and NST files and files over 64 MB, and stops at 5000 files or 150 seconds. Files that cannot be opened are counted as locked. Reparse points are not followed. Compressed stores such as LevelDB/Snappy and OST can hide a match, so 0 hits there is not proof of absence.
+
+Output is complete text blocks, then one last line, `RELIAN_SOURCES_JSON: {...}`, of at most 8000 UTF-8 bytes. When the line would be longer it drops whole sections first and names them in `droppedSections`. Hit files and accounts go last, with the counts in `hitFilesOmitted` and `accountsOmitted`.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.

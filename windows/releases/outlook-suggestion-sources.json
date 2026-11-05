@@ -1,0 +1,6 @@
+{
+  "name": "Microsoft Outlook Suggestion Sources",
+  "kind": "check",
+  "installsSoftware": false,
+  "packageArguments": "Required base64-encoded UTF-8 JSON object. Every value is a JSON string. Pass {\"Match\":\"personal.stale@example.invalid\"} (eyJNYXRjaCI6InBlcnNvbmFsLnN0YWxlQGV4YW1wbGUuaW52YWxpZCJ9), or add \"Hours\":\"168\" to change the event log window (default 72, cap 720)."
+}
