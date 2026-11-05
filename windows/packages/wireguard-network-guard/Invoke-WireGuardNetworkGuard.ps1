@@ -434,8 +434,12 @@ function Get-WgOptions {
         }
     }
 
+    $allowIpOnly = ConvertTo-WgBool -Value $AllowGatewayIpOnly -Default $false -Name 'AllowGatewayIpOnly'
+    $trustDomain = ConvertTo-WgBool -Value $TrustDomainAuthenticated -Default $false -Name 'TrustDomainAuthenticated'
+    $manageOff = ConvertTo-WgBool -Value $ManageOffNetwork -Default $true -Name 'ManageOffNetwork'
+
     # Evaluate or Check without inline criteria loads saved config.json when present.
-    $hasInlineCriteria = (-not [string]::IsNullOrWhiteSpace($TrustedGateways)) -or ($TrustDomainAuthenticated -eq 'true')
+    $hasInlineCriteria = (-not [string]::IsNullOrWhiteSpace($TrustedGateways)) -or $trustDomain
     if (($mode -eq 'evaluate' -or $mode -eq 'check') -and -not $hasInlineCriteria) {
         $saved = Read-WgSavedConfig -Root $root
         return [ordered]@{
@@ -452,9 +456,6 @@ function Get-WgOptions {
         }
     }
 
-    $allowIpOnly = ConvertTo-WgBool -Value $AllowGatewayIpOnly -Default $false -Name 'AllowGatewayIpOnly'
-    $trustDomain = ConvertTo-WgBool -Value $TrustDomainAuthenticated -Default $false -Name 'TrustDomainAuthenticated'
-    $manageOff = ConvertTo-WgBool -Value $ManageOffNetwork -Default $true -Name 'ManageOffNetwork'
     $gatewayRules = @(ConvertFrom-WgGatewayRules -TrustedGateways $TrustedGateways -TrustedGatewayMacs $TrustedGatewayMacs -AllowGatewayIpOnly:$allowIpOnly)
     $patterns = @(ConvertFrom-WgTunnelPatterns -TunnelPattern $TunnelPattern)
     $suffixes = @(ConvertFrom-WgDnsSuffixes -TrustedDnsSuffixes $TrustedDnsSuffixes)
@@ -486,7 +487,9 @@ $script:WgGetPhysicalGateways = {
         return $results.ToArray()
     }
     $adapters = @{}
-    foreach ($a in @(Get-NetAdapter -ErrorAction SilentlyContinue)) {
+    foreach ($a in @(Get-NetAdapter -Physical -ErrorAction SilentlyContinue)) {
+        if ($null -ne $a.PSObject.Properties['HardwareInterface'] -and -not [bool]$a.HardwareInterface) { continue }
+        if ($null -ne $a.PSObject.Properties['Virtual'] -and [bool]$a.Virtual) { continue }
         $adapters[[int]$a.ifIndex] = $a
     }
     $profiles = @{}
