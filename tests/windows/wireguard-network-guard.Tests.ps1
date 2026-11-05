@@ -395,5 +395,5 @@ if (-not (Test-Path -LiteralPath $releasePath)) {
     Fail "missing release metadata $releasePath"
 }
 $releaseJson = Get-Content -LiteralPath $releasePath -Raw | ConvertFrom-Json
-Assert-Same $releaseJson.ninjaField 'relianWireGuardGuard' 'release metadata ninjaField'
+Assert-Same $releaseJson.kind 'service-guard' 'release metadata kind'
 Assert-Same $releaseJson.installsSoftware $false 'release metadata installsSoftware'

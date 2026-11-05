@@ -52,7 +52,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$WgFieldName = 'relianWireGuardGuard'
 $WgTaskPath = '\Relian\'
 $script:WgSourceScriptPath = $PSCommandPath
 
@@ -1175,34 +1174,6 @@ function Invoke-WgRun {
     return [ordered]@{ record = $record; exitCode = $code }
 }
 
-function ConvertTo-WgNativeArg {
-    param([string]$Value)
-    return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
-}
-
-function Set-WgField {
-    param([string]$Value)
-    if ($env:RELIAN_DEPLOY_TEST -eq '1') {
-        return $false
-    }
-    try {
-        $programData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
-        $cli = Join-Path $programData 'NinjaRMMAgent\ninjarmm-cli.exe'
-        if (Test-Path -LiteralPath $cli -ErrorAction SilentlyContinue) {
-            $null = $Value | & $cli set --stdin $WgFieldName 2>&1
-            $back = (& $cli get $WgFieldName 2>$null) -join "`n"
-            if ($back.Trim() -eq $Value) { return $true }
-        }
-    } catch { }
-    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try {
-            Ninja-Property-Set $WgFieldName (ConvertTo-WgNativeArg $Value)
-            return $true
-        } catch { }
-    }
-    return $false
-}
-
 function Invoke-WgMain {
     $mutex = $null
     $acquired = $false
@@ -1236,9 +1207,6 @@ function Invoke-WgMain {
         $run = Invoke-WgRun -Options $options
         $json = ConvertTo-Json -InputObject $run.record -Depth 6 -Compress
         Write-WgStatus "Verdict: $($run.record.verdict)"
-        if (Set-WgField -Value $json) {
-            Write-WgStatus "Written to $WgFieldName"
-        }
         Write-Output $json
         exit $run.exitCode
     } catch {
