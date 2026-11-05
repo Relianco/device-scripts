@@ -50,13 +50,18 @@ Set-StrictMode -Off
 Set-StrictMode -Version Latest
 
 # 1. MAC normalization and gateway rule parsing.
-Assert-Same (ConvertTo-WgCanonicalMac -Mac '58:d6:1f:4c:4b:b6') '58-D6-1F-4C-4B-B6' 'colon MAC normalized'
-Assert-Same (ConvertTo-WgCanonicalMac -Mac '58-d6-1f-4c-4b-b6') '58-D6-1F-4C-4B-B6' 'dash MAC normalized'
-Assert-Same (ConvertTo-WgCanonicalMac -Mac '58d6.1f4c.4bb6') '58-D6-1F-4C-4B-B6' 'cisco dot MAC normalized'
-Assert-Same (ConvertTo-WgCanonicalMac -Mac '58d61f4c4bb6') '58-D6-1F-4C-4B-B6' 'bare hex MAC normalized'
+Assert-Same (ConvertTo-WgCanonicalMac -Mac '00:53:00:11:22:33') '00-53-00-11-22-33' 'colon MAC normalized'
+Assert-Same (ConvertTo-WgCanonicalMac -Mac '00-53-00-11-22-33') '00-53-00-11-22-33' 'dash MAC normalized'
+Assert-Same (ConvertTo-WgCanonicalMac -Mac '0053.0011.2233') '00-53-00-11-22-33' 'cisco dot MAC normalized'
+Assert-Same (ConvertTo-WgCanonicalMac -Mac '005300112233') '00-53-00-11-22-33' 'bare hex MAC normalized'
 Assert-Same (ConvertTo-WgCanonicalMac -Mac '00:00:00:00:00:00') $null 'all-zero MAC rejected'
 Assert-Same (ConvertTo-WgCanonicalMac -Mac 'ff:ff:ff:ff:ff:ff') $null 'broadcast MAC rejected'
 Assert-Same (ConvertTo-WgCanonicalMac -Mac 'not-a-mac') $null 'invalid MAC rejected'
+
+$xmlAmp = New-WgTaskXml -ScriptPath 'C:\ProgramData\Relian & Co\Invoke-WireGuardNetworkGuard.ps1' -InstallRoot 'C:\ProgramData\Relian & Co'
+Assert-Like $xmlAmp '*Relian &amp; Co*' 'ampersand escaped once in Task XML'
+Assert-True ($xmlAmp -notlike '*&amp;amp;*') 'ampersand is not double-escaped in Task XML'
+Assert-Like $xmlAmp '*-InstallRoot*' 'InstallRoot included in Task XML arguments'
 
 # Inline IP=MAC and shared TrustedGatewayMacs parsing.
 $rulesInline = @(ConvertFrom-WgGatewayRules -TrustedGateways '192.0.2.1=00:11:22:33:44:55,198.51.100.1=00-11-22-33-44-55|00-11-22-33-44-56')

@@ -108,7 +108,7 @@ function Test-WgNoReparsePoint {
     return $true
 }
 
-# Normalizes a MAC address (58:d6:1f:4c:4b:b6, 58-D6-1F-4C-4B-B6, 58d6.1f4c.4bb6, or 12 hex chars)
+# Normalizes a MAC address (00:53:00:11:22:33, 00-53-00-11-22-33, 0053.0011.2233, or 12 hex chars)
 # to uppercase XX-XX-XX-XX-XX-XX. Returns $null when invalid, all-zero, or broadcast.
 function ConvertTo-WgCanonicalMac {
     param([AllowEmptyString()][string]$Mac)
@@ -147,7 +147,7 @@ function Test-WgGatewayIpv4 {
 }
 
 # Parses TrustedGateways and TrustedGatewayMacs into normalized rule objects:
-# @{ ip = '10.85.25.1'; macs = @('58-D6-1F-4C-4B-B6') }
+# @{ ip = '192.0.2.1'; macs = @('00-53-00-11-22-33') }
 function ConvertFrom-WgGatewayRules {
     param(
         [AllowEmptyString()][string]$TrustedGateways = '',
@@ -608,9 +608,19 @@ $script:WgHardenDirectoryAcl = {
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         return
     }
-    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    $isContainer = [bool]$item.PSIsContainer
+    $acl = if ($isContainer) {
+        New-Object System.Security.AccessControl.DirectorySecurity
+    } else {
+        New-Object System.Security.AccessControl.FileSecurity
+    }
     $acl.SetAccessRuleProtection($true, $false)
-    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $inherit = if ($isContainer) {
+        [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+    } else {
+        [System.Security.AccessControl.InheritanceFlags]::None
+    }
     $prop = [System.Security.AccessControl.PropagationFlags]::None
     $allow = [System.Security.AccessControl.AccessControlType]::Allow
     $full = [System.Security.AccessControl.FileSystemRights]::FullControl
@@ -769,15 +779,21 @@ function Write-WgJsonFile {
     if (-not (Test-WgNoReparsePoint -Path $Path)) {
         throw "refusing to write through reparse point at $Path"
     }
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction Stop
+    }
     $json = ConvertTo-Json -InputObject $Object -Depth 6 -Compress
     $utf8NoBom = [Text.UTF8Encoding]::new($false)
     [IO.File]::WriteAllText($Path, ($json + "`n"), $utf8NoBom)
+    & $script:WgHardenDirectoryAcl -Path $Path
 }
 
 function New-WgTaskXml {
-    param([string]$ScriptPath)
-    $escapedPath = [Security.SecurityElement]::Escape($ScriptPath)
-    $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$escapedPath`" -Action Evaluate"
+    param([string]$ScriptPath, [string]$InstallRoot)
+    if ($ScriptPath.Contains('"') -or $InstallRoot.Contains('"')) {
+        throw 'ScriptPath and InstallRoot must not contain double quotes.'
+    }
+    $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`" -Action Evaluate -InstallRoot `"$InstallRoot`""
     $escapedArgs = [Security.SecurityElement]::Escape($arguments)
     return @"
 <?xml version="1.0" encoding="UTF-16"?>
@@ -1035,9 +1051,17 @@ function Invoke-WgRun {
         if ([string]::IsNullOrWhiteSpace($sourcePath) -or -not (Test-Path -LiteralPath $sourcePath)) {
             throw 'source script path is missing; cannot stage scheduled task script.'
         }
-        if (-not [IO.Path]::GetFullPath($sourcePath).Equals([IO.Path]::GetFullPath($scriptCopy), [StringComparison]::OrdinalIgnoreCase)) {
-            Copy-Item -LiteralPath $sourcePath -Destination $scriptCopy -Force -ErrorAction Stop
+        if (-not (Test-WgNoReparsePoint -Path $sourcePath) -or -not (Test-WgNoReparsePoint -Path $scriptCopy)) {
+            throw "refusing reparse point when staging $scriptCopy"
         }
+        if (-not [IO.Path]::GetFullPath($sourcePath).Equals([IO.Path]::GetFullPath($scriptCopy), [StringComparison]::OrdinalIgnoreCase)) {
+            $sourceBytes = [IO.File]::ReadAllBytes($sourcePath)
+            if (Test-Path -LiteralPath $scriptCopy) {
+                Remove-Item -LiteralPath $scriptCopy -Force -ErrorAction Stop
+            }
+            [IO.File]::WriteAllBytes($scriptCopy, $sourceBytes)
+        }
+        & $script:WgHardenDirectoryAcl -Path $scriptCopy
 
         $configObj = [ordered]@{
             schema                   = 1
@@ -1051,7 +1075,7 @@ function Invoke-WgRun {
         }
         Write-WgJsonFile -Path (Get-WgConfigPath -Root $root) -Object $configObj
 
-        $xml = New-WgTaskXml -ScriptPath $scriptCopy
+        $xml = New-WgTaskXml -ScriptPath $scriptCopy -InstallRoot $root
         & $script:WgRegisterTask -TaskName $taskName -Xml $xml
     }
 
