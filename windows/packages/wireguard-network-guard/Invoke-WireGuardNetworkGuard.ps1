@@ -1207,6 +1207,18 @@ function Invoke-WgMain {
     $mutex = $null
     $acquired = $false
     try {
+        try {
+            $mutex = [System.Threading.Mutex]::new($false, 'Global\RelianWireGuardNetworkGuard')
+            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        } catch {
+            $mutex = $null
+        }
+        if ($null -ne $mutex -and -not $acquired) {
+            throw 'timed out waiting for Global\RelianWireGuardNetworkGuard mutex.'
+        }
+
         $options = Get-WgOptions `
             -DeploymentType $DeploymentType `
             -Action $Action `
@@ -1220,18 +1232,6 @@ function Invoke-WgMain {
             -TaskName $TaskName `
             -InstallRoot $InstallRoot `
             -SourceScriptPath $SourceScriptPath
-
-        try {
-            $mutex = [System.Threading.Mutex]::new($false, 'Global\RelianWireGuardNetworkGuard')
-            $acquired = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
-        } catch [System.Threading.AbandonedMutexException] {
-            $acquired = $true
-        } catch {
-            $mutex = $null
-        }
-        if ($null -ne $mutex -and -not $acquired) {
-            throw 'timed out waiting for Global\RelianWireGuardNetworkGuard mutex.'
-        }
 
         $run = Invoke-WgRun -Options $options
         $json = ConvertTo-Json -InputObject $run.record -Depth 6 -Compress
