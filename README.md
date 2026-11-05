@@ -171,6 +171,20 @@ Fix mode is off unless `Fix` is `"true"` in `-PackageArguments`, for example `{"
 
 `windows/releases/outlook-autocomplete.json` records the field name and the package arguments. The package hash goes in the runner's `-PackageSha256`.
 
+## WireGuard network guard
+
+`windows/packages/wireguard-network-guard/Invoke-WireGuardNetworkGuard.ps1` makes Windows `WireGuardTunnel$*` services network-aware. When a laptop is connected to a trusted office VLAN, the guard stops matching `WireGuardTunnel$*` services so that WireGuard's `/24` `AllowedIPs` routes do not override the physical adapter's default route (`0.0.0.0/0`) or connected subnet route. When the laptop connects to an external network, the guard starts those tunnel services again.
+
+Run it directly or through `windows/runner/Invoke-RelianRunner.ps1` as SYSTEM. Package arguments are passed either as command-line parameters or as base64-encoded UTF-8 JSON in `-PackageArguments`:
+
+```json
+{"TrustedGateways":"192.0.2.25,192.0.2.1","TrustedGatewayMacs":"00-11-22-33-44-55"}
+```
+
+By default, every gateway IPv4 in `TrustedGateways` requires a matching Layer-2 neighbor MAC (`IP=MAC` inline or via `TrustedGatewayMacs`), and stale or incomplete ARP cache entries are actively re-probed before trusting a cached MAC so a home or hotel router using the same IP cannot spoof the office gateway. Optional arguments: `TunnelPattern` (default `WireGuardTunnel$*`), `TrustDomainAuthenticated` (`true` or `false`), `TrustedDnsSuffixes`, `AllowGatewayIpOnly` (`true` or `false`), `ManageOffNetwork` (`true` or `false`), and `TaskName` (default `Relian-WireGuardNetworkGuard`).
+
+`Install` (and `Update`, `Repair`, `Reinstall`) stages `config.json` and a copy of `Invoke-WireGuardNetworkGuard.ps1` under `%ProgramData%\Relian\WireGuardNetworkGuard` (ACL restricted to `SYSTEM` and `Administrators`), registers the SYSTEM scheduled task `\Relian\Relian-WireGuardNetworkGuard` triggered at boot, wake (`Microsoft-Windows-Power-Troubleshooter` Event ID `1`), and network connect/disconnect (`Microsoft-Windows-NetworkProfile/Operational` Event IDs `10000` and `10001`), and runs an immediate evaluation pass. `Check` runs a read-only evaluation without modifying services, files, or tasks. `Uninstall` removes the scheduled task, restarts any non-disabled `WireGuardTunnel$*` service that the guard stopped (or that is set to `Automatic`), and deletes `%ProgramData%\Relian\WireGuardNetworkGuard`. Every run prints one compact JSON line last on stdout.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.
