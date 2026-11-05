@@ -339,9 +339,44 @@ try {
     $resRightSuffix = Invoke-WgRun -Options $optsDomain
     Assert-True $resRightSuffix.record.onTrustedNetwork 'DomainAuthenticated with matching DNS suffix is trusted'
 
-    # Case I: Real child process execution of Uninstall on an empty InstallRoot emits valid JSON on stdout and exits 0.
-    $childOut = & pwsh -NoProfile -File $scriptPath -Action Uninstall -InstallRoot (Join-Path $tmpRoot 'NonExistentRoot') 2>&1
-    Assert-Same $LASTEXITCODE 0 'Child process Uninstall exits 0'
+    # DeploymentType Check/Evaluate without -Action selects Check/Evaluate mode rather than Install.
+    $optsDeployTypeCheck = Get-WgOptions -DeploymentType 'Check' `
+        -TrustedGateways '192.0.2.25=00-11-22-33-44-55' `
+        -InstallRoot $installRoot `
+        -SourceScriptPath $fakeSourceScript
+    Assert-Same $optsDeployTypeCheck.mode 'check' 'DeploymentType Check selects check mode when Action is omitted'
+
+    # Unconfirmed Delay/Probe neighbor state after probe is rejected.
+    Reset-WgFake
+    $script:fakeGateways = @(
+        [pscustomobject]@{
+            InterfaceIndex = 12
+            InterfaceAlias = 'Wi-Fi'
+            InterfaceDescription = 'Intel(R) Wi-Fi 6E AX211'
+            GatewayIp = '192.0.2.25'
+            NetworkCategory = 'Private'
+            DnsSuffix = 'office.example.invalid'
+        }
+    )
+    $script:fakeNeighbors['12|192.0.2.25'] = [pscustomobject]@{
+        State = 'Stale'
+        LinkLayerAddress = '00-11-22-33-44-55'
+    }
+    $script:fakeAfterProbeNeighbors['12|192.0.2.25'] = [pscustomobject]@{
+        State = 'Delay'
+        LinkLayerAddress = '00-11-22-33-44-55'
+    }
+    $resDelay = Invoke-WgRun -Options $optsDeployTypeCheck
+    Assert-Same $resDelay.record.onTrustedNetwork $false 'Neighbor remaining in Delay state after probe is not trusted'
+
+    # Case I: Real child process execution of Uninstall on an empty InstallRoot with RELIAN_DEPLOY_TEST unset emits valid JSON on stdout and exits 0.
+    Remove-Item Env:\RELIAN_DEPLOY_TEST -ErrorAction SilentlyContinue
+    try {
+        $childOut = & pwsh -NoProfile -File $scriptPath -Action Uninstall -InstallRoot (Join-Path $tmpRoot 'NonExistentRoot') 2>&1
+        Assert-Same $LASTEXITCODE 0 'Child process Uninstall exits 0'
+    } finally {
+        $env:RELIAN_DEPLOY_TEST = '1'
+    }
     $lastLine = [string](@($childOut) | Select-Object -Last 1)
     $parsedChild = $lastLine | ConvertFrom-Json
     Assert-Same $parsedChild.mode 'uninstall' 'Child process emitted uninstall JSON'

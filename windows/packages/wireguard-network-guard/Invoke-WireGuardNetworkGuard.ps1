@@ -35,7 +35,7 @@
 [CmdletBinding()]
 param(
     [string]$DeploymentType = '',
-    [string]$Action = 'Install',
+    [string]$Action = '',
     [string]$PinVersion = '',
     [string]$TrustedGateways = '',
     [string]$TrustedGatewayMacs = '',
@@ -379,7 +379,7 @@ function Read-WgSavedConfig {
 function Get-WgOptions {
     param(
         [string]$DeploymentType = '',
-        [string]$Action = 'Install',
+        [string]$Action = '',
         [string]$TrustedGateways = '',
         [string]$TrustedGatewayMacs = '',
         [string]$TunnelPattern = 'WireGuardTunnel$*',
@@ -636,20 +636,21 @@ $script:WgHardenDirectoryAcl = {
 
 function Resolve-WgGatewayMac {
     param([int]$InterfaceIndex, [string]$GatewayIp)
-    $freshStates = @('Reachable', 'Permanent', 'Delay', 'Probe')
+    $confirmedStates = @('Reachable', 'Permanent')
     $neighbor = & $script:WgGetNeighbor -InterfaceIndex $InterfaceIndex -IPAddress $GatewayIp
     $state = if ($null -ne $neighbor) { [string]$neighbor.State } else { '' }
     $mac = if ($null -ne $neighbor) { ConvertTo-WgCanonicalMac -Mac ([string]$neighbor.LinkLayerAddress) } else { $null }
 
-    # Always actively probe when missing, Incomplete, Unreachable, or Stale so a cached ARP entry
-    # from a previous network before sleep/roaming cannot spoof a trusted gateway MAC.
-    if ($null -eq $mac -or $freshStates -notcontains $state) {
+    # Always actively probe when missing, Incomplete, Unreachable, Stale, Delay, or Probe so a cached
+    # ARP entry from a previous network before sleep/roaming cannot spoof a trusted gateway MAC.
+    # Require confirmed neighbor reachability (Reachable or Permanent), never Delay or Probe.
+    if ($null -eq $mac -or $confirmedStates -notcontains $state) {
         & $script:WgProbeGateway -InterfaceIndex $InterfaceIndex -IPAddress $GatewayIp
         $neighbor = & $script:WgGetNeighbor -InterfaceIndex $InterfaceIndex -IPAddress $GatewayIp
         $state = if ($null -ne $neighbor) { [string]$neighbor.State } else { '' }
         $mac = if ($null -ne $neighbor) { ConvertTo-WgCanonicalMac -Mac ([string]$neighbor.LinkLayerAddress) } else { $null }
     }
-    if ($null -eq $mac -or $freshStates -notcontains $state) {
+    if ($null -eq $mac -or $confirmedStates -notcontains $state) {
         return $null
     }
     return $mac
