@@ -173,17 +173,15 @@ Fix mode is off unless `Fix` is `"true"` in `-PackageArguments`, for example `{"
 
 ## WireGuard network guard
 
-`windows/packages/wireguard-network-guard/Invoke-WireGuardNetworkGuard.ps1` makes Windows `WireGuardTunnel$*` services network-aware. When a laptop is connected to a trusted office VLAN, the guard stops matching `WireGuardTunnel$*` services so that WireGuard's `/24` `AllowedIPs` routes do not override the physical adapter's default route (`0.0.0.0/0`) or connected subnet route. When the laptop connects to an external network, the guard starts those tunnel services again.
+`windows/packages/wireguard-network-guard/Invoke-WireGuardNetworkGuard.ps1` stops Windows `WireGuardTunnel$*` services when a laptop is on a trusted office network and starts them again when the laptop leaves. Run it directly or through `windows/runner/Invoke-RelianRunner.ps1` as SYSTEM.
 
-Run it directly or through `windows/runner/Invoke-RelianRunner.ps1` as SYSTEM. Package arguments are passed either as command-line parameters or as base64-encoded UTF-8 JSON in `-PackageArguments`:
+Pass the office gateway IPv4 addresses and Layer-2 MAC address in `-PackageArguments`:
 
 ```json
-{"TrustedGateways":"192.0.2.25,192.0.2.1","TrustedGatewayMacs":"00-11-22-33-44-55"}
+{"TrustedGateways":"192.0.2.25,192.0.2.1","TrustedGatewayMacs":"00-53-00-11-22-33"}
 ```
 
-By default, every gateway IPv4 in `TrustedGateways` requires a matching Layer-2 neighbor MAC (`IP=MAC` inline or via `TrustedGatewayMacs`), and stale or incomplete ARP cache entries are actively re-probed before trusting a cached MAC so a home or hotel router using the same IP cannot spoof the office gateway. Optional arguments: `TunnelPattern` (default `WireGuardTunnel$*`), `TrustDomainAuthenticated` (`true` or `false`), `TrustedDnsSuffixes`, `AllowGatewayIpOnly` (`true` or `false`), `ManageOffNetwork` (`true` or `false`), and `TaskName` (default `Relian-WireGuardNetworkGuard`).
-
-`Install` (and `Update`, `Repair`, `Reinstall`) stages `config.json` and a copy of `Invoke-WireGuardNetworkGuard.ps1` under `%ProgramData%\Relian\WireGuardNetworkGuard` (ACL restricted to `SYSTEM` and `Administrators`), registers the SYSTEM scheduled task `\Relian\Relian-WireGuardNetworkGuard` triggered at boot, wake (`Microsoft-Windows-Power-Troubleshooter` Event ID `1`), and network connect/disconnect (`Microsoft-Windows-NetworkProfile/Operational` Event IDs `10000` and `10001`), and runs an immediate evaluation pass. `Check` runs a read-only evaluation without modifying services, files, or tasks. `Uninstall` removes the scheduled task, restarts any non-disabled `WireGuardTunnel$*` service that the guard stopped (or that is set to `Automatic`), and deletes `%ProgramData%\Relian\WireGuardNetworkGuard`. Every run prints one compact JSON line last on stdout.
+Each check inspects only physical hardware adapters and actively re-probes any `Stale` or `Incomplete` ARP entry on that interface before trusting a cached MAC. `Install` stages the script and `config.json` in `%ProgramData%\Relian\WireGuardNetworkGuard`, registers `\Relian\Relian-WireGuardNetworkGuard` to run at boot, wake, and network connect/disconnect (`Event ID` `10000`/`10001`), and evaluates immediately. `Check` is read-only. `Uninstall` removes the task, restarts any non-disabled `WireGuardTunnel$*` service that the guard stopped, and deletes the install folder. See [the WireGuard network guard runbook](docs/wireguard-network-guard.md).
 
 ## Pin records
 
