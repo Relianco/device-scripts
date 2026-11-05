@@ -390,10 +390,15 @@ try {
     }
 }
 
-# 3. Release metadata JSON exists and is valid.
+# 3. Release metadata JSON and runbook documentation exist and are valid.
 if (-not (Test-Path -LiteralPath $releasePath)) {
     Fail "missing release metadata $releasePath"
 }
 $releaseJson = Get-Content -LiteralPath $releasePath -Raw | ConvertFrom-Json
 Assert-Same $releaseJson.kind 'service-guard' 'release metadata kind'
 Assert-Same $releaseJson.installsSoftware $false 'release metadata installsSoftware'
+
+$runbookPath = Join-Path $repoRoot 'docs/wireguard-network-guard.md'
+Assert-True (Test-Path -LiteralPath $runbookPath) 'docs/wireguard-network-guard.md exists'
+$readmeContent = Get-Content -LiteralPath (Join-Path $repoRoot 'README.md') -Raw
+Assert-Like $readmeContent '*docs/wireguard-network-guard.md*' 'README links to docs/wireguard-network-guard.md'
