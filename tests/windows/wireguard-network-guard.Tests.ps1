@@ -139,6 +139,9 @@ try {
                 $script:fakeNeighbors[$key] = $script:fakeAfterProbeNeighbors[$key]
             }
         }
+        $script:WgWaitNeighbor = {
+            param([int]$Milliseconds = 150)
+        }
         $script:WgGetServices = {
             return $script:fakeServices
         }

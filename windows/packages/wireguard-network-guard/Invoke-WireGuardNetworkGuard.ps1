@@ -545,15 +545,60 @@ $script:WgGetNeighbor = {
 
 $script:WgProbeGateway = {
     param([int]$InterfaceIndex, [string]$IPAddress)
-    # Triggers Windows ARP resolution for the gateway IP without requiring ICMP to be allowed.
+    # Force Layer-2 ARP resolution on the specific physical InterfaceIndex even when a running
+    # WireGuard tunnel currently owns a lower-metric route for the gateway's subnet:
+    # 1. Bind a UDP socket with IP_UNICAST_IF (option 31) and the adapter's source IPv4 to InterfaceIndex.
+    # 2. Invoke iphlpapi.dll SendARP using the physical adapter's source IPv4 so Windows sends an
+    #    ARP request directly on that interface and waits for the reply.
     try {
-        $ping = [System.Net.NetworkInformation.Ping]::new()
+        $srcIpObj = @(Get-NetIPAddress -InterfaceIndex $InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPAddress -and $_.IPAddress -notlike '169.254.*' } |
+            Select-Object -First 1)
+        $dstIp = [System.Net.IPAddress]::Parse($IPAddress)
+        $udp = [System.Net.Sockets.Socket]::new(
+            [System.Net.Sockets.AddressFamily]::InterNetwork,
+            [System.Net.Sockets.SocketType]::Dgram,
+            [System.Net.Sockets.ProtocolType]::Udp
+        )
         try {
-            $null = $ping.Send($IPAddress, 600)
+            if ($srcIpObj.Count -gt 0 -and $null -ne $srcIpObj[0].IPAddress) {
+                $srcIp = [System.Net.IPAddress]::Parse([string]$srcIpObj[0].IPAddress)
+                $udp.Bind([System.Net.IPEndPoint]::new($srcIp, 0))
+            }
+            $ifNetOrder = [System.Net.IPAddress]::HostToNetworkOrder([int]$InterfaceIndex)
+            $udp.SetSocketOption(
+                [System.Net.Sockets.SocketOptionLevel]::IP,
+                [System.Net.Sockets.SocketOptionName]31,
+                [BitConverter]::GetBytes($ifNetOrder)
+            )
+            $null = $udp.SendTo([byte[]]@(0), [System.Net.IPEndPoint]::new($dstIp, 33434))
         } finally {
-            $ping.Dispose()
+            $udp.Dispose()
+        }
+
+        if (-not ('Relian.WgArpNative' -as [type])) {
+            Add-Type -Namespace 'Relian' -Name 'WgArpNative' -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("iphlpapi.dll", ExactSpelling = true)]
+public static extern int SendARP(uint DestIP, uint SrcIP, byte[] pMacAddr, ref int PhyAddrLen);
+'@ -ErrorAction SilentlyContinue
+        }
+        if ('Relian.WgArpNative' -as [type]) {
+            $dstUint = [BitConverter]::ToUInt32($dstIp.GetAddressBytes(), 0)
+            $srcUint = [uint32]0
+            if ($srcIpObj.Count -gt 0 -and $null -ne $srcIpObj[0].IPAddress) {
+                $srcParsed = [System.Net.IPAddress]::Parse([string]$srcIpObj[0].IPAddress)
+                $srcUint = [BitConverter]::ToUInt32($srcParsed.GetAddressBytes(), 0)
+            }
+            $macBuf = New-Object byte[] 6
+            $macLen = 6
+            $null = [Relian.WgArpNative]::SendARP($dstUint, $srcUint, $macBuf, [ref]$macLen)
         }
     } catch { }
+}
+
+$script:WgWaitNeighbor = {
+    param([int]$Milliseconds = 150)
+    Start-Sleep -Milliseconds $Milliseconds
 }
 
 $script:WgGetServices = {
@@ -641,16 +686,22 @@ function Resolve-WgGatewayMac {
     $state = if ($null -ne $neighbor) { [string]$neighbor.State } else { '' }
     $mac = if ($null -ne $neighbor) { ConvertTo-WgCanonicalMac -Mac ([string]$neighbor.LinkLayerAddress) } else { $null }
 
-    # Always actively probe when missing, Incomplete, Unreachable, Stale, Delay, or Probe so a cached
-    # ARP entry from a previous network before sleep/roaming cannot spoof a trusted gateway MAC.
-    # Require confirmed neighbor reachability (Reachable or Permanent), never Delay or Probe.
+    # Always actively probe on the physical InterfaceIndex when missing, Incomplete, Unreachable,
+    # Stale, Delay, or Probe so a cached ARP entry from a previous network before sleep/roaming
+    # cannot spoof a trusted gateway MAC. Wait up to 3 polls for confirmed Reachable/Permanent state.
     if ($null -eq $mac -or $confirmedStates -notcontains $state) {
         & $script:WgProbeGateway -InterfaceIndex $InterfaceIndex -IPAddress $GatewayIp
-        $neighbor = & $script:WgGetNeighbor -InterfaceIndex $InterfaceIndex -IPAddress $GatewayIp
-        $state = if ($null -ne $neighbor) { [string]$neighbor.State } else { '' }
-        $mac = if ($null -ne $neighbor) { ConvertTo-WgCanonicalMac -Mac ([string]$neighbor.LinkLayerAddress) } else { $null }
-    }
-    if ($null -eq $mac -or $confirmedStates -notcontains $state) {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $neighbor = & $script:WgGetNeighbor -InterfaceIndex $InterfaceIndex -IPAddress $GatewayIp
+            $state = if ($null -ne $neighbor) { [string]$neighbor.State } else { '' }
+            $mac = if ($null -ne $neighbor) { ConvertTo-WgCanonicalMac -Mac ([string]$neighbor.LinkLayerAddress) } else { $null }
+            if ($null -ne $mac -and $confirmedStates -contains $state) {
+                return $mac
+            }
+            if ($attempt -lt 3) {
+                & $script:WgWaitNeighbor -Milliseconds 150
+            }
+        }
         return $null
     }
     return $mac
