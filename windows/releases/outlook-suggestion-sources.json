@@ -2,5 +2,5 @@
   "name": "Microsoft Outlook Suggestion Sources",
   "kind": "check",
   "installsSoftware": false,
-  "packageArguments": "Required base64-encoded UTF-8 JSON object. Every value is a JSON string. Pass {\"Match\":\"personal.stale@example.invalid\"} (eyJNYXRjaCI6InBlcnNvbmFsLnN0YWxlQGV4YW1wbGUuaW52YWxpZCJ9), or add \"Hours\":\"168\" to change the event log window (default 72, cap 720)."
+  "packageArguments": "Required base64-encoded UTF-8 JSON object. Every value is a JSON string. Pass {\"Match\":\"personal.stale@example.invalid\"} (eyJNYXRjaCI6InBlcnNvbmFsLnN0YWxlQGV4YW1wbGUuaW52YWxpZCJ9), or add any of \"Hours\":\"168\" (event log window, default 72, cap 720), \"Scope\":\"browser\" (all, browser, outlook, office; default all), and \"Sections\":\"roots,config\" (all, none, or a comma list of processes, config, roots, inventory, roamcache; default all, or processes,config,roots for browser and office)."
 }

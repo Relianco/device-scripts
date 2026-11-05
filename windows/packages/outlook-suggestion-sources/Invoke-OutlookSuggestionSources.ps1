@@ -6,7 +6,9 @@ param(
  [string]$Action,
  [string]$PinVersion,
  [string]$Match = '',
- [string]$Hours = ''
+ [string]$Hours = '',
+ [string]$Scope = '',
+ [string]$Sections = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,8 +16,12 @@ Set-StrictMode -Version Latest
 
 $script:OssVersion = '1'
 $script:OssJsonPrefix = 'RELIAN_SOURCES_JSON: '
-$script:OssMaxJsonBytes = 8000
+# Ninja activity output is cut at about 10000 characters, and the JSON line shares that budget with the text.
+$script:OssMaxOutputChars = 9500
+$script:OssMaxJsonBytes = 4000
+$script:OssAllSections = @('processes', 'config', 'roots', 'inventory', 'roamcache')
 $script:OssMaxFileBytes = 67108864
+# Per root, so one big root cannot use up another root's share. Test-OssExpired is the overall bound.
 $script:OssMaxFiles = 5000
 $script:OssMaxSeconds = 150
 $script:OssChunkBytes = 1048576
@@ -41,11 +47,11 @@ function Limit-OssText {
 }
 
 function Get-OssOptions {
- param([string]$Action, [string]$Match = '', [string]$Hours = '')
+ param([string]$Action, [string]$Match = '', [string]$Hours = '', [string]$Scope = '', [string]$Sections = '')
  if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) {
   throw 'Action must be Install, Update, Repair, Reinstall, or Uninstall.'
  }
- if ($Action -eq 'Uninstall') { return [ordered]@{ Mode = 'none'; Match = ''; Hours = 0 } }
+ if ($Action -eq 'Uninstall') { return [ordered]@{ Mode = 'none'; Match = ''; Hours = 0; Scope = ''; Sections = @() } }
  $address = if ($null -eq $Match) { '' } else { $Match.Trim() }
  # ponytail: ASCII addresses only, so one Latin-1 regex covers ASCII, UTF-8 and UTF-16LE. Decode IDN first if one ever matters.
  if ($address.Length -gt 254 -or $address -notmatch '\A[A-Za-z0-9!#$%&''*+/=?^_`{|}~.-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+\z') {
@@ -56,7 +62,22 @@ function Get-OssOptions {
   if ($Hours -notmatch '\A\d{1,6}\z' -or [int]$Hours -lt 1) { throw 'Hours must be a whole number of at least 1.' }
   $window = [Math]::Min([int]$Hours, 720)
  }
- return [ordered]@{ Mode = 'check'; Match = $address; Hours = $window }
+ $area = if ([string]::IsNullOrWhiteSpace($Scope)) { 'all' } else { $Scope.Trim().ToLowerInvariant() }
+ if (@('all', 'browser', 'outlook', 'office') -notcontains $area) { throw 'Scope must be all, browser, outlook, or office.' }
+ # The inventory and RoamCache blocks are about Outlook, so a browser or Office run leaves their room to hit files.
+ $blocks = if ($area -eq 'browser' -or $area -eq 'office') { @('processes', 'config', 'roots') } else { $script:OssAllSections }
+ if (-not [string]::IsNullOrWhiteSpace($Sections)) {
+  $asked = @($Sections.ToLowerInvariant() -split ',' | ForEach-Object { $_.Trim() })
+  if ($asked.Count -eq 1 -and $asked[0] -eq 'all') { $blocks = $script:OssAllSections }
+  elseif ($asked.Count -eq 1 -and $asked[0] -eq 'none') { $blocks = @() }
+  else {
+   foreach ($name in $asked) {
+    if ($script:OssAllSections -notcontains $name) { throw "Sections must be all, none, or a comma list of $($script:OssAllSections -join ', ')." }
+   }
+   $blocks = $asked
+  }
+ }
+ return [ordered]@{ Mode = 'check'; Match = $address; Hours = $window; Scope = $area; Sections = @($blocks) }
 }
 
 function Test-OssReparse {
@@ -166,11 +187,15 @@ function Find-OssMatches {
 }
 
 function New-OssRoot {
- param([string]$ProfileName, [string]$ProfilePath, [string]$Relative, [string]$Preset = '', [switch]$Browser, [switch]$HugeCheck)
+ param([string]$ProfileName, [string]$ProfilePath, [string]$Relative, [string]$Preset = '', [string]$Kind = 'outlook', [switch]$HugeCheck)
+ # Lowest rank scans first. Office\16.0 goes last because it can hold tens of thousands of files, and CacheStorage is the largest browser folder.
+ $rank = 0
+ if ($Kind -eq 'office') { $rank = 3 }
+ elseif ($Kind -eq 'browser') { $rank = if ($Relative -like '*CacheStorage') { 2 } else { 1 } }
  return [pscustomobject]@{
-  profile = $ProfileName; root = $Relative; status = $Preset
+  profile = $ProfileName; root = $Relative; kind = $Kind; status = $Preset
   filesFound = 0; filesScanned = 0; filesSkippedTooLarge = 0; filesLocked = 0; storeFilesSkipped = 0; reparseSkipped = 0; dirErrors = 0; hitFiles = 0
-  ProfilePath = $ProfilePath; Browser = [bool]$Browser; HugeCheck = [bool]$HugeCheck
+  ProfilePath = $ProfilePath; Rank = $rank; HugeCheck = [bool]$HugeCheck
  }
 }
 
@@ -183,29 +208,31 @@ function Get-OssChildDirs {
 function Get-OssScanRoots {
  param($Prof)
  $rows = [System.Collections.Generic.List[object]]::new()
- foreach ($rel in @('AppData\Local\Microsoft\Outlook', 'AppData\Roaming\Microsoft\Outlook', 'AppData\Local\Microsoft\Office\16.0', 'AppData\Local\Microsoft\Olk')) {
+ foreach ($rel in @('AppData\Local\Microsoft\Outlook', 'AppData\Roaming\Microsoft\Outlook', 'AppData\Local\Microsoft\Olk')) {
   $rows.Add((New-OssRoot $Prof.Name $Prof.Path $rel))
  }
  $rows.Add((New-OssRoot $Prof.Name $Prof.Path 'AppData\Local\Microsoft\Windows\INetCache\Content.Outlook' -HugeCheck))
+ $rows.Add((New-OssRoot $Prof.Name $Prof.Path 'AppData\Local\Microsoft\Office\16.0' -Kind 'office'))
 
  $storageDirs = @('IndexedDB', 'Local Storage', 'Service Worker\CacheStorage', 'Session Storage')
  foreach ($userData in @('AppData\Local\Microsoft\Edge\User Data', 'AppData\Local\Google\Chrome\User Data')) {
   $state = Get-OssRootState $Prof.Path $userData
-  if ($state -ne 'ok') { $rows.Add((New-OssRoot $Prof.Name $Prof.Path $userData $state -Browser)); continue }
+  if ($state -ne 'ok') { $rows.Add((New-OssRoot $Prof.Name $Prof.Path $userData $state -Kind 'browser')); continue }
   $found = 0
   foreach ($child in @(Get-OssChildDirs (Join-OssPath $Prof.Path $userData))) {
+   # A real profile folder always gets its rows. Any other folder, such as Crashpad, only when it holds browser storage.
    $present = @($storageDirs | Where-Object { (Get-OssRootState $child.FullName $_) -ne 'missing' })
-   if ($present.Count -eq 0) { continue }
+   if ($present.Count -eq 0 -and $child.Name -notmatch '\A(Default|Profile \d+|Guest Profile)\z') { continue }
    $found++
-   foreach ($sub in $storageDirs) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$userData\$($child.Name)\$sub" -Browser)) }
+   foreach ($sub in $storageDirs) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$userData\$($child.Name)\$sub" -Kind 'browser')) }
   }
-  if ($found -eq 0) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$userData\<profile>" 'missing' -Browser)) }
+  if ($found -eq 0) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$userData\<profile>" 'missing' -Kind 'browser')) }
  }
 
  $firefox = 'AppData\Roaming\Mozilla\Firefox\Profiles'
  $state = Get-OssRootState $Prof.Path $firefox
  if ($state -ne 'ok') {
-  $rows.Add((New-OssRoot $Prof.Name $Prof.Path $firefox $state -Browser))
+  $rows.Add((New-OssRoot $Prof.Name $Prof.Path $firefox $state -Kind 'browser'))
  } else {
   foreach ($ff in @(Get-OssChildDirs (Join-OssPath $Prof.Path $firefox))) {
    $default = "$firefox\$($ff.Name)\storage\default"
@@ -213,29 +240,28 @@ function Get-OssScanRoots {
    if ((Get-OssRootState $Prof.Path $default) -eq 'ok') {
     $sites = @(Get-OssChildDirs (Join-OssPath $Prof.Path $default) | Where-Object { $_.Name -like '*outlook*' })
    }
-   if ($sites.Count -eq 0) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$default\*outlook*" 'missing' -Browser)) }
-   foreach ($site in $sites) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$default\$($site.Name)" -Browser)) }
+   if ($sites.Count -eq 0) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$default\*outlook*" 'missing' -Kind 'browser')) }
+   foreach ($site in $sites) { $rows.Add((New-OssRoot $Prof.Name $Prof.Path "$default\$($site.Name)" -Kind 'browser')) }
   }
  }
  return @($rows.ToArray())
 }
 
 function Invoke-OssScan {
- param([object[]]$Profiles, [string]$Address)
+ param([object[]]$Profiles, [string]$Address, [string]$Scope = 'all')
  $scanner = New-OssScanner $Address
  $hits = [System.Collections.Generic.List[object]]::new()
  $locked = [System.Collections.Generic.List[object]]::new()
- $roots = @($Profiles | ForEach-Object { Get-OssScanRoots $_ })
- # Outlook roots run first, so a large browser cache cannot use up the caps before them.
- $roots = @(@($roots | Where-Object { -not $_.Browser }) + @($roots | Where-Object { $_.Browser }))
- $attempts = 0; $timedOut = $false; $fileCapReached = $false
+ $listed = @($Profiles | ForEach-Object { Get-OssScanRoots $_ } | Where-Object { $Scope -eq 'all' -or $_.kind -eq $Scope })
+ $roots = @(foreach ($rank in 0..3) { $listed | Where-Object { $_.Rank -eq $rank } })
+ $timedOut = $false; $fileCapReached = $false
  $storeExtensions = @('.ost', '.pst', '.nst')
  $script:OssClock = [Diagnostics.Stopwatch]::StartNew()
  try {
   foreach ($root in $roots) {
    if ($root.status) { continue }
    if (Test-OssExpired) { $timedOut = $true }
-   if ($timedOut -or $fileCapReached) { $root.status = 'notReached'; continue }
+   if ($timedOut) { $root.status = 'notReached'; continue }
    $state = Get-OssRootState $root.ProfilePath $root.root
    if ($state -ne 'ok') { $root.status = $state; continue }
    $path = Join-OssPath $root.ProfilePath $root.root
@@ -250,11 +276,12 @@ function Invoke-OssScan {
    $root.reparseSkipped = $walk.ReparseSkipped
    $root.dirErrors = $walk.DirErrors
    $root.status = if ($walk.Truncated) { 'partial' } else { 'scanned' }
+   $attempts = 0
    foreach ($file in $walk.Files) {
     if (Test-OssExpired) { $timedOut = $true; break }
     if ($storeExtensions -contains $file.Extension) { $root.storeFilesSkipped++; continue }
     if ($file.Length -gt $script:OssMaxFileBytes) { $root.filesSkippedTooLarge++; continue }
-    if ($attempts -ge $script:OssMaxFiles) { $fileCapReached = $true; break }
+    if ($attempts -ge $script:OssMaxFiles) { $fileCapReached = $true; $root.status = 'capped'; break }
     $attempts++
     $found = Find-OssMatches -Path $file.FullName -Scanner $scanner
     $relative = Get-OssRelativePath $root.ProfilePath $file.FullName
@@ -275,7 +302,7 @@ function Invoke-OssScan {
     }
     if ($timedOut) { break }
    }
-   if ($timedOut -or $fileCapReached) { $root.status = 'partial' }
+   if ($timedOut) { $root.status = 'partial' }
    if ($walk.Truncated -and (Test-OssExpired)) { $timedOut = $true }
   }
   $elapsed = [int]$script:OssClock.Elapsed.TotalSeconds
@@ -288,8 +315,9 @@ function Invoke-OssScan {
    filesScanned = (& $total 'filesScanned'); filesSkippedTooLarge = (& $total 'filesSkippedTooLarge'); filesLocked = (& $total 'filesLocked')
    storeFilesSkipped = (& $total 'storeFilesSkipped'); reparseSkipped = (& $total 'reparseSkipped'); dirErrors = (& $total 'dirErrors'); timedOut = $timedOut; fileCapReached = $fileCapReached
    elapsedSeconds = $elapsed; rootsTotal = $roots.Count; rootsMissing = @($roots | Where-Object { $_.status -eq 'missing' }).Count
+   rootsCapped = @($roots | Where-Object { $_.status -eq 'capped' }).Count; rootsNotReached = @($roots | Where-Object { $_.status -eq 'notReached' }).Count
   }
-  Roots = @($roots | Select-Object profile, root, status, filesFound, filesScanned, filesSkippedTooLarge, filesLocked, storeFilesSkipped, reparseSkipped, dirErrors, hitFiles)
+  Roots = @($roots | Select-Object profile, root, kind, status, filesFound, filesScanned, filesSkippedTooLarge, filesLocked, storeFilesSkipped, reparseSkipped, dirErrors, hitFiles)
   Hits = @($hits.ToArray())
   Locked = @($locked.ToArray())
  }
@@ -485,19 +513,33 @@ function Get-OssEventSummary {
  $faults = @(& $script:OssGetEvents @{ LogName = 'Application'; ProviderName = @('Application Error', 'Application Hang'); StartTime = $since } 2000)
  $crashes = @($faults | Where-Object { ([string]$_.Message) -like '*OUTLOOK.EXE*' } | ForEach-Object {
    [pscustomobject]@{ id = [int]$_.Id; timeUtc = (Format-OssUtc $_.TimeCreated) }
-  })
- return [pscustomobject]@{ outlook = $byId; outlookEventsRead = $outlook.Count; crashes = $crashes }
+  } | Sort-Object -Property timeUtc -Descending)
+ return [pscustomobject]@{ outlook = $byId; outlookEventsRead = $outlook.Count; crashesTotal = $crashes.Count; crashes = @($crashes | Select-Object -First 20) }
+}
+
+function Get-OssBrowserFolders {
+ # One line per browser in a profile, because missing rows are not printed and the folders found must still be visible.
+ param([object[]]$Roots)
+ $seen = [ordered]@{}
+ foreach ($root in $Roots) {
+  if ($root.root -match '\\(Edge|Chrome)\\User Data\\([^\\<]+)\\') {
+   $key = "$($root.profile) $($Matches[1])"
+   if (-not $seen.Contains($key)) { $seen[$key] = [System.Collections.Generic.List[string]]::new() }
+   if (-not $seen[$key].Contains($Matches[2])) { $seen[$key].Add($Matches[2]) }
+  }
+ }
+ foreach ($key in @($seen.Keys | Sort-Object)) { "${key}: $(@($seen[$key] | Sort-Object) -join ', ')" }
 }
 
 function Invoke-OssRun {
- param([string]$Address, [int]$Hours)
+ param([string]$Address, [int]$Hours, [string]$Scope = 'all', [string[]]$Sections = $script:OssAllSections)
  $errors = [System.Collections.Generic.List[string]]::new()
  $note = { param($Section, $Err) $errors.Add("${Section}: " + (Limit-OssText $Err.Exception.Message 160)) }
 
  $processes = @(); $profiles = @(); $hives = @(); $events = $null
  $inventory = [pscustomobject]@{ Stores = @(); RoamCache = @(); Roots = @() }
  $scan = [pscustomobject]@{ Summary = [ordered]@{}; Roots = @(); Hits = @(); Locked = @() }
- try { $processes = @(Get-OssProcessSummary) } catch { & $note 'processes' $_ }
+ if ($Sections -contains 'processes') { try { $processes = @(Get-OssProcessSummary) } catch { & $note 'processes' $_ } }
  try { $profiles = @(Get-OssProfiles) } catch { & $note 'profiles' $_ }
  try {
   foreach ($hive in @(& $script:OssGetHives)) {
@@ -505,98 +547,143 @@ function Invoke-OssRun {
   }
  } catch { & $note 'hives' $_ }
  $safeProfiles = @($profiles | Where-Object { -not $_.Reparse })
- try { $inventory = Get-OssInventory $safeProfiles } catch { & $note 'inventory' $_ }
- try { $scan = Invoke-OssScan -Profiles $safeProfiles -Address $Address } catch { & $note 'scan' $_ }
+ if ($Sections -contains 'inventory' -or $Sections -contains 'roamcache') {
+  try { $inventory = Get-OssInventory $safeProfiles } catch { & $note 'inventory' $_ }
+ }
+ try { $scan = Invoke-OssScan -Profiles $safeProfiles -Address $Address -Scope $Scope } catch { & $note 'scan' $_ }
  try { $events = Get-OssEventSummary -Hours $Hours } catch { & $note 'events' $_ }
 
+ # A profile earns its lines with a loaded hive, Outlook data, or a hit. The others are only counted.
  $loaded = @($hives | ForEach-Object { $_.windowsProfile })
+ $keep = @{}
+ foreach ($name in $loaded) { if ($name) { $keep[$name] = $true } }
+ foreach ($row in @($scan.Hits) + @($inventory.Stores) + @($inventory.RoamCache)) { $keep[$row.profile] = $true }
+ foreach ($root in @($scan.Roots | Where-Object { $_.kind -ne 'browser' -and $_.filesFound -gt 0 })) { $keep[$root.profile] = $true }
+
+ # Nothing to say about these roots beyond how many there were.
+ $omitted = [ordered]@{ missing = 0; notReached = 0; empty = 0; otherProfiles = 0 }
+ $rows = [System.Collections.Generic.List[object]]::new()
+ foreach ($root in @($scan.Roots)) {
+  if ($root.hitFiles -gt 0) { $rows.Add($root) }
+  elseif ($root.status -eq 'missing') { $omitted.missing++ }
+  elseif ($root.status -eq 'notReached') { $omitted.notReached++ }
+  elseif (-not $keep.ContainsKey($root.profile)) { $omitted.otherProfiles++ }
+  elseif ($root.status -eq 'scanned' -and $root.filesFound -eq 0 -and $root.dirErrors -eq 0) { $omitted.empty++ }
+  else { $rows.Add($root) }
+ }
+ $withOutlook = @($hives | Where-Object { @($_.outlookProfiles).Count -gt 0 -or @($_.Accounts).Count -gt 0 })
+ $showConfig = $Sections -contains 'config'
+ $shownProfiles = @($profiles | Where-Object { $keep.ContainsKey($_.Name) })
  return [ordered]@{
   version = $script:OssVersion
   utc = (Format-OssUtc (Get-Date))
   computer = $env:COMPUTERNAME
   hours = $Hours
+  scope = $Scope
+  sections = @($Sections)
   truncated = $false
   limits = $script:OssLimitsNote
   scan = $scan.Summary
   hitFilesTotal = $scan.Hits.Count
   hitFilesOmitted = 0
   hits = $scan.Hits
-  accounts = @($hives | ForEach-Object { $_.Accounts })
+  events = $events
+  accounts = $(if ($showConfig) { @($hives | ForEach-Object { $_.Accounts }) } else { @() })
   accountsOmitted = 0
   droppedSections = @()
-  profiles = @($profiles | ForEach-Object { [pscustomobject]@{ name = $_.Name; reparse = $_.Reparse; hiveLoaded = ($loaded -contains $_.Name) } })
-  hives = @($hives | Select-Object sid, account, windowsProfile, defaultProfile, outlookProfiles, stores, displayNames, showAutoSug, showAutoSugPolicy, useNewOutlook, keysTruncated)
+  profilesTotal = $profiles.Count
+  profilesOmitted = $profiles.Count - $shownProfiles.Count
+  profiles = @($shownProfiles | ForEach-Object { [pscustomobject]@{ name = $_.Name; reparse = $_.Reparse; hiveLoaded = ($loaded -contains $_.Name) } })
+  hivesWithoutOutlook = $hives.Count - $withOutlook.Count
+  hives = $(if ($showConfig) { @($withOutlook | Select-Object sid, account, windowsProfile, defaultProfile, outlookProfiles, stores, displayNames, showAutoSug, showAutoSugPolicy, useNewOutlook, keysTruncated) } else { @() })
   processes = $processes
-  stores = $inventory.Stores
-  events = $events
   errors = @($errors.ToArray())
-  inventoryRoots = $inventory.Roots
-  lockedFiles = $scan.Locked
-  roots = $scan.Roots
-  roamCache = $inventory.RoamCache
+  browserProfiles = @(Get-OssBrowserFolders @($scan.Roots | Where-Object { $keep.ContainsKey($_.profile) }))
+  rootsOmitted = $omitted
+  roots = $(if ($Sections -contains 'roots') { @($rows.ToArray()) } else { @() })
+  lockedFiles = @($scan.Locked | Where-Object { $keep.ContainsKey($_.profile) })
+  stores = $(if ($Sections -contains 'inventory') { $inventory.Stores } else { @() })
+  inventoryRoots = $(if ($Sections -contains 'inventory') { @($inventory.Roots | Where-Object { $_.status -ne 'missing' -and $keep.ContainsKey($_.profile) }) } else { @() })
+  roamCache = $(if ($Sections -contains 'roamcache') { $inventory.RoamCache } else { @() })
  }
 }
 
 function Format-OssText {
+ # Most important first. Get-OssOutput cuts from the end when the budget runs out.
  param([System.Collections.IDictionary]$Report)
  $show = { param($Value) if ($null -eq $Value -or "$Value" -eq '') { 'NOT SET' } else { "$Value" } }
+ $wants = { param($Name) @($Report.sections) -contains $Name }
  "=== Outlook suggestion sources v$($Report.version) ==="
- "utc: $($Report.utc)  computer: $($Report.computer)  eventHours: $($Report.hours)"
- ''
- '=== Processes ==='
- foreach ($p in $Report.processes) { "$($p.name): count=$($p.count) earliestStartUtc=$(& $show $p.earliestStartUtc) sessionIds=$(@($p.sessionIds) -join ',')" }
- ''
- '=== Windows profiles ==='
- foreach ($p in $Report.profiles) { "$($p.name): hiveLoaded=$($p.hiveLoaded) reparseSkipped=$($p.reparse)" }
- ''
- foreach ($h in $Report.hives) {
-  "=== Outlook config: $($h.account) ($($h.sid)) ==="
-  "defaultProfile: $(& $show $h.defaultProfile)"
-  "outlookProfiles: $(& $show (@($h.outlookProfiles) -join '; '))"
-  foreach ($a in @($Report.accounts | Where-Object { $_.sid -eq $h.sid })) { "account [$($a.outlookProfile)]: name=$(& $show $a.accountName) email=$(& $show $a.email)" }
-  foreach ($s in @($h.stores)) { "store: $s" }
-  foreach ($n in @($h.displayNames)) { "displayName: $n" }
-  "ShowAutoSug: $(& $show $h.showAutoSug)  policy: $(& $show $h.showAutoSugPolicy)  UseNewOutlook: $(& $show $h.useNewOutlook)  keysTruncated: $($h.keysTruncated)"
-  ''
- }
- if (@($Report.hives).Count -eq 0) { '=== Outlook config: NO USER HIVE LOADED ==='; '' }
- '=== PST and OST inventory ==='
- foreach ($r in $Report.inventoryRoots) { "root [$($r.profile)] $($r.root): $($r.status) truncated=$($r.truncated)" }
- foreach ($f in $Report.stores) { "file [$($f.profile)] $($f.path): size=$($f.sizeBytes) lastWriteUtc=$($f.lastWriteUtc)" }
- ''
- '=== RoamCache files ==='
- foreach ($f in $Report.roamCache) { "[$($f.profile)] $($f.name): size=$($f.sizeBytes) lastWriteUtc=$($f.lastWriteUtc)" }
+ "utc: $($Report.utc)  computer: $($Report.computer)  scope: $($Report.scope)  sections: $(@($Report.sections) -join ',')"
  ''
  '=== Scan totals ==='
  foreach ($k in @($Report.scan.Keys)) { "${k}: $($Report.scan[$k])" }
- ''
- '=== Scan roots ==='
- foreach ($r in $Report.roots) {
-  "[$($r.profile)] $($r.root): $($r.status) found=$($r.filesFound) scanned=$($r.filesScanned) tooLarge=$($r.filesSkippedTooLarge) locked=$($r.filesLocked) stores=$($r.storeFilesSkipped) reparse=$($r.reparseSkipped) dirErrors=$($r.dirErrors) hitFiles=$($r.hitFiles)"
- }
- ''
- '=== Files with hits ==='
- if (@($Report.hits).Count -eq 0) { 'none' }
- foreach ($f in $Report.hits) { "[$($f.profile)] $($f.path): size=$($f.sizeBytes) lastWriteUtc=$($f.lastWriteUtc) asciiHits=$($f.asciiHits) utf16Hits=$($f.utf16Hits) partial=$($f.partial)" }
- ''
- '=== Locked files ==='
- foreach ($f in $Report.lockedFiles) { "[$($f.profile)] $($f.path)" }
  ''
  "=== Application events, last $($Report.hours) hours ==="
  if ($null -eq $Report.events) { 'not read' }
  else {
   foreach ($e in $Report.events.outlook) { "Outlook id=$($e.id) count=$($e.count) latestUtc=$($e.latestUtc)" }
+  "OUTLOOK.EXE faults: $($Report.events.crashesTotal)"
   foreach ($e in $Report.events.crashes) { "OUTLOOK.EXE fault id=$($e.id) timeUtc=$($e.timeUtc)" }
  }
  ''
+ "=== Files with hits: $($Report.hitFilesTotal) ==="
+ foreach ($f in $Report.hits) { "[$($f.profile)] $($f.path): size=$($f.sizeBytes) lastWriteUtc=$($f.lastWriteUtc) asciiHits=$($f.asciiHits) utf16Hits=$($f.utf16Hits) partial=$($f.partial)" }
+ ''
  '=== Limits ==='
  $Report.limits
- if (@($Report.errors).Count -gt 0) { ''; '=== Partial failures ==='; $Report.errors }
+ if (@($Report.errors).Count -gt 0) { '=== Partial failures ==='; $Report.errors }
  ''
+ if (& $wants 'processes') {
+  '=== Processes ==='
+  foreach ($p in $Report.processes) { "$($p.name): count=$($p.count) earliestStartUtc=$(& $show $p.earliestStartUtc) sessionIds=$(@($p.sessionIds) -join ',')" }
+  ''
+ }
+ "=== Windows profiles: $($Report.profilesTotal), not listed $($Report.profilesOmitted) (no hive, no Outlook data, no hits) ==="
+ foreach ($p in $Report.profiles) { "$($p.name): hiveLoaded=$($p.hiveLoaded) reparseSkipped=$($p.reparse)" }
+ foreach ($b in $Report.browserProfiles) { "browser folders, $b" }
+ ''
+ if (& $wants 'config') {
+  foreach ($h in $Report.hives) {
+   "=== Outlook config: $($h.account) ($($h.sid)) ==="
+   "defaultProfile: $(& $show $h.defaultProfile)"
+   "outlookProfiles: $(& $show (@($h.outlookProfiles) -join '; '))"
+   foreach ($a in @($Report.accounts | Where-Object { $_.sid -eq $h.sid })) { "account [$($a.outlookProfile)]: name=$(& $show $a.accountName) email=$(& $show $a.email)" }
+   foreach ($s in @($h.stores)) { "store: $s" }
+   foreach ($n in @($h.displayNames)) { "displayName: $n" }
+   "ShowAutoSug: $(& $show $h.showAutoSug)  policy: $(& $show $h.showAutoSugPolicy)  UseNewOutlook: $(& $show $h.useNewOutlook)  keysTruncated: $($h.keysTruncated)"
+   ''
+  }
+  "Loaded hives with no Outlook profile: $($Report.hivesWithoutOutlook)"
+  ''
+ }
+ if (& $wants 'roots') {
+  $o = $Report.rootsOmitted
+  "=== Scan roots (not listed: missing $($o.missing), notReached $($o.notReached), empty $($o.empty), other profiles $($o.otherProfiles)) ==="
+  foreach ($r in $Report.roots) {
+   "[$($r.profile)] $($r.root): $($r.status) found=$($r.filesFound) scanned=$($r.filesScanned) tooLarge=$($r.filesSkippedTooLarge) locked=$($r.filesLocked) stores=$($r.storeFilesSkipped) reparse=$($r.reparseSkipped) dirErrors=$($r.dirErrors) hitFiles=$($r.hitFiles)"
+  }
+  ''
+ }
+ if (& $wants 'inventory') {
+  '=== PST and OST inventory ==='
+  foreach ($r in $Report.inventoryRoots) { "root [$($r.profile)] $($r.root): $($r.status) truncated=$($r.truncated)" }
+  foreach ($f in $Report.stores) { "file [$($f.profile)] $($f.path): size=$($f.sizeBytes) lastWriteUtc=$($f.lastWriteUtc)" }
+  ''
+ }
+ if (& $wants 'roamcache') {
+  '=== RoamCache files ==='
+  foreach ($f in $Report.roamCache) { "[$($f.profile)] $($f.name): size=$($f.sizeBytes) lastWriteUtc=$($f.lastWriteUtc)" }
+  ''
+ }
+ if (@($Report.lockedFiles).Count -gt 0) {
+  '=== Locked files ==='
+  foreach ($f in $Report.lockedFiles) { "[$($f.profile)] $($f.path)" }
+ }
 }
 
 function ConvertTo-OssJsonLine {
- # Budget covers the whole line. Whole sections go first. Hit files and accounts are the last thing cut, and only when they alone do not fit.
+ # Budget covers the whole line. Whole sections go first. Hit files, accounts and events are the last thing cut, and only when they alone do not fit.
  param([System.Collections.IDictionary]$Report, [int]$MaxBytes = $script:OssMaxJsonBytes)
  $copy = [ordered]@{}
  foreach ($k in @($Report.Keys)) { $copy[$k] = $Report[$k] }
@@ -607,7 +694,7 @@ function ConvertTo-OssJsonLine {
 
  $copy['truncated'] = $true
  $dropped = [System.Collections.Generic.List[string]]::new()
- foreach ($section in @('roamCache', 'roots', 'lockedFiles', 'inventoryRoots', 'events', 'stores', 'processes', 'hives', 'profiles', 'errors')) {
+ foreach ($section in @('roamCache', 'roots', 'lockedFiles', 'inventoryRoots', 'stores', 'browserProfiles', 'processes', 'hives', 'profiles', 'errors', 'rootsOmitted', 'sections')) {
   $copy.Remove($section)
   $dropped.Add($section)
   $copy['droppedSections'] = @($dropped.ToArray())
@@ -615,13 +702,13 @@ function ConvertTo-OssJsonLine {
   if (& $fits $line) { return $line }
  }
 
- # ponytail: pops one entry per render, at most ~300 renders of a small object. Per-entry byte accounting if this ever shows up in a run time.
+ # ponytail: pops one entry per render, at most ~120 renders of a small object. Per-entry byte accounting if this ever shows up in a run time.
  $hits = [System.Collections.Generic.List[object]]::new()
- foreach ($h in @($copy['hits'] | Select-Object -First 300)) {
-  $hits.Add([pscustomobject]@{ profile = (Limit-OssText $h.profile 40); path = (Limit-OssText $h.path 160); sizeBytes = $h.sizeBytes; lastWriteUtc = $h.lastWriteUtc; asciiHits = $h.asciiHits; utf16Hits = $h.utf16Hits; partial = $h.partial })
+ foreach ($h in @($copy['hits'] | Select-Object -First 60)) {
+  $hits.Add([pscustomobject]@{ profile = (Limit-OssText $h.profile 40); path = (Limit-OssText $h.path 120); sizeBytes = $h.sizeBytes; lastWriteUtc = $h.lastWriteUtc; asciiHits = $h.asciiHits; utf16Hits = $h.utf16Hits; partial = $h.partial })
  }
  $accounts = [System.Collections.Generic.List[object]]::new()
- foreach ($a in @($copy['accounts'] | Select-Object -First 300)) {
+ foreach ($a in @($copy['accounts'] | Select-Object -First 60)) {
   $accounts.Add([pscustomobject]@{ sid = $a.sid; outlookProfile = (Limit-OssText $a.outlookProfile 60); accountName = (Limit-OssText $a.accountName 80); email = (Limit-OssText $a.email 120) })
  }
  $accountTotal = @($copy['accounts']).Count
@@ -631,24 +718,42 @@ function ConvertTo-OssJsonLine {
   $copy['hitFilesOmitted'] = [int]$Report['hitFilesTotal'] - $hits.Count
   $copy['accountsOmitted'] = $accountTotal - $accounts.Count
   $line = & $render
-  if ((& $fits $line) -or ($hits.Count -eq 0 -and $accounts.Count -eq 0)) { return $line }
+  if (& $fits $line) { return $line }
+  if ($hits.Count -eq 0 -and $accounts.Count -eq 0) { break }
   # The longer list gives way, so neither list empties while the other still has room to shrink.
   if ($hits.Count -ge $accounts.Count) { $hits.RemoveAt($hits.Count - 1) } else { $accounts.RemoveAt($accounts.Count - 1) }
  }
+ $copy.Remove('events')
+ $copy['droppedSections'] = @($dropped.ToArray()) + 'events'
+ return (& $render)
 }
 
-function Invoke-OssMain {
- param([string]$Address, [int]$Hours)
- $report = Invoke-OssRun -Address $Address -Hours $Hours
- Format-OssText $report
- ConvertTo-OssJsonLine $report
+function Get-OssOutput {
+ # JSON first, so the summary survives any cut. Then text by priority, stopping inside the budget and saying so. Each line also costs its CRLF.
+ param([System.Collections.IDictionary]$Report, [int]$MaxChars = $script:OssMaxOutputChars)
+ $json = ConvertTo-OssJsonLine $Report
+ $end = '=== End of report ==='
+ $text = @(Format-OssText $Report)
+ $left = $MaxChars - $json.Length - $end.Length - 90
+ $json
+ $printed = 0
+ foreach ($line in $text) {
+  $left -= ([string]$line).Length + 2
+  if ($left -lt 0) { break }
+  $line
+  $printed++
+ }
+ if ($printed -lt $text.Count) { "... $($text.Count - $printed) text lines cut to stay under $MaxChars characters" }
+ $end
 }
+
+
 
 if ($env:RELIAN_DEPLOY_TEST -ne '1') {
- try { $ossOptions = Get-OssOptions -Action $Action -Match $Match -Hours $Hours }
+ try { $ossOptions = Get-OssOptions -Action $Action -Match $Match -Hours $Hours -Scope $Scope -Sections $Sections }
  catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
  if ($ossOptions.Mode -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
- try { Invoke-OssMain -Address $ossOptions.Match -Hours $ossOptions.Hours }
+ try { Get-OssOutput (Invoke-OssRun -Address $ossOptions.Match -Hours $ossOptions.Hours -Scope $ossOptions.Scope -Sections $ossOptions.Sections) }
  catch { Write-Output "Partial failure: $(Limit-OssText $_.Exception.Message 200)" }
  exit 0
 }

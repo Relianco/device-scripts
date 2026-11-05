@@ -93,6 +93,17 @@ try {
  foreach ($badMatch in @('', 'nope', 'a@b', '@example.invalid', 'a b@example.invalid', 'a@example.invalid;b@example.invalid', 'p{1}@example.invalid\')) {
   Assert-Throws { Get-OssOptions -Action 'Install' -Match $badMatch } "bad Match [$badMatch]"
  }
+ foreach ($area in @('all', 'browser', 'outlook', 'office', 'BROWSER')) {
+  Assert-Same (Get-OssOptions -Action 'Install' -Match $address -Scope $area).Scope $area.ToLowerInvariant() "Scope $area"
+ }
+ Assert-Same (Get-OssOptions -Action 'Install' -Match $address).Scope 'all' 'Scope default'
+ Assert-Same (@((Get-OssOptions -Action 'Install' -Match $address).Sections) -join ',') 'processes,config,roots,inventory,roamcache' 'default Sections'
+ Assert-Same (@((Get-OssOptions -Action 'Install' -Match $address -Scope 'browser').Sections) -join ',') 'processes,config,roots' 'a browser run leaves out inventory and RoamCache'
+ Assert-Same (@((Get-OssOptions -Action 'Install' -Match $address -Scope 'browser' -Sections 'all').Sections) -join ',') 'processes,config,roots,inventory,roamcache' 'Sections all overrides the browser default'
+ Assert-Same @((Get-OssOptions -Action 'Install' -Match $address -Sections 'none').Sections).Count 0 'Sections none'
+ Assert-Same (@((Get-OssOptions -Action 'Install' -Match $address -Sections ' Roots, config ').Sections) -join ',') 'roots,config' 'Sections list'
+ Assert-Throws { Get-OssOptions -Action 'Install' -Match $address -Scope 'mail' } 'bad Scope'
+ Assert-Throws { Get-OssOptions -Action 'Install' -Match $address -Sections 'roots,nope' } 'bad Sections'
  foreach ($badHours in @('0', '-1', 'x', '1.5', '1234567')) {
   Assert-Throws { Get-OssOptions -Action 'Install' -Match $address -Hours $badHours } "bad Hours [$badHours]"
  }
@@ -102,6 +113,10 @@ try {
  Assert-Same $run.Code 1 'bad Match exits 1'
  $run = Invoke-Package @('-Action', 'Install', '-Match', 'a@example.invalid', '-Hours', 'x')
  Assert-Same $run.Code 1 'bad Hours exits 1'
+ $run = Invoke-Package @('-Action', 'Install', '-Match', 'a@example.invalid', '-Scope', 'nope')
+ Assert-Same $run.Code 1 'bad Scope exits 1'
+ $run = Invoke-Package @('-Action', 'Install', '-Match', 'a@example.invalid', '-Sections', 'nope')
+ Assert-Same $run.Code 1 'bad Sections exits 1'
  $run = Invoke-Package @('-Action', 'Uninstall')
  Assert-Same $run.Code 0 'Uninstall exits 0'
  Assert-True (-not (($run.Output -join "`n") -like '*RELIAN_SOURCES_JSON*')) 'Uninstall does not scan'
@@ -221,15 +236,19 @@ try {
  $capped = Invoke-OssScan -Profiles $safe -Address $address
  $script:OssMaxFiles = 5000
  Assert-True $capped.Summary.fileCapReached 'file cap reported'
- Assert-Same ($capped.Summary.filesScanned + $capped.Summary.filesLocked) 2 'file cap stops at the cap'
- Assert-True (@($capped.Roots | Where-Object { $_.status -eq 'notReached' }).Count -gt 0) 'roots past the cap are visible'
- Assert-Same @($capped.Roots | Where-Object { $_.root -like '*Edge*' -and $_.status -eq 'scanned' }).Count 0 'browser roots wait behind Outlook roots'
+ $cappedRow = Get-Row $capped 'AppData\Local\Microsoft\Outlook'
+ Assert-Same $cappedRow.status 'capped' 'a root over its cap says so'
+ Assert-Same ($cappedRow.filesScanned + $cappedRow.filesLocked) 2 'the cap stops that root at the cap'
+ Assert-Same $capped.Summary.rootsCapped @($capped.Roots | Where-Object { $_.status -eq 'capped' }).Count 'capped roots are in the totals'
+ Assert-True ($capped.Summary.rootsCapped -ge 1) 'at least one root was capped'
+ Assert-Same @($capped.Roots | Where-Object { $_.status -eq 'notReached' }).Count 0 'a capped root does not stop the others'
 
  $script:OssMaxSeconds = 0
  $late = Invoke-OssScan -Profiles $safe -Address $address
  $script:OssMaxSeconds = 150
  Assert-True $late.Summary.timedOut 'timeout reported'
  Assert-Same $late.Summary.filesScanned 0 'nothing scanned after the deadline'
+ Assert-True ($late.Summary.rootsNotReached -gt 0) 'the overall time cap still applies'
 
  foreach ($n in 1..4) { $null = Write-Fixture $alice "AppData\Local\Microsoft\Windows\INetCache\Content.Outlook\ABC\f$n.tmp" (Get-Ascii $hitAscii) }
  $small = Invoke-OssScan -Profiles $safe -Address $address
@@ -341,17 +360,18 @@ try {
  # 10. A whole run: nothing matched or neighbouring reaches the output.
  $report = Invoke-OssRun -Address $address -Hours 72
  $text = @(Format-OssText $report) -join "`n"
+ Assert-Same @($report.roots | Where-Object { $_.status -eq 'missing' }).Count 0 'a missing root with no hits gets no line'
  $line = ConvertTo-OssJsonLine $report
  $everything = "$text`n$line"
  $utf16Printable = [Text.Encoding]::Unicode.GetString((Get-Ascii $address))
  foreach ($forbidden in @($address, $address.ToLowerInvariant(), $secret, $utf16Printable)) {
   Assert-True ($everything.IndexOf($forbidden, [StringComparison]::OrdinalIgnoreCase) -lt 0) 'matched text or neighbouring bytes reached the output'
  }
- foreach ($expected in @('=== Processes ===', '=== Files with hits ===', 'plain.nk2', 'work@example.invalid', 'attached.pst', 'old.pst', 'Stream_Other.dat', 'LevelDB/Snappy', 'OUTLOOK.EXE fault id=1000')) {
+ foreach ($expected in @('=== Processes ===', '=== Files with hits: ', 'plain.nk2', 'work@example.invalid', 'attached.pst', 'old.pst', 'Stream_Other.dat', 'LevelDB/Snappy', 'OUTLOOK.EXE fault id=1000')) {
   Assert-True ($text.IndexOf($expected, [StringComparison]::Ordinal) -ge 0) "text block has $expected"
  }
  Assert-True ($line.StartsWith('RELIAN_SOURCES_JSON: {')) 'JSON prefix'
- Assert-True ([Text.Encoding]::UTF8.GetByteCount($line) -le 8000) 'JSON line within budget'
+ Assert-True ([Text.Encoding]::UTF8.GetByteCount($line) -le 4000) 'JSON line within budget'
  $parsed = $line.Substring('RELIAN_SOURCES_JSON: '.Length) | ConvertFrom-Json
  Assert-True ($parsed.limits -like '*LevelDB/Snappy*') 'limits note in JSON'
  Assert-True (@($parsed.hits).Count -gt 0) 'hits in JSON'
@@ -367,10 +387,11 @@ try {
  $bloated['hitFilesTotal'] = $manyHits.Count
  $bloated['roamCache'] = @(foreach ($n in 1..500) { [pscustomobject]@{ profile = 'alice'; name = "Stream_$n.dat"; sizeBytes = 1; lastWriteUtc = '2026-01-02T03:04:05Z' } })
  $huge = ConvertTo-OssJsonLine $bloated
- Assert-True ([Text.Encoding]::UTF8.GetByteCount($huge) -le 8000) 'JSON under 8000 bytes with a huge hit list'
+ Assert-True ([Text.Encoding]::UTF8.GetByteCount($huge) -le 4000) 'JSON within budget with a huge hit list'
  $hugeParsed = $huge.Substring('RELIAN_SOURCES_JSON: '.Length) | ConvertFrom-Json
  Assert-True $hugeParsed.truncated 'truncated flag set'
- Assert-True (@($hugeParsed.hits).Count -ge 10) 'hit files kept under pressure'
+ Assert-True (@($hugeParsed.hits).Count -ge 8) 'hit files kept under pressure'
+ Assert-Same @($hugeParsed.events.outlook).Count 2 'events kept under pressure'
  Assert-Same $hugeParsed.hitFilesTotal 4000 'total hit files kept'
  Assert-Same ($hugeParsed.hitFilesOmitted + @($hugeParsed.hits).Count) 4000 'omitted count is honest'
  Assert-Same @($hugeParsed.accounts).Count 2 'accounts kept under pressure'
@@ -379,13 +400,24 @@ try {
  $manyAccounts = @(foreach ($n in 1..500) { [pscustomobject]@{ sid = 'S-1-12-1-1-2-3-4'; outlookProfile = 'Main'; accountName = "Account $n"; email = "user$n@example.invalid" } })
  $bloated['accounts'] = $manyAccounts
  $both = ConvertTo-OssJsonLine $bloated
- Assert-True ([Text.Encoding]::UTF8.GetByteCount($both) -le 8000) 'JSON under 8000 bytes with huge hits and accounts'
+ Assert-True ([Text.Encoding]::UTF8.GetByteCount($both) -le 4000) 'JSON within budget with huge hits and accounts'
  $bothParsed = $both.Substring('RELIAN_SOURCES_JSON: '.Length) | ConvertFrom-Json
  Assert-True (@($bothParsed.hits).Count -gt 0 -and @($bothParsed.accounts).Count -gt 0) 'both lists keep entries'
  Assert-Same ($bothParsed.accountsOmitted + @($bothParsed.accounts).Count) 500 'omitted account count is honest'
  # Text stays complete whatever the JSON dropped.
  $fullText = @(Format-OssText $bloated) -join "`n"
  Assert-True ($fullText.IndexOf('\4000.log') -ge 0) 'text block keeps every hit file'
+
+ # A whole printed run with every list huge still fits, with events and hit files ahead of the cut.
+ $hugeOutput = @(Get-OssOutput $bloated)
+ $hugeChars = (($hugeOutput | ForEach-Object { ([string]$_).Length + 2 } | Measure-Object -Sum).Sum)
+ Assert-True ($hugeChars -lt 10000) "printed output under 10000 characters, was $hugeChars"
+ $hugeJoined = $hugeOutput -join "`n"
+ Assert-True ($hugeOutput[0].StartsWith('RELIAN_SOURCES_JSON: {')) 'JSON is the first line'
+ Assert-True ($hugeJoined.IndexOf('Outlook id=27 count=2') -ge 0) 'event data survives the cut'
+ Assert-True ($hugeJoined.IndexOf('\1.log: size=') -ge 0) 'hit files survive the cut'
+ Assert-True ($hugeJoined -match 'text lines cut to stay under 9500 characters') 'the cut is stated'
+ Assert-Same $hugeOutput[-1] '=== End of report ===' 'end marker shows nothing was lost after it'
 
  # 12. Partial failures do not stop the run.
  $script:OssGetHives = { throw 'hive boom' }
@@ -398,6 +430,97 @@ try {
  Assert-True ($partialText -like '*Partial failures*') 'failures are printed'
  Assert-True ((ConvertTo-OssJsonLine $partial).StartsWith('RELIAN_SOURCES_JSON: ')) 'JSON still printed'
  $script:OssRegValues = $realValues; $script:OssRegSubKeys = $realKeys; $script:OssGetHives = $realHives; $script:OssGetEvents = $realEvents; $script:OssGetProcesses = $realProcs
+
+ # 12a. A root over the cap ahead of a browser root (the first real run stopped inside Office\16.0 and never reached a browser).
+ $bigUsers = Join-Path $sandbox 'BigUsers'
+ $big = Join-Path $bigUsers 'bigprofile'
+ $null = New-Item -ItemType Directory -Force -Path (Join-Rel $big 'AppData\Local\Microsoft\Office\16.0\cache')
+ $fillDir = Join-Rel $big 'AppData\Local\Microsoft\Office\16.0\cache'
+ $fillBytes = Get-Ascii 'clean'
+ foreach ($n in 1..20001) { [IO.File]::WriteAllBytes([IO.Path]::Combine($fillDir, "f$n.bin"), $fillBytes) }
+ $chrome = 'AppData\Local\Google\Chrome\User Data'
+ $edge = 'AppData\Local\Microsoft\Edge\User Data'
+ foreach ($folder in @('Default', 'Profile 1', 'Profile 12', 'Guest Profile')) {
+  $null = Write-Fixture $big "$chrome\$folder\IndexedDB\https_outlook.office.com_0.indexeddb.leveldb\000003.log" (Get-Ascii $hitAscii)
+ }
+ $null = Write-Fixture $big "$chrome\Profile 2\Local Storage\leveldb\000003.log" (Get-Utf16 $hitAscii)
+ $null = Write-Fixture $big "$chrome\Profile 3\Session Storage\000003.log" (Get-Ascii $hitAscii)
+ $null = Write-Fixture $big "$chrome\Profile 4\Service Worker\CacheStorage\abc\def\0" (Get-Ascii $hitAscii)
+ $null = Write-Fixture $big "$chrome\Crashpad\metadata" (Get-Ascii $hitAscii)
+ $null = New-Item -ItemType Directory -Force -Path (Join-Rel $big "$chrome\Profile 5")
+ $null = Write-Fixture $big "$edge\Profile 7\IndexedDB\x\000003.log" (Get-Ascii $hitAscii)
+ $bigProfile = [pscustomobject]@{ Name = 'bigprofile'; Path = $big; Reparse = $false }
+ $bigAll = Invoke-OssScan -Profiles @($bigProfile) -Address $address
+ Assert-Same (Get-Row $bigAll 'Office\16.0').status 'capped' 'Office\16.0 over the cap is capped'
+ Assert-Same (Get-Row $bigAll 'Office\16.0').filesScanned 5000 'the default cap is applied per root'
+ Assert-Same $bigAll.Summary.rootsNotReached 0 'a big root leaves no root unreached'
+ Assert-Same (Get-Row $bigAll "$chrome\Default\IndexedDB").hitFiles 1 'Chrome is scanned with a big Office root present'
+ Assert-Same $bigAll.Hits.Count 8 'every browser hit is found with a big Office root present'
+ $scanOrder = @($bigAll.Roots | ForEach-Object { $_.root })
+ Assert-True ($scanOrder[-1] -like '*Office\16.0') 'Office\16.0 scans last'
+ $bigBrowser = Invoke-OssScan -Profiles @($bigProfile) -Address $address -Scope 'browser'
+ Assert-Same @($bigBrowser.Roots | Where-Object { $_.status -eq 'notReached' }).Count 0 'no browser root is notReached under Scope browser'
+ Assert-Same @($bigBrowser.Roots | Where-Object { $_.kind -ne 'browser' }).Count 0 'Scope browser scans only browser roots'
+ Assert-Same $bigBrowser.Hits.Count 8 'Scope browser finds every hit'
+ Assert-Same @($bigBrowser.Roots | Where-Object { $_.root -like '*Crashpad*' }).Count 0 'Crashpad is not a browser profile'
+ foreach ($folder in @('Default', 'Profile 1', 'Profile 12', 'Guest Profile', 'Profile 2', 'Profile 3', 'Profile 4', 'Profile 5')) {
+  foreach ($sub in @('IndexedDB', 'Local Storage', 'Service Worker\CacheStorage', 'Session Storage')) {
+   Assert-Same @($bigBrowser.Roots | Where-Object { $_.root -eq "$chrome\$folder\$sub" }).Count 1 "root $folder\$sub is listed"
+  }
+ }
+ Assert-Same (@(Get-OssBrowserFolders $bigBrowser.Roots) -join ';') 'bigprofile Chrome: Default, Guest Profile, Profile 1, Profile 12, Profile 2, Profile 3, Profile 4, Profile 5;bigprofile Edge: Profile 7' 'browser folders are named'
+ $edgeOnly = @($bigBrowser.Roots | Where-Object { $_.root -like '*Edge*' -and $_.hitFiles -gt 0 })
+ Assert-Same $edgeOnly.Count 1 'Edge profile folder is scanned'
+ $bigOutlook = Invoke-OssScan -Profiles @($bigProfile) -Address $address -Scope 'outlook'
+ Assert-Same @($bigOutlook.Roots | Where-Object { $_.kind -ne 'outlook' }).Count 0 'Scope outlook scans only Outlook roots'
+ $bigOffice = Invoke-OssScan -Profiles @($bigProfile) -Address $address -Scope 'office'
+ Assert-Same @($bigOffice.Roots).Count 1 'Scope office scans only Office\16.0'
+
+ # 12b. A many-profile PC prints under Ninja's 10000 characters, with hits and events.
+ $manyUsers = Join-Path $sandbox 'ManyUsers'
+ foreach ($n in 1..120) {
+  $name = "user$n"
+  $null = New-Item -ItemType Directory -Force -Path (Join-Rel (Join-Path $manyUsers $name) "$chrome\Default\IndexedDB")
+  $null = New-Item -ItemType Directory -Force -Path (Join-Rel (Join-Path $manyUsers $name) 'AppData\Local\Microsoft\Outlook')
+ }
+ $null = Write-Fixture (Join-Path $manyUsers 'user7') "$chrome\Default\IndexedDB\x\000003.log" (Get-Ascii $hitAscii)
+ $null = Write-Fixture (Join-Path $manyUsers 'user9') 'AppData\Local\Microsoft\Outlook\RoamCache\Stream_x.dat' (Get-Ascii 'clean')
+ $script:OssUsersRoot = $manyUsers
+ $script:OssGetHives = { [pscustomobject]@{ Sid = 'S-1-12-1-1-2-3-4'; Account = 'AzureAD\user1'; ProfileName = 'user1'; Root = 'HIVE' } }
+ $script:OssRegValues = { param($Path) if ($fakeValues.ContainsKey($Path)) { $fakeValues[$Path] } else { @{} } }
+ $script:OssRegSubKeys = { param($Path) if ($fakeKeys.ContainsKey($Path)) { @($fakeKeys[$Path]) } else { @() } }
+ $script:OssGetEvents = { param([hashtable]$Filter, [int]$Max) if ($Filter.ProviderName -eq 'Outlook') { @([pscustomobject]@{ Id = 63; TimeCreated = $when; Message = $secret }) } else { @() } }
+ $manyReport = Invoke-OssRun -Address $address -Hours 72
+ $manyOutput = @(Get-OssOutput $manyReport)
+ $manyChars = (($manyOutput | ForEach-Object { ([string]$_).Length + 2 } | Measure-Object -Sum).Sum)
+ Assert-True ($manyChars -lt 10000) "many-profile output under 10000 characters, was $manyChars"
+ $manyJoined = $manyOutput -join "`n"
+ Assert-True ($manyOutput[0].StartsWith('RELIAN_SOURCES_JSON: {')) 'many-profile JSON first'
+ Assert-Same $manyOutput[-1] '=== End of report ===' 'many-profile output is complete'
+ Assert-True ($manyJoined -notmatch 'text lines cut') 'many-profile output needs no cut'
+ Assert-True ($manyJoined.IndexOf('[user7] ') -ge 0) 'a profile with hits is listed'
+ Assert-True ($manyJoined.IndexOf('user120') -lt 0) 'a profile with no hive, Outlook data or hits is not listed'
+ Assert-True ($manyJoined.IndexOf('user1: hiveLoaded=True') -ge 0) 'a profile with a hive is listed'
+ Assert-True ($manyJoined.IndexOf('user9: hiveLoaded=False') -ge 0) 'a profile with Outlook data is listed'
+ Assert-True ($manyJoined.IndexOf('Outlook id=63 count=1') -ge 0) 'event data printed'
+ Assert-Same $manyReport.profilesOmitted 117 'omitted profiles are counted'
+ Assert-True ($manyReport.rootsOmitted.missing -gt 100) 'omitted missing roots are counted'
+ Assert-True ($manyJoined -match 'not listed: missing \d+') 'the omitted count is printed'
+ Assert-Same @($manyReport.roots | Where-Object { $_.status -eq 'missing' }).Count 0 'missing roots with no hits get no line'
+ # Sections and Scope reach the printed blocks.
+ $browserRun = Invoke-OssRun -Address $address -Hours 72 -Scope 'browser' -Sections @('processes', 'config', 'roots')
+ $browserText = @(Get-OssOutput $browserRun) -join "`n"
+ Assert-True ($browserText.IndexOf('=== RoamCache files ===') -lt 0) 'RoamCache block omitted'
+ Assert-True ($browserText.IndexOf('=== PST and OST inventory ===') -lt 0) 'inventory block omitted'
+ Assert-True ($browserText.IndexOf('=== Files with hits: 1 ===') -ge 0) 'hit block kept'
+ Assert-True ($browserText.IndexOf('Outlook id=63 count=1') -ge 0) 'event block kept'
+ Assert-True ($browserText.IndexOf('browser folders, user7 Chrome: Default') -ge 0) 'browser folders printed'
+ $bareRun = Invoke-OssRun -Address $address -Hours 72 -Sections @()
+ $bareText = @(Format-OssText $bareRun) -join "`n"
+ Assert-True ($bareText.IndexOf('=== Processes ===') -lt 0 -and $bareText.IndexOf('=== Scan roots') -lt 0 -and $bareText.IndexOf('=== Outlook config') -lt 0) 'Sections none leaves totals, events and hits'
+ Assert-True ($bareText.IndexOf('=== Files with hits: 1 ===') -ge 0) 'Sections none keeps hits'
+ $script:OssUsersRoot = $users
+ $script:OssRegValues = $realValues; $script:OssRegSubKeys = $realKeys; $script:OssGetHives = $realHives; $script:OssGetEvents = $realEvents
 
  # 13. Source: read-only by construction. The checker itself must catch each kind of write.
  $source = [IO.File]::ReadAllText($scriptPath)
@@ -412,7 +535,7 @@ try {
  }
  Assert-True ($source -match '\[IO\.FileShare\]::ReadWrite -bor \[IO\.FileShare\]::Delete') 'files open with shared read, write and delete'
  Assert-True ($source -notmatch 'Mandatory') 'no Mandatory parameter'
- foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinVersion', "[string]`$Match = ''", "[string]`$Hours = ''")) {
+ foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinVersion', "[string]`$Match = ''", "[string]`$Hours = ''", "[string]`$Scope = ''", "[string]`$Sections = ''")) {
   Assert-True ($source.IndexOf($need, [StringComparison]::Ordinal) -ge 0) "param block lacks $need"
  }
  Assert-True (@([Text.Encoding]::UTF8.GetBytes($source) | Where-Object { $_ -gt 127 }).Count -eq 0) 'source is ASCII, so Windows PowerShell 5.1 reads it the same'
@@ -423,9 +546,11 @@ try {
  Set-StrictMode -Off
  . (Join-Path $repoRoot 'windows/runner/Invoke-RelianRunner.ps1')
  Set-StrictMode -Version Latest
- $sampleJson = '{"Match":"personal.stale@example.invalid","Hours":"168"}'
+ $sampleJson = '{"Match":"personal.stale@example.invalid","Hours":"168","Scope":"browser","Sections":"roots,config"}'
  $pairs = ConvertFrom-RelianPackageArguments -PackageArguments ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($sampleJson)))
- Assert-Same $pairs.Count 2 'runner decodes both arguments'
+ Assert-Same $pairs.Count 4 'runner decodes every argument'
+ Assert-Same $pairs[2].Value 'browser' 'Scope value'
+ Assert-Same $pairs[3].Value 'roots,config' 'Sections value'
  Assert-Same $pairs[0].Name 'Match' 'first argument name'
  Assert-Same $pairs[0].Value 'personal.stale@example.invalid' 'first argument value'
  Assert-Same $pairs[1].Name 'Hours' 'second argument name'
@@ -456,9 +581,13 @@ try {
  # End to end. On Linux there is no registry or event log, so this also proves those failures stay partial.
  $e2e = Invoke-Package @('-Action', 'Install', '-Match', 'absent.oss.check@example.invalid', '-Hours', '1')
  Assert-Same $e2e.Code 0 'a completed run exits 0'
- $last = $e2e.Output[-1]
- Assert-True ($last.StartsWith('RELIAN_SOURCES_JSON: ')) 'the JSON line is last'
- Assert-True ([Text.Encoding]::UTF8.GetByteCount($last) -le 8000) 'end-to-end JSON within budget'
+ $last = $e2e.Output[0]
+ Assert-True ($last.StartsWith('RELIAN_SOURCES_JSON: ')) 'the JSON line is first'
+ Assert-True ([Text.Encoding]::UTF8.GetByteCount($last) -le 4000) 'end-to-end JSON within budget'
+ Assert-Same $e2e.Output[-1] '=== End of report ===' 'end-to-end report ends with the marker'
+ $e2eBrowser = Invoke-Package @('-Action', 'Install', '-Match', 'absent.oss.check@example.invalid', '-Scope', 'browser', '-Sections', 'roots,config')
+ Assert-Same $e2eBrowser.Code 0 'Scope and a comma Sections list reach the package as strings'
+ Assert-Same ($e2eBrowser.Output[0].Substring('RELIAN_SOURCES_JSON: '.Length) | ConvertFrom-Json).scope 'browser' 'end-to-end scope'
  $e2eParsed = $last.Substring('RELIAN_SOURCES_JSON: '.Length) | ConvertFrom-Json
  Assert-Same $e2eParsed.hitFilesTotal 0 'end-to-end run finds nothing for an absent address'
  Assert-True ((($e2e.Output -join "`n").IndexOf('absent.oss.check') -lt 0)) 'end-to-end output never echoes Match'
