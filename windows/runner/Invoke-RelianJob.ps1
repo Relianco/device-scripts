@@ -98,14 +98,15 @@ function Invoke-RelianJob {
         [switch]$ReportOnly
     )
 
+    # Before the URL is read, even one with userinfo: nothing is downloaded either way.
+    if ([string]::IsNullOrWhiteSpace($ModuleSha256)) { return 0 }
     if (Test-RelianUrlHasUserInfo -Url $ModuleUrl) {
         Write-RelianJobError 'refusing a URL that contains userinfo'
         return 1
     }
-    if ([string]::IsNullOrWhiteSpace($ModuleSha256)) { return 0 }
     # The hash names the cached file. \z, because $ also matches before a trailing newline.
-    if ($ModuleSha256 -notmatch '\A[0-9a-fA-F]{64}\z') {
-        Write-RelianJobError 'module hash is not 64 hex characters'
+    if ($ModuleSha256 -cnotmatch '\A[0-9a-f]{64}\z') {
+        Write-RelianJobError 'module hash is not 64 lowercase hex characters'
         return 1
     }
     $uri = $null
@@ -114,7 +115,7 @@ function Invoke-RelianJob {
         return 1
     }
 
-    $expected = $ModuleSha256.ToLowerInvariant()
+    $expected = $ModuleSha256
     $temp = $null
     try {
         $chain = @((Split-Path -Parent $script:CacheRoot), $script:CacheRoot)
@@ -132,7 +133,9 @@ function Invoke-RelianJob {
 
         $file = Join-Path $script:CacheRoot "$expected.ps1"
         if (-not (Test-Path -LiteralPath $file)) {
-            # ponytail: no retry loop here, a failed download exits 1 and the next scheduled run is the retry.
+            # ponytail: one attempt on purpose. A failed download exits 1 and the next scheduled run is the
+            # retry, so this loader needs none of the runner's retry classifier. Only a module's first run
+            # downloads at all. Add the runner's three attempts if first runs are seen failing on transient errors.
             $temp = Join-Path $script:CacheRoot ([guid]::NewGuid().ToString('n') + '.tmp')
             [void](& $script:DownloadFile $ModuleUrl $temp)
             if ((Get-RelianSha256 -Bytes ([IO.File]::ReadAllBytes($temp))) -ne $expected) {
@@ -173,6 +176,8 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
+# A missing name exits 1 even for an empty hash, as in the runner: both names stay in the Parameters
+# string, and a row that lost one fails visibly. Only a present, empty hash is the exit 0 switch.
 foreach ($name in @('ModuleUrl', 'ModuleSha256')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
         Write-RelianJobError "missing parameter $name"

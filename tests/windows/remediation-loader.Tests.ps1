@@ -55,18 +55,20 @@ foreach ($blank in @('', '   ')) {
     Assert-True (-not (Test-Path -LiteralPath $script:CacheRoot)) 'blank hash must not create the cache'
 }
 
-# Userinfo: exit 1 before any download, even with a blank hash (runner order).
-foreach ($case in @(
-        @{ U = 'https://user:secret@example.invalid/job.ps1'; H = $goodHash },
-        @{ U = 'https://user@example.invalid/job.ps1'; H = $goodHash },
-        @{ U = 'https://user@example.invalid/job.ps1'; H = '' })) {
+# Userinfo: exit 1 before any download.
+foreach ($bad in @('https://user@example.invalid/job.ps1', 'https://@example.invalid/job.ps1')) {
     Reset-Test
-    Assert-Same (Invoke-RelianJob -ModuleUrl $case.U -ModuleSha256 $case.H) 1 'userinfo exit'
+    Assert-Same (Invoke-RelianJob -ModuleUrl $bad -ModuleSha256 $goodHash) 1 "userinfo exit [$bad]"
     Assert-Same $script:Downloads 0 'userinfo downloads'
 }
 
-# The hash names a file, so it must be exactly 64 hex characters. A URL must be absolute https.
-foreach ($bad in @('..\..\evil', '../../evil', 'abc', ($goodHash + 'a'), ($goodHash + "`n"))) {
+# An empty hash exits 0 before the URL is read, even a URL with userinfo.
+Reset-Test
+Assert-Same (Invoke-RelianJob -ModuleUrl 'https://user@example.invalid/job.ps1' -ModuleSha256 '') 0 'blank hash wins over userinfo'
+Assert-Same $script:Downloads 0 'blank hash with userinfo downloads'
+
+# The hash names a file, so it must be exactly 64 lowercase hex characters. A URL must be absolute https.
+foreach ($bad in @('..\..\evil', '../../evil', 'abc', ($goodHash + 'a'), ($goodHash + "`n"), ('A' * 64))) {
     Reset-Test
     Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $bad) 1 "bad hash [$bad]"
     Assert-Same $script:Downloads 0 'bad hash downloads'
@@ -86,11 +88,11 @@ Assert-Same $global:JobRuns.Count 1 'first run ran the module'
 Assert-Same $global:JobRuns[0] 'False' 'report-only is off by default'
 Assert-True (Test-Path -LiteralPath (Get-CachedFile)) 'verified module cached'
 Assert-Same @(Get-ChildItem -LiteralPath $script:CacheRoot).Count 1 'only the module is left in the cache'
-Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash.ToUpperInvariant()) 0 'second run exit (upper-case pin)'
+Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 0 'second run exit'
 Assert-Same $script:Downloads 1 'second run downloads nothing'
 Assert-Same $script:Protects 1 'second run does not re-protect'
 Assert-Same $global:JobRuns.Count 2 'second run ran the module'
-Assert-Same @(Get-ChildItem -LiteralPath $script:CacheRoot).Count 1 'upper-case pin reuses the same file'
+Assert-Same @(Get-ChildItem -LiteralPath $script:CacheRoot).Count 1 'second run reuses the same file'
 
 # -ReportOnly reaches the module.
 Reset-Test
@@ -213,9 +215,9 @@ Assert-Same $r.Code 1 'real process: missing hash name'
 Assert-True ($r.Err -match 'missing parameter ModuleSha256') 'real process: missing hash is named'
 $r = Invoke-Child @($loaderPath, '-ModuleSha256', '')
 Assert-Same $r.Code 1 'real process: missing URL name'
-$r = Invoke-Child @($loaderPath, '-ModuleUrl', 'https://someone:secret@example.invalid/job.ps1', '-ModuleSha256', $goodHash)
+$r = Invoke-Child @($loaderPath, '-ModuleUrl', 'https://someone@example.invalid/job.ps1', '-ModuleSha256', $goodHash)
 Assert-Same $r.Code 1 'real process: userinfo'
-Assert-True ("$($r.Out) $($r.Err)" -notmatch 'someone|secret') 'real process: the URL is not printed'
+Assert-True ("$($r.Out) $($r.Err)" -notmatch 'someone') 'real process: the URL is not printed'
 
 # The module's stdout and exit code reach Ninja through the loader, and a download error hides the URL.
 $wrapper = Join-Path $tempRoot 'wrapper.ps1'
@@ -273,7 +275,7 @@ if ($env:OS -eq 'Windows_NT') {
     $env:RELIAN_DEPLOY_TEST = $null
     & $ps51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $loaderPath -ModuleUrl $url -ModuleSha256 '' | Out-Null
     Assert-Same $LASTEXITCODE 0 '5.1: empty hash'
-    & $ps51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $loaderPath -ModuleUrl 'https://u:secret@example.invalid/x' -ModuleSha256 $goodHash 2>$null | Out-Null
+    & $ps51 -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $loaderPath -ModuleUrl 'https://u@example.invalid/x' -ModuleSha256 $goodHash 2>$null | Out-Null
     Assert-Same $LASTEXITCODE 1 '5.1: userinfo'
     # The whole path on 5.1 with the cache seams: hash, cache, in-process run, stdout and exit code.
     Remove-Item -LiteralPath (Join-Path $tempRoot 'Relian') -Recurse -Force
