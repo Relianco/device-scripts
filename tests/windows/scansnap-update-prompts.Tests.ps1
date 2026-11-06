@@ -70,20 +70,20 @@ Assert-Same $script:Stops 0 'disabled stops'
 
 # Another product's entry does not match: it stays enabled and is not counted, by name or by command.
 foreach ($case in @(
-        @{ N = 'Contoso OnlineUpdate'; V = 'C:\Contoso\Updater.exe' },
+        @{ N = 'OtherVendor OnlineUpdate'; V = 'C:\OtherVendor\Updater.exe' },
         @{ N = 'OnlineUpdate'; V = 'C:\x\y.exe' },
-        @{ N = 'Contoso'; V = 'C:\Contoso\OnlineUpdate.exe' },
+        @{ N = 'OtherVendor'; V = 'C:\OtherVendor\OnlineUpdate.exe' },
         @{ N = 'ScanSnap OnlineUpdate Watcher 2'; V = 'C:\x\y.exe' },
         @{ N = 'SsUWatcher'; V = 'C:\x\y.exe' },
-        @{ N = 'Contoso'; V = 'C:\NotSsUWatcher.exe' },
-        @{ N = 'Contoso'; V = 'C:\SsUWatcherHelper.exe' },
-        @{ N = 'Contoso'; V = 'C:\SsUWatcher\Other.exe' },
-        @{ N = 'Contoso'; V = 'C:\Contoso.exe --watch SsUWatcher.exe' },
-        @{ N = 'Contoso'; V = '"C:\Tools\Other.exe" --watch "C:\ScanSnap\SsUWatcher.exe"' },
-        @{ N = 'Contoso'; V = 'C:\Tools\Other.exe --watch C:\ScanSnap\SsUWatcher.exe' },
-        @{ N = 'Contoso'; V = 'C:\Program Files\Tools\Other.exe C:\ScanSnap\SsUWatcher.exe' },
-        @{ N = 'Contoso'; V = 'other --watch C:\ScanSnap\SsUWatcher.exe' },
-        @{ N = 'Contoso'; V = 'other /watch:C:\ScanSnap\SsUWatcher.exe' })) {
+        @{ N = 'OtherVendor'; V = 'C:\NotSsUWatcher.exe' },
+        @{ N = 'OtherVendor'; V = 'C:\SsUWatcherHelper.exe' },
+        @{ N = 'OtherVendor'; V = 'C:\SsUWatcher\Other.exe' },
+        @{ N = 'OtherVendor'; V = 'C:\OtherVendor.exe --watch SsUWatcher.exe' },
+        @{ N = 'OtherVendor'; V = '"C:\Tools\Other.exe" --watch "C:\ScanSnap\SsUWatcher.exe"' },
+        @{ N = 'OtherVendor'; V = 'C:\Tools\Other.exe --watch C:\ScanSnap\SsUWatcher.exe' },
+        @{ N = 'OtherVendor'; V = 'C:\Program Files\Tools\Other.exe C:\ScanSnap\SsUWatcher.exe' },
+        @{ N = 'OtherVendor'; V = 'other --watch C:\ScanSnap\SsUWatcher.exe' },
+        @{ N = 'OtherVendor'; V = 'other /watch:C:\ScanSnap\SsUWatcher.exe' })) {
     Reset-Test
     $script:Reg[$run64] = @{ $case.N = $case.V }
     $r = Invoke-Job
