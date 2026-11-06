@@ -31,6 +31,7 @@ function Reset-Test {
     $script:CacheRoot = Join-Path $tempRoot 'Relian/Jobs'
     $global:JobRuns = @()
     $script:Downloads = 0
+    $script:Delays = @()
     $script:Protects = 0
     $script:Served = $goodModule
     $script:Sddl = @{}
@@ -41,6 +42,7 @@ $script:DownloadFile = { param($Url, $Destination)
     [IO.File]::WriteAllBytes($Destination, $utf8.GetBytes($script:Served))
 }
 $script:ProtectDirectory = { param($Path) $script:Protects++ }
+$script:RetryDelay = { param($Seconds) $script:Delays += @($Seconds) }
 $script:ReadSddl = { param($Path)
     if ($script:Sddl.ContainsKey($Path)) { return $script:Sddl[$Path] }
     return $script:DefaultSddl
@@ -112,12 +114,39 @@ Assert-Same $script:Downloads 1 'mismatch is not retried'
 Assert-Same $global:JobRuns.Count 0 'mismatch ran nothing'
 Assert-Same @(Get-ChildItem -LiteralPath $script:CacheRoot).Count 0 'mismatch leaves nothing in the cache'
 
-# A failed download is exit 1 and runs nothing. The next scheduled run is the retry.
-Reset-Test
+# Downloads: three attempts for a retryable failure, waiting 5s then 20s. Anything else is one attempt.
+function New-HttpError { param([int]$Status)
+    $e = [Net.WebException]::new("HTTP $Status")
+    Add-Member -InputObject $e -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{ StatusCode = $Status }) -Force
+    $e
+}
 $saved = $script:DownloadFile
-$script:DownloadFile = { param($Url, $Destination) $script:Downloads++; throw "boom $Url" }
-Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 1 'download failure exit'
-Assert-Same $script:Downloads 1 'download failure is not retried here'
+$script:FailWith = @()
+$script:DownloadFile = { param($Url, $Destination)
+    $script:Downloads++
+    if ($script:Downloads -le $script:FailWith.Count) { throw $script:FailWith[$script:Downloads - 1] }
+    [IO.File]::WriteAllBytes($Destination, $utf8.GetBytes($script:Served))
+}
+foreach ($status in @(408, 429, 500, 502, 503, 504)) {
+    Reset-Test
+    $script:FailWith = @((New-HttpError $status), [TimeoutException]::new('slow'))
+    Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 0 "HTTP $status then timeout then success"
+    Assert-Same $script:Downloads 3 "HTTP $status attempts"
+    Assert-Same ($script:Delays -join ',') '5,20' "HTTP $status waits"
+    Assert-Same $global:JobRuns.Count 1 "HTTP $status ran the module"
+}
+Reset-Test
+$script:FailWith = @([Net.WebException]::new('no DNS'), [Net.WebException]::new('no DNS'), [Net.WebException]::new('no DNS'), [Net.WebException]::new('no DNS'))
+Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 1 'three network failures exit'
+Assert-Same $script:Downloads 3 'stops after three attempts'
+Assert-Same $global:JobRuns.Count 0 'three network failures ran nothing'
+foreach ($failure in @((New-HttpError 404), (New-HttpError 403), [InvalidOperationException]::new('not transient'))) {
+    Reset-Test
+    $script:FailWith = @($failure)
+    Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 1 "non-retryable exit [$($failure.Message)]"
+    Assert-Same $script:Downloads 1 "non-retryable attempts [$($failure.Message)]"
+    Assert-Same $script:Delays.Count 0 "non-retryable waits [$($failure.Message)]"
+}
 $script:DownloadFile = $saved
 
 # Tampered cache: refused on the next run, no re-download, not run, not overwritten.
@@ -219,6 +248,8 @@ $r = Invoke-Child @($loaderPath, '-ModuleUrl', $url)
 Assert-Same $r.Code 1 'real process: missing hash name'
 Assert-True ($r.Err -match 'missing parameter ModuleSha256') 'real process: missing hash is named'
 $r = Invoke-Child @($loaderPath, '-ModuleSha256', '')
+Assert-Same $r.Code 0 'real process: an empty hash needs no URL'
+$r = Invoke-Child @($loaderPath, '-ModuleSha256', $goodHash)
 Assert-Same $r.Code 1 'real process: missing URL name'
 $r = Invoke-Child @($loaderPath, '-ModuleUrl', 'https://someone@example.invalid/job.ps1', '-ModuleSha256', $goodHash)
 Assert-Same $r.Code 1 'real process: userinfo'
@@ -255,6 +286,8 @@ $env:RELIAN_DEPLOY_TEST = $null
 $clm = & $pwshPath -NoProfile -NonInteractive -Command "`$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; & '$loaderPath' -ModuleUrl '$url' -ModuleSha256 '$goodHash'; exit `$LASTEXITCODE" 2>$null
 Assert-Same $LASTEXITCODE 1 'CLM exit'
 Assert-True ("$clm" -match 'ConstrainedLanguage') 'CLM reason is named'
+& $pwshPath -NoProfile -NonInteractive -Command "`$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; & '$loaderPath' -ModuleUrl '$url' -ModuleSha256 ''; exit `$LASTEXITCODE" 2>$null | Out-Null
+Assert-Same $LASTEXITCODE 0 'an empty hash exits 0 before the CLM refusal'
 $env:RELIAN_DEPLOY_TEST = '1'
 
 # Windows only: the real ACL calls on real NTFS, and Windows PowerShell 5.1.

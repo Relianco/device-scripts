@@ -63,9 +63,9 @@ function Get-ScanSnapState {
         $values = & $script:SsReadValues $view.Run
         # The source's PS* skip is gone: RegistryKey has none of the provider's synthetic PS* properties.
         foreach ($entry in $values.GetEnumerator()) {
-            # Kept as broad as the Intune Remediation this replaces, on purpose: same entries, same result.
-            # ponytail: another product's Run entry containing OnlineUpdate is disabled too. Narrow this
-            # if a device shows one in the enabled list. Try -ReportOnly first to see what matches.
+            # Review finding rejected: this match stays as broad as the Intune Remediation it replaces,
+            # because the maintainer asked for a faithful port. Another product's Run entry containing
+            # OnlineUpdate is disabled too. Use -ReportOnly to see what matches, and narrow it if one appears.
             if ("$($entry.Key) $($entry.Value)" -notmatch 'SsUWatcher|OnlineUpdate') { continue }
             $found++
             # Task Manager's format: first byte 3 = disabled.

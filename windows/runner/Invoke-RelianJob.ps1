@@ -9,6 +9,10 @@ param(
     [switch]$ReportOnly
 )
 
+# An empty hash is the off switch: exit 0 before the URL or anything else is read.
+# Operators only: Constrained Language Mode blocks a method call on this dictionary.
+if (($PSBoundParameters.Keys -contains 'ModuleSha256') -and $ModuleSha256 -notmatch '\S') { exit 0 }
+
 # App Control or AppLocker puts untrusted scripts here. .NET calls below would fail, so name the reason.
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     Write-Output "refused: PowerShell is in $($ExecutionContext.SessionState.LanguageMode) mode"
@@ -34,6 +38,17 @@ function Test-RelianUrlHasUserInfo {
     } catch {
         return $false
     }
+}
+
+# Timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Three attempts, as in the runner.
+# Compared by name: HttpRequestException is not always loaded on Windows PowerShell 5.1.
+function Test-RelianDownloadRetryable {
+    param([Parameter(Mandatory)]$Exception)
+    $response = $Exception.PSObject.Properties['Response']
+    if ($response -and $response.Value) {
+        return @(408, 429, 500, 502, 503, 504) -contains [int]$response.Value.StatusCode
+    }
+    return @('WebException', 'HttpRequestException', 'TimeoutException', 'TaskCanceledException', 'SocketException') -contains $Exception.GetType().Name
 }
 
 function Get-RelianSha256 {
@@ -73,6 +88,8 @@ $script:DownloadFile = {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $null = Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 120
 }
+
+$script:RetryDelay = { param($Seconds) Start-Sleep -Seconds $Seconds }
 
 $script:ReadSddl = { param($Path) (Get-Acl -LiteralPath $Path).Sddl }
 
@@ -135,11 +152,16 @@ function Invoke-RelianJob {
 
         $file = Join-Path $script:CacheRoot "$expected.ps1"
         if (-not (Test-Path -LiteralPath $file)) {
-            # ponytail: one attempt on purpose. A failed download exits 1 and the next scheduled run is the
-            # retry, so this loader needs none of the runner's retry classifier. Only a module's first run
-            # downloads at all. Add the runner's three attempts if first runs are seen failing on transient errors.
             $temp = Join-Path $script:CacheRoot ([guid]::NewGuid().ToString('n') + '.tmp')
-            [void](& $script:DownloadFile $ModuleUrl $temp)
+            for ($attempt = 1; ; $attempt++) {
+                try {
+                    [void](& $script:DownloadFile $ModuleUrl $temp)
+                    break
+                } catch {
+                    if ($attempt -ge 3 -or -not (Test-RelianDownloadRetryable $_.Exception)) { throw }
+                    [void](& $script:RetryDelay (@(5, 20)[$attempt - 1]))
+                }
+            }
             if ((Get-RelianSha256 -Bytes ([IO.File]::ReadAllBytes($temp))) -ne $expected) {
                 Write-RelianJobError 'hash mismatch for the downloaded module'
                 return 1
@@ -178,8 +200,7 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
-# A missing name exits 1 even for an empty hash, as in the runner: both names stay in the Parameters
-# string, and a row that lost one fails visibly. Only a present, empty hash is the exit 0 switch.
+# A hash that was not given at all is not the off switch: the row fails visibly.
 foreach ($name in @('ModuleUrl', 'ModuleSha256')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
         Write-RelianJobError "missing parameter $name"
