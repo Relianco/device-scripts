@@ -55,13 +55,14 @@ $script:SsStopWatchers = {
     }
 }
 
-# The watcher's own entry name, or a command that runs the watcher executable under any entry name.
-# The executable must be the command or a path segment: C:\NotSsUWatcher.exe and another program's
-# --watch SsUWatcher.exe argument are not it.
+# The watcher's own entry name, or a command whose executable is the watcher, under any entry name.
+# Only the executable part counts: quoted, or an unquoted path up to .exe (it may hold spaces, but not
+# an argument), or else the first word. A watcher path in another program's arguments is not a match.
 function Test-ScanSnapWatcherEntry {
     param([AllowEmptyString()][string]$Name, $Command)
-    return ($Name -ieq 'ScanSnap OnlineUpdate Watcher') -or
-        ("$Command" -match '(?:\A\s*"?|[\\/])SsUWatcher(?:\.exe)?(?=["\s]|\z)')
+    if ($Name -ieq 'ScanSnap OnlineUpdate Watcher') { return $true }
+    $parsed = [regex]::Match("$Command", '\A\s*(?:"(?<exe>[^"]*)"|(?<exe>(?:(?!\s[-/]).)*?\.exe)(?=\s|\z)|(?<exe>\S+))', 'IgnoreCase')
+    return $parsed.Groups['exe'].Value -match '(?:\A|[\\/])SsUWatcher(?:\.exe)?\z'
 }
 
 function Get-ScanSnapState {

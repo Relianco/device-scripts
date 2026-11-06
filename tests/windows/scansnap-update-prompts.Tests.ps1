@@ -78,7 +78,12 @@ foreach ($case in @(
         @{ N = 'Contoso'; V = 'C:\NotSsUWatcher.exe' },
         @{ N = 'Contoso'; V = 'C:\SsUWatcherHelper.exe' },
         @{ N = 'Contoso'; V = 'C:\SsUWatcher\Other.exe' },
-        @{ N = 'Contoso'; V = 'C:\Contoso.exe --watch SsUWatcher.exe' })) {
+        @{ N = 'Contoso'; V = 'C:\Contoso.exe --watch SsUWatcher.exe' },
+        @{ N = 'Contoso'; V = '"C:\Tools\Other.exe" --watch "C:\ScanSnap\SsUWatcher.exe"' },
+        @{ N = 'Contoso'; V = 'C:\Tools\Other.exe --watch C:\ScanSnap\SsUWatcher.exe' },
+        @{ N = 'Contoso'; V = 'C:\Program Files\Tools\Other.exe C:\ScanSnap\SsUWatcher.exe' },
+        @{ N = 'Contoso'; V = 'other --watch C:\ScanSnap\SsUWatcher.exe' },
+        @{ N = 'Contoso'; V = 'other /watch:C:\ScanSnap\SsUWatcher.exe' })) {
     Reset-Test
     $script:Reg[$run64] = @{ $case.N = $case.V }
     $r = Invoke-Job
