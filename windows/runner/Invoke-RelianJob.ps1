@@ -26,6 +26,8 @@ function Write-RelianJobError {
 
 function Test-RelianUrlHasUserInfo {
     param([AllowEmptyString()][string]$Url)
+    # The regex is for an empty name: [Uri] reports no UserInfo for https://@host.
+    if ($Url -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { return $true }
     try {
         $uri = [Uri]$Url
         return $uri.IsAbsoluteUri -and -not [string]::IsNullOrEmpty($uri.UserInfo)

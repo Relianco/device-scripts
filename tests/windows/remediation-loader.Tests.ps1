@@ -47,6 +47,11 @@ $script:ReadSddl = { param($Path)
 }
 function Get-CachedFile { Join-Path $script:CacheRoot "$goodHash.ps1" }
 
+# An @ in the path or query is not userinfo.
+Reset-Test
+Assert-Same (Invoke-RelianJob -ModuleUrl 'https://example.invalid/a@b/job.ps1?c=d@e' -ModuleSha256 $goodHash) 0 '@ in the path is allowed'
+Assert-Same $script:Downloads 1 '@ in the path downloads'
+
 # Empty hash: exit 0, nothing downloaded, nothing created.
 foreach ($blank in @('', '   ')) {
     Reset-Test
@@ -56,7 +61,7 @@ foreach ($blank in @('', '   ')) {
 }
 
 # Userinfo: exit 1 before any download.
-foreach ($bad in @('https://user@example.invalid/job.ps1', 'https://@example.invalid/job.ps1')) {
+foreach ($bad in @('https://user@example.invalid/job.ps1', 'https://@example.invalid/job.ps1', 'HTTPS:\\user@example.invalid/job.ps1')) {
     Reset-Test
     Assert-Same (Invoke-RelianJob -ModuleUrl $bad -ModuleSha256 $goodHash) 1 "userinfo exit [$bad]"
     Assert-Same $script:Downloads 0 'userinfo downloads'
