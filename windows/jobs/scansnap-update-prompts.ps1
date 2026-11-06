@@ -55,6 +55,15 @@ $script:SsStopWatchers = {
     }
 }
 
+# The watcher's own entry name, or a command that runs the watcher executable under any entry name.
+# The executable must be the command or a path segment: C:\NotSsUWatcher.exe and another program's
+# --watch SsUWatcher.exe argument are not it.
+function Test-ScanSnapWatcherEntry {
+    param([AllowEmptyString()][string]$Name, $Command)
+    return ($Name -ieq 'ScanSnap OnlineUpdate Watcher') -or
+        ("$Command" -match '(?:\A\s*"?|[\\/])SsUWatcher(?:\.exe)?(?=["\s]|\z)')
+}
+
 function Get-ScanSnapState {
     $found = 0
     $enabled = [Collections.Generic.List[object]]::new()
@@ -63,10 +72,7 @@ function Get-ScanSnapState {
         $values = & $script:SsReadValues $view.Run
         # The source's PS* skip is gone: RegistryKey has none of the provider's synthetic PS* properties.
         foreach ($entry in $values.GetEnumerator()) {
-            # Review finding rejected: this match stays as broad as the Intune Remediation it replaces,
-            # because the maintainer asked for a faithful port. Another product's Run entry containing
-            # OnlineUpdate is disabled too. Use -ReportOnly to see what matches, and narrow it if one appears.
-            if ("$($entry.Key) $($entry.Value)" -notmatch 'SsUWatcher|OnlineUpdate') { continue }
+            if (-not (Test-ScanSnapWatcherEntry -Name $entry.Key -Command $entry.Value)) { continue }
             $found++
             # Task Manager's format: first byte 3 = disabled.
             $state = $states[$entry.Key]

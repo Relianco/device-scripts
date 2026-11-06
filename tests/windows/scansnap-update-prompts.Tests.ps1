@@ -58,20 +58,57 @@ Assert-Same $script:Stops 0 'no ScanSnap stops'
 # Healthy: entries already disabled in both views. An unrelated Run entry is ignored.
 Reset-Test
 $script:Reg[$run64] = @{ 'ScanSnap Online Update' = 'C:\Program Files\PFU\SsUWatcher.exe'; 'OneDrive' = 'C:\OneDrive.exe' }
-$script:Reg[$run32] = @{ 'OnlineUpdate' = 'C:\x\y.exe' }
+$script:Reg[$run32] = @{ 'scansnap onlineupdate watcher' = 'C:\x\y.exe' }
 $script:Reg["$approved\Run"] = @{ 'ScanSnap Online Update' = $disabled; 'OneDrive' = $enabled }
-$script:Reg["$approved\Run32"] = @{ 'OnlineUpdate' = $disabled }
+$script:Reg["$approved\Run32"] = @{ 'scansnap onlineupdate watcher' = $disabled }
 $r = Invoke-Job
 Assert-Same $r.Code 0 'disabled exit'
 Assert-Same $r.Json.status 'compliant' 'disabled status'
-Assert-Same $r.Json.found 2 'disabled found (name match and data match)'
+Assert-Same $r.Json.found 2 'disabled found (command match and case-insensitive exact name match)'
 Assert-Same $script:Writes.Count 0 'a healthy run changes nothing, not even the timestamp'
 Assert-Same $script:Stops 0 'disabled stops'
+
+# Another product's entry does not match: it stays enabled and is not counted, by name or by command.
+foreach ($case in @(
+        @{ N = 'Contoso OnlineUpdate'; V = 'C:\Contoso\Updater.exe' },
+        @{ N = 'OnlineUpdate'; V = 'C:\x\y.exe' },
+        @{ N = 'Contoso'; V = 'C:\Contoso\OnlineUpdate.exe' },
+        @{ N = 'ScanSnap OnlineUpdate Watcher 2'; V = 'C:\x\y.exe' },
+        @{ N = 'SsUWatcher'; V = 'C:\x\y.exe' },
+        @{ N = 'Contoso'; V = 'C:\NotSsUWatcher.exe' },
+        @{ N = 'Contoso'; V = 'C:\SsUWatcherHelper.exe' },
+        @{ N = 'Contoso'; V = 'C:\SsUWatcher\Other.exe' },
+        @{ N = 'Contoso'; V = 'C:\Contoso.exe --watch SsUWatcher.exe' })) {
+    Reset-Test
+    $script:Reg[$run64] = @{ $case.N = $case.V }
+    $r = Invoke-Job
+    Assert-Same $r.Code 0 "another product exit [$($case.N)=$($case.V)]"
+    Assert-Same $r.Json.status 'compliant' "another product status [$($case.N)=$($case.V)]"
+    Assert-Same $r.Json.found 0 "another product is not counted [$($case.N)=$($case.V)]"
+    Assert-Same $script:Writes.Count 0 "another product stays enabled [$($case.N)=$($case.V)]"
+}
+
+# The two ways to match: the exact name, or a command that runs the watcher, under any entry name.
+foreach ($case in @(
+        @{ N = 'ScanSnap OnlineUpdate Watcher'; V = 'C:\x\y.exe' },
+        @{ N = 'SCANSNAP ONLINEUPDATE WATCHER'; V = '' },
+        @{ N = 'Anything'; V = 'C:\PFU\SsUWatcher.exe' },
+        @{ N = 'Anything'; V = 'C:\PFU\ssuwatcher.EXE' },
+        @{ N = 'Anything'; V = '"C:\Program Files\PFU\SsUWatcher.exe" /background' },
+        @{ N = 'Anything'; V = 'C:\Program Files\PFU\SsUWatcher.exe /background' },
+        @{ N = 'Anything'; V = 'SsUWatcher.exe' },
+        @{ N = 'Anything'; V = 'C:\PFU\SsUWatcher' })) {
+    Reset-Test
+    $script:Reg[$run64] = @{ $case.N = $case.V }
+    $r = Invoke-Job
+    Assert-Same $r.Json.found 1 "watcher entry is counted [$($case.N)=$($case.V)]"
+    Assert-Same $r.Json.status 'fixed' "watcher entry is fixed [$($case.N)=$($case.V)]"
+}
 
 # The disabled check: only a binary value whose first byte is 3 counts.
 foreach ($state in @($null, $enabled, 'not bytes', [int]3, [byte[]]@())) {
     Reset-Test
-    $script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w.exe' }
+    $script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w\SsUWatcher.exe' }
     if ($null -ne $state) { $script:Reg["$approved\Run"] = @{ 'SsUWatcher' = $state } }
     $r = Invoke-Job -ReportOnly
     Assert-Same $r.Json.status 'drift' "disabled-byte check on [$state]"
@@ -79,9 +116,9 @@ foreach ($state in @($null, $enabled, 'not bytes', [int]3, [byte[]]@())) {
 
 # Fix: only the drifted entry, in the StartupApproved key of its own view, in Task Manager's format.
 Reset-Test
-$script:Reg[$run64] = @{ 'ScanSnap Online Update' = 'C:\PFU\SsUWatcher.exe'; 'Other' = 'C:\OnlineUpdate.exe' }
+$script:Reg[$run64] = @{ 'ScanSnap Online Update' = 'C:\PFU\SsUWatcher.exe'; 'ScanSnap OnlineUpdate Watcher' = 'C:\PFU\Updater.exe' }
 $script:Reg[$run32] = @{ 'Watch32' = 'C:\x\SsUWatcher.exe' }
-$script:Reg["$approved\Run"] = @{ 'Other' = $disabled }
+$script:Reg["$approved\Run"] = @{ 'ScanSnap OnlineUpdate Watcher' = $disabled }
 $script:Watchers = 1
 $before = [DateTime]::UtcNow.ToFileTimeUtc()
 $r = Invoke-Job
@@ -106,7 +143,7 @@ Assert-Same $script:Writes.Count 2 'second run writes nothing'
 
 # A running watcher alone is drift, and the fix does not touch the registry for it.
 Reset-Test
-$script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w.exe' }
+$script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w\SsUWatcher.exe' }
 $script:Reg["$approved\Run"] = @{ 'SsUWatcher' = $disabled }
 $script:Watchers = 2
 $r = Invoke-Job
@@ -117,7 +154,7 @@ Assert-Same $script:Stops 1 'running only stops'
 
 # Report-only: drift is reported, nothing changes, exit is nonzero.
 Reset-Test
-$script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w.exe' }
+$script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w\SsUWatcher.exe' }
 $script:Watchers = 1
 $r = Invoke-Job -ReportOnly
 Assert-Same $r.Code 1 'report-only drift exit'
@@ -132,7 +169,7 @@ Assert-Same $r.Json.status 'compliant' 'report-only healthy status'
 
 # Failure: a write that throws, a stop that does not take, and a read that throws.
 Reset-Test
-$script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w.exe' }
+$script:Reg[$run64] = @{ 'SsUWatcher' = 'C:\w\SsUWatcher.exe' }
 $script:WriteThrows = $true
 $r = Invoke-Job
 Assert-Same $r.Code 2 'write failure exit'
@@ -157,7 +194,7 @@ $script:SsReadValues = $savedRead
 Reset-Test
 $huge = 'SsUWatcher"\<>&' + "`r`n`t`u{1}" + ('x' * 5000)
 $values = @{}
-foreach ($i in 1..500) { $values["$huge$i"] = 'C:\w.exe' }
+foreach ($i in 1..500) { $values["$huge$i"] = 'C:\w\SsUWatcher.exe' }
 $script:Reg[$run64] = $values
 $script:Watchers = 1
 $script:WriteThrows = $true
