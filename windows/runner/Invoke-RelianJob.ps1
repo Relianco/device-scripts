@@ -40,15 +40,22 @@ function Test-RelianUrlHasUserInfo {
     }
 }
 
-# Timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Three attempts, as in the runner.
-# Compared by name: HttpRequestException is not always loaded on Windows PowerShell 5.1.
+# Timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Same classes as the runner.
 function Test-RelianDownloadRetryable {
     param([Parameter(Mandatory)]$Exception)
     $response = $Exception.PSObject.Properties['Response']
     if ($response -and $response.Value) {
         return @(408, 429, 500, 502, 503, 504) -contains [int]$response.Value.StatusCode
     }
-    return @('WebException', 'HttpRequestException', 'TimeoutException', 'TaskCanceledException', 'SocketException') -contains $Exception.GetType().Name
+    $webTransient = @('Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure')
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    for ($current = $Exception; $null -ne $current; $current = $current.InnerException) {
+        if ($current -is [TimeoutException] -or $current -is [Threading.Tasks.TaskCanceledException] -or $current -is [Net.Sockets.SocketException]) { return $true }
+        if ($current -is [Net.WebException] -and $webTransient -contains [string]$current.Status) { return $true }
+        $request = $current.PSObject.Properties['HttpRequestError']
+        if ($request -and $requestTransient -contains [string]$request.Value) { return $true }
+    }
+    return $false
 }
 
 function Get-RelianSha256 {

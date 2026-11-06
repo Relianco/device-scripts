@@ -136,11 +136,18 @@ foreach ($status in @(408, 429, 500, 502, 503, 504)) {
     Assert-Same $global:JobRuns.Count 1 "HTTP $status ran the module"
 }
 Reset-Test
-$script:FailWith = @([Net.WebException]::new('no DNS'), [Net.WebException]::new('no DNS'), [Net.WebException]::new('no DNS'), [Net.WebException]::new('no DNS'))
+function New-WebError { param([string]$Status) [Net.WebException]::new($Status, $null, $Status, $null) }
+$script:FailWith = @((New-WebError 'NameResolutionFailure'), (New-WebError 'ConnectFailure'), (New-WebError 'Timeout'), (New-WebError 'Timeout'))
 Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 1 'three network failures exit'
 Assert-Same $script:Downloads 3 'stops after three attempts'
 Assert-Same $global:JobRuns.Count 0 'three network failures ran nothing'
-foreach ($failure in @((New-HttpError 404), (New-HttpError 403), [InvalidOperationException]::new('not transient'))) {
+# A socket failure inside an HttpRequestException, the shape PowerShell 7 throws, is retried.
+Reset-Test
+$script:FailWith = @([Net.Http.HttpRequestException]::new('no route', [Net.Sockets.SocketException]::new()))
+Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 0 'inner socket failure then success'
+Assert-Same $script:Downloads 2 'inner socket failure attempts'
+# A certificate failure is not transient.
+foreach ($failure in @((New-HttpError 404), (New-HttpError 403), (New-WebError 'TrustFailure'), [Net.Http.HttpRequestException]::new('bad cert'), [InvalidOperationException]::new('not transient'))) {
     Reset-Test
     $script:FailWith = @($failure)
     Assert-Same (Invoke-RelianJob -ModuleUrl $url -ModuleSha256 $goodHash) 1 "non-retryable exit [$($failure.Message)]"
