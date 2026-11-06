@@ -183,6 +183,40 @@ Pass the office gateway IPv4 addresses and Layer-2 MAC address in `-PackageArgum
 
 Each check inspects only physical hardware adapters and actively re-probes any `Stale` or `Incomplete` ARP entry on that interface before trusting a cached MAC. `Install` stages the script and `config.json` in `%ProgramData%\Relian\WireGuardNetworkGuard`, registers `\Relian\Relian-WireGuardNetworkGuard` to run at boot, wake, and network connect/disconnect (`Event ID` `10000`/`10001`), and evaluates immediately. `Check` is read-only. `Uninstall` removes the task, restarts any non-disabled `WireGuardTunnel$*` service that the guard stopped, and deletes the install folder. See [the WireGuard network guard runbook](docs/wireguard-network-guard.md).
 
+## Recurring remediations
+
+`windows/runner/Invoke-RelianJob.ps1` is a thin loader for jobs on a NinjaOne schedule. `Invoke-RelianRunner` downloads the 8.8 MB toolkit and the brand pack on every run, so it is too heavy for that. The loader has no toolkit and no dialog. It downloads one module, caches it, and after that uses no network.
+
+**Paste:** put `windows/runner/Invoke-RelianJob.ps1` in the NinjaOne script library. Run it as System. It does not work as Current user, because only SYSTEM can write to the cache.
+
+**Schedule:** in the policy, add an "Every N hours" row (not under 1 hour), an "On System Startup" row, and an "On User Login" row for laptops. Each row runs the loader with this in its Parameters box:
+
+```
+-ModuleUrl "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/jobs/scansnap-update-prompts.ps1" -ModuleSha256 "<sha256>"
+```
+
+Add `-ReportOnly` to detect and change nothing. Use a commit in the URL, never a branch: a branch moves, and the pin then exits 1.
+
+**Version bump:** commit the module, run `git show <commit>:windows/jobs/scansnap-update-prompts.ps1 | sha256sum`, then edit the URL and hash in each schedule row. A row you have not edited keeps running the old version from its cache. Old versions stay in the cache, a few KB each.
+
+**Rules:** an empty hash exits 0 and downloads nothing. A URL with userinfo, a URL that is not `https`, a missing parameter name, or a hash mismatch exits 1. A mismatch is not retried, and a failed download waits for the next scheduled run. The cache is `%ProgramData%\Relian\Jobs\<sha256>.ps1`, with a protected ACL that allows SYSTEM only. Every run re-checks the ACL and the hash, and runs the bytes it hashed. A cache directory or a cached file with the wrong owner, ACL, or hash is refused and left in place for you to inspect. The run fails until someone deletes it as SYSTEM or takes ownership. A PowerShell session in Constrained Language Mode exits 1 and names the mode.
+
+**A module** prints one JSON line of at most 1024 characters and ends with `exit`. `windows/jobs/scansnap-update-prompts.ps1` prints `job`, `status`, `reportOnly`, `found`, `running`, `enabled`, and `error`.
+
+| Status | Meaning | Exit |
+| --- | --- | --- |
+| `compliant` | Healthy. Nothing changed. | 0 |
+| `fixed` | Drift was fixed, and a second detect passed. | 0 |
+| `drift` | `-ReportOnly` found drift and changed nothing. | 1 |
+| `failed` | Could not read, could not fix, or still active after the fix. | 2 |
+
+**What it does not do:**
+
+- No offline catch-up. NinjaOne does not replay a schedule missed while a device is off or offline. The startup and login rows narrow the gap but do not close it.
+- Nobody signed in: this job runs as SYSTEM on `HKLM` and is not affected. A row set to Current user is skipped by NinjaOne and reported as SUCCESS, so do not use one for a job that must run.
+- No alert. A failing scheduled script shows only as FAILURE in the device's activity rows.
+- A device that is not in NinjaOne gets no job.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.
@@ -196,6 +230,8 @@ Each check inspects only physical hardware adapters and actively re-probes any `
 ## Layout
 
 - `windows/runner/Invoke-RelianRunner.ps1` is the NinjaOne install script.
+- `windows/runner/Invoke-RelianJob.ps1` is the NinjaOne loader for recurring remediations.
+- `windows/jobs/<name>.ps1` is one remediation module.
 - `windows/packages/<name>/` is one application.
 - `windows/releases/<name>.json` is that application's pin record.
 - `windows/brand/` is the source of the Relian dialog pack.
