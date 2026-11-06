@@ -70,3 +70,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/maintenance-session-close.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/remediation-loader.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/scansnap-update-prompts.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
