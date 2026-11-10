@@ -13,7 +13,9 @@
     Sources: https://learn.microsoft.com/windows/win32/msi/command-line-options (/f options)
              https://learn.microsoft.com/windows/win32/msi/reinstallmode
     -Section Evidence (read-only, any action): the product, whether its cached MSI exists, and the last
-      10 MsiInstaller events for it. Nothing is changed.
+      10 matching MsiInstaller events. Numeric status/caller fields survive message clipping.
+      Transactions match only an exact ProductCode or cached MSI path; original-source-path
+      transactions are omitted when their product cannot be established. Nothing is changed.
     -Action Install, Update, Repair or Reinstall: msiexec /f<mode> <code> /qn /norestart /l*v <log>.
       msiexec is waited for and never killed. Success is exit code 0 or 3010 (reboot needed, not done).
       Refused when the cached MSI (LocalPackage) is missing, because repair would need the original
@@ -36,7 +38,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $script:MrModes = @('/fa', '/fomus')
 $script:MrGuid = '\A\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\z'
-$script:MrEventIds = @(1035, 11729, 1004, 1001, 1033, 11708)
+$script:MrEventIds = @(1035, 11729, 11728, 1004, 1001, 1016, 1033, 11708, 1040, 1042)
 
 # Seams: tests replace these. The defaults touch the real machine.
 $script:MrEntries = {
@@ -69,7 +71,7 @@ $script:MrMsiProperty = {
 }
 $script:MrEvents = {
     @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; Id = $script:MrEventIds } -MaxEvents 300 -ErrorAction SilentlyContinue |
-        ForEach-Object { [pscustomobject]@{ Id = [int]$_.Id; TimeCreated = $_.TimeCreated; Message = [string]$_.Message } })
+        ForEach-Object { [pscustomobject]@{ Id = [int]$_.Id; TimeCreated = $_.TimeCreated; Message = [string]$_.Message; Data = @($_.Properties | ForEach-Object { $_.Value }) } })
 }
 $script:MrLogPath = {
     $dir = Join-Path $env:ProgramData 'Relian\msi-repair'
@@ -132,12 +134,41 @@ function Resolve-MrProduct {
 }
 
 function Get-MrEvents {
-    param($Product)
+    param($Product, [string]$LocalPackage = '')
+    $namePattern = if ($Product.Name) { [regex]::Escape($Product.Name) } else { '(?!)' }
     $mine = @(& $script:MrEvents | Where-Object {
-        $_.Message.IndexOf($Product.Key, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-        ($Product.Name -and $_.Message.IndexOf($Product.Name, [StringComparison]::OrdinalIgnoreCase) -ge 0) } |
-        Sort-Object TimeCreated -Descending | Select-Object -First 10)
-    @($mine | ForEach-Object { [ordered]@{ id = $_.Id; time = ([datetime]$_.TimeCreated).ToUniversalTime().ToString('o'); message = (Protect-MrText $_.Message 200) } })
+        $data = @($_.Data)
+        $identity = if ($data.Count -gt 0) { [string]$data[0] } else { '' }
+        if ($_.Id -in @(1040, 1042)) {
+            # Do not infer a transaction's product from timing, a filename fragment, or its caller PID.
+            $identity -ieq $Product.Key -or ($LocalPackage -and $identity -ieq $LocalPackage)
+        } elseif ($identity -and $_.Id -in @(1001, 1004, 1016, 1033, 1035)) {
+            $identity -ieq $Product.Key -or $identity -ieq $Product.Name
+        } else {
+            # Authored error events can put the full message in field 1. Also support older evidence
+            # without insertion strings. A similar product name is not a match.
+            $message = [string]$_.Message
+            $message -match ('(?i)\b(?:Detection of product|Product:)\s*[''"]?' + [regex]::Escape($Product.Key) + '[''"]?(?:[, .]|$)') -or
+                $message -match ('(?i)\bProduct Name: ' + $namePattern + '(?:\. Product Version:|\.?\s*\z)') -or
+                $message -match ('(?i)\bProduct: ' + $namePattern + ' -- ')
+        }
+    } | Sort-Object TimeCreated -Descending | Select-Object -First 10)
+    foreach ($event in $mine) {
+        $row = [ordered]@{ id = $event.Id; time = ([datetime]$event.TimeCreated).ToUniversalTime().ToString('o'); message = (Protect-MrText $event.Message 200) }
+        $data = @($event.Data)
+        # MSI insertion fields, not localized rendered text: field 4 is the status for 1033/1035.
+        # https://learn.microsoft.com/windows/win32/msi/event-logging
+        $field = -1; $key = ''
+        if ($event.Id -in @(1033, 1035)) { $field = 3; $key = 'statusCode' }
+        elseif ($event.Id -in @(1040, 1042)) { $field = 1; $key = 'clientProcessId' }
+        if ($field -ge 0 -and $data.Count -gt $field) {
+            $text = [string]$data[$field]; $number = [uint32]0
+            if ($text -cmatch '\A[0-9]{1,10}\z' -and [uint32]::TryParse($text, [ref]$number)) {
+                $row[$key] = $number
+            }
+        }
+        $row
+    }
 }
 
 function Invoke-MrMain {
@@ -169,7 +200,7 @@ function Invoke-MrMain {
 
     if ($evidence) {
         $r.status = 'evidence'
-        $r.events = @(Get-MrEvents $p)
+        $r.events = @(Get-MrEvents $p -LocalPackage $local)
         return @{ ExitCode = 0; Result = $r }
     }
 
