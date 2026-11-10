@@ -162,6 +162,8 @@ function Invoke-CvMain {
     foreach ($s in $states) {
         $want = if ($removing) { Remove-CvVssLine $s.Lines } else { Set-CvVssLine $s.Lines }
         if (($want -join "`0") -cne ($s.Lines -join "`0")) {
+            # Marker before the first write: a failure after it still leaves a restart owed.
+            if (-not $changed) { & $script:CvSetMarker $true }
             & $script:CvWrite $s.Service $want
             $back = [string[]]@((& $script:CvRead $s.Service).Lines | Where-Object { $_ -ne '' })
             if (($back -join "`0") -cne ($want -join "`0")) { $result.Reason = "read-back mismatch on $($s.Service)"; return @{ ExitCode = 1; Result = $result } }
@@ -170,6 +172,8 @@ function Invoke-CvMain {
     }
 
     if ($changed -or $result.RestartPending) {
+        # Sample again: a job may have started while the values were read and written.
+        $result.JobRunning = Test-CvJobRunning
         if ($result.JobRunning) {
             & $script:CvSetMarker $true
             $result.RestartPending = $true
@@ -177,7 +181,7 @@ function Invoke-CvMain {
             $result.Reason = 'value set; a backup job is running, so the services were not restarted. Run again later.'
             return @{ ExitCode = 0; Result = $result }
         }
-        # Marker first: if a restart fails, the next run tries again.
+        # Marker stays set until both restarts succeed, so a failed restart is retried next run.
         & $script:CvSetMarker $true
         foreach ($svc in $script:CvServices) { & $script:CvRestart $svc }
         & $script:CvSetMarker $false

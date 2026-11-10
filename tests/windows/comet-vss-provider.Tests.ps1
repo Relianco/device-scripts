@@ -20,10 +20,13 @@ Assert (-not (Test-CvCompliant @('COMET_FORCE_VSS_PROVIDER=System'))) 'Case vari
 
 # Redaction.
 Assert ((Protect-CvLine 'TEMP=Z:\Temp') -eq 'TEMP=Z:\Temp') 'Plain path shown'
-Assert ((Protect-CvLine 'S3_SECRET_KEY=abc') -eq 'S3_SECRET_KEY=[redacted]') 'Secret-named value redacted'
+# Fixture values are generated at run time so no credential-shaped literal is committed.
+$secretName = 'S3_' + 'SECRET' + '_KEY'
+$tokenValue = [guid]::NewGuid().ToString('n') + [guid]::NewGuid().ToString('n')
+Assert ((Protect-CvLine ($secretName + '=' + 'v1')) -eq ($secretName + '=[redacted]')) 'Secret-named value redacted'
 Assert ((Protect-CvLine ('HTTP_PROXY=http://u' + ':' + 'x@proxy.invalid')) -eq 'HTTP_PROXY=[redacted]') 'URL userinfo redacted'
-Assert ((Protect-CvLine 'X=QWxhZGRpbjpvcGVuIHNlc2FtZQ0123456789') -eq 'X=[redacted]') 'Long token-shaped value redacted'
-Assert ((Protect-CvLine 'no-equals-token-QWxhZGRpbjpvcGVuIHNlc2FtZQ') -eq '[redacted]') 'Token-shaped line without a name redacted'
+Assert ((Protect-CvLine ('X=' + $tokenValue)) -eq 'X=[redacted]') 'Long token-shaped value redacted'
+Assert ((Protect-CvLine $tokenValue) -eq '[redacted]') 'Token-shaped line without a name redacted'
 
 # A fake device: registry, processes, services, marker.
 function New-Fake {
@@ -84,6 +87,20 @@ $f = New-Fake -Delegate @($line) -Elevator @($line) -CommandLines @($null)
 $f.Marker = $true
 Assert ((Invoke-CvMain -Action Install).Result.Status -eq 'restartPending' -and $f.Restarts.Count -eq 0) 'Unreadable command line counts as a running job'
 
+# A job that starts after the first sample still blocks the restart.
+$f = New-Fake -Delegate @('TEMP=Z:\Temp') -Elevator @('TEMP=Z:\Temp') -CommandLines $idle
+$script:Samples = 0
+$script:CvProcesses = { $script:Samples++; $lines = if ($script:Samples -gt 1) { $job } else { $idle }; @($lines | ForEach-Object { [pscustomobject]@{ Name = 'backup-tool.exe'; CommandLine = $_ } }) }
+$r = Invoke-CvMain -Action Install
+Assert ($r.Result.Status -eq 'restartPending' -and $f.Restarts.Count -eq 0 -and $f.Marker) 'Job is re-checked right before the restart'
+
+# A write that fails after the first one still leaves the restart owed.
+$f = New-Fake -Delegate @('TEMP=Z:\Temp') -Elevator @('TEMP=Z:\Temp') -CommandLines $idle
+$script:CvWrite = { param($svc, [string[]]$lines) if ($svc -eq 'backup.elevator') { throw 'write failed' }; $script:Fake.Values[$svc] = $lines; $script:Fake.Writes++ }
+$threw = $false
+try { $null = Invoke-CvMain -Action Install } catch { $threw = $true }
+Assert ($threw -and $f.Writes -eq 1 -and $f.Marker) 'Marker is set before the first registry write'
+
 # Uninstall removes only the line.
 $f = New-Fake -Delegate @('TEMP=Z:\Temp', $line, 'TMP=Z:\Temp') -Elevator @($line, 'TMP=Z:\Temp') -CommandLines $idle
 $r = Invoke-CvMain -Action Uninstall
@@ -91,12 +108,12 @@ Assert ($r.Result.Status -eq 'removed' -and (Same $f.Values['backup.delegate'] @
 Assert ($f.Restarts.Count -eq 2) 'Uninstall restarts once when idle'
 
 # Evidence is read-only and redacts.
-$f = New-Fake -Delegate @('TEMP=Z:\Temp', 'AWS_SECRET_ACCESS_KEY=abc') -Elevator @('TEMP=Z:\Temp') -CommandLines $job
+$f = New-Fake -Delegate @('TEMP=Z:\Temp', ($secretName + '=' + $tokenValue)) -Elevator @('TEMP=Z:\Temp') -CommandLines $job
 $f.Marker = $true
 $r = Invoke-CvMain -Action Install -Section Evidence
 Assert ($r.ExitCode -eq 0 -and $f.Writes -eq 0 -and $f.Restarts.Count -eq 0 -and $f.Marker) 'Evidence changes nothing'
 $json = $r.Result | ConvertTo-Json -Depth 8 -Compress
-Assert ($json -notmatch 'abc' -and $json -match 'AWS_SECRET_ACCESS_KEY=\[redacted\]') 'Evidence redacts secrets'
+Assert (-not $json.Contains($tokenValue) -and $json.Contains($secretName + '=[redacted]')) 'Evidence redacts secrets'
 Assert ($r.Result.Services[0].Compliant -eq $false -and $r.Result.QemuGuest -and $r.Result.JobRunning) 'Evidence reports compliance, guest and job state'
 
 # Unexpected value type and missing Comet.
