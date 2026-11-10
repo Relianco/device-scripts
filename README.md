@@ -183,6 +183,48 @@ Pass the office gateway IPv4 addresses and Layer-2 MAC address in `-PackageArgum
 
 Each check inspects only physical hardware adapters and actively re-probes any `Stale` or `Incomplete` ARP entry on that interface before trusting a cached MAC. `Install` stages the script and `config.json` in `%ProgramData%\Relian\WireGuardNetworkGuard`, registers `\Relian\Relian-WireGuardNetworkGuard` to run at boot, wake, and network connect/disconnect (`Event ID` `10000`/`10001`), and evaluates immediately. `Check` is read-only. `Uninstall` removes the task, restarts any non-disabled `WireGuardTunnel$*` service that the guard stopped, and deletes the install folder. See [the WireGuard network guard runbook](docs/wireguard-network-guard.md).
 
+## Group Policy evidence
+
+`windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1` reports Group Policy state through the deploy runner as SYSTEM, on a domain controller or a member with GPMC/RSAT. It changes nothing. It prints one JSON line of at most 8,000 UTF-8 bytes. The optional `Section` package argument picks what it reads:
+
+- `Summary` (default): domain and forest functional levels, domain controllers, SYSVOL replication (DFSR or FRS, migration state, and on a DC the DFSR service and DFSR warning events 2212, 2213, 4012, 5002, 5008 and 5014 from the last 7 days), GPO counts, AD/SYSVOL version mismatches, and GPOs with a Preferences `cpassword`.
+- `Gpos`: every GPO with owner, dates, AD and SYSVOL versions and a mismatch flag, links with enabled and enforced state, WMI filter, and security filtering. Mismatches come first. When the list does not fit, run again with `"Offset"` set to the printed `nextOffset`.
+- `Policy`: password, lockout and Kerberos values from the Default Domain Policy and Default Domain Controllers Policy `GptTmpl.inf`, the effective domain password policy, the number of fine-grained password policies, and the GPOs linked at the domain root.
+- `Rsop`: `gpresult /scope computer /x` for this computer, with applied GPOs, GPOs blocked by security or WMI filtering, and client-side extension errors. The XML file is deleted after it is read.
+- `{"Gpo":"<name or GUID>"}`: one GPO's machine and user `Registry.pol` values, `GptTmpl.inf` lines, `audit.csv` rows, and Preferences files.
+
+A `cpassword` is counted and never printed. A line or registry value whose name mentions a password, secret, token or credential is omitted.
+
+## Group Policy baseline
+
+`windows/packages/gpo-baseline/Invoke-GpoBaseline.ps1` applies an embedded GPO definition through the deploy runner as SYSTEM on the PDC emulator. The first definition, `cis-ws2022-dc-low-risk`, is the low-risk group from the CIS Microsoft Windows Server 2022 Benchmark v5.1.0 for domain controllers. It sets firewall logging (9.x.4 to 9.x.7), event log sizes (18.10.26), PowerShell script block logging (18.10.88.1), Print Spooler remote connections off (18.7.1) and the service disabled (5.1), audit-only NTLM (2.3.11.11 to 2.3.11.13), subcategory audit override (2.3.2.1), three advanced audit subcategories (17.4.1, 17.4.2, 17.8.1), and LDAP event 2889 and SMBv1 access auditing as evidence for later enforcement.
+
+Package arguments:
+
+| Argument | Effect |
+|---|---|
+| `Definition` | Required. The embedded definition id. |
+| `Apply` | `true` makes changes. Without it every action prints a plan and changes nothing. |
+| `LinkTo` | An OU DN in this domain. The link is created disabled. |
+| `LinkEnabled` | `true` creates or sets the link enabled. |
+| `AllowDefaultPolicy` | `true` lets a definition that sets `allowDefaultPolicy` change the Default Domain Policy or Default Domain Controllers Policy. The shipped definition does not set it. |
+
+Before it changes an existing GPO, the package runs `Backup-GPO` to `%ProgramData%\Relian\gpo-backups\{GPO GUID}`, which is limited to SYSTEM and Administrators, and prints the backup id. A new GPO gets `[relian-gpo-baseline:<id>]` in its description. A GPO with the same name and no marker is refused. Registry policy is written with `Set-GPRegistryValue`. `GptTmpl.inf` and `audit.csv` are written in SYSVOL. The computer version is then raised in `GPT.INI` and AD, and the security and audit client-side extensions are added to `gPCMachineExtensionNames` ([MS-GPOL](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpol/), [MS-GPSB](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpsb/), [MS-GPAC](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpac/)). A second run changes nothing. A run that stops partway exits 1 and lists what is left. `Uninstall` with `Apply` backs up and removes the GPO this package created, or restores the last Relian backup of an allowed default policy.
+
+Security options, user rights and service start types stay set on a computer after the GPO is unlinked. Undo them with a GPO that sets the previous values.
+
+### Comet VSS provider on QEMU servers
+
+The second definition, `comet-vss-provider-qemu`, keeps `COMET_FORCE_VSS_PROVIDER=system` in Comet Backup's `AppEnvironmentExtra` on domain-joined Proxmox/QEMU Windows servers. It reuses the [comet-vss-provider](docs/comet-vss-provider.md) package unchanged.
+
+- **Targeting:** a WMI filter, `Relian - QEMU Windows servers`, applies the GPO only where `Win32_ComputerSystem.Manufacturer = "QEMU"` and `Win32_OperatingSystem.ProductType <> 1` (servers and DCs). The filter's description carries the ownership marker. A same-named filter without the marker is refused.
+- **Mechanism:** a Group Policy Preferences scheduled task (`TaskV2`) that runs as SYSTEM 5 minutes after boot and every 60 minutes. It runs the comet-vss-provider script, which adds the line, keeps every other line in its order, and restarts Comet only after a change and only when no backup job runs.
+- **Script pin:** the definition pins the script by commit URL and SHA256. `Apply` downloads it once over TLS 1.2 and checks the hash before any GPO or AD write. It then stores the script in the GPO's SYSVOL folder (`Machine\Scripts\Relian`). The task checks the SYSVOL copy against the same hash before each run, so a copy that is still replicating, or one that was changed, does not run.
+- **Not a GPP Registry item:** that item writes the whole `REG_MULTI_SZ`. It would drop per-server lines such as `TEMP=Z:\Temp`, and every refresh would rewrite the value, which Comet reads only at service start. It would also not restart Comet. The task merges the line instead.
+- **Removal:** `Uninstall` with `Apply=true` removes the GPO and, when no other GPO uses it, the WMI filter. The task item has "remove when no longer applied" set, so clients delete the task at their next refresh. The line stays in Comet's environment. Run the comet-vss-provider package with `-Action Uninstall` to remove it.
+
+To move the pin to a newer comet-vss-provider, update `url` (a commit on `main`) and `sha256` in the definition. A test checks that the pin matches the package file in the same commit.
+
 ## Recurring remediations
 
 `windows/runner/Invoke-RelianJob.ps1` is a thin loader for jobs on a NinjaOne schedule. `Invoke-RelianRunner` downloads the 8.8 MB toolkit and the brand pack on every run, so it is too heavy for that. The loader has no toolkit and no dialog. It downloads one module, caches it, and after that uses no network.
