@@ -37,7 +37,7 @@ removes the AutoElevate agent from the hash-pinned `AESetup.msi` in
   version is at or above the pin. The stdout JSON reports both.
 - **Fresh install, or installed but not registered.** The device counts as
   registered when the registry holds a license key, a company name and a
-  location name. Otherwise the package needs `AE_LICENSE_KEY`, `CompanyName`
+  location name. Otherwise the package needs the key (`LicenseKey` or `AE_LICENSE_KEY`), `CompanyName`
   and `LocationName`. Without them it exits 1 before the download. The local
   registry cannot tell whether the AutoElevate portal knows the device. If the
   Partner API does not list a device that looks registered locally, run
@@ -53,10 +53,16 @@ removes the AutoElevate agent from the hash-pinned `AESetup.msi` in
 
   Use the company and location names exactly as the portal shows them. The
   portal generates the install command per location (Companies tab).
-- **The key** comes only from the `AE_LICENSE_KEY` environment variable. The
-  package reads it once and removes it from its own process. It is never a
-  parameter, and it is redacted from the stdout report, from errors, and from
-  the msiexec command the report prints. The MSI does not hide `LICENSE_KEY`,
+- **The key** comes from the `LicenseKey` package argument if it is not
+  empty, else from the `AE_LICENSE_KEY` environment variable. Both have the
+  same validation. The package reads it once and removes the environment
+  variable from its own process. It is redacted from the stdout report, from
+  errors, and from the msiexec command the report prints. The runner never
+  prints argument values (it reports only `invalid package arguments` and
+  hash or download failures, and strips pinned URLs from error text). The
+  argument way is kept in NinjaOne's activity and parameter history, and is on
+  the package process command line while it runs. The environment variable is
+  neither. The MSI does not hide `LICENSE_KEY`,
   and on an upgrade it loads the stored key into `LICENSE_KEY_REG`, so a
   verbose msiexec log would hold the key. The package writes no msiexec log.
   For a failed install, use `Section` `Evidence` (MsiInstaller events) and
@@ -81,12 +87,17 @@ README.
 | Upgrade a registered agent | `Install` | none | |
 | Fresh install | `Install` | `eyJDb21wYW55TmFtZSI6IkV4YW1wbGUgQ29tcGFueSIsIkNvbXBhbnlJbml0aWFscyI6IkVDIiwiTG9jYXRpb25OYW1lIjoiTWFpbiBPZmZpY2UiLCJFbGV2YXRpb25Nb2RlIjoibGl2ZSJ9` | `{"CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}` |
 
+Fresh install with the key as an argument (the value is a placeholder):
+
+`{"LicenseKey":"TEST-KEY-0000","CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}`
+
 Make your own with `printf '%s' '<json>' | base64 -w0`.
 
-## NinjaOne wrapper for the key
+## NinjaOne wrapper for the key (environment variable way)
 
-The key must not go in `-PackageArguments`, because those are kept in the
-job's activity history. Keep it in a NinjaOne custom field of type Secure,
+Putting `LicenseKey` in `-PackageArguments` keeps the key in NinjaOne's
+activity history. To keep it out of that history, use the environment
+variable. Keep it in a NinjaOne custom field of type Secure,
 set at the organization level, with script read access. A wrapper script in
 the NinjaOne library, outside this repo, reads the field into
 `$env:AE_LICENSE_KEY` for its own process. It then starts the pinned runner,
