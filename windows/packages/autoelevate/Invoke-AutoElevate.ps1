@@ -550,24 +550,21 @@ function Get-AutoElevateMsiArgumentList {
         [string]$Mode,
         [string]$InstallerPath,
         [string]$ProductCode,
-        [string[]]$Properties = @(),
-        [string]$LogPath = ''
+        [string[]]$Properties = @()
     )
-    $log = @()
-    if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
-        $log = @('/l*v', ('"' + $LogPath + '"'))
-    }
+    # No /l*v: AppSearch loads the stored key into LICENSE_KEY_REG, and the MSI does not
+    # hide it, so any verbose log would hold the key. MsiInstaller events and Evidence remain.
     if ($Mode -eq 'uninstall') {
         if ([string]::IsNullOrWhiteSpace($ProductCode)) {
             return $null
         }
-        return @('/x', $ProductCode, '/quiet', '/norestart') + $log
+        return @('/x', $ProductCode, '/quiet', '/norestart')
     }
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
     # Start-Process joins the array with spaces, so a path is quoted to stay one argument.
-    return @('/i', ('"' + $InstallerPath + '"'), '/quiet', '/norestart') + @($Properties) + $log
+    return @('/i', ('"' + $InstallerPath + '"'), '/quiet', '/norestart') + @($Properties)
 }
 
 # Stop order matters: the delayed-start service can start the agent again.
@@ -996,22 +993,14 @@ function Invoke-AutoElevateAction {
             if ($present -and -not (Stop-AutoElevateServices)) {
                 return 1
             }
-            # The MSI does not hide LICENSE_KEY (MsiHiddenProperties), so a verbose log would hold it.
-            $logPath = ''
-            if (@($registration.Properties).Count -eq 0) {
-                $logPath = Join-Path $MarkerRoot 'msiexec-install.log'
-                if (-not (Test-Path -LiteralPath $MarkerRoot)) {
-                    New-Item -ItemType Directory -Path $MarkerRoot -Force | Out-Null
-                }
-            }
-            $argumentList = Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $installerPath -ProductCode '' -Properties $registration.Properties -LogPath $logPath
+            $argumentList = Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $installerPath -ProductCode '' -Properties $registration.Properties
             $script:AutoElevateReport['MsiCommand'] = ConvertTo-AutoElevateRedacted -Text ('msiexec ' + ($argumentList -join ' '))
-            $script:AutoElevateReport['MsiLog'] = $logPath
-            $result = & $script:InvokeMsiExec -Mode 'install' -ArgumentList $argumentList -InstallerPath $installerPath -ProductCode ''
+            # A throw is treated as a failed run, so the stopped services are restored below.
+            $result = Invoke-AutoElevateSafe -Block { & $script:InvokeMsiExec -Mode 'install' -ArgumentList $argumentList -InstallerPath $installerPath -ProductCode '' } -Fallback $null
             $script:AutoElevateReport['MsiExitCode'] = $result
             if ($null -eq $result -or -not (Test-AutoElevateMsiSucceeded -Code ([int]$result))) {
                 Restore-AutoElevateServices
-                Add-AutoElevateError -Message "installer failed with exit code $result"
+                Add-AutoElevateError -Message "installer failed (exit code: $result)"
                 return 1
             }
             $service = Wait-AutoElevateAgentRunning
@@ -1050,7 +1039,7 @@ function Invoke-AutoElevateAction {
                 return 1
             }
             $argumentList = Get-AutoElevateMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode $productCode
-            $result = & $script:InvokeMsiExec -Mode 'uninstall' -ArgumentList $argumentList -InstallerPath '' -ProductCode $productCode
+            $result = Invoke-AutoElevateSafe -Block { & $script:InvokeMsiExec -Mode 'uninstall' -ArgumentList $argumentList -InstallerPath '' -ProductCode $productCode } -Fallback $null
             if ($null -eq $result -or -not (Test-AutoElevateMsiSucceeded -Code ([int]$result))) {
                 Restore-AutoElevateServices
                 Add-AutoElevateError -Message 'uninstall failed'

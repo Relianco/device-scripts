@@ -56,10 +56,12 @@ removes the AutoElevate agent from the hash-pinned `AESetup.msi` in
 - **The key** comes only from the `AE_LICENSE_KEY` environment variable. The
   package reads it once and removes it from its own process. It is never a
   parameter, and it is redacted from the stdout report, from errors, and from
-  the msiexec command the report prints. The MSI does not mark `LICENSE_KEY`
-  hidden, so the package writes no msiexec log when it passes a key. Without
-  a key, the msiexec log is at
-  `%ProgramData%\Relian\autoelevate\msiexec-install.log`. msiexec still gets
+  the msiexec command the report prints. The MSI does not hide `LICENSE_KEY`,
+  and on an upgrade it loads the stored key into `LICENSE_KEY_REG`, so a
+  verbose msiexec log would hold the key. The package writes no msiexec log.
+  For a failed install, use `Section` `Evidence` (MsiInstaller events) and
+  the MSI exit code in the report. A machine policy that turns on Windows
+  Installer logging still writes one, so keep that policy off. msiexec still gets
   the key on its command line, which local administrators can read while it
   runs. The agent stores the key in the registry anyway.
 - **`Section` `Evidence`** is read-only. It reports the installed version, the

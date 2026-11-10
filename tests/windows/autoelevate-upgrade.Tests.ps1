@@ -130,8 +130,9 @@ try {
     if (($script:MsiArgs -join ' ') -match 'LICENSE_KEY|COMPANY_NAME|LOCATION_NAME') {
         Fail "upgrade passed registration properties: $($script:MsiArgs -join ' ')"
     }
-    if (($script:MsiArgs -join ' ') -notmatch '/l\*v') {
-        Fail 'upgrade without a key did not write an msiexec log'
+    # The MSI loads the stored key into LICENSE_KEY_REG, so no verbose log on an upgrade either.
+    if (($script:MsiArgs -join ' ') -match '/l') {
+        Fail 'upgrade wrote an msiexec log'
     }
     if ([string]$script:AutoElevateReport.Service -cne 'Running' -or [string]$script:AutoElevateReport.Version -cne '2.11.1959.0') {
         Fail "upgrade report: $(ConvertTo-Json -InputObject $script:AutoElevateReport -Compress)"
@@ -250,12 +251,21 @@ try {
 
     # 11. Paths with spaces stay one argument once Start-Process joins the array.
     $spaced = 'C:\Windows\Temp\dir with space\AESetup.msi'
-    $spacedLog = 'C:\Program Data\Relian\msiexec install.log'
     $props = @("LICENSE_KEY=`"$($script:Key)`"", 'COMPANY_NAME="Example Company"')
-    $flat = (Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $spaced -ProductCode '' -Properties $props -LogPath $spacedLog) -join ' '
+    $flat = (Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $spaced -ProductCode '' -Properties $props) -join ' '
     if (-not $flat.StartsWith("/i `"$spaced`" /quiet /norestart")) { Fail "spaced installer path: $flat" }
-    if (-not $flat.EndsWith("/l*v `"$spacedLog`"")) { Fail "spaced log path: $flat" }
     if ((ConvertTo-AutoElevateRedacted -Text $flat).Contains($script:Key)) { Fail 'flattened arguments kept the key after redaction' }
+
+    # 14. msiexec throwing after the stop still restores the services, on install and uninstall.
+    foreach ($action in @('Install', 'Uninstall')) {
+        Reset-Case
+        $script:InvokeMsiExec = { param($Mode, $ArgumentList) $script:Calls.Add("msiexec $Mode"); throw 'start failed' }
+        $code = [int](Invoke-AutoElevateAction -DeploymentType $action -Action $action -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot)
+        if ($code -ne 1) { Fail "$action msiexec throw exit $code" }
+        foreach ($name in @('AEDelayedStartService', 'AutoElevateAgent')) {
+            if ($script:Calls -notcontains "start $name" -or $script:ServiceState[$name] -ne 'Running') { Fail "$action msiexec throw left $name stopped: $($script:Calls -join ', ')" }
+        }
+    }
 
     # 12. Userinfo is refused only where the installer is downloaded.
     $userInfoUrl = -join @('https://', 'user', '@', 'example.invalid/AESetup.msi')
