@@ -9,8 +9,14 @@ param(
     [switch]$ReportOnly
 )
 
-# An empty hash is the off switch: exit 0 before the URL or anything else is read.
-# Operators only: Constrained Language Mode blocks a method call on this dictionary.
+# A URL with userinfo is refused first, even with an empty hash: the credential is already in the
+# job's parameters. Then an empty hash is the off switch: exit 0 before anything else is read.
+# Operators only: Constrained Language Mode blocks a method call on this dictionary and on [Uri].
+# The regex is the first test in Test-RelianUrlHasUserInfo below; keep the two the same.
+if ($ModuleUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') {
+    Write-Output 'refusing a URL that contains userinfo'
+    exit 1
+}
 if (($PSBoundParameters.Keys -contains 'ModuleSha256') -and $ModuleSha256 -notmatch '\S') { exit 0 }
 
 # App Control or AppLocker puts untrusted scripts here. .NET calls below would fail, so name the reason.
@@ -124,12 +130,12 @@ function Invoke-RelianJob {
         [switch]$ReportOnly
     )
 
-    # Before the URL is read, even one with userinfo: nothing is downloaded either way.
-    if ([string]::IsNullOrWhiteSpace($ModuleSha256)) { return 0 }
+    # Userinfo first, even with an empty hash: the credential is already in the job's parameters.
     if (Test-RelianUrlHasUserInfo -Url $ModuleUrl) {
         Write-RelianJobError 'refusing a URL that contains userinfo'
         return 1
     }
+    if ([string]::IsNullOrWhiteSpace($ModuleSha256)) { return 0 }
     # The hash names the cached file. \z, because $ also matches before a trailing newline.
     if ($ModuleSha256 -cnotmatch '\A[0-9a-f]{64}\z') {
         Write-RelianJobError 'module hash is not 64 lowercase hex characters'
