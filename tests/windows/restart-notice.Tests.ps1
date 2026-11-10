@@ -584,8 +584,7 @@ Assert-Same $release.ninjaField $RnFieldName 'pin record matches script field'
 Assert-Same $release.kind 'notify' 'pin record kind'
 if ($release.packageArguments.IndexOf('"ReportOnly"', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks ReportOnly' }
 if ($release.packageArguments.IndexOf($RnReportField, [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the report field' }
-$readme = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
-if ($readme.IndexOf('windows/packages/restart-notice/Invoke-RestartNotice.ps1', [StringComparison]::Ordinal) -lt 0) { Fail 'README lacks the package section' }
+# The README entry is checked by tests/readme-inventory.Tests.ps1.
 
 # End to end through the runner's argument parser.
 $json = '{"Message":"Windows needs to restart. Save your work.","SnoozeMinutes":"60","PromptMinutes":"10","CountdownMinutes":"15","ReportOnly":"true"}'

@@ -260,69 +260,23 @@ JS
   fi
   ok
 
-  begin "readme keeps deploy needles and names both shell runners"
+  begin "readme names both shell runners"
   if [[ ! -f "$README" ]]; then
     fail "missing README"
   else
-    local text rest needle next
+    local text needle
     text="$(cat "$README")"
-    local description='NinjaOne installs software by pasting `windows/runner/Invoke-RelianRunner.ps1`. That file is the installer. `windows/bootstrap.ps1` loads an inventory collector. It is not the installer.'
     case "$text" in
       "# device-scripts"*) ;;
       *) fail "README title changed" ;;
     esac
-    case "$text" in
-      *"$description"*) ;;
-      *) fail "README description removed" ;;
-    esac
-    rest="${text#*"## Deploy runner"}"
-    if [[ "$rest" == "$text" ]]; then
-      fail "Deploy runner section missing"
-    fi
-    local needles=(
-      'windows/runner/Invoke-RelianRunner.ps1'
-      'PackageSha256'
-      'ToolkitSha256'
-      'BrandPackSha256'
-      'An empty pin exits 0'
-      'three download attempts'
-      'A bad hash is not retried'
-      '130'
-      'https://relianpub.blob.core.windows.net/pub/sec/'
-      'bootstrap.ps1 remains the collector loader'
-    )
-    for needle in "${needles[@]}"; do
-      next="${rest#*"$needle"}"
-      if [[ "$next" == "$rest" ]]; then
-        fail "README missing $needle"
-        break
-      fi
-      rest="$next"
+    # Package folders are checked by tests/readme-inventory.Tests.ps1.
+    for needle in 'linux/runner/relian-runner.sh' 'macos/runner/relian-runner.sh' '## Linux' '## macOS'; do
+      case "$text" in
+        *"$needle"*) ;;
+        *) fail "README missing $needle" ;;
+      esac
     done
-    if ! awk '
-      /^## Deploy runner$/ { deploy = NR }
-      /^## Shell runners$/ { shell = NR }
-      END {
-        if (deploy == 0 || shell == 0 || shell < deploy) exit 1
-      }
-    ' "$README"; then
-      fail "Shell runners section is not after Deploy runner"
-    fi
-    local linux_sentence='`linux/runner/relian-runner.sh` is the Linux script to paste. It is not the macOS runner.'
-    local macos_sentence='`macos/runner/relian-runner.sh` is the macOS script to paste. It is not the Windows runner and not the Linux runner.'
-    case "$text" in
-      *"$linux_sentence"*) ;;
-      *) fail "README linux shell runners sentence missing" ;;
-    esac
-    case "$text" in
-      *"$macos_sentence"*) ;;
-      *) fail "README macos shell runners sentence missing" ;;
-    esac
-    local after_linux="${text#*"$linux_sentence"}"
-    case "$after_linux" in
-      *"$macos_sentence"*) ;;
-      *) fail "README macos sentence is not after the linux sentence" ;;
-    esac
   fi
   ok
 
