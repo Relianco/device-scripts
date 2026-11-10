@@ -32,8 +32,14 @@ The default SHA256 is
 The inspected Microsoft bundle identifies itself as 2.34.222 (x64); its PE
 product version is 2.34.222.0. The installer binary is not committed or
 published by this change. Supply it locally, or provide `-InstallerUrl` for
-an HTTPS copy. Supply only one source. Downloads are attempted once; a
-failed download or hash check leaves the old client in place.
+an HTTPS copy. Supply only one source. The hash must be 64 lowercase
+hexadecimal characters. URLs containing userinfo, including an empty name
+before `@`, are refused before discovery or download.
+
+Downloads get at most three attempts for timeouts, connection or DNS failures,
+and HTTP 408, 429, 500, 502, 503, or 504. Delays are 5 and 20 seconds.
+Other HTTP errors and hash mismatches are not retried. A failed download or
+hash check leaves the old client in place.
 
 For a future target, change `PinVersion` and `InstallerSha256` together to
 match the replacement. An empty pin or hash disables the package without

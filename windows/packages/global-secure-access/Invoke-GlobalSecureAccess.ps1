@@ -79,13 +79,132 @@ $script:ValidateGsaUninstaller = {
     Assert-GsaMicrosoftSignature -Path $Path
 }
 
+function Get-GsaHttpStatus {
+    param($Exception)
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard++
+        $code = $null
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'StatusCode' -and $null -ne $current.StatusCode) {
+            try {
+                $parsed = [int]$current.StatusCode
+                if ($parsed -ge 100 -and $parsed -le 599) {
+                    $code = $parsed
+                }
+            } catch {
+                $code = $null
+            }
+        }
+        if ($null -eq $code -and $names -contains 'Response' -and $null -ne $current.Response) {
+            $response = $current.Response
+            $responseNames = @($response.PSObject.Properties.Name)
+            if ($responseNames -contains 'StatusCode' -and $null -ne $response.StatusCode) {
+                try {
+                    $parsed = [int]$response.StatusCode
+                    if ($parsed -ge 100 -and $parsed -le 599) {
+                        $code = $parsed
+                    }
+                } catch {
+                    $code = $null
+                }
+            }
+        }
+        if ($null -ne $code) {
+            return $code
+        }
+        $current = $current.InnerException
+    }
+    return $null
+}
+
+function Test-GsaSocketIsTransient {
+    param($Exception)
+    if ($Exception -isnot [System.Net.Sockets.SocketException]) {
+        return $false
+    }
+    # Timeout, connection, and DNS only. AddressAlreadyInUse is not retried.
+    $code = $Exception.SocketErrorCode
+    $retry = @(
+        [System.Net.Sockets.SocketError]::TimedOut,
+        [System.Net.Sockets.SocketError]::ConnectionReset,
+        [System.Net.Sockets.SocketError]::ConnectionAborted,
+        [System.Net.Sockets.SocketError]::ConnectionRefused,
+        [System.Net.Sockets.SocketError]::HostNotFound
+    )
+    return $retry -contains $code
+}
+
+function Test-GsaTransientTransport {
+    param($Exception)
+    $webTransient = @(
+        'Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure',
+        'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure'
+    )
+    # SecureConnectionError is a connection failure and stays retryable.
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    $current = $Exception
+    $guard = 0
+    while ($null -ne $current -and $guard -lt 8) {
+        $guard++
+        # A bare TaskCanceledException is not a timeout. Retry only when a TimeoutException is inside it.
+        if ($current -is [System.TimeoutException] -or (Test-GsaSocketIsTransient -Exception $current)) {
+            return $true
+        }
+        if ($current -is [System.Net.WebException] -and $webTransient -contains [string]$current.Status) {
+            return $true
+        }
+        $names = @($current.PSObject.Properties.Name)
+        if ($names -contains 'HttpRequestError' -and $null -ne $current.HttpRequestError -and $requestTransient -contains [string]$current.HttpRequestError) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Test-GsaDownloadIsTransient {
+    param($ErrorRecord)
+    $exception = $null
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) {
+        $exception = $ErrorRecord.Exception
+    } elseif ($ErrorRecord -is [System.Exception]) {
+        $exception = $ErrorRecord
+    }
+    if ($null -eq $exception) {
+        return $false
+    }
+    $status = Get-GsaHttpStatus -Exception $exception
+    if ($null -ne $status) {
+        return @(408, 429, 500, 502, 503, 504) -contains $status
+    }
+    return [bool](Test-GsaTransientTransport -Exception $exception)
+}
+
+function Save-GsaDownload {
+    param([string]$Url, [string]$Destination)
+    $delays = @(5, 20)
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
+            Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing | Out-Null
+            return
+        } catch {
+            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            if ($attempt -eq 3 -or -not (Test-GsaDownloadIsTransient -ErrorRecord $_)) { throw }
+            Start-Sleep -Seconds $delays[$attempt - 1]
+        }
+    }
+}
+
 $script:PrepareGsaInstaller = {
     param($InstallerPath, $InstallerUrl, $InstallerSha256, $Destination, $PinVersion)
     # Stage and verify first: removing GSA may interrupt the network.
     if (-not [string]::IsNullOrWhiteSpace($InstallerPath)) {
         Copy-Item -LiteralPath $InstallerPath -Destination $Destination
     } else {
-        Invoke-WebRequest -Uri $InstallerUrl -OutFile $Destination -UseBasicParsing | Out-Null
+        Save-GsaDownload -Url $InstallerUrl -Destination $Destination
     }
     if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash -ine $InstallerSha256) {
         throw 'GSA installer hash mismatch; no client was removed.'
@@ -115,10 +234,11 @@ function Invoke-GsaAction {
     $cache = ''
     $phase = 'validating parameters'
     try {
-        if ($InstallerSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'Invalid installer SHA256.' }
+        if ($InstallerSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Invalid installer SHA256.' }
         if ($Action -notin @('Install', 'Update')) { throw 'GSA supports Install and Update only.' }
         $pin = ConvertTo-GsaVersion $PinVersion
         if (-not [string]::IsNullOrWhiteSpace($InstallerUrl)) {
+            if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { throw 'InstallerUrl must not contain userinfo.' }
             $uri = [uri]$InstallerUrl
             if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or $uri.UserInfo -ne '') {
                 throw 'InstallerUrl must be HTTPS without userinfo.'
@@ -178,7 +298,7 @@ function Invoke-GsaAction {
         return 0
     } catch {
         # Do not echo exception text: download errors can contain URL query credentials.
-        Write-Warning ('GSA replacement failed while {0}. Check the source, installer logs, and registration; no automatic retry.' -f $phase)
+        Write-Warning ('GSA replacement failed while {0}. Check the source, installer logs, and registration; no installer retry.' -f $phase)
         return 1
     } finally {
         if ($cache -and (Test-Path -LiteralPath $cache)) { Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue }

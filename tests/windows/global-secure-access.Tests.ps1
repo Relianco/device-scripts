@@ -78,5 +78,69 @@ try {
 $script:GetGsaInstalled = { throw 'must not discover' }
 Assert ((Invoke-GsaAction -InstallerSha256 '') -eq 0) 'empty hash no-op'
 Assert ((Invoke-GsaAction -PinVersion '' -InstallerSha256 ('a'*64)) -eq 0) 'empty pin no-op'
-Assert ((Invoke-GsaAction -Action Install -PinVersion '2.34.222' -InstallerUrl 'https://user@example.com/a.exe' -InstallerSha256 ('a'*64)) -eq 1) 'userinfo rejected'
+# A successful discovery double ensures removing the URL guard cannot hide behind
+# an unrelated discovery exception. All rejected inputs must stop before discovery.
+$script:discovered = 0
+$script:GetGsaInstalled = { $script:discovered++; @((Entry '2.34.222')) }
+foreach ($url in @('https://user@example.com/a.exe', 'https://@example.com/a.exe')) {
+    $events.Clear(); $script:discovered = 0
+    Assert ((Invoke-GsaAction -Action Install -PinVersion '2.34.222' -InstallerUrl $url -InstallerSha256 ('a'*64)) -eq 1) 'userinfo rejected'
+    Assert ($script:discovered -eq 0 -and $events.Count -eq 0) 'userinfo must stop before discovery or preparation'
+}
+foreach ($hash in @(('A'*64), ('a'*63), ('a'*65), 'abc')) {
+    $script:discovered = 0
+    Assert ((Invoke-GsaAction -Action Install -PinVersion '2.34.222' -InstallerUrl 'https://example.com/a.exe' -InstallerSha256 $hash) -eq 1) 'malformed or uppercase pin rejected'
+    Assert ($script:discovered -eq 0) 'invalid pin must stop before discovery'
+}
+# Uninstall is deliberately outside this replacement-only package's contract.
+$script:discovered = 0
+Assert ((Invoke-GsaAction -Action Uninstall -PinVersion '2.34.222' -InstallerSha256 ('a'*64)) -eq 1) 'unsupported uninstall fails closed'
+Assert ($script:discovered -eq 0) 'unsupported uninstall cannot remove a client'
+
 Write-Host 'PASS GSA replacement, version boundaries, failure and reboot handling'
+
+# Real preparation exercises download retries and hash verification; only network
+# and waiting are replaced. The deliberately invalid bytes must never execute.
+function Invoke-WebRequest {
+    param($Uri, $OutFile, [switch]$UseBasicParsing)
+    $script:downloadCalls++
+    [IO.File]::WriteAllText($OutFile, 'partial or incorrect payload')
+    if ($script:downloadCalls -le $script:failDownloads) { throw $script:downloadFailure }
+}
+function Start-Sleep { param($Seconds) $script:delays.Add([int]$Seconds) }
+$dir = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $dir | Out-Null
+function CheckDownload($Failure, $Failures, $ExpectedCalls, $ExpectedDelays, $ExpectHashMismatch) {
+    $script:downloadCalls=0; $script:failDownloads=$Failures; $script:downloadFailure=$Failure
+    $script:delays=[Collections.Generic.List[int]]::new()
+    $destination=Join-Path $dir 'download.exe'
+    $message=''
+    try { & $prepare -InstallerUrl 'https://example.com/package.exe' -InstallerSha256 ('a'*64) -Destination $destination -PinVersion '2.34.222' } catch { $message=$_.Exception.Message }
+    Assert ($script:downloadCalls -eq $ExpectedCalls) "wrong download attempts: $script:downloadCalls expected $ExpectedCalls"
+    Assert (($script:delays -join ',') -eq $ExpectedDelays) 'wrong bounded download delays'
+    Assert ([bool]($message -match 'hash mismatch') -eq $ExpectHashMismatch) 'download/hash failure boundary incorrect'
+    if (-not $ExpectHashMismatch) { Assert (-not (Test-Path -LiteralPath $destination)) 'failed download must remove partial payload' }
+}
+try {
+    CheckDownload ([TimeoutException]::new('timeout')) 2 3 '5,20' $true
+    CheckDownload ([TimeoutException]::new('timeout')) 5 3 '5,20' $false
+    CheckDownload ([Net.WebException]::new('dns', [Net.WebExceptionStatus]::NameResolutionFailure)) 1 2 '5' $true
+    CheckDownload ([Net.WebException]::new('connection', [Net.WebExceptionStatus]::ConnectFailure)) 1 2 '5' $true
+    foreach ($status in @(408,429,500,502,503,504,400,401,403,404,501)) {
+        $errorObject=[Exception]::new('http')
+        $errorObject | Add-Member NoteProperty StatusCode $status
+        if ($status -in @(408,429,500,502,503,504)) { CheckDownload $errorObject 1 2 '5' $true }
+        else { CheckDownload $errorObject 1 1 '' $false }
+    }
+    # HTTP refusal takes precedence over a nested timeout.
+    $errorObject=[Exception]::new('http', [TimeoutException]::new('timeout'))
+    $errorObject | Add-Member NoteProperty StatusCode 403
+    CheckDownload $errorObject 1 1 '' $false
+    CheckDownload ([UnauthorizedAccessException]::new('disk permission')) 1 1 '' $false
+    CheckDownload ([OperationCanceledException]::new('cancelled')) 1 1 '' $false
+    CheckDownload ([TimeoutException]::new('unused')) 0 1 '' $true
+} finally {
+    Remove-Item $dir -Recurse -Force
+    Remove-Item Function:Invoke-WebRequest, Function:Start-Sleep
+}
+Write-Host 'PASS GSA bounded transient retries and nonretryable integrity failure'
