@@ -183,6 +183,36 @@ function ConvertTo-AutoElevateRedacted {
     return $out
 }
 
+# Redact report strings before JSON encoding. A plain-text replacement after encoding
+# can consume escaped quotes or introduce unescaped quotes into the JSON document.
+function ConvertTo-AutoElevateRedactedValue {
+    param([AllowNull()]$Value)
+    if ($null -eq $Value) { return ,$null }
+    if ($Value -is [string]) { return ConvertTo-AutoElevateRedacted -Text $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $copy = [ordered]@{}
+        foreach ($key in $Value.Keys) { $copy[$key] = ConvertTo-AutoElevateRedactedValue -Value $Value[$key] }
+        return ,$copy
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $items = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in $Value) { $items.Add((ConvertTo-AutoElevateRedactedValue -Value $item)) }
+        return ,$items.ToArray()
+    }
+    if ($Value -is [pscustomobject]) {
+        $copy = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) { $copy[$property.Name] = ConvertTo-AutoElevateRedactedValue -Value $property.Value }
+        return ,$copy
+    }
+    return ,$Value
+}
+
+function ConvertTo-AutoElevateReportJson {
+    param($Report)
+    $redacted = ConvertTo-AutoElevateRedactedValue -Value $Report
+    return ConvertTo-Json -InputObject $redacted -Depth 6 -Compress
+}
+
 function Add-AutoElevateError {
     param([string]$Message)
     if ($null -eq $script:AutoElevateErrorLog) {
@@ -1132,5 +1162,5 @@ try {
 } finally {
     $autoelevateKey = $null
 }
-Write-Output (ConvertTo-AutoElevateRedacted -Text (ConvertTo-Json -InputObject $script:AutoElevateReport -Depth 6 -Compress))
+Write-Output (ConvertTo-AutoElevateReportJson -Report $script:AutoElevateReport)
 exit $autoelevateExit
