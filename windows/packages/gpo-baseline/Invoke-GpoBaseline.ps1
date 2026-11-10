@@ -68,6 +68,8 @@ $GpbAuditHeader = 'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclu
 
 # Embedded definitions: the package hash pins them. Values come from the CIS Microsoft
 # Windows Server 2022 Benchmark v5.1.0 Audit sections (cis = recommendation id).
+# 17.8.1 is Success only: v5.1.0 states "The recommended state for this setting is: Success."
+# (earlier CIS versions asked for Success and Failure).
 $GpbDefinitionJson = @'
 [
  {

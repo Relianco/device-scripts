@@ -186,7 +186,10 @@ function Find-GpeCpassword {
     foreach ($id in @($Ids)) {
         foreach ($side in @('Machine', 'User')) {
             $dir = Join-Path (Join-Path $PoliciesPath ('{' + ([string]$id).ToUpper() + '}')) "$side\Preferences"
-            if (-not (Test-Path -LiteralPath $dir)) { continue }
+            # Test-Path reports an access-denied folder as missing; only a real "not found" is skipped.
+            try { [void](Get-Item -LiteralPath $dir -Force -ErrorAction Stop) }
+            catch [System.Management.Automation.ItemNotFoundException] { continue }
+            catch { $errors++; continue }
             $enumErrors = $null
             $files = @(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue -ErrorVariable enumErrors)
             # An unreadable subtree makes the scan incomplete, never clean.

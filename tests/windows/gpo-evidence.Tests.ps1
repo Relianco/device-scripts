@@ -174,6 +174,12 @@ try {
         $denied = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId)
         Assert (-not $denied.complete -and $denied.errors -ge 1) 'enumeration error marks the scan incomplete'
     }
+    # Review: an inaccessible Preferences folder is not skipped as missing.
+    & {
+        function Get-Item { [CmdletBinding()] param($LiteralPath, [switch]$Force) throw [UnauthorizedAccessException]::new('Access to the path is denied.') }
+        $denied = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId)
+        Assert (-not $denied.complete -and $denied.errors -ge 1) 'inaccessible Preferences folder marks the scan incomplete'
+    }
     # Review: valid XML with single quotes or spaces around = is still counted.
     $altId = [guid]::NewGuid(); $altDir = New-GpoDir $altId
     [void](New-Item -ItemType Directory -Path (Join-Path $altDir 'Machine\Preferences\Services') -Force)
