@@ -192,6 +192,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 - `gpo-baseline`: applies an embedded Group Policy definition on the PDC emulator. Plan-only unless `Apply` is `true`. It backs up an existing GPO first. Definitions: `cis-ws2022-dc-low-risk` and `comet-vss-provider-qemu`.
 - `wu-policy`: finds local policy values that turn off automatic Windows Update. `Fix` set to `true` removes them, after a backup. It does nothing on a WSUS-managed device.
 - `apply-action`: applies one registry action from `windows/actions/<id>.json`. The pin is `<id>:<sha256 of that file>`.
+- `msi-repair`: repairs one installed Windows Installer product machine-wide (`msiexec /f`). Give `ProductCode` or an exact `DisplayName`. `RepairMode` is `/fa` (default) or `/fomus`. It refuses when the cached MSI is missing unless `SourcePath` is an MSI with the same ProductCode. `Section` set to `Evidence` is read-only. It downloads nothing.
 - `comet-vss-provider`: keeps `COMET_FORCE_VSS_PROVIDER=system` in Comet Backup's service environment on QEMU guests. `Section` set to `Evidence` is read-only. See [the runbook](docs/comet-vss-provider.md).
 - `wireguard-network-guard`: stops WireGuard tunnel services on a trusted office network and starts them when the laptop leaves. `Check` is read-only. See [the runbook](docs/wireguard-network-guard.md).
 
