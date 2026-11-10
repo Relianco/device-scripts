@@ -115,7 +115,9 @@ function Test-CvJobRunning {
     foreach ($p in @(& $script:CvProcesses)) {
         $cmd = [string]$p.CommandLine
         # Idle Comet keeps these helpers running; anything else (or an unreadable command line) is a job.
-        if ($cmd -notmatch '(?i)\s(delegate-server|elevator-server|stream)(\s|$)') { return $true }
+        # Match only after the executable token, so a path containing "stream" cannot hide a job.
+        $args1 = if ($cmd -match '^\s*(?:"[^"]*"|\S+)\s*(.*)$') { $Matches[1] } else { $null }
+        if ($null -eq $args1 -or $args1 -notmatch '(?i)^(cmd\s+)?(-(?!Action=)\w+=\S*\s+)*(-Action=)?(delegate-server|elevator-server|stream)(\s|$)') { return $true }
     }
     return $false
 }
@@ -159,15 +161,22 @@ function Invoke-CvMain {
     }
 
     $changed = $false
+    $before = @{}
     foreach ($s in $states) {
         $want = if ($removing) { Remove-CvVssLine $s.Lines } else { Set-CvVssLine $s.Lines }
         if (($want -join "`0") -cne ($s.Lines -join "`0")) {
             # Marker before the first write: a failure after it still leaves a restart owed.
             if (-not $changed) { & $script:CvSetMarker $true }
+            $before[$s.Service] = $result.Services | Where-Object { $_.Service -eq $s.Service }
             & $script:CvWrite $s.Service $want
             $back = [string[]]@((& $script:CvRead $s.Service).Lines | Where-Object { $_ -ne '' })
             if (($back -join "`0") -cne ($want -join "`0")) { $result.Reason = "read-back mismatch on $($s.Service)"; return @{ ExitCode = 1; Result = $result } }
             $changed = $true
+            # Report the post-write state; keep the pre-write lines as Before.
+            $row = $before[$s.Service]
+            $row.Before = $row.Lines
+            $row.Lines = @($back | ForEach-Object { Protect-CvLine $_ })
+            $row.Compliant = (Test-CvCompliant $back)
         }
     }
 

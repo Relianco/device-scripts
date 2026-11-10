@@ -435,7 +435,7 @@ try {
     # ---- Comet VSS provider: WMI-filtered GPO with a hash-pinned GPP scheduled task ----
     $comet = Get-GpbDefinition 'comet-vss-provider-qemu'
     $task = $comet.tasks[0]
-    Assert ($task.file.url -match '^https://raw\.githubusercontent\.com/Relianco/device-scripts/[0-9a-f]{40}/windows/packages/comet-vss-provider/Invoke-CometVssProvider\.ps1$') 'Comet script pinned to a commit'
+    Assert ($task.file.url -eq "https://relianpub.blob.core.windows.net/pub/sec/Invoke-CometVssProvider-$($task.file.sha256).ps1") 'Comet script is a content-addressed blob named by its sha256'
     $pinned = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'windows/packages/comet-vss-provider/Invoke-CometVssProvider.ps1')).Hash.ToLower()
     Assert ($task.file.sha256 -eq $pinned) 'Comet pin matches the comet-vss-provider package in this repo'
     Assert (($comet.wmiFilter.queries -join ' ') -match 'Manufacturer = "QEMU"' -and ($comet.wmiFilter.queries -join ' ') -match 'ProductType <> 1') 'WMI filter targets QEMU servers'

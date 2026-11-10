@@ -32,9 +32,9 @@ The same rules hold on every platform. The runner never runs code it has not has
 
 Rules:
 
-- **Empty hash:** the run exits 0 and downloads nothing. This is the off switch for a deployment.
+- **Empty hash:** the run exits 0 and downloads nothing. This is the off switch for a deployment. A URL with userinfo is refused first, even with an empty hash.
 - **Hash mismatch:** the run exits 1 and does not retry.
-- **URL with userinfo** (`https://user@host`): the run exits 1 before any download. `Invoke-RelianRunner` checks this first, even when the hash is empty. The job loader and both shell runners check the empty hash first, so an empty hash exits 0 there.
+- **URL with userinfo** (`https://user@host`, including an empty name `https://@host`): the run exits 1 before any download. All four entry points check this first, even when the hash is empty: the credential is already in the job's parameters, which NinjaOne keeps in its activity history. Inside a package, an empty pin still exits 0 before the installer URL is read.
 - **Retries:** three attempts, for a timeout, a connection or DNS failure, or HTTP 408, 429, 500, 502, 503, or 504. Any other HTTP status gets one attempt.
 - **Pin a commit, not a branch.** A branch moves, and the hash then fails.
 - **Get the hash** with `git show <commit>:<path> | sha256sum`.
@@ -265,7 +265,7 @@ For a security reviewer. This is what a pasted script can and cannot do.
 - **The two PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. They check each SHA256 before they run anything.
 - **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
 - **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
-- **Neither runner calls the NinjaOne API.** Some packages write a result to a NinjaOne device field (`feature-update`, `feature-upgrade`, `restart-notice`, `wu-policy`, `outlook-autocomplete`). `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. No package reads `relian_git_deploy_token`.
+- **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. No package reads `relian_git_deploy_token`.
 - **Read-only packages** are tested for it. The tests scan their source for write commands, or run them against stubs.
 - **Changing packages** say so in their header: what they change, what they back up first, and what they never do (reboot, start Setup, change firewall rules).
 - **Hash pins and the repo.** A pin names exact bytes. Moving `main` cannot change what a pinned device runs.
@@ -289,7 +289,7 @@ Rules for a package script:
 1. **The runner copies the script alone.** Inline every URL, hash, and setting. Do not read a sibling file.
 2. **Parameters are not `Mandatory`.** A mandatory parameter prompts when a test dot-sources the file. Take `DeploymentType`, `Action`, `PinVersion`, and your own names as plain strings.
 3. **Check the hash before you run a download.** Exit 1 on a mismatch, and do not retry. Exit 1 on a URL with userinfo. If the script downloads, carry the TLS guard line that the other packages carry.
-4. **Do not call NinjaOne** except to write a result to a device field.
+4. **Do not call NinjaOne.** Report through stdout and the exit code. `tests/windows/ninja-agnostic.Tests.ps1` fails on a custom-field read or write, `ninjarmm-cli`, the NinjaOne API, or the deploy token.
 5. **Keep it Windows PowerShell 5.1 compatible.**
 6. **Keep PowerShell output bounded.** NinjaOne truncates long output. Print one JSON line.
 

@@ -69,10 +69,12 @@ foreach ($bad in @('https://user@example.invalid/job.ps1', 'https://@example.inv
     Assert-Same $script:Downloads 0 'userinfo downloads'
 }
 
-# An empty hash exits 0 before the URL is read, even a URL with userinfo.
-Reset-Test
-Assert-Same (Invoke-RelianJob -ModuleUrl 'https://user@example.invalid/job.ps1' -ModuleSha256 '') 0 'blank hash wins over userinfo'
-Assert-Same $script:Downloads 0 'blank hash with userinfo downloads'
+# Userinfo is refused before the empty-hash off switch: the credential is already in the job's parameters.
+foreach ($bad in @('https://user@example.invalid/job.ps1', 'https://@example.invalid/job.ps1')) {
+    Reset-Test
+    Assert-Same (Invoke-RelianJob -ModuleUrl $bad -ModuleSha256 '') 1 "userinfo wins over blank hash [$bad]"
+    Assert-Same $script:Downloads 0 'blank hash with userinfo downloads'
+}
 
 # The hash names a file, so it must be exactly 64 lowercase hex characters. A URL must be absolute https.
 foreach ($bad in @('..\..\evil', '../../evil', 'abc', ($goodHash + 'a'), ($goodHash + "`n"), ('A' * 64))) {
@@ -261,6 +263,9 @@ Assert-Same $r.Code 1 'real process: missing URL name'
 $r = Invoke-Child @($loaderPath, '-ModuleUrl', 'https://someone@example.invalid/job.ps1', '-ModuleSha256', $goodHash)
 Assert-Same $r.Code 1 'real process: userinfo'
 Assert-True ("$($r.Out) $($r.Err)" -notmatch 'someone') 'real process: the URL is not printed'
+$r = Invoke-Child @($loaderPath, '-ModuleUrl', 'https://someone@example.invalid/job.ps1', '-ModuleSha256', '')
+Assert-Same $r.Code 1 'real process: userinfo wins over an empty hash'
+Assert-True ("$($r.Out) $($r.Err)" -notmatch 'someone') 'real process: empty hash, the URL is not printed'
 
 # The module's stdout and exit code reach Ninja through the loader, and a download error hides the URL.
 $wrapper = Join-Path $tempRoot 'wrapper.ps1'
@@ -295,6 +300,9 @@ Assert-Same $LASTEXITCODE 1 'CLM exit'
 Assert-True ("$clm" -match 'ConstrainedLanguage') 'CLM reason is named'
 & $pwshPath -NoProfile -NonInteractive -Command "`$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; & '$loaderPath' -ModuleUrl '$url' -ModuleSha256 ''; exit `$LASTEXITCODE" 2>$null | Out-Null
 Assert-Same $LASTEXITCODE 0 'an empty hash exits 0 before the CLM refusal'
+$clm = & $pwshPath -NoProfile -NonInteractive -Command "`$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'; & '$loaderPath' -ModuleUrl 'https://someone@example.invalid/job.ps1' -ModuleSha256 ''; exit `$LASTEXITCODE" 2>&1
+Assert-Same $LASTEXITCODE 1 'CLM: userinfo wins over an empty hash'
+Assert-True ("$clm" -match 'userinfo' -and "$clm" -notmatch 'someone') 'CLM: userinfo is named, the URL is not printed'
 $env:RELIAN_DEPLOY_TEST = '1'
 
 # Windows only: the real ACL calls on real NTFS, and Windows PowerShell 5.1.

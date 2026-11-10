@@ -544,7 +544,7 @@ test_empty_hash() {
     reset_stubs
     local log
     log="$(mktemp)"
-    url="$(url_user)"
+    url="$PKG_URL"
     invoke_runner "$log" --package-url "$url" --package-sha256 "" --action "$action" --pin-version 1.2.3
     if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
       fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
@@ -557,7 +557,7 @@ test_empty_hash() {
     begin "whitespace hash $action skips download"
     reset_stubs
     log="$(mktemp)"
-    url="$(url_user_pw)"
+    url="$PKG_URL"
     invoke_runner "$log" --package-url "$url" --package-sha256 $' \t ' --action "$action" --pin-version 1.2.3
     if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
       fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
@@ -633,13 +633,17 @@ test_userinfo() {
   assert_no_url "$url" || true
   ok
 
-  begin "blank hash with empty userinfo does not download"
+  # Userinfo is refused before the empty-hash off switch: the credential is already in the job's parameters.
+  begin "blank hash with empty userinfo is refused"
   reset_stubs
   log="$(mktemp)"
   url="$(url_empty_user)"
   invoke_runner "$log" --package-url "$url" --package-sha256 "" --action Install --pin-version 1.2.3
-  if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
+  if [[ "$LAST_CODE" -ne 1 || "$DOWNLOADS" -ne 0 ]]; then
     fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
+  fi
+  if [[ "$LAST_ERR" != "refusing a URL that contains userinfo" ]]; then
+    fail "stderr [$LAST_ERR]"
   fi
   if [[ -s "$log" ]]; then
     fail "package ran"
