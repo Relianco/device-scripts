@@ -154,6 +154,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 - `edge`: installs Microsoft Edge.
 - `everything`: installs Everything, the file search tool.
 - `firefox`: installs Mozilla Firefox.
+- `global-secure-access` — replace older clients with a verified Microsoft bundle. Install and Update only; see [package notes](windows/packages/global-secure-access/README.md).
 - `git`: installs Git for Windows.
 - `microsoft-365`: installs Microsoft 365 Apps with the Office Deployment Tool and a pinned `configuration.xml`. The Office payloads download at install time and are not pinned.
 - `notepadpp`: installs Notepad++.
