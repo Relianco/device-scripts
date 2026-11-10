@@ -32,9 +32,9 @@ The same rules hold on every platform. The runner never runs code it has not has
 
 Rules:
 
-- **Empty hash:** the run exits 0 and downloads nothing. This is the off switch for a deployment.
+- **Empty hash:** the run exits 0 and downloads nothing. This is the off switch for a deployment. A URL with userinfo is refused first, even with an empty hash.
 - **Hash mismatch:** the run exits 1 and does not retry.
-- **URL with userinfo** (`https://user@host`): the run exits 1 before any download. `Invoke-RelianRunner` checks this first, even when the hash is empty. The job loader and both shell runners check the empty hash first, so an empty hash exits 0 there.
+- **URL with userinfo** (`https://user@host`, including an empty name `https://@host`): the run exits 1 before any download. All four entry points check this first, even when the hash is empty: the credential is already in the job's parameters, which NinjaOne keeps in its activity history. Inside a package, an empty pin still exits 0 before the installer URL is read.
 - **Retries:** three attempts, for a timeout, a connection or DNS failure, or HTTP 408, 429, 500, 502, 503, or 504. Any other HTTP status gets one attempt.
 - **Pin a commit, not a branch.** A branch moves, and the hash then fails.
 - **Get the hash** with `git show <commit>:<path> | sha256sum`.
