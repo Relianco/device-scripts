@@ -115,7 +115,9 @@ function Read-GpePol {
         return $s
     }
     $out = [Collections.Generic.List[object]]::new()
-    while ($i + 2 -le $Bytes.Length -and $out.Count -lt $MaxEntries) {
+    $truncated = $false
+    while ($i + 2 -le $Bytes.Length) {
+        if ($out.Count -ge $MaxEntries) { $truncated = $true; break }
         if ($u.GetString($Bytes, $i, 2) -ne '[') { throw 'Registry.pol entry is malformed.' }
         $i += 2
         $key = . $readString; $i += 2
@@ -137,7 +139,15 @@ function Read-GpePol {
         elseif ($data -is [string]) { $data = Protect-GpeText $data }
         $out.Add([ordered]@{ key = (Protect-GpeText $key -Max 160); name = (Protect-GpeText $name -Max 80); type = $typeName; data = $data })
     }
-    return $out.ToArray()
+    return [pscustomobject]@{ entries = $out.ToArray(); truncated = $truncated }
+}
+
+# First $Max items; sets truncated on the report when more were dropped.
+function Limit-GpeItems {
+    param($Items, [int]$Max, $Report)
+    $all = @($Items)
+    if ($all.Count -gt $Max) { $Report['truncated'] = $true }
+    return @($all | Select-Object -First $Max)
 }
 
 function ConvertFrom-GpeInf {
@@ -178,7 +188,9 @@ function Find-GpeCpassword {
             if (-not (Test-Path -LiteralPath $dir)) { continue }
             foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue)) {
                 if (++$seen -gt $MaxFiles) { return [pscustomobject]@{ hits = $hits.ToArray(); complete = $false; files = $MaxFiles } }
-                $count = [regex]::Matches([IO.File]::ReadAllText($file.FullName), '(?i)\bcpassword="[^"]+"').Count
+                $text = [IO.File]::ReadAllText($file.FullName)
+                try { $count = @(([xml]$text).SelectNodes("//@*[local-name()='cpassword']") | Where-Object { $_.Value }).Count }
+                catch { $count = [regex]::Matches($text, '(?i)\bcpassword\s*=\s*("[^"]+"|''[^'']+'')').Count }
                 if ($count) {
                     $relative = $side + '\Preferences\' + $file.FullName.Substring($dir.Length).TrimStart('\', '/')
                     $hits.Add([pscustomobject]@{ id = ([string]$id).ToLowerInvariant(); file = $relative; count = $count })
@@ -209,7 +221,13 @@ function Read-GpeRsop {
         if ($reason) { $row.reason = $reason; $r.notApplied += $row } else { $row.order = $order; $r.applied += $row }
     }
     $r.applied = @($r.applied | Sort-Object { $_.order })
-    foreach ($e in @($computer.SelectNodes("*[local-name()='ExtensionStatus']"))) {
+    # Accept both a flat ExtensionStatus record and ExtensionStatus/Extension children.
+    $records = @()
+    foreach ($s in @($computer.SelectNodes("*[local-name()='ExtensionStatus']"))) {
+        $children = @($s.SelectNodes("*[local-name()='Extension']"))
+        if ($children.Count) { $records += $children } else { $records += $s }
+    }
+    foreach ($e in $records) {
         $code = 0; [void][int]::TryParse((& $node $e 'Error'), [ref]$code)
         $r.extensions += [ordered]@{ name = (& $node $e 'Name'); error = $code; status = (& $node $e 'LoggingStatus') }
     }
@@ -283,7 +301,7 @@ function Get-GpeSummary {
     $Report.domain = [ordered]@{ dnsRoot = [string]$d.DNSRoot; netbios = [string]$d.NetBIOSName; mode = [string]$d.DomainMode; pdc = [string]$d.PDCEmulator; forestMode = $null }
     if ($Context.Forest) { $Report.domain.forestMode = [string]$Context.Forest.ForestMode }
     try {
-        $Report.dcs = @(Get-ADDomainController -Filter * -ErrorAction Stop | Select-Object -First 20 | ForEach-Object {
+        $Report.dcs = @(Limit-GpeItems (Get-ADDomainController -Filter * -ErrorAction Stop) 20 $Report | ForEach-Object {
                 [ordered]@{ name = [string]$_.HostName; site = [string]$_.Site; os = [string]$_.OperatingSystem; gc = [bool]$_.IsGlobalCatalog; rodc = [bool]$_.IsReadOnly }
             })
     } catch { $Report.dcs = Get-GpeError $_ }
@@ -316,13 +334,15 @@ function Get-GpeGposSection {
         $g = $gpos[$i]; $id = $g.Id.ToString().ToLowerInvariant(); $v = Get-GpeVersionRow $g
         $row = [ordered]@{ name = (Protect-GpeText $g.DisplayName -Max 80); id = $id; owner = (Protect-GpeText ([string]$g.Owner) -Max 60); created = $g.CreationTime.ToString('yyyy-MM-dd'); modified = $g.ModificationTime.ToString('yyyy-MM-dd'); status = [string]$g.GpoStatus; ad = $v.ad; sysvol = $v.sysvol; mismatch = $v.mismatch; wmi = $null; links = @(); apply = @(); deny = 0 }
         if ($g.WmiFilter) { $row.wmi = Protect-GpeText ([string]$g.WmiFilter.Name) -Max 60 }
-        if ($links.ContainsKey($id)) { $row.links = @($links[$id] | Select-Object -First 6) }
+        if ($links.ContainsKey($id)) { $row.links = @($links[$id] | Select-Object -First 6); $row.linkCount = $links[$id].Count }
         if ($cp.ContainsKey($id)) { $row.cpassword = $cp[$id] }
         if ($script:GpeClock.Elapsed.TotalSeconds -gt 40) { $row.apply = 'timeBudget' }
         else {
             try {
                 $perm = @(Get-GPPermission -Guid $g.Id -All -Server $Context.Server -ErrorAction Stop)
-                $row.apply = @($perm | Where-Object { [string]$_.Permission -eq 'GpoApply' -and -not $_.Denied } | Select-Object -First 4 | ForEach-Object { Protect-GpeText ([string]$_.Trustee.Name) -Max 60 })
+                $applyAll = @($perm | Where-Object { [string]$_.Permission -eq 'GpoApply' -and -not $_.Denied })
+                $row.apply = @($applyAll | Select-Object -First 4 | ForEach-Object { Protect-GpeText ([string]$_.Trustee.Name) -Max 60 })
+                $row.applyCount = $applyAll.Count
                 $row.deny = @($perm | Where-Object { $_.Denied }).Count
             } catch { $row.apply = 'unavailable' }
         }
@@ -385,18 +405,18 @@ function Get-GpeGpoSection {
         $polPath = Join-Path $dir "$side\Registry.pol"
         $field = $side.ToLowerInvariant() + 'Pol'
         if (-not [IO.File]::Exists($polPath)) { $Report[$field] = @(); continue }
-        try { $Report[$field] = @(Read-GpePol ([IO.File]::ReadAllBytes($polPath))) } catch { $Report[$field] = @{ status = 'invalid'; error = $_.Exception.Message } }
+        try { $pol = Read-GpePol ([IO.File]::ReadAllBytes($polPath)); $Report[$field] = @($pol.entries); if ($pol.truncated) { $Report['truncated'] = $true } } catch { $Report[$field] = @{ status = 'invalid'; error = $_.Exception.Message } }
     }
     $inf = Read-GpeText (Join-Path $dir 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf')
     $Report.securityTemplate = [ordered]@{}
     if ($null -ne $inf) {
         $sections = ConvertFrom-GpeInf $inf
-        foreach ($name in @($sections.Keys | Where-Object { $_ -ne 'Unicode' -and $_ -ne 'Version' })) { $Report.securityTemplate[$name] = @($sections[$name] | Select-Object -First 40 | ForEach-Object { Protect-GpeText $_ -Max 160 }) }
+        foreach ($name in @($sections.Keys | Where-Object { $_ -ne 'Unicode' -and $_ -ne 'Version' })) { $Report.securityTemplate[$name] = @(Limit-GpeItems $sections[$name] 40 $Report | ForEach-Object { Protect-GpeText $_ -Max 160 }) }
     }
     $Report.audit = @()
     $csv = Read-GpeText (Join-Path $dir 'Machine\Microsoft\Windows NT\Audit\audit.csv')
     if ($null -ne $csv) {
-        $Report.audit = @($csv -split '\r?\n' | Where-Object { $_ -and -not $_.StartsWith('Machine Name,') } | Select-Object -First 60 | ForEach-Object {
+        $Report.audit = @(Limit-GpeItems @($csv -split '\r?\n' | Where-Object { $_ -and -not $_.StartsWith('Machine Name,') }) 60 $Report | ForEach-Object {
                 $f = $_.Split(','); if ($f.Count -ge 7) { [ordered]@{ subcategory = (Protect-GpeText $f[2] -Max 80); setting = (Protect-GpeText $f[4] -Max 40); value = $f[6] } }
             })
     }
@@ -407,7 +427,7 @@ function Get-GpeGpoSection {
     foreach ($side in @('Machine', 'User')) {
         $pref = Join-Path $dir "$side\Preferences"
         if (-not (Test-Path -LiteralPath $pref)) { continue }
-        $Report.preferences += @(Get-ChildItem -LiteralPath $pref -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object {
+        $Report.preferences += @(Limit-GpeItems @(Get-ChildItem -LiteralPath $pref -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue) 30 $Report | ForEach-Object {
                 $rel = $side + '\Preferences\' + $_.FullName.Substring($pref.Length).TrimStart('\', '/')
                 $n = 0; if ($hits.ContainsKey($rel)) { $n = $hits[$rel] }
                 [ordered]@{ file = (Protect-GpeText $rel -Max 120); sizeBytes = $_.Length; cpassword = $n }

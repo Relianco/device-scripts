@@ -75,7 +75,7 @@ function Add-FakeGpo {
     $script:ad[$Id.ToString()] = @{ versionNumber = 0; gPCMachineExtensionNames = '' }
     $dir = Join-Path $Context.PoliciesPath ('{' + $Id.ToString().ToUpper() + '}')
     [void](New-Item -ItemType Directory -Path $dir -Force)
-    [IO.File]::WriteAllText((Join-Path $dir 'GPT.INI'), "[General]`r`nVersion=0`r`n")
+    [IO.File]::WriteAllText((Join-Path $dir 'GPT.INI'), "[General]`r`nVersion=0`r`ndisplayName=New Group Policy Object`r`n")
     return $script:gpos[$Name]
 }
 function Find-FakeGpo { param($Guid) foreach ($g in $script:gpos.Values) { if ($g.Id -eq [guid]$Guid) { return $g } } }
@@ -83,29 +83,33 @@ function Step-FakeVersion {
     param($Context, [guid]$Id)
     $script:ad[$Id.ToString()].versionNumber = [int]$script:ad[$Id.ToString()].versionNumber + 1
     $ini = Join-Path $Context.PoliciesPath ('{' + $Id.ToString().ToUpper() + '}\GPT.INI')
-    [IO.File]::WriteAllText($ini, "[General]`r`nVersion=$($script:ad[$Id.ToString()].versionNumber)`r`n")
+    [IO.File]::WriteAllText($ini, "[General]`r`nVersion=$($script:ad[$Id.ToString()].versionNumber)`r`ndisplayName=New Group Policy Object`r`n")
 }
 function Import-Module { param([Parameter(ValueFromRemainingArguments)]$Rest) }
 function Get-GPO {
-    param($Name, $Guid, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Name, $Guid, $Server)
     $script:calls.Add('Get-GPO')
     if ($Guid) { $g = Find-FakeGpo $Guid } elseif ($script:gpos.ContainsKey($Name)) { $g = $script:gpos[$Name] } else { $g = $null }
     if (-not $g) { throw [System.ArgumentException]::new('not found') }
     return $g
 }
 function New-GPO {
-    param($Name, $Comment, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Name, $Comment, $Server)
     $script:calls.Add('New-GPO')
     return (Add-FakeGpo -Context $script:ctx -Name $Name -Comment $Comment)
 }
 function Get-GPRegistryValue {
-    param($Guid, $Key, $ValueName, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Guid, $Key, $ValueName, $Server)
     $k = "$Guid|$Key|$ValueName"
     if (-not $script:regValues.ContainsKey($k)) { throw [System.ArgumentException]::new('missing value') }
     return $script:regValues[$k]
 }
 function Set-GPRegistryValue {
-    param($Guid, $Key, $ValueName, $Type, $Value, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Guid, $Key, $ValueName, $Type, $Value, $Server)
     $script:setCount++
     if ($script:failSetAfter -ge 0 -and $script:setCount -gt $script:failSetAfter) { throw 'simulated write failure' }
     $script:calls.Add("Set-GPRegistryValue $Key\$ValueName")
@@ -115,37 +119,42 @@ function Set-GPRegistryValue {
     $o.gPCMachineExtensionNames = Add-GpbExtensionNames -Current $o.gPCMachineExtensionNames -Pairs @($reg)
 }
 function Backup-GPO {
-    param($Guid, $Path, $Comment, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Guid, $Path, $Comment, $Server)
     $script:calls.Add('Backup-GPO')
     # Non-terminating, as a binary cmdlet reports most failures.
     if ($script:backupFails) { Write-Error 'backup failed'; return }
     Assert (Test-Path -LiteralPath $Path) 'backup folder exists before Backup-GPO'
     return [pscustomobject]@{ Id = [guid]'11111111-2222-3333-4444-555555555555' }
 }
-function Restore-GPO { param($BackupId, $Path, $Server, $ErrorAction) $script:calls.Add("Restore-GPO $BackupId") }
-function Remove-GPO { param($Guid, $Server, $ErrorAction) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName) }
+function Restore-GPO { [CmdletBinding()] param($BackupId, $Path, $Server) $script:calls.Add("Restore-GPO $BackupId") }
+function Remove-GPO { [CmdletBinding()] param($Guid, $Server) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName) }
 function Get-ADObject {
-    param($Identity, $Properties, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Identity, $Properties, $Server)
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     $o = $script:ad[$id]
     return [pscustomobject]@{ versionNumber = $o.versionNumber; gPCMachineExtensionNames = $o.gPCMachineExtensionNames }
 }
 function Set-ADObject {
-    param($Identity, $Replace, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Identity, $Replace, $Server)
     $script:calls.Add('Set-ADObject')
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     foreach ($k in $Replace.Keys) { $script:ad[$id][$k] = $Replace[$k] }
 }
 function Get-GPInheritance {
-    param($Target, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Target, $Server)
     return [pscustomobject]@{ GpoLinks = @($script:links.Values | Where-Object { $_.Target -eq $Target }) }
 }
 function New-GPLink {
-    param($Guid, $Target, $LinkEnabled, $Server, $ErrorAction)
+    [CmdletBinding()]
+    param($Guid, $Target, $LinkEnabled, $Server)
     $script:calls.Add("New-GPLink $LinkEnabled")
     $script:links["$Guid|$Target"] = [pscustomobject]@{ GpoId = [guid]$Guid; Target = $Target; Enabled = ($LinkEnabled -eq 'Yes') }
 }
-function Set-GPLink { param($Guid, $Target, $LinkEnabled, $Server, $ErrorAction) $script:calls.Add("Set-GPLink $LinkEnabled") }
+function Set-GPLink { [CmdletBinding()] param($Guid, $Target, $LinkEnabled, $Server) $script:calls.Add("Set-GPLink $LinkEnabled") }
 function Protect-GpbBackupRoot { param($Path) $script:calls.Add('Protect-GpbBackupRoot') }
 function Get-Writes { return ,@($script:calls | Where-Object { $_ -notmatch '^(Get-GPO)$' }) }
 
@@ -194,6 +203,7 @@ try {
     $iniVersion = [long]([regex]::Match([IO.File]::ReadAllText((Join-Path $gpoDir 'GPT.INI')), 'Version=(\d+)').Groups[1].Value)
     Assert ([long]$adObj.versionNumber -eq $iniVersion -and $iniVersion -eq (@($def.registry).Count + 1)) 'AD and GPT.INI versions match after one security bump'
     Assert ($adObj.gPCMachineExtensionNames -eq ($reg + $sec + $aud)) 'security and audit CSEs registered in order'
+    Assert ([IO.File]::ReadAllText((Join-Path $gpoDir 'GPT.INI')) -match "Version=$iniVersion`r`ndisplayName=New Group Policy Object`r`n") 'GPT.INI version replaced without touching the next line'
     Assert (-not ($script:calls -contains 'Backup-GPO')) 'new GPO has nothing to back up'
 
     # Second run is idempotent.

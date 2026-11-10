@@ -400,7 +400,8 @@ function Get-GpbPublishState {
     $iniPath = Join-Path (Get-GpbGpoDir $Context $Gpo) 'GPT.INI'
     $ini = ''
     if ([IO.File]::Exists($iniPath)) { $ini = [Text.Encoding]::Default.GetString([IO.File]::ReadAllBytes($iniPath)) }
-    $m = [regex]::Match($ini, '(?im)^\s*Version\s*=\s*(\d+)\s*$')
+    # Spaces and tabs only: \s would reach into the next line.
+    $m = [regex]::Match($ini, '(?im)^[ \t]*Version[ \t]*=[ \t]*(\d+)[ \t]*\r?$')
     $iniVersion = [long]0
     if ($m.Success) { $iniVersion = [long]$m.Groups[1].Value }
     return @{ dn = $dn; ext = $ext; adVersion = $adVersion; iniPath = $iniPath; ini = $ini; match = $m; iniVersion = $iniVersion }
@@ -411,7 +412,7 @@ function Update-GpbVersion {
     $st = Get-GpbPublishState -Context $Context -Gpo $Gpo
     $dn = $st.dn; $ext = $st.ext; $iniPath = $st.iniPath; $ini = $st.ini; $m = $st.match
     $next = Get-GpbNextVersion -AdVersion $st.adVersion -IniVersion $st.iniVersion
-    if ($m.Success) { $ini = $ini.Substring(0, $m.Index) + "Version=$next" + $ini.Substring($m.Index + $m.Length) }
+    if ($m.Success) { $g = $m.Groups[1]; $ini = $ini.Substring(0, $g.Index) + [string]$next + $ini.Substring($g.Index + $g.Length) }
     elseif ($ini -match '(?im)^\[General\]\s*$') { $ini = [regex]::Replace($ini, '(?im)^\[General\]\s*$', "[General]`r`nVersion=$next", 1) }
     else { $ini = "[General]`r`nVersion=$next`r`n" + $ini }
     # SYSVOL first, then AD: a client that sees the new AD version must find the new files.

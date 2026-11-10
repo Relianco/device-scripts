@@ -44,7 +44,10 @@ $pol = [byte[]](0x50, 0x52, 0x65, 0x67, 1, 0, 0, 0)
 $pol += New-PolEntry 'Software\Policies\Microsoft\Windows NT\Printers' 'RegisterSpoolerRemoteRpcEndPoint' 4 ([BitConverter]::GetBytes([uint32]2))
 $pol += New-PolEntry 'Software\Policies\Test' 'Path' 1 ([Text.Encoding]::Unicode.GetBytes('C:\Logs' + [char]0))
 $pol += New-PolEntry 'Software\Policies\Test' 'DefaultPassword' 1 ([Text.Encoding]::Unicode.GetBytes($secret + [char]0))
-$entries = @(Read-GpePol $pol)
+$parsedPol = Read-GpePol $pol
+$entries = @($parsedPol.entries)
+Assert (-not $parsedPol.truncated) 'Registry.pol read whole'
+Assert ((Read-GpePol $pol -MaxEntries 2).truncated) 'Registry.pol cap reported'
 Assert ($entries.Count -eq 3 -and $entries[0].type -eq 'REG_DWORD' -and $entries[0].data -eq 2) 'dword entry'
 Assert ($entries[1].data -eq 'C:\Logs') 'string entry'
 Assert (($entries | ConvertTo-Json -Compress) -notmatch $secret) 'password policy value redacted'
@@ -65,6 +68,8 @@ Assert ($rsop.applied.Count -eq 1 -and $rsop.applied[0].name -eq 'Default Domain
 Assert (@($rsop.notApplied | Where-Object { $_.name -eq 'Filtered' -and $_.reason -eq 'wmiFilter' }).Count -eq 1) 'WMI-filtered GPO'
 Assert (@($rsop.notApplied | Where-Object { $_.name -eq 'Denied' -and $_.reason -eq 'securityFilter' }).Count -eq 1) 'security-filtered GPO'
 Assert ($rsop.extensions[0].name -eq 'Security' -and $rsop.extensions[0].error -eq 1332) 'extension error'
+$nested = Read-GpeRsop ([xml]'<Rsop><ComputerResults><ExtensionStatus><Extension><Name>Registry</Name><Error>0</Error><LoggingStatus>Complete</LoggingStatus></Extension><Extension><Name>Security</Name><Error>5</Error><LoggingStatus>Complete</LoggingStatus></Extension></ExtensionStatus></ComputerResults></Rsop>')
+Assert ($nested.extensions.Count -eq 2 -and $nested.extensions[1].name -eq 'Security' -and $nested.extensions[1].error -eq 5) 'nested Extension records read'
 
 # Fake SYSVOL and domain.
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
@@ -154,6 +159,16 @@ try {
     [void](New-Item -ItemType Directory -Path (Join-Path $gppDir 'User\Preferences\Drives') -Force)
     [IO.File]::WriteAllText((Join-Path $gppDir 'User\Preferences\Drives\Drives.xml'), '<Drives/>')
     $capped = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId) -MaxFiles 1
+    # Review: valid XML with single quotes or spaces around = is still counted.
+    $altId = [guid]::NewGuid(); $altDir = New-GpoDir $altId
+    [void](New-Item -ItemType Directory -Path (Join-Path $altDir 'Machine\Preferences\Services') -Force)
+    [IO.File]::WriteAllText((Join-Path $altDir 'Machine\Preferences\Services\Services.xml'), "<Services><S><Properties cpassword = '$secret'/></S><S><Properties cpassword=`"`"/></S></Services>")
+    $alt = Find-GpeCpassword -PoliciesPath $policies -Ids @($altId)
+    Assert ($alt.hits.Count -eq 1 -and $alt.hits[0].count -eq 1 -and ($alt | ConvertTo-Json -Compress) -notmatch $secret) 'single-quoted cpassword counted, empty one ignored'
+    # Review: a fixed list limit sets truncated.
+    $lim = [ordered]@{}
+    $kept = @(Limit-GpeItems -Items @(1, 2, 3) -Max 2 -Report $lim)
+    Assert ($kept.Count -eq 2 -and $lim.truncated) 'list limit marks report truncated'
     Assert (-not $capped.complete) 'capped cpassword scan marked incomplete'
     Assert ($s.cpasswordScan.complete -eq $true) 'summary reports scan completeness'
     # Review: GPO versions come from the same DC as the SYSVOL path.
