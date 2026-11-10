@@ -318,7 +318,7 @@ function Get-GpeSummary {
     $mismatch = @($gpos | Where-Object { (Get-GpeVersionRow $_).mismatch })
     $Report.gpoCount = $gpos.Count
     $Report.allSettingsDisabled = @($gpos | Where-Object { [string]$_.GpoStatus -eq 'AllSettingsDisabled' }).Count
-    $Report.versionMismatches = @($mismatch | Select-Object -First 15 | ForEach-Object { $v = Get-GpeVersionRow $_; [ordered]@{ name = (Protect-GpeText $_.DisplayName -Max 80); id = [string]$_.Id; ad = $v.ad; sysvol = $v.sysvol } })
+    $Report.versionMismatches = @(Limit-GpeItems $mismatch 15 $Report | ForEach-Object { $v = Get-GpeVersionRow $_; [ordered]@{ name = (Protect-GpeText $_.DisplayName -Max 80); id = [string]$_.Id; ad = $v.ad; sysvol = $v.sysvol } })
     $Report.versionMismatchCount = $mismatch.Count
     $names = @{}; foreach ($g in $gpos) { $names[$g.Id.ToString().ToLowerInvariant()] = $g.DisplayName }
     $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })

@@ -162,6 +162,12 @@ try {
     [void](New-Item -ItemType Directory -Path (Join-Path $gppDir 'User\Preferences\Drives') -Force)
     [IO.File]::WriteAllText((Join-Path $gppDir 'User\Preferences\Drives\Drives.xml'), '<Drives/>')
     $capped = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId) -MaxFiles 1
+    # Review: more than 15 mismatches sets truncated.
+    $savedGpos = $script:fakeGpos
+    $script:fakeGpos = @(1..16 | ForEach-Object { New-FakeGpo ([guid]::NewGuid()) "Mismatch $_" 2 1 })
+    $m = Invoke-GpoEvidence -Context $ctx | ConvertFrom-Json
+    $script:fakeGpos = $savedGpos
+    Assert ($m.versionMismatchCount -eq 16 -and @($m.versionMismatches).Count -eq 15 -and $m.truncated) 'mismatch list cap marks truncated'
     # Review: an unreadable Preferences subtree is not a clean result.
     & {
         function Get-ChildItem { [CmdletBinding()] param($LiteralPath, [switch]$Recurse, $Filter, [switch]$File) Write-Error 'Access to the path is denied.' }
