@@ -1,0 +1,535 @@
+<#
+.SYNOPSIS
+    Applies a named, embedded Group Policy definition to a Relian-owned GPO.
+.DESCRIPTION
+    Runs through the Relian deploy runner (NinjaOne script 374) as SYSTEM on the
+    PDC emulator, Windows PowerShell 5.1, with the GroupPolicy and ActiveDirectory
+    modules. The runner passes DeploymentType, Action and PinVersion, then each
+    PackageArguments pair as -Name value:
+
+      Definition          id of an embedded definition (required)
+      Apply               "true" makes changes. Anything else is plan-only.
+      LinkTo              OU distinguished name inside this domain to link the GPO to
+      LinkEnabled         "true" enables the link. Default: the link is created disabled.
+      AllowDefaultPolicy  "true" allows a definition that targets the Default Domain
+                          Policy or Default Domain Controllers Policy, and only when the
+                          definition itself sets allowDefaultPolicy.
+
+    Install, Update, Repair and Reinstall compare the GPO with the definition and print
+    the differences. With Apply=true they create the GPO (description carries the
+    marker [relian-gpo-baseline:<id>]) or, for an existing GPO, run Backup-GPO to
+    %ProgramData%\Relian\gpo-backups\{GPO GUID} first, then write only the differing
+    values. A GPO with the same name but without the marker is never touched.
+
+    Uninstall with Apply=true backs up and removes the GPO this package created, or,
+    for an allowed default policy, restores the backup taken before the last change.
+
+    Mechanism (Microsoft documentation):
+    - Registry policy: Set-GPRegistryValue, which writes Registry.pol and updates the
+      GPO version and extension list itself.
+      https://learn.microsoft.com/en-us/powershell/module/grouppolicy/set-gpregistryvalue
+    - Security template (GptTmpl.inf, UTF-16LE with BOM) and advanced audit (audit.csv):
+      the GroupPolicy module has no cmdlet. Files are written in the GPO's SYSVOL folder
+      as [MS-GPSB] and [MS-GPAC] define them, the computer half (low 16 bits) of
+      versionNumber is raised in both GPT.INI and AD, and the CSE/tool GUID pair is added
+      to gPCMachineExtensionNames, sorted by CSE GUID, as [MS-GPOL] requires. Without the
+      pair, clients skip the settings.
+      https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpol/
+      https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpsb/55bb803e-b35f-4ce8-b558-4c1e92ad77a4
+      https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpac/ac9c8234-d2e8-455d-be76-f84244dd1e58
+      Import-GPO from a generated backup was rejected: it replaces every setting in the
+      target and depends on the undocumented backup XML layout.
+    Writes go to the PDC emulator (the GPMC default), and only when this device is it.
+
+    Output is one line of compact JSON (<= 8,000 UTF-8 bytes). Exit 0 for a plan, no
+    change or a complete apply; exit 1 for a refusal, a failure, or a partial apply, with
+    the values left in "left".
+#>
+[CmdletBinding()]
+param(
+    [string]$DeploymentType,
+    [string]$Action,
+    [string]$PinVersion,
+    [string]$Definition = '',
+    [string]$Apply = '',
+    [string]$LinkTo = '',
+    [string]$LinkEnabled = '',
+    [string]$AllowDefaultPolicy = ''
+)
+$ProgressPreference = 'SilentlyContinue'
+
+$GpbDefaultPolicies = @{
+    '31b2f340-016d-11d2-945f-00c04fb984f9' = 'Default Domain Policy'
+    '6ac1786c-016f-11d2-945f-00c04fb984f9' = 'Default Domain Controllers Policy'
+}
+$GpbSecurityCse = '[{827D319E-6EAC-11D2-A4EA-00C04F79F83A}{803E14A0-B4FB-11D0-A0D0-00A0C90F574B}]'
+$GpbAuditCse = '[{F3CCC681-B74C-4060-9F26-CD84525DCA2A}{0F3F3735-573D-9804-99E4-AB2A69BA5FD4}]'
+$GpbAuditHeader = 'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value'
+
+# Embedded definitions: the package hash pins them. Values come from the CIS Microsoft
+# Windows Server 2022 Benchmark v5.1.0 Audit sections (cis = recommendation id).
+$GpbDefinitionJson = @'
+[
+ {
+  "id": "cis-ws2022-dc-low-risk",
+  "gpoName": "Relian CIS - Domain Controllers (low risk)",
+  "description": "CIS WS2022 v5.1.0 low-risk group for domain controllers: logging, audit-only NTLM, LDAP and SMBv1 evidence, Print Spooler off. Link to the Domain Controllers OU.",
+  "allowDefaultPolicy": false,
+  "registry": [
+   {"cis": "18.7.1", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows NT\\Printers", "valueName": "RegisterSpoolerRemoteRpcEndPoint", "type": "DWord", "value": 2},
+   {"cis": "9.1.4", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\DomainProfile\\Logging", "valueName": "LogFilePath", "type": "String", "value": "%SystemRoot%\\System32\\logfiles\\firewall\\domainfw.log"},
+   {"cis": "9.1.5", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\DomainProfile\\Logging", "valueName": "LogFileSize", "type": "DWord", "value": 16384},
+   {"cis": "9.1.6", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\DomainProfile\\Logging", "valueName": "LogDroppedPackets", "type": "DWord", "value": 1},
+   {"cis": "9.1.7", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\DomainProfile\\Logging", "valueName": "LogSuccessfulConnections", "type": "DWord", "value": 1},
+   {"cis": "9.2.4", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PrivateProfile\\Logging", "valueName": "LogFilePath", "type": "String", "value": "%SystemRoot%\\System32\\logfiles\\firewall\\privatefw.log"},
+   {"cis": "9.2.5", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PrivateProfile\\Logging", "valueName": "LogFileSize", "type": "DWord", "value": 16384},
+   {"cis": "9.2.6", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PrivateProfile\\Logging", "valueName": "LogDroppedPackets", "type": "DWord", "value": 1},
+   {"cis": "9.2.7", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PrivateProfile\\Logging", "valueName": "LogSuccessfulConnections", "type": "DWord", "value": 1},
+   {"cis": "9.3.6", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PublicProfile\\Logging", "valueName": "LogFilePath", "type": "String", "value": "%SystemRoot%\\System32\\logfiles\\firewall\\publicfw.log"},
+   {"cis": "9.3.7", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PublicProfile\\Logging", "valueName": "LogFileSize", "type": "DWord", "value": 16384},
+   {"cis": "9.3.8", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PublicProfile\\Logging", "valueName": "LogDroppedPackets", "type": "DWord", "value": 1},
+   {"cis": "9.3.9", "key": "HKLM\\Software\\Policies\\Microsoft\\WindowsFirewall\\PublicProfile\\Logging", "valueName": "LogSuccessfulConnections", "type": "DWord", "value": 1},
+   {"cis": "18.10.26.1.1", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\Application", "valueName": "Retention", "type": "String", "value": "0"},
+   {"cis": "18.10.26.1.2", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\Application", "valueName": "MaxSize", "type": "DWord", "value": 32768},
+   {"cis": "18.10.26.2.1", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\Security", "valueName": "Retention", "type": "String", "value": "0"},
+   {"cis": "18.10.26.2.2", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\Security", "valueName": "MaxSize", "type": "DWord", "value": 196608},
+   {"cis": "18.10.26.3.1", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\Setup", "valueName": "Retention", "type": "String", "value": "0"},
+   {"cis": "18.10.26.3.2", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\Setup", "valueName": "MaxSize", "type": "DWord", "value": 32768},
+   {"cis": "18.10.26.4.1", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\System", "valueName": "Retention", "type": "String", "value": "0"},
+   {"cis": "18.10.26.4.2", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\EventLog\\System", "valueName": "MaxSize", "type": "DWord", "value": 32768},
+   {"cis": "18.10.88.1", "key": "HKLM\\Software\\Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging", "valueName": "EnableScriptBlockLogging", "type": "DWord", "value": 1},
+   {"cis": "none: LDAP event 2889", "key": "HKLM\\System\\CurrentControlSet\\Services\\NTDS\\Diagnostics", "valueName": "16 LDAP Interface Events", "type": "DWord", "value": 2},
+   {"cis": "none: SMBv1 event 3000", "key": "HKLM\\System\\CurrentControlSet\\Services\\LanmanServer\\Parameters", "valueName": "AuditSmb1Access", "type": "DWord", "value": 1}
+  ],
+  "security": [
+   {"cis": "2.3.2.1", "section": "Registry Values", "key": "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\SCENoApplyLegacyAuditPolicy", "value": "4,1"},
+   {"cis": "2.3.11.11", "section": "Registry Values", "key": "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\AuditReceivingNTLMTraffic", "value": "4,2"},
+   {"cis": "2.3.11.12", "section": "Registry Values", "key": "MACHINE\\System\\CurrentControlSet\\Services\\Netlogon\\Parameters\\AuditNTLMInDomain", "value": "4,7"},
+   {"cis": "2.3.11.13", "section": "Registry Values", "key": "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\MSV1_0\\RestrictSendingNTLMTraffic", "value": "4,1"},
+   {"cis": "5.1", "section": "Service General Setting", "key": "Spooler", "value": "4,\"\""}
+  ],
+  "audit": [
+   {"cis": "17.4.1", "subcategory": "Audit Directory Service Access", "guid": "{0cce923b-69ae-11d9-bed3-505054503030}", "setting": 3},
+   {"cis": "17.4.2", "subcategory": "Audit Directory Service Changes", "guid": "{0cce923c-69ae-11d9-bed3-505054503030}", "setting": 3},
+   {"cis": "17.8.1", "subcategory": "Audit Sensitive Privilege Use", "guid": "{0cce9228-69ae-11d9-bed3-505054503030}", "setting": 1}
+  ]
+ }
+]
+'@
+
+function Get-GpbDefinition {
+    param([string]$Id)
+    # No @(): Windows PowerShell 5.1 emits a JSON array as one object, and foreach enumerates it.
+    $all = $GpbDefinitionJson | ConvertFrom-Json
+    foreach ($d in $all) { if ($d.id -eq $Id) { return $d } }
+    return $null
+}
+
+function Protect-GpbText {
+    param([string]$Text, [int]$Max = 300)
+    if ($Text -match '(?i)password|cpassword|secret|token|credential|bearer') { return '[sensitive line omitted]' }
+    $t = ($Text -replace '[\x00-\x1F]', ' ').Trim()
+    if ($t.Length -gt $Max) { return $t.Substring(0, $Max) + '[clipped]' }
+    return $t
+}
+
+function Find-GpbLargestArray {
+    param($Value)
+    $best = $null
+    if ($Value -is [Collections.IDictionary]) {
+        foreach ($k in @($Value.Keys)) {
+            $item = $Value[$k]
+            if ($item -is [array] -and $item.Count -gt 0 -and ($null -eq $best -or $item.Count -gt $best.Count)) { $best = @{ Container = $Value; Key = $k; Count = $item.Count } }
+            $inner = Find-GpbLargestArray $item
+            if ($inner -and ($null -eq $best -or $inner.Count -gt $best.Count)) { $best = $inner }
+        }
+    } elseif ($Value -is [array]) {
+        foreach ($item in $Value) {
+            $inner = Find-GpbLargestArray $item
+            if ($inner -and ($null -eq $best -or $inner.Count -gt $best.Count)) { $best = $inner }
+        }
+    }
+    return $best
+}
+
+# Drops entries from the longest list until the JSON fits, and says so with "truncated".
+function ConvertTo-GpbBoundedJson {
+    param($Report, [int]$MaxBytes = 8000)
+    $json = $Report | ConvertTo-Json -Depth 8 -Compress
+    while ([Text.Encoding]::UTF8.GetByteCount($json) -gt $MaxBytes) {
+        $Report['truncated'] = $true
+        $largest = Find-GpbLargestArray $Report
+        if (-not $largest) { throw 'Report metadata exceeds the output budget.' }
+        $keep = $largest.Count - [Math]::Max(1, [int][Math]::Ceiling($largest.Count / 8))
+        $largest.Container[$largest.Key] = @($largest.Container[$largest.Key] | Select-Object -First $keep)
+        $json = $Report | ConvertTo-Json -Depth 8 -Compress
+    }
+    return $json
+}
+
+# ---- GPT.INI / AD version and extension names ([MS-GPOL]) ----
+
+# versionNumber: high 16 bits user, low 16 bits computer. Each half takes the larger of
+# AD and GPT.INI so a store that is ahead is never moved back.
+function Get-GpbNextVersion {
+    param([long]$AdVersion, [long]$IniVersion)
+    $mask = [long]4294967295
+    $a = $AdVersion -band $mask
+    $i = $IniVersion -band $mask
+    $user = [Math]::Max(($a -shr 16), ($i -shr 16))
+    $computer = [Math]::Max(($a -band 65535), ($i -band 65535)) + 1
+    if ($computer -gt 65535) { throw 'GPO computer version would overflow 16 bits.' }
+    return [long](($user -shl 16) -bor $computer)
+}
+
+# AD stores versionNumber as a signed 32-bit integer.
+function ConvertTo-GpbAdVersion {
+    param([long]$Version)
+    if ($Version -gt 2147483647) { return [int]($Version - 4294967296) }
+    return [int]$Version
+}
+
+function Add-GpbExtensionNames {
+    param([AllowEmptyString()][string]$Current, [string[]]$Pairs)
+    $map = @{}
+    foreach ($text in @($Current) + @($Pairs)) {
+        foreach ($m in [regex]::Matches([string]$text, '\[(\{[0-9A-Fa-f-]{36}\})((?:\{[0-9A-Fa-f-]{36}\})*)\]')) {
+            $cse = $m.Groups[1].Value.ToUpperInvariant()
+            if (-not $map.ContainsKey($cse)) { $map[$cse] = [Collections.Generic.List[string]]::new() }
+            foreach ($t in [regex]::Matches($m.Groups[2].Value, '\{[0-9A-Fa-f-]{36}\}')) {
+                $tool = $t.Value.ToUpperInvariant()
+                if (-not $map[$cse].Contains($tool)) { $map[$cse].Add($tool) }
+            }
+        }
+    }
+    # Clients stop at the first CSE GUID out of order, so sort ordinally.
+    $keys = [string[]]@($map.Keys)
+    [Array]::Sort($keys, [StringComparer]::OrdinalIgnoreCase)
+    $sb = [Text.StringBuilder]::new()
+    foreach ($cse in $keys) {
+        $tools = $map[$cse].ToArray()
+        [Array]::Sort($tools, [StringComparer]::OrdinalIgnoreCase)
+        [void]$sb.Append('[' + $cse + ($tools -join '') + ']')
+    }
+    return $sb.ToString()
+}
+
+# ---- GptTmpl.inf ([MS-GPSB]) ----
+
+$GpbKeyedSections = @('Unicode', 'Version', 'System Access', 'Kerberos Policy', 'Event Audit', 'Registry Values', 'Privilege Rights', 'System Log', 'Security Log', 'Application Log')
+
+# Sections -> keys -> right-hand side. Lines in other sections are kept verbatim.
+function ConvertFrom-GpbInf {
+    param([AllowEmptyString()][string]$Text)
+    $sections = [ordered]@{}
+    $current = $null
+    foreach ($line in ($Text -split '\r?\n')) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith(';')) { continue }
+        if ($t -match '^\[(.+)\]$') {
+            $current = $Matches[1]
+            if (-not $sections.Contains($current)) { $sections[$current] = [ordered]@{} }
+            continue
+        }
+        if ($null -eq $current) { continue }
+        if ($current -eq 'Service General Setting' -and $t -match '^"?([^",]+)"?\s*,(.*)$') { $sections[$current][$Matches[1]] = $Matches[2].Trim() }
+        elseif ($GpbKeyedSections -contains $current -and $t -match '^([^=]+?)\s*=\s*(.*)$') { $sections[$current][$Matches[1]] = $Matches[2] }
+        else { $sections[$current][$t] = $null }
+    }
+    return $sections
+}
+
+function ConvertTo-GpbInf {
+    param($Sections)
+    if (-not $Sections.Contains('Unicode')) { $Sections['Unicode'] = [ordered]@{ Unicode = 'yes' } }
+    if (-not $Sections.Contains('Version')) { $Sections['Version'] = [ordered]@{ signature = '"$CHICAGO$"'; Revision = '1' } }
+    $sb = [Text.StringBuilder]::new()
+    foreach ($name in @('Unicode', 'Version') + @($Sections.Keys | Where-Object { $_ -ne 'Unicode' -and $_ -ne 'Version' })) {
+        [void]$sb.Append("[$name]`r`n")
+        foreach ($k in @($Sections[$name].Keys)) {
+            $v = $Sections[$name][$k]
+            if ($null -eq $v) { [void]$sb.Append("$k`r`n") }
+            elseif ($name -eq 'Service General Setting') { [void]$sb.Append("`"$k`",$v`r`n") }
+            elseif ($name -eq 'Unicode' -or $name -eq 'Version') { [void]$sb.Append("$k=$v`r`n") }
+            else { [void]$sb.Append("$k = $v`r`n") }
+        }
+    }
+    return $sb.ToString()
+}
+
+# ---- audit.csv ([MS-GPAC]) ----
+
+# shortcut: plain comma split; Microsoft subcategory names and settings contain no commas.
+function ConvertFrom-GpbAuditCsv {
+    param([AllowEmptyString()][string]$Text)
+    $rows = [ordered]@{}
+    foreach ($line in ($Text -split '\r?\n')) {
+        if (-not $line.Trim() -or $line.StartsWith('Machine Name,')) { continue }
+        $f = $line.Split(',')
+        if ($f.Count -lt 7) { continue }
+        $row = [pscustomobject]@{ Machine = $f[0]; Target = $f[1]; Subcategory = $f[2]; Guid = $f[3]; Inclusion = $f[4]; Exclusion = $f[5]; Value = $f[6] }
+        $key = if ($f[3]) { $f[3].ToLowerInvariant() } else { $f[2] }
+        $rows[$key] = $row
+    }
+    return $rows
+}
+
+function ConvertTo-GpbAuditCsv {
+    param($Rows)
+    $lines = @($GpbAuditHeader)
+    foreach ($r in $Rows.Values) { $lines += (@($r.Machine, $r.Target, $r.Subcategory, $r.Guid, $r.Inclusion, $r.Exclusion, $r.Value) -join ',') }
+    return (($lines -join "`r`n") + "`r`n")
+}
+
+function Get-GpbInclusion {
+    param([int]$Setting)
+    switch ($Setting) { 0 { 'No Auditing' } 1 { 'Success' } 2 { 'Failure' } 3 { 'Success and Failure' } default { throw "Invalid audit setting $Setting" } }
+}
+
+# ---- Domain access ----
+
+function Get-GpbContext {
+    Import-Module GroupPolicy -ErrorAction Stop
+    Import-Module ActiveDirectory -ErrorAction Stop
+    $domain = Get-ADDomain -ErrorAction Stop
+    $pdc = [string]$domain.PDCEmulator
+    return @{
+        Server = $pdc
+        DomainDN = [string]$domain.DistinguishedName
+        PoliciesPath = "\\$pdc\SYSVOL\$($domain.DNSRoot)\Policies"
+        BackupRoot = Join-Path $env:ProgramData 'Relian\gpo-backups'
+        IsPdc = ($pdc.Split('.')[0] -ieq $env:COMPUTERNAME)
+    }
+}
+
+function Get-GpbGpo {
+    param($Context, [string]$Name)
+    try { return Get-GPO -Name $Name -Server $Context.Server -ErrorAction Stop }
+    catch [System.ArgumentException] { return $null } # Get-GPO reports "not found" this way.
+}
+
+function Get-GpbGpoDir { param($Context, $Gpo) Join-Path $Context.PoliciesPath ('{' + $Gpo.Id.ToString().ToUpper() + '}') }
+function Get-GpbInfPath { param($Context, $Gpo) Join-Path (Get-GpbGpoDir $Context $Gpo) 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf' }
+function Get-GpbAuditPath { param($Context, $Gpo) Join-Path (Get-GpbGpoDir $Context $Gpo) 'Machine\Microsoft\Windows NT\Audit\audit.csv' }
+function Read-GpbText { param([string]$Path) if ([IO.File]::Exists($Path)) { return [IO.File]::ReadAllText($Path) } return '' }
+
+function Get-GpbPlan {
+    param($Context, $Def, $Gpo, [string]$LinkTo, [bool]$LinkOn)
+    $changes = [Collections.Generic.List[object]]::new()
+    if (-not $Gpo) { $changes.Add([ordered]@{ kind = 'create'; target = $Def.gpoName; current = $null; desired = 'new GPO' }) }
+    foreach ($item in @($Def.registry)) {
+        $cur = $null
+        # shortcut: any read error counts as "not set"; the write that follows then reports the real failure.
+        if ($Gpo) { try { $cur = Get-GPRegistryValue -Guid $Gpo.Id -Key $item.key -ValueName $item.valueName -Server $Context.Server -ErrorAction Stop } catch { $cur = $null } }
+        if ($null -eq $cur -or [string]$cur.Value -ne [string]$item.value -or [string]$cur.Type -ne [string]$item.type) {
+            $c = $null; if ($cur) { $c = [string]$cur.Value }
+            $changes.Add([ordered]@{ kind = 'registry'; target = "$($item.key)\$($item.valueName)"; current = $c; desired = [string]$item.value; type = [string]$item.type; cis = $item.cis; item = $item })
+        }
+    }
+    $inf = [ordered]@{}; $audit = [ordered]@{}
+    if ($Gpo) {
+        $inf = ConvertFrom-GpbInf (Read-GpbText (Get-GpbInfPath $Context $Gpo))
+        $audit = ConvertFrom-GpbAuditCsv (Read-GpbText (Get-GpbAuditPath $Context $Gpo))
+    }
+    foreach ($item in @($Def.security)) {
+        $cur = $null
+        if ($inf.Contains($item.section) -and $inf[$item.section].Contains($item.key)) { $cur = $inf[$item.section][$item.key] }
+        if ($cur -ne $item.value) { $changes.Add([ordered]@{ kind = 'security'; target = "[$($item.section)] $($item.key)"; current = $cur; desired = $item.value; cis = $item.cis; item = $item }) }
+    }
+    foreach ($item in @($Def.audit)) {
+        $cur = $null
+        if ($audit.Contains($item.guid)) { $cur = $audit[$item.guid].Value }
+        if ($cur -ne [string]$item.setting) { $changes.Add([ordered]@{ kind = 'audit'; target = $item.subcategory; current = $cur; desired = [string]$item.setting; cis = $item.cis; item = $item }) }
+    }
+    if ($LinkTo) {
+        $link = $null
+        if ($Gpo) { $link = @((Get-GPInheritance -Target $LinkTo -Server $Context.Server).GpoLinks | Where-Object { $_.GpoId -eq $Gpo.Id }) | Select-Object -First 1 }
+        if (-not $link) { $changes.Add([ordered]@{ kind = 'link'; target = $LinkTo; current = $null; desired = $(if ($LinkOn) { 'enabled' } else { 'disabled' }) }) }
+        elseif ([bool]$link.Enabled -ne $LinkOn) { $changes.Add([ordered]@{ kind = 'link'; target = $LinkTo; current = $(if ($link.Enabled) { 'enabled' } else { 'disabled' }); desired = $(if ($LinkOn) { 'enabled' } else { 'disabled' }); exists = $true }) }
+    }
+    return , $changes
+}
+
+function Protect-GpbBackupRoot {
+    param([string]$Path)
+    # Backups can hold Group Policy Preference data: SYSTEM and Administrators only.
+    & icacls.exe $Path /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls grant exited $LASTEXITCODE" }
+    & icacls.exe $Path /inheritance:r /C /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "icacls inheritance exited $LASTEXITCODE" }
+}
+
+function Save-GpbBackup {
+    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record)
+    [void](New-Item -ItemType Directory -Path $Context.BackupRoot -Force)
+    Protect-GpbBackupRoot $Context.BackupRoot
+    $dir = Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}')
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    $backup = Backup-GPO -Guid $Gpo.Id -Path $dir -Comment "relian-gpo-baseline $DefinitionId" -Server $Context.Server
+    $id = [string]$backup.Id
+    if ($Record) {
+        $state = [ordered]@{ backupId = $id; gpoId = [string]$Gpo.Id; definition = $DefinitionId; utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $dir 'last-backup.json'), $state)
+    }
+    return $id
+}
+
+function Update-GpbVersion {
+    param($Context, $Gpo, [string[]]$Pairs)
+    $dn = 'CN={' + $Gpo.Id.ToString().ToUpper() + '},CN=Policies,CN=System,' + $Context.DomainDN
+    $obj = Get-ADObject -Identity $dn -Properties versionNumber, gPCMachineExtensionNames -Server $Context.Server
+    $ext = ''
+    if ($obj.PSObject.Properties['gPCMachineExtensionNames'] -and $obj.gPCMachineExtensionNames) { $ext = [string]$obj.gPCMachineExtensionNames }
+    $adVersion = 0
+    if ($obj.PSObject.Properties['versionNumber'] -and $null -ne $obj.versionNumber) { $adVersion = [long]$obj.versionNumber }
+    $iniPath = Join-Path (Get-GpbGpoDir $Context $Gpo) 'GPT.INI'
+    $ini = ''
+    if ([IO.File]::Exists($iniPath)) { $ini = [Text.Encoding]::Default.GetString([IO.File]::ReadAllBytes($iniPath)) }
+    $m = [regex]::Match($ini, '(?im)^\s*Version\s*=\s*(\d+)\s*$')
+    $iniVersion = 0
+    if ($m.Success) { $iniVersion = [long]$m.Groups[1].Value }
+    $next = Get-GpbNextVersion -AdVersion $adVersion -IniVersion $iniVersion
+    if ($m.Success) { $ini = $ini.Substring(0, $m.Index) + "Version=$next" + $ini.Substring($m.Index + $m.Length) }
+    elseif ($ini -match '(?im)^\[General\]\s*$') { $ini = [regex]::Replace($ini, '(?im)^\[General\]\s*$', "[General]`r`nVersion=$next", 1) }
+    else { $ini = "[General]`r`nVersion=$next`r`n" + $ini }
+    # SYSVOL first, then AD: a client that sees the new AD version must find the new files.
+    [IO.File]::WriteAllBytes($iniPath, [Text.Encoding]::Default.GetBytes($ini))
+    Set-ADObject -Identity $dn -Replace @{ versionNumber = (ConvertTo-GpbAdVersion $next); gPCMachineExtensionNames = (Add-GpbExtensionNames -Current $ext -Pairs $Pairs) } -Server $Context.Server
+}
+
+function Invoke-GpbApply {
+    param($Context, $Def, $Gpo, $Changes, [string]$LinkTo, [bool]$LinkOn, $Report)
+    if (-not $Gpo) {
+        $Gpo = New-GPO -Name $Def.gpoName -Comment ("[relian-gpo-baseline:$($Def.id)] Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server
+        $Report.gpo.id = [string]$Gpo.Id; $Report.gpo.exists = $true; $Report.gpo.owned = $true
+    } else {
+        $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record
+    }
+    foreach ($c in @($Changes | Where-Object { $_.kind -eq 'registry' })) {
+        Set-GPRegistryValue -Guid $Gpo.Id -Key $c.item.key -ValueName $c.item.valueName -Type $c.item.type -Value $c.item.value -Server $Context.Server | Out-Null
+    }
+    $pairs = @()
+    $security = @($Changes | Where-Object { $_.kind -eq 'security' })
+    if ($security.Count) {
+        $path = Get-GpbInfPath $Context $Gpo
+        $inf = ConvertFrom-GpbInf (Read-GpbText $path)
+        foreach ($c in $security) {
+            if (-not $inf.Contains($c.item.section)) { $inf[$c.item.section] = [ordered]@{} }
+            $inf[$c.item.section][$c.item.key] = $c.item.value
+        }
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force)
+        [IO.File]::WriteAllText($path, (ConvertTo-GpbInf $inf), [Text.Encoding]::Unicode)
+        $pairs += $GpbSecurityCse
+    }
+    $audit = @($Changes | Where-Object { $_.kind -eq 'audit' })
+    if ($audit.Count) {
+        $path = Get-GpbAuditPath $Context $Gpo
+        $rows = ConvertFrom-GpbAuditCsv (Read-GpbText $path)
+        foreach ($c in $audit) {
+            $rows[$c.item.guid] = [pscustomobject]@{ Machine = ''; Target = 'System'; Subcategory = $c.item.subcategory; Guid = $c.item.guid; Inclusion = (Get-GpbInclusion $c.item.setting); Exclusion = ''; Value = [string]$c.item.setting }
+        }
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force)
+        [IO.File]::WriteAllText($path, (ConvertTo-GpbAuditCsv $rows), [Text.UTF8Encoding]::new($false))
+        $pairs += $GpbAuditCse
+    }
+    if ($pairs.Count) { Update-GpbVersion -Context $Context -Gpo $Gpo -Pairs $pairs }
+    foreach ($c in @($Changes | Where-Object { $_.kind -eq 'link' })) {
+        $state = 'No'; if ($LinkOn) { $state = 'Yes' }
+        if ($c.Contains('exists')) { Set-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server | Out-Null }
+        else { New-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server | Out-Null }
+    }
+    return $Gpo
+}
+
+function Get-GpbPublicChanges {
+    param($Changes)
+    return @($Changes | ForEach-Object { $o = [ordered]@{}; foreach ($k in @('kind', 'target', 'current', 'desired', 'cis')) { if ($_.Contains($k)) { $o[$k] = $_[$k] } }; $o })
+}
+
+function Test-GpbFlag {
+    param([string]$Name, [string]$Value)
+    if ($Value -eq '' -or $Value -eq 'false') { return $false }
+    if ($Value -eq 'true') { return $true }
+    throw "$Name must be true or false."
+}
+
+function Invoke-GpoBaseline {
+    param([string]$Action = 'Install', [string]$Definition = '', [string]$Apply = '', [string]$LinkTo = '', [string]$LinkEnabled = '', [string]$AllowDefaultPolicy = '', $Context, $DefinitionObject)
+    $report = [ordered]@{ version = '1'; status = 'plan'; action = $Action; definition = $Definition; gpo = [ordered]@{}; changes = @(); backupId = $null }
+    $refuse = { param($Why) $report.status = 'refused'; $report.reason = $Why; return @{ report = $report; exitCode = 1 } }
+    try {
+        $applyOn = Test-GpbFlag 'Apply' $Apply
+        $linkOn = Test-GpbFlag 'LinkEnabled' $LinkEnabled
+        $allowDefault = Test-GpbFlag 'AllowDefaultPolicy' $AllowDefaultPolicy
+    } catch { return (& $refuse $_.Exception.Message) }
+    $def = $DefinitionObject
+    if (-not $def) { $def = Get-GpbDefinition $Definition }
+    if (-not $def) { return (& $refuse 'Unknown Definition. Embedded: cis-ws2022-dc-low-risk.') }
+    $report.definition = $def.id
+    try {
+        if (-not $Context) { $Context = Get-GpbContext }
+        $gpo = Get-GpbGpo -Context $Context -Name $def.gpoName
+        $isDefault = $GpbDefaultPolicies.Values -contains $def.gpoName
+        if ($gpo -and $GpbDefaultPolicies.ContainsKey($gpo.Id.ToString().ToLower())) { $isDefault = $true }
+        $owned = $false
+        if ($gpo -and $gpo.Description) { $owned = ([string]$gpo.Description).Contains("[relian-gpo-baseline:$($def.id)]") }
+        $report.gpo = [ordered]@{ name = $def.gpoName; id = $null; exists = [bool]$gpo; owned = $owned; default = $isDefault }
+        if ($gpo) { $report.gpo.id = [string]$gpo.Id }
+        if ($isDefault -and -not ($def.allowDefaultPolicy -eq $true -and $allowDefault)) { return (& $refuse 'Default policies change only when the definition sets allowDefaultPolicy and AllowDefaultPolicy=true is passed.') }
+        if ($isDefault -and -not $gpo) { return (& $refuse 'Default policy not found.') }
+        if ($gpo -and -not $isDefault -and -not $owned) { return (& $refuse 'A GPO with this name exists without the Relian marker. It was not changed.') }
+        $backupDir = $null; $lastBackup = $null
+        if ($gpo) {
+            $backupDir = Join-Path $Context.BackupRoot ('{' + $gpo.Id.ToString().ToUpper() + '}')
+            $lastPath = Join-Path $backupDir 'last-backup.json'
+            if ([IO.File]::Exists($lastPath)) { $lastBackup = ([IO.File]::ReadAllText($lastPath) | ConvertFrom-Json).backupId }
+        }
+
+        if ($Action -eq 'Uninstall') {
+            if (-not $gpo) { $report.status = 'nothingToUninstall'; return @{ report = $report; exitCode = 0 } }
+            if ($isDefault -and -not $lastBackup) { return (& $refuse 'No Relian backup of this default policy to restore.') }
+            $kind = 'remove'; if ($isDefault) { $kind = 'restore' }
+            $report.changes = @([ordered]@{ kind = $kind; target = $def.gpoName; current = $null; desired = $lastBackup })
+            if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
+            if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
+            $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
+            if ($isDefault) { Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server | Out-Null; $report.status = 'restored' }
+            else { Remove-GPO -Guid $gpo.Id -Server $Context.Server | Out-Null; $report.status = 'removed' }
+            return @{ report = $report; exitCode = 0 }
+        }
+
+        if ($LinkTo) {
+            if ($isDefault) { return (& $refuse 'Default policies are not linked by this package.') }
+            # shortcut: DNs with escaped commas are refused rather than parsed.
+            if ($LinkTo -notmatch '^OU=[^,\\]+(,(OU|DC)=[^,\\]+)*$' -or -not $LinkTo.EndsWith(',' + $Context.DomainDN, [StringComparison]::OrdinalIgnoreCase)) { return (& $refuse 'LinkTo must be an OU distinguished name in this domain.') }
+        }
+        $changes = Get-GpbPlan -Context $Context -Def $def -Gpo $gpo -LinkTo $LinkTo -LinkOn $linkOn
+        $report.changes = @(Get-GpbPublicChanges $changes)
+        $report.changeCount = $changes.Count
+        if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
+        if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
+        if ($changes.Count -eq 0) { $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
+        $err = $null
+        try { $gpo = Invoke-GpbApply -Context $Context -Def $def -Gpo $gpo -Changes $changes -LinkTo $LinkTo -LinkOn $linkOn -Report $report }
+        catch { $err = Protect-GpbText $_.Exception.Message }
+        if (-not $gpo) { $gpo = Get-GpbGpo -Context $Context -Name $def.gpoName }
+        $left = @()
+        if ($gpo) { $left = @(Get-GpbPublicChanges (Get-GpbPlan -Context $Context -Def $def -Gpo $gpo -LinkTo $LinkTo -LinkOn $linkOn)) }
+        else { $left = @($report.changes) }
+        if ($err -or $left.Count) {
+            $report.status = 'partial'; $report.left = $left; $report.error = $err
+            return @{ report = $report; exitCode = 1 }
+        }
+        $report.status = 'applied'
+        return @{ report = $report; exitCode = 0 }
+    } catch {
+        $report.status = 'failed'; $report.error = Protect-GpbText $_.Exception.Message
+        return @{ report = $report; exitCode = 1 }
+    }
+}
+
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
+if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
+$run = Invoke-GpoBaseline -Action $Action -Definition $Definition -Apply $Apply -LinkTo $LinkTo -LinkEnabled $LinkEnabled -AllowDefaultPolicy $AllowDefaultPolicy
+Write-Output (ConvertTo-GpbBoundedJson $run.report)
+exit $run.exitCode

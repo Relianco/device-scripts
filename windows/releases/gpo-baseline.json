@@ -1,0 +1,6 @@
+{
+  "name": "Group Policy baseline",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Required: {\"Definition\":\"cis-ws2022-dc-low-risk\"}. Plan-only unless \"Apply\":\"true\". \"LinkTo\":\"<OU DN in this domain>\" links the GPO, disabled unless \"LinkEnabled\":\"true\". \"AllowDefaultPolicy\":\"true\" is needed, with a definition that opts in, to change a default policy. Uninstall with \"Apply\":\"true\" removes the GPO this package created or restores the last Relian backup of a default policy. Run on the PDC emulator; backups go to %ProgramData%\\Relian\\gpo-backups."
+}
