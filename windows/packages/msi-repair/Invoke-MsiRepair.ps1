@@ -18,6 +18,7 @@
       msiexec is waited for and never killed. Success is exit code 0 or 3010 (reboot needed, not done).
       Refused when the cached MSI (LocalPackage) is missing, because repair would need the original
       media, unless -SourcePath names an MSI whose ProductCode matches.
+    An empty -PinVersion does nothing and exits 0.
     Prints one JSON line of at most 8,000 bytes. Exit 0 or 1.
 #>
 [CmdletBinding()]
@@ -140,8 +141,10 @@ function Get-MrEvents {
 }
 
 function Invoke-MrMain {
-    param([string]$Action = '', [string]$Section = '', [string]$ProductCode = '', [string]$DisplayName = '', [string]$RepairMode = '', [string]$SourcePath = '')
+    param([string]$PinVersion = '', [string]$Action = '', [string]$Section = '', [string]$ProductCode = '', [string]$DisplayName = '', [string]$RepairMode = '', [string]$SourcePath = '')
     $r = [ordered]@{ package = 'msi-repair'; status = 'error' }
+    # An empty pin is the fleet's off switch: do nothing, for every action and section.
+    if (-not $PinVersion) { $r.status = 'noPin'; return @{ ExitCode = 0; Result = $r } }
     $fail = { param($why) $r.reason = $why; return @{ ExitCode = 1; Result = $r } }
     if ($Section -and $Section -ne 'Evidence') { return & $fail 'Section must be empty or Evidence' }
     $evidence = $Section -eq 'Evidence'
@@ -198,7 +201,7 @@ function Invoke-MrMain {
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
 
 try {
-    $run = Invoke-MrMain -Action $Action -Section $Section -ProductCode $ProductCode -DisplayName $DisplayName -RepairMode $RepairMode -SourcePath $SourcePath
+    $run = Invoke-MrMain -PinVersion $PinVersion -Action $Action -Section $Section -ProductCode $ProductCode -DisplayName $DisplayName -RepairMode $RepairMode -SourcePath $SourcePath
 } catch {
     $run = @{ ExitCode = 1; Result = [ordered]@{ package = 'msi-repair'; status = 'error'; reason = $_.Exception.GetType().Name } }
 }
