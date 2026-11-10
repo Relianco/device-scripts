@@ -40,15 +40,18 @@ foreach ($case in @(@(0, 0), @(768, (768 -bor 3072)), @(($ssl3Tls), ($ssl3Tls -b
 
 # A package runs in a child process, which does not inherit the setting.
 # Every script that downloads must carry the guard line verbatim.
-$scripts = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages') -Filter 'Invoke-*.ps1' -Recurse)
-$scripts += Get-Item -LiteralPath (Join-Path $repoRoot 'windows/runner/Invoke-RelianJob.ps1')
-$scripts += @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/jobs') -Filter '*.ps1')
+$scripts = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages') -Filter '*.ps1' -Recurse)
+foreach ($rel in @('windows/runner/Invoke-RelianRunner.ps1', 'windows/runner/Invoke-RelianJob.ps1', 'windows/bootstrap.ps1')) {
+    $scripts += Get-Item -LiteralPath (Join-Path $repoRoot $rel)
+}
+$scripts += @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/jobs') -Filter '*.ps1' -Recurse)
 foreach ($file in $scripts) {
     $text = Get-Content -LiteralPath $file.FullName -Raw
-    if ($text -match 'Invoke-WebRequest' -and -not $text.Contains($guard)) {
+    if ($text -match 'Invoke-WebRequest|Invoke-RestMethod|HttpWebRequest|WebClient|HttpClient' -and -not $text.Contains($guard)) {
         Fail "$($file.Name) downloads without the Tls12 guard"
     }
-    if ($text -match 'SecurityProtocol\s*=\s*(\[Net\.SecurityProtocolType\]::Tls12\b|\[Net\.ServicePointManager\]::SecurityProtocol\s*-bor)') {
+    # Any other SecurityProtocol assignment (= Tls12, = 3072, -bor, fully qualified type) is a defect.
+    if ($text.Replace($guard, '') -match 'SecurityProtocol\s*=') {
         Fail "$($file.Name) overwrites or ORs SecurityProtocol without the guard"
     }
 }
