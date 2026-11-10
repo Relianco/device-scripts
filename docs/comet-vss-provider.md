@@ -33,12 +33,15 @@ the package on a schedule so it puts the line back.
 - It restarts `backup.delegate` and `backup.elevator` only when the value
   changed and no backup job is running. A job means a `backup-tool.exe`
   process whose command line is not one of the idle helpers
-  (`delegate-server`, `elevator-server` or `stream`). If the package cannot
+  (`delegate-server`, `elevator-server` or `stream`, bare or as
+  `-Action=<name>`). If the package cannot
   read a command line, it treats the process as a running job.
 - If a job is running, it writes the value, skips the restart, sets
   `HKLM\SOFTWARE\Relian\CometVssProvider\RestartPending=1`, prints
   `restartPending` and exits 0. The next idle run does the restart and clears
   the marker.
+- After a write, `Services[].Lines` and `Compliant` show the re-read value;
+  the old lines are in `Before`.
 - **`Uninstall`** removes only the `COMET_FORCE_VSS_PROVIDER` lines. It
   follows the same restart rule.
 - **`Section=Evidence`** is read-only with any action. It reports each
