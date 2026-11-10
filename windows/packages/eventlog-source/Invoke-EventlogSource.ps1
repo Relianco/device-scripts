@@ -19,8 +19,13 @@
     -Action Install (Update, Repair): create the source when missing. Already there under the same log is a no-op.
       A source registered under a different log is refused and the log is named, because Windows keeps one log per source.
       The result is read back before it reports success.
-    -Action Uninstall: remove only that source, and only when it is registered under the requested log.
-      A log is never deleted.
+    -Action Uninstall: remove only a source this package created, and only under the requested log. Install writes an
+      ownership marker, HKLM\SOFTWARE\Relian\EventlogSource\<LogName>\<Source> (value Created, a UTC timestamp), and
+      Uninstall removes nothing without it. A source that was already there at Install has no marker and is never
+      removed. Windows sources are refused even with a marker: a deny list (Application Error, Windows Error
+      Reporting, MsiInstaller, Application Hang, .NET Runtime, SecurityCenter) and any source whose message file is
+      under %SystemRoot%, except under %SystemRoot%\Microsoft.NET, which is where .NET points a source created
+      without a message file. A log is never deleted.
 
     Uses [System.Diagnostics.EventLog]::CreateEventSource with EventSourceCreationData, which works on Windows
     PowerShell 5.1 and PowerShell 7. New-EventLog wraps the same call and does not exist in PowerShell 7.
@@ -54,6 +59,47 @@ $script:ElCreate = {
     [System.Diagnostics.EventLog]::CreateEventSource((New-Object System.Diagnostics.EventSourceCreationData($name, $log)))
 }
 $script:ElDelete = { param($name) [System.Diagnostics.EventLog]::DeleteEventSource($name) }
+$script:ElMarkerRoot = 'SOFTWARE\Relian\EventlogSource'
+$script:ElDenySources = @('Application Error', 'Windows Error Reporting', 'MsiInstaller', 'Application Hang', '.NET Runtime', 'SecurityCenter')
+$script:ElMessageFiles = {
+    param($log, $name)
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\CurrentControlSet\Services\EventLog\$log\$name")
+    if ($null -eq $key) { return @() }
+    try {
+        @('EventMessageFile', 'CategoryMessageFile', 'ParameterMessageFile') | ForEach-Object {
+            $v = $key.GetValue($_, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($v) { [string]$v }
+        }
+    } finally { $key.Dispose() }
+}
+$script:ElMarkerGet = {
+    param($log, $name)
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("$($script:ElMarkerRoot)\$log\$name")
+    if ($null -eq $key) { return $false }
+    try { return $null -ne $key.GetValue('Created', $null) } finally { $key.Dispose() }
+}
+$script:ElMarkerSet = {
+    param($log, $name)
+    $key = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey("$($script:ElMarkerRoot)\$log\$name")
+    try { $key.SetValue('Created', [DateTime]::UtcNow.ToString('o'), [Microsoft.Win32.RegistryValueKind]::String) } finally { $key.Dispose() }
+}
+$script:ElMarkerClear = {
+    param($log, $name)
+    [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKey("$($script:ElMarkerRoot)\$log\$name", $false)
+}
+
+# A Windows-owned source: on the deny list, or a message file under the Windows directory
+# (but not under Microsoft.NET, the default for a source created without a message file).
+function Test-ElProtected([string]$Log, [string]$Name) {
+    if ($script:ElDenySources -contains $Name) { return $true }
+    foreach ($f in @(& $script:ElMessageFiles $Log $Name)) {
+        $t = ([string]$f).Trim('"')
+        $win = $t -match '^(%SystemRoot%|%windir%|[A-Za-z]:\\Windows)\\'
+        $dotnet = $t -match '^(%SystemRoot%|%windir%|[A-Za-z]:\\Windows)\\Microsoft\.NET\\'
+        if ($win -and -not $dotnet) { return $true }
+    }
+    return $false
+}
 
 function Get-ElRegisteredLog([string]$Name) {
     if (-not [bool](& $script:ElSourceExists $Name)) { return $null }
@@ -93,7 +139,10 @@ function Invoke-ElMain {
     if ($removing) {
         if ($null -eq $registered) { $result.Status = 'absent'; return @{ ExitCode = 0; Result = $result } }
         if (-not (Test-ElSameLog $registered $LogName)) { return & $fail "Source is registered under log $registered, not $LogName; not removed" }
+        if (Test-ElProtected $registered $Source) { return & $fail 'Source is a Windows source and is never removed' }
+        if (-not [bool](& $script:ElMarkerGet $registered $Source)) { return & $fail 'Source was not created by this package (no ownership marker); not removed' }
         & $script:ElDelete $Source
+        & $script:ElMarkerClear $registered $Source
         if ($null -ne (Get-ElRegisteredLog $Source)) { return & $fail 'Source still registered after removal' }
         $result.Status = 'removed'
         return @{ ExitCode = 0; Result = $result }
@@ -110,6 +159,7 @@ function Invoke-ElMain {
     & $script:ElCreate $Source $LogName
     $back = Get-ElRegisteredLog $Source
     if ($null -eq $back -or -not (Test-ElSameLog $back $LogName)) { return & $fail 'read-back after create did not find the source under the requested log' }
+    & $script:ElMarkerSet $back $Source
     $result.SourceExists = $true
     $result.RegisteredLog = $back
     $result.RegistryKey = "$($script:ElKeyRoot)\$back\$Source"

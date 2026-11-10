@@ -7,7 +7,7 @@ function Assert($ok, $message) { if (-not $ok) { throw $message } }
 # A fake event log: sources map name -> log; logs is the set of existing logs.
 function New-Fake {
     param([hashtable]$Sources = @{}, [string[]]$Logs = @('Application', 'System', 'Security'))
-    $f = [pscustomobject]@{ Sources = $Sources; Logs = [System.Collections.Generic.List[string]]$Logs; Creates = 0; Deletes = 0; DeletedLogs = 0; Throw = $null }
+    $f = [pscustomobject]@{ Markers = [System.Collections.Generic.List[string]]::new(); Files = @{}; Sources = $Sources; Logs = [System.Collections.Generic.List[string]]$Logs; Creates = 0; Deletes = 0; DeletedLogs = 0; Throw = $null }
     $script:Fake = $f
     $script:ElSourceExists = { param($n) $script:Fake.Sources.ContainsKey($n) }
     $script:ElLogOfSource = { param($n) $script:Fake.Sources[$n] }
@@ -18,6 +18,10 @@ function New-Fake {
         $script:Fake.Creates++; $script:Fake.Sources[$n] = $l
         if ($script:Fake.Logs -notcontains $l) { $script:Fake.Logs.Add($l) }
     }
+    $script:ElMessageFiles = { param($l, $n) @($script:Fake.Files[$n]) | Where-Object { $_ } }
+    $script:ElMarkerGet = { param($l, $n) $script:Fake.Markers -contains "$l\$n" }
+    $script:ElMarkerSet = { param($l, $n) $script:Fake.Markers.Add("$l\$n") }
+    $script:ElMarkerClear = { param($l, $n) [void]$script:Fake.Markers.Remove("$l\$n") }
     $script:ElDelete = { param($n) $script:Fake.Deletes++; $script:Fake.Sources.Remove($n) }
     return $f
 }
@@ -103,15 +107,47 @@ Assert ($r.ExitCode -eq 1) 'Evidence still validates Source'
 
 # Uninstall scope.
 $f = New-Fake -Sources @{ 'Mine' = 'Application'; 'Other' = 'Custom'; 'Keep' = 'Application' } -Logs @('Application', 'Custom')
+[void](Invoke-ElMain -Action Install -Source 'Made')
+Assert ($f.Markers -contains 'Application\Made') 'Install writes the ownership marker'
+$f.Markers.Add('Application\Mine'); $f.Markers.Add('Custom\Other')
 $r = Invoke-ElMain -Action Uninstall -Source 'Mine'
 Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'removed' -and -not $f.Sources.ContainsKey('Mine') -and $f.Sources.ContainsKey('Keep')) 'Uninstall removes only that source'
+Assert ($f.Markers -notcontains 'Application\Mine') 'Uninstall clears the marker'
 Assert ($f.Logs.Count -eq 2) 'Uninstall never deletes a log'
+$r = Invoke-ElMain -Action Uninstall -Source 'Keep'
+Assert ($r.ExitCode -eq 1 -and $f.Sources.ContainsKey('Keep') -and $r.Result.Reason -like '*marker*') 'Uninstall refuses a source without the marker'
+[void](Invoke-ElMain -Action Install -Source 'Keep')
+$r = Invoke-ElMain -Action Uninstall -Source 'Keep'
+Assert ($r.ExitCode -eq 1 -and $f.Sources.ContainsKey('Keep')) 'Install on a pre-existing source writes no marker, so it is never removed'
+$d = $f.Deletes
 $r = Invoke-ElMain -Action Uninstall -Source 'Other'
-Assert ($r.ExitCode -eq 1 -and $f.Sources.ContainsKey('Other') -and $f.Deletes -eq 1) 'Uninstall refuses a source under another log'
+Assert ($r.ExitCode -eq 1 -and $f.Sources.ContainsKey('Other') -and $f.Deletes -eq $d) 'Uninstall refuses a source under another log'
 $r = Invoke-ElMain -Action Uninstall -Source 'Mine'
-Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'absent' -and $f.Deletes -eq 1) 'Uninstall of a missing source is a no-op'
+Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'absent') 'Uninstall of a missing source is a no-op'
 $r = Invoke-ElMain -Action Uninstall -Source 'Keep' -LogName 'System'
 Assert ($r.ExitCode -eq 1 -and $f.Sources.ContainsKey('Keep')) 'Uninstall never targets a built-in log'
+
+# Windows sources are refused even with a marker.
+foreach ($name in @('Application Error', 'Windows Error Reporting', 'MsiInstaller', 'Application Hang', '.NET Runtime', 'SecurityCenter')) {
+    $f = New-Fake -Sources @{ $name = 'Application' }
+    $f.Markers.Add("Application\$name")
+    $r = Invoke-ElMain -Action Uninstall -Source $name
+    Assert ($r.ExitCode -eq 1 -and $f.Deletes -eq 0 -and $r.Result.Reason -like '*Windows source*') "Deny list refuses $name"
+}
+$f = New-Fake -Sources @{ 'Svc' = 'Application' }; $f.Markers.Add('Application\Svc')
+$f.Files['Svc'] = '%SystemRoot%\System32\msi.dll'
+$r = Invoke-ElMain -Action Uninstall -Source 'Svc'
+Assert ($r.ExitCode -eq 1 -and $f.Deletes -eq 0) 'A message file under %SystemRoot% refuses the removal'
+$f.Files['Svc'] = 'C:\Windows\System32\msi.dll'
+$r = Invoke-ElMain -Action Uninstall -Source 'Svc'
+Assert ($r.ExitCode -eq 1 -and $f.Deletes -eq 0) 'An expanded C:\Windows path refuses the removal'
+$f.Files['Svc'] = 'C:\Program Files\App\msg.dll'
+$r = Invoke-ElMain -Action Uninstall -Source 'Svc'
+Assert ($r.ExitCode -eq 0 -and $f.Deletes -eq 1) 'A message file outside Windows does not block our own source'
+$f = New-Fake -Sources @{ 'Svc' = 'Application' }; $f.Markers.Add('Application\Svc')
+$f.Files['Svc'] = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\EventLogMessages.dll'
+$r = Invoke-ElMain -Action Uninstall -Source 'Svc'
+Assert ($r.ExitCode -eq 0 -and $f.Deletes -eq 1) 'The .NET default message file does not block our own source'
 
 # Output cap: a huge exception message is cut and the line stays one bounded line.
 $long = 'E' * 5000
