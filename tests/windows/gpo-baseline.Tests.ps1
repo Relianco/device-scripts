@@ -511,6 +511,8 @@ try {
         $script:ctx = New-FakeWorld; $script:calls.Clear(); $script:downloads.Clear()
         $r = Invoke-GpoBaseline -Action $act -DefinitionObject $unpinned -Apply 'true' -Context $script:ctx
         Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'notPinned' -and $script:downloads.Count -eq 0 -and $script:calls.Count -eq 0) "empty pin is a no-op for $act"
+        $r = Invoke-GpoBaseline -Action $act -DefinitionObject $unpinned -Apply 'yes' -LinkEnabled 'maybe' -Context $script:ctx
+        Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'notPinned') "empty pin wins over invalid flags for $act"
     }
     # Review: a userinfo URL refuses Install before any download but does not block Uninstall.
     $script:ctx = New-FakeWorld

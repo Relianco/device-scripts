@@ -760,11 +760,6 @@ function Invoke-GpoBaseline {
     $ErrorActionPreference = 'Stop'
     $report = [ordered]@{ version = '1'; status = 'plan'; action = $Action; definition = $Definition; gpo = [ordered]@{}; changes = @(); backupId = $null }
     $refuse = { param($Why) $report.status = 'refused'; $report.reason = $Why; return @{ report = $report; exitCode = 1 } }
-    try {
-        $applyOn = Test-GpbFlag 'Apply' $Apply
-        $linkOn = Test-GpbFlag 'LinkEnabled' $LinkEnabled
-        $allowDefault = Test-GpbFlag 'AllowDefaultPolicy' $AllowDefaultPolicy
-    } catch { return (& $refuse $_.Exception.Message) }
     $def = $DefinitionObject
     if (-not $def) { $def = Get-GpbDefinition $Definition }
     if (-not $def) { return (& $refuse 'Unknown Definition. Embedded: cis-ws2022-dc-low-risk.') }
@@ -773,6 +768,11 @@ function Invoke-GpoBaseline {
     foreach ($t in @(Get-GpbProp $def 'tasks')) {
         if ([string](Get-GpbProp (Get-GpbProp $t 'file') 'sha256') -eq '') { $report.status = 'notPinned'; $report.reason = "Task $($t.name) has no sha256. Nothing was read or changed."; return @{ report = $report; exitCode = 0 } }
     }
+    try {
+        $applyOn = Test-GpbFlag 'Apply' $Apply
+        $linkOn = Test-GpbFlag 'LinkEnabled' $LinkEnabled
+        $allowDefault = Test-GpbFlag 'AllowDefaultPolicy' $AllowDefaultPolicy
+    } catch { return (& $refuse $_.Exception.Message) }
     $problem = Test-GpbDefinition $def $Action
     if ($problem) { return (& $refuse $problem) }
     try {
