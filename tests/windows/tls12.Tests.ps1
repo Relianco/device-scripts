@@ -40,7 +40,10 @@ foreach ($case in @(@(0, 0), @(768, (768 -bor 3072)), @(($ssl3Tls), ($ssl3Tls -b
 
 # A package runs in a child process, which does not inherit the setting.
 # Every script that downloads must carry the guard line verbatim.
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages') -Filter 'Invoke-*.ps1' -Recurse) {
+$scripts = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages') -Filter 'Invoke-*.ps1' -Recurse)
+$scripts += Get-Item -LiteralPath (Join-Path $repoRoot 'windows/runner/Invoke-RelianJob.ps1')
+$scripts += @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/jobs') -Filter '*.ps1')
+foreach ($file in $scripts) {
     $text = Get-Content -LiteralPath $file.FullName -Raw
     if ($text -match 'Invoke-WebRequest' -and -not $text.Contains($guard)) {
         Fail "$($file.Name) downloads without the Tls12 guard"
