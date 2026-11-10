@@ -6,7 +6,8 @@
     Some programs check for their event log source on every start and, when it is missing, relaunch a helper
     elevated to create it. Registering the source once as SYSTEM stops that. Run it as SYSTEM through the deploy runner.
 
-    Package arguments (base64 JSON in -PackageArguments), all string values:
+    Package arguments (base64 JSON in the runner's -PackageArguments), all string values. The runner decodes the
+    JSON and passes each key to this script as a named parameter, so this script has no PackageArguments parameter:
       Source     required. 1 to 100 characters from [A-Za-z0-9 ._-].
       LogName    default Application. Same characters. Application is always allowed. Any other name must be a
                  custom log that already exists, or CreateLog=true must be passed. Trade-off: a custom log is a new
