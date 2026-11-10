@@ -143,10 +143,12 @@ try {
     $missing = Invoke-GpoEvidence -Section Gpo -Gpo 'No such policy' -Context $ctx | ConvertFrom-Json
     Assert ($missing.gpo.status -eq 'notFound') 'unknown GPO reported'
 
+    $staleId = [guid]::NewGuid()
     function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $Server, $ErrorAction)
         if ($Identity -like '*DFSR-GlobalSettings*') { return [pscustomobject]@{ 'msDFSR-Flags' = 48 } }
         if ($Identity) { throw [ArgumentException]::new('missing') }
-        @([pscustomobject]@{ DistinguishedName = 'DC=example,DC=invalid'; gPLink = "[LDAP://cn={$ddpId},cn=policies,cn=system,DC=example,DC=invalid;0]" }) }
+        # A stale link to a deleted GPO must not reduce the unlinked count.
+        @([pscustomobject]@{ DistinguishedName = 'DC=example,DC=invalid'; gPLink = "[LDAP://cn={$ddpId},cn=policies,cn=system,DC=example,DC=invalid;0][LDAP://cn={$staleId},cn=policies,cn=system,DC=example,DC=invalid;0]" }) }
     function Get-ADDomainController { param($Filter, $ErrorAction) @([pscustomobject]@{ HostName = 'dc1.example.invalid'; Site = 'Site1'; OperatingSystem = 'Windows Server 2022 Datacenter'; IsGlobalCatalog = $true; IsReadOnly = $false }) }
     function Get-Service { param($Name, $ErrorAction) if ($Name -eq 'DFSR') { [pscustomobject]@{ Status = 'Running' } } else { throw 'absent' } }
     function Get-WinEvent { param($FilterHashtable, $MaxEvents, $ErrorAction) @([pscustomobject]@{ Id = 4012 }, [pscustomobject]@{ Id = 4012 }) }
@@ -156,6 +158,15 @@ try {
     Assert ($s.dcs[0].gc -and $s.sysvol.type -eq 'DFSR' -and $s.sysvol.migrationState -eq 'Eliminated') 'DCs and SYSVOL DFSR'
     Assert ($s.sysvol.serviceDFSR -eq 'Running' -and $s.sysvol.serviceNtFrs -eq 'absent' -and $s.sysvol.dfsrWarnings7d.'4012' -eq 2) 'SYSVOL health hints'
     Assert ($s.gpoCount -eq 122 -and $s.versionMismatchCount -eq 1 -and $s.cpassword[0].count -eq 1) 'summary counts'
+    Assert ($s.unlinked -eq 121) 'unlinked counts existing GPOs with no link, ignoring stale links'
+    # Review: per-row link and trustee caps set truncated.
+    & {
+        function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $Server, $ErrorAction)
+            @(1..7 | ForEach-Object { [pscustomobject]@{ DistinguishedName = "OU=Site$_,DC=example,DC=invalid"; gPLink = "[LDAP://cn={$ddpId},cn=policies,cn=system,DC=example,DC=invalid;0]" } }) }
+        $cap = Invoke-GpoEvidence -Section Gpos -Context $ctx | ConvertFrom-Json
+        $row = @($cap.gpos | Where-Object { $_.name -eq 'Default Domain Policy' })[0]
+        Assert ($row.linkCount -eq 7 -and @($row.links).Count -eq 6 -and $cap.truncated) 'link cap marks truncated'
+    }
     Assert ([Text.Encoding]::UTF8.GetByteCount($sj) -le 8000 -and $sj -notmatch $secret) 'summary bounded and redacted'
 
     # Review: a capped scan says so instead of reporting a clean result.

@@ -474,6 +474,7 @@ try {
     [xml]$tx = [IO.File]::ReadAllText((Join-Path $cgDir 'Machine\Preferences\ScheduledTasks\ScheduledTasks.xml'))
     $t2 = $tx.ScheduledTasks.TaskV2
     Assert ($tx.ScheduledTasks.clsid -eq '{CC63F200-7309-4ba0-B154-A71CD118DBCC}' -and $t2.clsid -eq '{D8896631-B747-47a7-84A6-C155337F3BC8}') 'GPP TaskV2 class ids'
+    Assert ($t2.Properties.Task.Principals.Principal.UserId -eq 'NT AUTHORITY\System' -and -not $t2.Properties.Task.Principals.Principal.SelectSingleNode("*[local-name()='LogonType']")) 'SYSTEM principal has no user logon type'
     Assert ($t2.Properties.runAs -eq 'NT AUTHORITY\System' -and $t2.Properties.action -eq 'R' -and $t2.removePolicy -eq '1') 'task runs as SYSTEM and is removed when the GPO no longer applies'
     $exec = $t2.Properties.Task.Actions.Exec
     Assert ($exec.Command -eq 'powershell.exe' -and $exec.Arguments.Contains($fakeHash) -and $exec.Arguments.Contains("\\example.invalid\SYSVOL\example.invalid\Policies\{$($cg.Id.ToString().ToUpper())}\Machine\Scripts\Relian\Invoke-CometVssProvider.ps1") -and $exec.Arguments.Contains('-Action Install')) 'task checks the pin, then runs the SYSVOL copy'

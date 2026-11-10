@@ -294,11 +294,11 @@ function ConvertTo-GpbTasksXml {
         $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
         $uid = Get-GpbStableGuid ($Gpo.Id.ToString() + '|' + $t.name)
         [void]$sb.Append("<TaskV2 clsid=`"{D8896631-B747-47a7-84A6-C155337F3BC8}`" name=`"$(& $e $t.name)`" image=`"1`" changed=`"2026-11-10 00:00:00`" uid=`"{$uid}`" userContext=`"0`" removePolicy=`"1`">")
-        # NT AUTHORITY\System with S4U is what GPMC writes for a SYSTEM preference task; Task Scheduler
-        # runs it as LocalSystem, which reaches SYSVOL as the computer account.
+        # SYSTEM principal with no inner LogonType: Task Scheduler registers it as LocalSystem (service
+        # account), which reads SYSVOL as the computer account. The outer GPP logonType is the GPMC value.
         [void]$sb.Append("<Properties action=`"R`" name=`"$(& $e $t.name)`" runAs=`"NT AUTHORITY\System`" logonType=`"S4U`"><Task version=`"1.3`">")
         [void]$sb.Append("<RegistrationInfo><Author>Relian gpo-baseline</Author><Description>$(& $e $t.description)</Description></RegistrationInfo>")
-        [void]$sb.Append('<Principals><Principal id="Author"><UserId>NT AUTHORITY\System</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>')
+        [void]$sb.Append('<Principals><Principal id="Author"><UserId>NT AUTHORITY\System</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>')
         [void]$sb.Append('<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT30M</ExecutionTimeLimit><Priority>7</Priority></Settings>')
         [void]$sb.Append("<Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT$([int]$t.bootDelayMinutes)M</Delay></BootTrigger><TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT$([int]$t.intervalMinutes)M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></TimeTrigger></Triggers>")
         [void]$sb.Append("<Actions Context=`"Author`"><Exec><Command>powershell.exe</Command><Arguments>$(& $e $arguments)</Arguments></Exec></Actions></Task></Properties></TaskV2>`r`n")

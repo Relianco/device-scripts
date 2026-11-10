@@ -327,7 +327,7 @@ function Get-GpeSummary {
     $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })
     $Report.cpasswordScan = [ordered]@{ complete = $scan.complete; files = $scan.files; errors = $scan.errors }
     $Report.cpassword = @($scan.hits | ForEach-Object { [ordered]@{ gpo = (Protect-GpeText ([string]$names[$_.id]) -Max 80); id = $_.id; file = (Protect-GpeText $_.file -Max 120); count = $_.count } })
-    try { $Report.unlinked = @($gpos).Count - @((Get-GpeLinkMap $Context).Keys).Count } catch { $Report.unlinked = Get-GpeError $_ }
+    try { $map = Get-GpeLinkMap $Context; $Report.unlinked = @($gpos | Where-Object { -not $map.ContainsKey($_.Id.ToString().ToLowerInvariant()) }).Count } catch { $Report.unlinked = Get-GpeError $_ }
 }
 
 function Get-GpeGposSection {
@@ -345,14 +345,14 @@ function Get-GpeGposSection {
         $g = $gpos[$i]; $id = $g.Id.ToString().ToLowerInvariant(); $v = Get-GpeVersionRow $g
         $row = [ordered]@{ name = (Protect-GpeText $g.DisplayName -Max 80); id = $id; owner = (Protect-GpeText ([string]$g.Owner) -Max 60); created = $g.CreationTime.ToString('yyyy-MM-dd'); modified = $g.ModificationTime.ToString('yyyy-MM-dd'); status = [string]$g.GpoStatus; ad = $v.ad; sysvol = $v.sysvol; mismatch = $v.mismatch; wmi = $null; links = @(); apply = @(); deny = 0 }
         if ($g.WmiFilter) { $row.wmi = Protect-GpeText ([string]$g.WmiFilter.Name) -Max 60 }
-        if ($links.ContainsKey($id)) { $row.links = @($links[$id] | Select-Object -First 6); $row.linkCount = $links[$id].Count }
+        if ($links.ContainsKey($id)) { $row.links = @(Limit-GpeItems $links[$id] 6 $Report); $row.linkCount = $links[$id].Count }
         if ($cp.ContainsKey($id)) { $row.cpassword = $cp[$id] }
         if ($script:GpeClock.Elapsed.TotalSeconds -gt 40) { $row.apply = 'timeBudget' }
         else {
             try {
                 $perm = @(Get-GPPermission -Guid $g.Id -All -Server $Context.Server -ErrorAction Stop)
                 $applyAll = @($perm | Where-Object { [string]$_.Permission -eq 'GpoApply' -and -not $_.Denied })
-                $row.apply = @($applyAll | Select-Object -First 4 | ForEach-Object { Protect-GpeText ([string]$_.Trustee.Name) -Max 60 })
+                $row.apply = @(Limit-GpeItems $applyAll 4 $Report | ForEach-Object { Protect-GpeText ([string]$_.Trustee.Name) -Max 60 })
                 $row.applyCount = $applyAll.Count
                 $row.deny = @($perm | Where-Object { $_.Denied }).Count
             } catch { $row.apply = 'unavailable' }
