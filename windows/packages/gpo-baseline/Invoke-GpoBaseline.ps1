@@ -173,11 +173,9 @@ function Get-GpbDefinition {
 function Get-GpbProp { param($Object, [string]$Name) if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.$Name } }
 
 # Returns the first problem with a definition, or $null. Embedded and test definitions both pass here.
-# Every action validates, Uninstall included: definitions are embedded, a test keeps each one
-# valid, so an invalid definition never ships. An empty sha256 is invalid, not "skip": unlike
-# the runner's PackageSha256, a definition pin is never optional.
+# Uninstall skips the download-only URL check: it never downloads.
 function Test-GpbDefinition {
-    param($Def)
+    param($Def, [string]$Action = 'Install')
     if ([string](Get-GpbProp $Def 'id') -notmatch '^[a-z0-9][a-z0-9-]{0,63}$') { return 'Definition id is invalid.' }
     if ([string](Get-GpbProp $Def 'gpoName') -notmatch '^[A-Za-z0-9 ._()-]{1,128}$') { return 'gpoName is invalid.' }
     foreach ($i in @(Get-GpbProp $Def 'registry')) {
@@ -202,7 +200,7 @@ function Test-GpbDefinition {
         $f = Get-GpbProp $t 'file'
         if ([string](Get-GpbProp $f 'name') -notmatch '^[A-Za-z0-9._-]+\.ps1$') { return 'Task file name is invalid.' }
         $url = [string](Get-GpbProp $f 'url')
-        if ($url -notmatch '^https://[^/@\s]+/[^\s"]+$') { return 'Task file URL must be https without user info.' }
+        if ($Action -ne 'Uninstall' -and $url -notmatch '^https://[^/@\s]+/[^\s"]+$') { return 'Task file URL must be https without user info.' }
         if ([string](Get-GpbProp $f 'sha256') -notmatch '^[0-9a-f]{64}$') { return 'Task file sha256 must be 64 lowercase hex characters.' }
         # Arguments are placed in a -Command line: words, dashes and = only.
         if ([string](Get-GpbProp $t 'arguments') -notmatch '^[A-Za-z0-9 =_.-]*$') { return 'Task arguments may hold letters, digits, spaces, = _ . - only.' }
@@ -771,7 +769,11 @@ function Invoke-GpoBaseline {
     if (-not $def) { $def = Get-GpbDefinition $Definition }
     if (-not $def) { return (& $refuse 'Unknown Definition. Embedded: cis-ws2022-dc-low-risk.') }
     $report.definition = [string](Get-GpbProp $def 'id')
-    $problem = Test-GpbDefinition $def
+    # As with the runner's pins: an empty hash exits 0 and does nothing, before its URL is read.
+    foreach ($t in @(Get-GpbProp $def 'tasks')) {
+        if ([string](Get-GpbProp (Get-GpbProp $t 'file') 'sha256') -eq '') { $report.status = 'notPinned'; $report.reason = "Task $($t.name) has no sha256. Nothing was read or changed."; return @{ report = $report; exitCode = 0 } }
+    }
+    $problem = Test-GpbDefinition $def $Action
     if ($problem) { return (& $refuse $problem) }
     try {
         if (-not $Context) { $Context = Get-GpbContext }

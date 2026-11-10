@@ -498,6 +498,26 @@ try {
     $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'foreign WMI filter refused'
 
+    # Review: an empty pin exits 0 for every action, before the URL is read, with no download or write.
+    $unpinned = $comet | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $unpinned.tasks[0].file.sha256 = ''
+    $unpinned.tasks[0].file.url = 'https://user@example.invalid/a.ps1'
+    foreach ($act in @('Install', 'Uninstall')) {
+        $script:ctx = New-FakeWorld; $script:calls.Clear(); $script:downloads.Clear()
+        $r = Invoke-GpoBaseline -Action $act -DefinitionObject $unpinned -Apply 'true' -Context $script:ctx
+        Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'notPinned' -and $script:downloads.Count -eq 0 -and $script:calls.Count -eq 0) "empty pin is a no-op for $act"
+    }
+    # Review: a userinfo URL refuses Install before any download but does not block Uninstall.
+    $script:ctx = New-FakeWorld
+    [void](Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx)
+    $userinfo = $testComet | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $userinfo.tasks[0].file.url = 'https://user@example.invalid/a.ps1'
+    $script:downloads.Clear()
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $userinfo -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and $script:downloads.Count -eq 0) 'userinfo URL refused before download'
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $userinfo -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'removed') 'userinfo URL does not block Uninstall'
+
     # Uninstall removes the owned GPO and its now-unused owned WMI filter.
     $script:ctx = New-FakeWorld
     [void](Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx)
