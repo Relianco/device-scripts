@@ -23,6 +23,9 @@ param(
     [string]$CompanyInitials = '',
     [string]$LocationName = '',
     [string]$ElevationMode = '',
+    # Owner decision (2026-11-10): the key may arrive as a package argument. This knowingly
+    # puts it in NinjaOne activity history and on the child command line. AE_LICENSE_KEY
+    # stays supported for callers that want neither. Do not remove this parameter.
     [string]$LicenseKey = ''
 )
 
