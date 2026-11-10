@@ -381,8 +381,7 @@ foreach ($bad in @('Restart-Computer', 'shutdown', 'msconfig', 'bcdedit', 'Softw
 # Pin record and README.
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/feature-upgrade.json') -Raw | ConvertFrom-Json
 if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
-$readme = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
-if ($readme.IndexOf('windows/packages/feature-upgrade/Invoke-FeatureUpgrade.ps1', [StringComparison]::Ordinal) -lt 0) { Fail 'README lacks the package section' }
+# The README entry is checked by tests/readme-inventory.Tests.ps1.
 
 # End to end through the runner's argument parser.
 $json = '{"IsoUrl":"https://downloads.example.com/win.iso","IsoSha256":"' + $goodSha + '","BypassHardwareCheck":"true"}'

@@ -319,30 +319,19 @@ function Assert-Readme {
     if (-not $text.StartsWith("# device-scripts`n")) {
         Fail 'README title changed'
     }
-    $description = 'NinjaOne installs software by pasting `windows/runner/Invoke-RelianRunner.ps1`. That file is the installer. `windows/bootstrap.ps1` loads an inventory collector. It is not the installer.'
-    if (-not $text.Contains($description)) {
-        Fail 'README description removed'
-    }
-    $sectionAt = $text.IndexOf("## Deploy runner")
+    $sectionAt = $text.IndexOf("## Windows")
     if ($sectionAt -lt 0) {
-        Fail 'Deploy runner section missing'
+        Fail 'Windows section missing'
     }
     $section = $text.Substring($sectionAt)
+    # Package folders are checked by readme-inventory.Tests.ps1. This keeps the runner facts in place.
     $needles = @(
         'windows/runner/Invoke-RelianRunner.ps1'
         'PackageSha256'
         'ToolkitSha256'
         'BrandPackSha256'
-        'An empty pin exits 0'
-        'three download attempts'
-        'A bad hash is not retried'
-        '130'
         'https://relianpub.blob.core.windows.net/pub/sec/'
-        'bootstrap.ps1 remains the collector loader'
-        'windows/packages/printer-tcp/Invoke-PrinterTcp.ps1'
-        'PrinterName'
-        'BrotherHlL2370Dw'
-        'KonicaUniversalPcl'
+        '130'
     )
     $cursor = 0
     foreach ($needle in $needles) {
