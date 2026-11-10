@@ -213,6 +213,18 @@ Before it changes an existing GPO, the package runs `Backup-GPO` to `%ProgramDat
 
 Security options, user rights and service start types stay set on a computer after the GPO is unlinked. Undo them with a GPO that sets the previous values.
 
+### Comet VSS provider on QEMU servers
+
+The second definition, `comet-vss-provider-qemu`, keeps `COMET_FORCE_VSS_PROVIDER=system` in Comet Backup's `AppEnvironmentExtra` on domain-joined Proxmox/QEMU Windows servers. It reuses the [comet-vss-provider](docs/comet-vss-provider.md) package unchanged.
+
+- **Targeting:** a WMI filter, `Relian - QEMU Windows servers`, applies the GPO only where `Win32_ComputerSystem.Manufacturer = "QEMU"` and `Win32_OperatingSystem.ProductType <> 1` (servers and DCs). The filter's description carries the ownership marker. A same-named filter without the marker is refused.
+- **Mechanism:** a Group Policy Preferences scheduled task (`TaskV2`) that runs as SYSTEM 5 minutes after boot and every 60 minutes. It runs the comet-vss-provider script, which adds the line, keeps every other line in its order, and restarts Comet only after a change and only when no backup job runs.
+- **Script pin:** the definition pins the script by commit URL and SHA256. `Apply` downloads it once over TLS 1.2 and checks the hash before any GPO or AD write. It then stores the script in the GPO's SYSVOL folder (`Machine\Scripts\Relian`). The task checks the SYSVOL copy against the same hash before each run, so a copy that is still replicating, or one that was changed, does not run.
+- **Not a GPP Registry item:** that item writes the whole `REG_MULTI_SZ`. It would drop per-server lines such as `TEMP=Z:\Temp`, and every refresh would rewrite the value, which Comet reads only at service start. It would also not restart Comet. The task merges the line instead.
+- **Removal:** `Uninstall` with `Apply=true` removes the GPO and, when no other GPO uses it, the WMI filter. The task item has "remove when no longer applied" set, so clients delete the task at their next refresh. The line stays in Comet's environment. Run the comet-vss-provider package with `-Action Uninstall` to remove it.
+
+To move the pin to a newer comet-vss-provider, update `url` (a commit on `main`) and `sha256` in the definition. A test checks that the pin matches the package file in the same commit.
+
 ## Pin records
 
 `windows/releases/<name>.json` records the file that was hashed: the source URL, the file name, the sha256, the size, and the version. A device does not read that file. The runner downloads the package script and no other file from this repo, so the URL and the hash are copied into the script. The tests fail when the script and the JSON disagree.

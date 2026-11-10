@@ -39,6 +39,16 @@
       https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpac/ac9c8234-d2e8-455d-be76-f84244dd1e58
       Import-GPO from a generated backup was rejected: it replaces every setting in the
       target and depends on the undocumented backup XML layout.
+    - GPP scheduled task (definition "tasks"): a script is downloaded once from its pinned
+      URL (TLS 1.2), its SHA256 checked before any write, and stored in the GPO's SYSVOL
+      folder (Machine\Scripts\Relian). Machine\Preferences\ScheduledTasks\ScheduledTasks.xml
+      gets a TaskV2 item ([MS-GPPREF] 2.2.1.18.3) that runs as SYSTEM at boot and on an
+      interval, checks the SYSVOL copy against the same hash, then runs it. The GPP item is
+      removed from clients when the GPO stops applying.
+      https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gppref/d7172c0f-4540-4bec-83d2-1ea14491c23c
+    - WMI filter (definition "wmiFilter"): an msWMI-Som object under CN=SOM,CN=WMIPolicy,
+      CN=System, marked in its description, linked through the GPO's gPCWQLFilter. The
+      GroupPolicy module can assign but not create WMI filters.
     Writes go to the PDC emulator (the GPMC default), and only when this device is it.
 
     Output is one line of compact JSON (<= 8,000 UTF-8 bytes). Exit 0 for a plan, no
@@ -64,6 +74,7 @@ $GpbDefaultPolicies = @{
 }
 $GpbSecurityCse = '[{827D319E-6EAC-11D2-A4EA-00C04F79F83A}{803E14A0-B4FB-11D0-A0D0-00A0C90F574B}]'
 $GpbAuditCse = '[{F3CCC681-B74C-4060-9F26-CD84525DCA2A}{0F3F3735-573D-9804-99E4-AB2A69BA5FD4}]'
+$GpbTaskCses = @('[{00000000-0000-0000-0000-000000000000}{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}]', '[{AADCED64-746C-4633-A97C-D61349046527}{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}]')
 $GpbAuditHeader = 'Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value'
 
 # Embedded definitions: the package hash pins them. Values come from the CIS Microsoft
@@ -115,6 +126,37 @@ $GpbDefinitionJson = @'
    {"cis": "17.4.2", "subcategory": "Audit Directory Service Changes", "guid": "{0cce923c-69ae-11d9-bed3-505054503030}", "setting": 3},
    {"cis": "17.8.1", "subcategory": "Audit Sensitive Privilege Use", "guid": "{0cce9228-69ae-11d9-bed3-505054503030}", "setting": 1}
   ]
+ },
+ {
+  "id": "comet-vss-provider-qemu",
+  "gpoName": "Relian - Comet VSS provider (QEMU guests)",
+  "description": "Keeps COMET_FORCE_VSS_PROVIDER=system in Comet Backup's AppEnvironmentExtra on QEMU/Proxmox Windows servers, keeping every other line. Runs the comet-vss-provider package at boot and hourly; it restarts Comet only after a change and only when no backup job runs.",
+  "allowDefaultPolicy": false,
+  "registry": [],
+  "security": [],
+  "audit": [],
+  "wmiFilter": {
+   "name": "Relian - QEMU Windows servers",
+   "description": "Windows Server (not workstations) whose Win32_ComputerSystem manufacturer is QEMU (Proxmox/KVM guests).",
+   "queries": [
+    "SELECT * FROM Win32_ComputerSystem WHERE Manufacturer = \"QEMU\"",
+    "SELECT * FROM Win32_OperatingSystem WHERE ProductType <> 1"
+   ]
+  },
+  "tasks": [
+   {
+    "name": "Relian Comet VSS provider",
+    "description": "Adds COMET_FORCE_VSS_PROVIDER=system to Comet's service environment if missing (merge, never replace). Managed by the Relian gpo-baseline package.",
+    "file": {
+     "name": "Invoke-CometVssProvider.ps1",
+     "url": "https://raw.githubusercontent.com/Relianco/device-scripts/27368651c3fc3aa561dd14f62d44d3aee35c5afc/windows/packages/comet-vss-provider/Invoke-CometVssProvider.ps1",
+     "sha256": "79dfa7393aae0893317651c4ac992261f0a4b861e21ad7d5f8506b114d570704"
+    },
+    "arguments": "-Action Install",
+    "intervalMinutes": 60,
+    "bootDelayMinutes": 5
+   }
+  ]
  }
 ]
 '@
@@ -125,6 +167,108 @@ function Get-GpbDefinition {
     $all = $GpbDefinitionJson | ConvertFrom-Json
     foreach ($d in $all) { if ($d.id -eq $Id) { return $d } }
     return $null
+}
+
+# No output (not $null) for a missing property, so @(Get-GpbProp ...) is empty.
+function Get-GpbProp { param($Object, [string]$Name) if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.$Name } }
+
+# Returns the first problem with a definition, or $null. Embedded and test definitions both pass here.
+function Test-GpbDefinition {
+    param($Def)
+    if ([string](Get-GpbProp $Def 'id') -notmatch '^[a-z0-9][a-z0-9-]{0,63}$') { return 'Definition id is invalid.' }
+    if ([string](Get-GpbProp $Def 'gpoName') -notmatch '^[A-Za-z0-9 ._()-]{1,128}$') { return 'gpoName is invalid.' }
+    foreach ($i in @(Get-GpbProp $Def 'registry')) {
+        if ([string]$i.key -notmatch '^HKLM\\[^\x00-\x1F]+$') { return "Registry key must be under HKLM: $($i.key)" }
+        if (@('DWord', 'String', 'ExpandString', 'QWord') -notcontains [string]$i.type) { return "Registry type not supported: $($i.type)" }
+    }
+    foreach ($i in @(Get-GpbProp $Def 'security')) {
+        if (@('System Access', 'Kerberos Policy', 'Event Audit', 'Registry Values', 'Privilege Rights', 'Service General Setting') -notcontains [string]$i.section) { return "Security section not supported: $($i.section)" }
+    }
+    foreach ($i in @(Get-GpbProp $Def 'audit')) {
+        if ([string]$i.guid -notmatch '^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$' -or @(0, 1, 2, 3) -notcontains [int]$i.setting -or [string]$i.subcategory -notmatch '^[A-Za-z /-]+$') { return "Audit entry invalid: $($i.subcategory)" }
+    }
+    $w = Get-GpbProp $Def 'wmiFilter'
+    if ($w) {
+        # Name goes into an LDAP filter: no metacharacters.
+        if ([string]$w.name -notmatch '^[A-Za-z0-9 ._-]{1,64}$') { return 'WMI filter name is invalid.' }
+        foreach ($q in @($w.queries)) { if ([string]$q -notmatch '^SELECT [^;\x00-\x1F]+$') { return 'WMI queries must be single SELECT statements.' } }
+        if (@($w.queries).Count -lt 1) { return 'WMI filter has no query.' }
+    }
+    foreach ($t in @(Get-GpbProp $Def 'tasks')) {
+        if ([string]$t.name -notmatch '^[A-Za-z0-9 ._-]{1,64}$') { return 'Task name is invalid.' }
+        $f = Get-GpbProp $t 'file'
+        if ([string](Get-GpbProp $f 'name') -notmatch '^[A-Za-z0-9._-]+\.ps1$') { return 'Task file name is invalid.' }
+        $url = [string](Get-GpbProp $f 'url')
+        if ($url -notmatch '^https://[^/@\s]+/[^\s"]+$') { return 'Task file URL must be https without user info.' }
+        if ([string](Get-GpbProp $f 'sha256') -notmatch '^[0-9a-f]{64}$') { return 'Task file sha256 must be 64 lowercase hex characters.' }
+        # Arguments are placed in a -Command line: words, dashes and = only.
+        if ([string](Get-GpbProp $t 'arguments') -notmatch '^[A-Za-z0-9 =_.-]*$') { return 'Task arguments may hold letters, digits, spaces, = _ . - only.' }
+        if ([int](Get-GpbProp $t 'intervalMinutes') -lt 15 -or [int](Get-GpbProp $t 'intervalMinutes') -gt 1440) { return 'Task intervalMinutes must be 15 to 1440.' }
+        if ([int](Get-GpbProp $t 'bootDelayMinutes') -lt 0 -or [int](Get-GpbProp $t 'bootDelayMinutes') -gt 60) { return 'Task bootDelayMinutes must be 0 to 60.' }
+    }
+    return $null
+}
+
+function Get-GpbSha256 {
+    param([string]$Path)
+    if (-not [IO.File]::Exists($Path)) { return $null }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path))) -replace '-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
+# Download seam. The runner's TLS setting does not reach this child process.
+$script:GpbDownload = {
+    param($Url, $Path)
+    # Shared guard (tests/windows/tls12.Tests.ps1): add Tls12 only on legacy explicit defaults.
+    $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
+    Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -ErrorAction Stop | Out-Null
+}
+
+# msWMI-Parm2: "<count>;" then per query "3;10;<len>;WQL;root\CIMv2;<query>;" (the GPMC encoding).
+function ConvertTo-GpbWmiParm2 {
+    param([string[]]$Queries)
+    $sb = [Text.StringBuilder]::new([string]$Queries.Count + ';')
+    foreach ($q in $Queries) { [void]$sb.Append("3;10;$($q.Length);WQL;root\CIMv2;$q;") }
+    return $sb.ToString()
+}
+
+function Get-GpbWmiFilter {
+    param($Context, [string]$Name)
+    $base = 'CN=SOM,CN=WMIPolicy,CN=System,' + $Context.DomainDN
+    return @(Get-ADObject -SearchBase $base -LDAPFilter "(&(objectClass=msWMI-Som)(msWMI-Name=$Name))" -Properties 'msWMI-Name', 'msWMI-Parm1', 'msWMI-Parm2', 'msWMI-ID' -Server $Context.Server -ErrorAction Stop) | Select-Object -First 1
+}
+
+function Get-GpbGpoDn { param($Context, $Gpo) 'CN={' + $Gpo.Id.ToString().ToUpper() + '},CN=Policies,CN=System,' + $Context.DomainDN }
+function Get-GpbScriptPath { param($Context, $Gpo, [string]$Name) Join-Path (Get-GpbGpoDir $Context $Gpo) "Machine\Scripts\Relian\$Name" }
+function Get-GpbTasksPath { param($Context, $Gpo) Join-Path (Get-GpbGpoDir $Context $Gpo) 'Machine\Preferences\ScheduledTasks\ScheduledTasks.xml' }
+
+# Stable uid per GPO and task name, so regenerating the XML is idempotent.
+function Get-GpbStableGuid {
+    param([string]$Text)
+    $md5 = [Security.Cryptography.MD5]::Create()
+    try { return ([guid]::new($md5.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).ToString().ToUpper() } finally { $md5.Dispose() }
+}
+
+function ConvertTo-GpbTasksXml {
+    param($Context, $Gpo, $Tasks)
+    $e = { param($t) [Security.SecurityElement]::Escape([string]$t) }
+    $sb = [Text.StringBuilder]::new('<?xml version="1.0" encoding="utf-8"?>' + "`r`n" + '<ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}">' + "`r`n")
+    foreach ($t in @($Tasks)) {
+        $unc = "\\$($Context.DnsRoot)\SYSVOL\$($Context.DnsRoot)\Policies\{$($Gpo.Id.ToString().ToUpper())}\Machine\Scripts\Relian\$($t.file.name)"
+        # The SYSVOL copy runs only while it matches the pin; a copy still replicating is skipped this round.
+        $command = "`$p='$unc'; if ((Get-FileHash -LiteralPath `$p -Algorithm SHA256).Hash -ne '$($t.file.sha256)') { exit 2 }; & `$p $($t.arguments); exit `$LASTEXITCODE"
+        $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
+        $uid = Get-GpbStableGuid ($Gpo.Id.ToString() + '|' + $t.name)
+        [void]$sb.Append("<TaskV2 clsid=`"{D8896631-B747-47a7-84A6-C155337F3BC8}`" name=`"$(& $e $t.name)`" image=`"1`" changed=`"2026-11-10 00:00:00`" uid=`"{$uid}`" userContext=`"0`" removePolicy=`"1`">")
+        [void]$sb.Append("<Properties action=`"R`" name=`"$(& $e $t.name)`" runAs=`"NT AUTHORITY\System`" logonType=`"S4U`"><Task version=`"1.3`">")
+        [void]$sb.Append("<RegistrationInfo><Author>Relian gpo-baseline</Author><Description>$(& $e $t.description)</Description></RegistrationInfo>")
+        [void]$sb.Append('<Principals><Principal id="Author"><UserId>NT AUTHORITY\System</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>')
+        [void]$sb.Append('<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT30M</ExecutionTimeLimit><Priority>7</Priority></Settings>')
+        [void]$sb.Append("<Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT$([int]$t.bootDelayMinutes)M</Delay></BootTrigger><TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT$([int]$t.intervalMinutes)M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></TimeTrigger></Triggers>")
+        [void]$sb.Append("<Actions Context=`"Author`"><Exec><Command>powershell.exe</Command><Arguments>$(& $e $arguments)</Arguments></Exec></Actions></Task></Properties></TaskV2>`r`n")
+    }
+    [void]$sb.Append("</ScheduledTasks>`r`n")
+    return $sb.ToString()
 }
 
 function Protect-GpbText {
@@ -301,6 +445,7 @@ function Get-GpbContext {
         PoliciesPath = "\\$pdc\SYSVOL\$($domain.DNSRoot)\Policies"
         BackupRoot = Join-Path $env:ProgramData 'Relian\gpo-backups'
         IsPdc = ($pdc.Split('.')[0] -ieq $env:COMPUTERNAME)
+        DnsRoot = [string]$domain.DNSRoot
     }
 }
 
@@ -343,11 +488,34 @@ function Get-GpbPlan {
         if ($audit.Contains($item.guid)) { $cur = $audit[$item.guid].Value }
         if ($cur -ne [string]$item.setting) { $changes.Add([ordered]@{ kind = 'audit'; target = $item.subcategory; current = $cur; desired = [string]$item.setting; cis = $item.cis; item = $item }) }
     }
+    $w = Get-GpbProp $Def 'wmiFilter'
+    if ($w) {
+        $marker = "[relian-gpo-baseline:$($Def.id)]"
+        $want = ConvertTo-GpbWmiParm2 @($w.queries)
+        $filter = Get-GpbWmiFilter -Context $Context -Name $w.name
+        if (-not $filter) { $changes.Add([ordered]@{ kind = 'wmiFilter'; target = $w.name; current = $null; desired = ($w.queries -join ' AND ') }) }
+        elseif ([string]$filter.'msWMI-Parm2' -cne $want) { $changes.Add([ordered]@{ kind = 'wmiFilter'; target = $w.name; current = 'different queries'; desired = ($w.queries -join ' AND '); filter = $filter }) }
+        $linked = $null
+        if ($Gpo) { $linked = [string](Get-ADObject -Identity (Get-GpbGpoDn $Context $Gpo) -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter }
+        if (-not $filter -or $linked -ne "[$($Context.DnsRoot);$($filter.'msWMI-ID');0]") { $changes.Add([ordered]@{ kind = 'wmiLink'; target = $w.name; current = $linked; desired = 'linked' }) }
+    }
+    $tasks = @(Get-GpbProp $Def 'tasks')
+    foreach ($t in $tasks) {
+        $cur = $null
+        if ($Gpo) { $cur = Get-GpbSha256 (Get-GpbScriptPath $Context $Gpo $t.file.name) }
+        if ($cur -ne $t.file.sha256) { $changes.Add([ordered]@{ kind = 'file'; target = $t.file.name; current = $cur; desired = $t.file.sha256; item = $t }) }
+    }
+    if ($tasks.Count) {
+        $same = $false
+        if ($Gpo) { $same = (Read-GpbText (Get-GpbTasksPath $Context $Gpo)) -ceq (ConvertTo-GpbTasksXml $Context $Gpo $tasks) }
+        if (-not $same) { $changes.Add([ordered]@{ kind = 'tasks'; target = 'ScheduledTasks.xml'; current = $null; desired = (@($tasks | ForEach-Object { $_.name }) -join ', ') }) }
+    }
     # Matching files are not enough: clients skip them unless the CSE pair is registered
     # and AD and GPT.INI carry the same version. A run that stopped between the two is repaired.
     $pairs = @()
     if (@($Def.security).Count) { $pairs += $GpbSecurityCse }
     if (@($Def.audit).Count) { $pairs += $GpbAuditCse }
+    if ($tasks.Count) { $pairs += $GpbTaskCses }
     if ($Gpo -and $pairs.Count) {
         $pub = Get-GpbPublishState -Context $Context -Gpo $Gpo
         $missing = (Add-GpbExtensionNames -Current $pub.ext -Pairs $pairs) -ne (Add-GpbExtensionNames -Current $pub.ext -Pairs @())
@@ -434,11 +602,45 @@ function Update-GpbVersion {
 
 function Invoke-GpbApply {
     param($Context, $Def, $Gpo, $Changes, [string]$LinkTo, [bool]$LinkOn, $Report)
+    # Downloads first: a pin mismatch stops the run before any GPO or AD write.
+    $downloaded = @{}
+    try {
+        foreach ($c in @($Changes | Where-Object { $_.kind -eq 'file' })) {
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ('relian-gpb-' + [guid]::NewGuid().ToString('n'))
+            & $script:GpbDownload $c.item.file.url $tmp
+            $got = Get-GpbSha256 $tmp
+            if ($got -ne $c.item.file.sha256) { throw "Downloaded $($c.item.file.name) has SHA256 $got, not the pinned $($c.item.file.sha256). Nothing was changed." }
+            $downloaded[$c.item.file.name] = $tmp
+        }
+        return (Invoke-GpbApplyWrites -Context $Context -Def $Def -Gpo $Gpo -Changes $Changes -LinkTo $LinkTo -LinkOn $LinkOn -Report $Report -Downloaded $downloaded)
+    } finally {
+        foreach ($f in $downloaded.Values) { if ([IO.File]::Exists($f)) { [IO.File]::Delete($f) } }
+    }
+}
+
+function Invoke-GpbApplyWrites {
+    param($Context, $Def, $Gpo, $Changes, [string]$LinkTo, [bool]$LinkOn, $Report, $Downloaded)
     if (-not $Gpo) {
         $Gpo = New-GPO -Name $Def.gpoName -Comment ("[relian-gpo-baseline:$($Def.id)] Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server -ErrorAction Stop
         $Report.gpo.id = [string]$Gpo.Id; $Report.gpo.exists = $true; $Report.gpo.owned = $true
     } else {
         $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record
+    }
+    $filter = $null
+    $w = Get-GpbProp $Def 'wmiFilter'
+    if ($w) {
+        $stamp = [datetime]::UtcNow.ToString('yyyyMMddHHmmss.ffffff') + '-000'
+        $parm1 = "[relian-gpo-baseline:$($Def.id)] " + $w.description
+        $parm2 = ConvertTo-GpbWmiParm2 @($w.queries)
+        $wc = @($Changes | Where-Object { $_.kind -eq 'wmiFilter' }) | Select-Object -First 1
+        if ($wc -and $wc.Contains('filter')) {
+            Set-ADObject -Identity $wc.filter.DistinguishedName -Replace @{ 'msWMI-Parm2' = $parm2; 'msWMI-ChangeDate' = $stamp } -Server $Context.Server -ErrorAction Stop
+        } elseif ($wc) {
+            $wid = '{' + [guid]::NewGuid().ToString().ToUpper() + '}'
+            New-ADObject -Name $wid -Type 'msWMI-Som' -Path ('CN=SOM,CN=WMIPolicy,CN=System,' + $Context.DomainDN) -OtherAttributes @{ 'msWMI-Name' = $w.name; 'msWMI-Parm1' = $parm1; 'msWMI-Parm2' = $parm2; 'msWMI-Author' = 'relian-gpo-baseline'; 'msWMI-ID' = $wid; 'msWMI-CreationDate' = $stamp; 'msWMI-ChangeDate' = $stamp } -Server $Context.Server -ErrorAction Stop
+        }
+        $filter = Get-GpbWmiFilter -Context $Context -Name $w.name
+        if (-not $filter) { throw 'WMI filter not found after creation.' }
     }
     foreach ($c in @($Changes | Where-Object { $_.kind -eq 'registry' })) {
         Set-GPRegistryValue -Guid $Gpo.Id -Key $c.item.key -ValueName $c.item.valueName -Type $c.item.type -Value $c.item.value -Server $Context.Server -ErrorAction Stop | Out-Null
@@ -446,9 +648,10 @@ function Invoke-GpbApply {
     $pairs = @()
     $security = @($Changes | Where-Object { $_.kind -eq 'security' })
     $audit = @($Changes | Where-Object { $_.kind -eq 'audit' })
+    $fileChanges = @($Changes | Where-Object { $_.kind -eq 'file' -or $_.kind -eq 'tasks' })
     # Marker first: if publication fails after the files change, the next plan retries it.
     $marker = $null
-    if ($security.Count -or $audit.Count -or @($Changes | Where-Object { $_.kind -eq 'publish' }).Count) {
+    if ($security.Count -or $audit.Count -or $fileChanges.Count -or @($Changes | Where-Object { $_.kind -eq 'publish' }).Count) {
         $marker = Join-Path (Initialize-GpbStateDir $Context $Gpo) 'pending-publish'
         [IO.File]::WriteAllText($marker, [datetime]::UtcNow.ToString('o'))
     }
@@ -473,12 +676,28 @@ function Invoke-GpbApply {
         [IO.File]::WriteAllText($path, (ConvertTo-GpbAuditCsv $rows), [Text.UTF8Encoding]::new($false))
         $pairs += $GpbAuditCse
     }
+    $tasks = @(Get-GpbProp $Def 'tasks')
+    foreach ($c in @($Changes | Where-Object { $_.kind -eq 'file' })) {
+        $dest = Get-GpbScriptPath $Context $Gpo $c.item.file.name
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force)
+        [IO.File]::Copy($Downloaded[$c.item.file.name], $dest, $true)
+    }
+    if (@($Changes | Where-Object { $_.kind -eq 'tasks' }).Count) {
+        $path = Get-GpbTasksPath $Context $Gpo
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force)
+        [IO.File]::WriteAllText($path, (ConvertTo-GpbTasksXml $Context $Gpo $tasks), [Text.UTF8Encoding]::new($false))
+    }
+    if ($fileChanges.Count) { $pairs += $GpbTaskCses }
     if (@($Changes | Where-Object { $_.kind -eq 'publish' }).Count) {
         if (@($Def.security).Count) { $pairs += $GpbSecurityCse }
         if (@($Def.audit).Count) { $pairs += $GpbAuditCse }
+        if ($tasks.Count) { $pairs += $GpbTaskCses }
     }
     if ($pairs.Count) { Update-GpbVersion -Context $Context -Gpo $Gpo -Pairs $pairs }
     if ($marker) { [IO.File]::Delete($marker) }
+    if ($filter -and @($Changes | Where-Object { $_.kind -eq 'wmiLink' }).Count) {
+        Set-ADObject -Identity (Get-GpbGpoDn $Context $Gpo) -Replace @{ gPCWQLFilter = "[$($Context.DnsRoot);$($filter.'msWMI-ID');0]" } -Server $Context.Server -ErrorAction Stop
+    }
     foreach ($c in @($Changes | Where-Object { $_.kind -eq 'link' })) {
         $state = 'No'; if ($LinkOn) { $state = 'Yes' }
         if ($c.Contains('exists')) { Set-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server -ErrorAction Stop | Out-Null }
@@ -513,7 +732,9 @@ function Invoke-GpoBaseline {
     $def = $DefinitionObject
     if (-not $def) { $def = Get-GpbDefinition $Definition }
     if (-not $def) { return (& $refuse 'Unknown Definition. Embedded: cis-ws2022-dc-low-risk.') }
-    $report.definition = $def.id
+    $report.definition = [string](Get-GpbProp $def 'id')
+    $problem = Test-GpbDefinition $def
+    if ($problem) { return (& $refuse $problem) }
     try {
         if (-not $Context) { $Context = Get-GpbContext }
         $gpo = Get-GpbGpo -Context $Context -Name $def.gpoName
@@ -526,6 +747,12 @@ function Invoke-GpoBaseline {
         if ($isDefault -and -not ($def.allowDefaultPolicy -eq $true -and $allowDefault)) { return (& $refuse 'Default policies change only when the definition sets allowDefaultPolicy and AllowDefaultPolicy=true is passed.') }
         if ($isDefault -and -not $gpo) { return (& $refuse 'Default policy not found.') }
         if ($gpo -and -not $isDefault -and -not $owned) { return (& $refuse 'A GPO with this name exists without the Relian marker. It was not changed.') }
+        $w = Get-GpbProp $def 'wmiFilter'
+        $ownFilter = $null
+        if ($w) {
+            $ownFilter = Get-GpbWmiFilter -Context $Context -Name $w.name
+            if ($ownFilter -and -not ([string]$ownFilter.'msWMI-Parm1').Contains("[relian-gpo-baseline:$($def.id)]")) { return (& $refuse 'A WMI filter with this name exists without the Relian marker. It was not changed.') }
+        }
         $backupDir = $null; $lastBackup = $null
         if ($gpo) {
             $backupDir = Join-Path $Context.BackupRoot ('{' + $gpo.Id.ToString().ToUpper() + '}')
@@ -542,7 +769,15 @@ function Invoke-GpoBaseline {
             if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
             $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
             if ($isDefault) { Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server -ErrorAction Stop | Out-Null; $report.status = 'restored' }
-            else { Remove-GPO -Guid $gpo.Id -Server $Context.Server -ErrorAction Stop | Out-Null; $report.status = 'removed' }
+            else {
+                Remove-GPO -Guid $gpo.Id -Server $Context.Server -ErrorAction Stop | Out-Null
+                # The owned WMI filter goes too, unless another GPO still uses it.
+                if ($ownFilter) {
+                    $users = @(Get-ADObject -SearchBase ('CN=Policies,CN=System,' + $Context.DomainDN) -LDAPFilter "(gPCWQLFilter=*$($ownFilter.'msWMI-ID')*)" -Server $Context.Server -ErrorAction Stop)
+                    if ($users.Count -eq 0) { Remove-ADObject -Identity $ownFilter.DistinguishedName -Confirm:$false -Server $Context.Server -ErrorAction Stop }
+                }
+                $report.status = 'removed'
+            }
             return @{ report = $report; exitCode = 0 }
         }
 

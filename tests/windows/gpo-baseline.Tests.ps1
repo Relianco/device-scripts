@@ -67,14 +67,17 @@ function New-FakeWorld {
     $script:removeFails = $false
     $script:adGetCount = 0
     $script:adGetFailAt = -1
+    $script:wmi = @{}
+    $script:downloads = [Collections.Generic.List[string]]::new()
+    $script:downloadBody = 'fake comet script'
     $policies = Join-Path $tmp ([guid]::NewGuid().ToString('n'))
     [void](New-Item -ItemType Directory -Path $policies)
-    return @{ Server = 'pdc.example.invalid'; DomainDN = 'DC=example,DC=invalid'; PoliciesPath = $policies; BackupRoot = (Join-Path $policies 'backups'); IsPdc = $true }
+    return @{ Server = 'pdc.example.invalid'; DomainDN = 'DC=example,DC=invalid'; PoliciesPath = $policies; BackupRoot = (Join-Path $policies 'backups'); IsPdc = $true; DnsRoot = 'example.invalid' }
 }
 function Add-FakeGpo {
     param($Context, [string]$Name, [string]$Comment, [guid]$Id = [guid]::NewGuid())
     $script:gpos[$Name] = [pscustomobject]@{ Id = $Id; DisplayName = $Name; Description = $Comment }
-    $script:ad[$Id.ToString()] = @{ versionNumber = 0; gPCMachineExtensionNames = '' }
+    $script:ad[$Id.ToString()] = @{ versionNumber = 0; gPCMachineExtensionNames = ''; gPCWQLFilter = $null }
     $dir = Join-Path $Context.PoliciesPath ('{' + $Id.ToString().ToUpper() + '}')
     [void](New-Item -ItemType Directory -Path $dir -Force)
     [IO.File]::WriteAllText((Join-Path $dir 'GPT.INI'), "[General]`r`nVersion=0`r`ndisplayName=New Group Policy Object`r`n")
@@ -130,20 +133,46 @@ function Backup-GPO {
     return [pscustomobject]@{ Id = [guid]'11111111-2222-3333-4444-555555555555' }
 }
 function Restore-GPO { [CmdletBinding()] param($BackupId, $Path, $Server) $script:calls.Add("Restore-GPO $BackupId") }
-function Remove-GPO { [CmdletBinding()] param($Guid, $Server) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName) }
+function Remove-GPO { [CmdletBinding()] param($Guid, $Server) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName); $script:ad.Remove($g.Id.ToString()) }
 function Get-ADObject {
     [CmdletBinding()]
-    param($Identity, $Properties, $Server)
+    param($Identity, $Properties, $Server, $SearchBase, $LDAPFilter)
+    if ($LDAPFilter -like '*msWMI-Som*') {
+        $name = [regex]::Match($LDAPFilter, 'msWMI-Name=([^)]*)\)').Groups[1].Value
+        return @($script:wmi.Values | Where-Object { $_.'msWMI-Name' -eq $name } | ForEach-Object { [pscustomobject]$_ })
+    }
+    if ($LDAPFilter -like '*gPCWQLFilter*') {
+        $fid = [regex]::Match($LDAPFilter, '\{[0-9A-Fa-f-]{36}\}').Value
+        return @($script:ad.Values | Where-Object { [string]$_.gPCWQLFilter -like "*$fid*" } | ForEach-Object { [pscustomobject]$_ })
+    }
     $script:adGetCount++
     if ($script:adGetCount -eq $script:adGetFailAt) { throw 'simulated AD read failure' }
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     $o = $script:ad[$id]
-    return [pscustomobject]@{ versionNumber = $o.versionNumber; gPCMachineExtensionNames = $o.gPCMachineExtensionNames }
+    return [pscustomobject]@{ versionNumber = $o.versionNumber; gPCMachineExtensionNames = $o.gPCMachineExtensionNames; gPCWQLFilter = $o.gPCWQLFilter }
+}
+function New-ADObject {
+    [CmdletBinding()]
+    param($Name, $Type, $Path, $OtherAttributes, $Server)
+    $script:calls.Add("New-ADObject $Type")
+    $o = @{ DistinguishedName = "CN=$Name,$Path" }
+    foreach ($k in $OtherAttributes.Keys) { $o[$k] = $OtherAttributes[$k] }
+    $script:wmi[$Name] = $o
+}
+function Remove-ADObject {
+    [CmdletBinding()]
+    param($Identity, [switch]$Confirm, $Server)
+    $script:calls.Add('Remove-ADObject')
+    foreach ($k in @($script:wmi.Keys)) { if ($script:wmi[$k].DistinguishedName -eq $Identity) { $script:wmi.Remove($k) } }
 }
 function Set-ADObject {
     [CmdletBinding()]
     param($Identity, $Replace, $Server)
     $script:calls.Add('Set-ADObject')
+    if ($Identity -like '*CN=SOM,*') {
+        foreach ($w in $script:wmi.Values) { if ($w.DistinguishedName -eq $Identity) { foreach ($k in $Replace.Keys) { $w[$k] = $Replace[$k] } } }
+        return
+    }
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     foreach ($k in $Replace.Keys) { $script:ad[$id][$k] = $Replace[$k] }
 }
@@ -159,6 +188,7 @@ function New-GPLink {
     $script:links["$Guid|$Target"] = [pscustomobject]@{ GpoId = [guid]$Guid; Target = $Target; Enabled = ($LinkEnabled -eq 'Yes') }
 }
 function Set-GPLink { [CmdletBinding()] param($Guid, $Target, $LinkEnabled, $Server) $script:calls.Add("Set-GPLink $LinkEnabled") }
+$script:GpbDownload = { param($Url, $Path) $script:downloads.Add($Url); [IO.File]::WriteAllText($Path, $script:downloadBody) }
 function Protect-GpbBackupRoot { param($Path) $script:calls.Add('Protect-GpbBackupRoot') }
 function Get-Writes { return ,@($script:calls | Where-Object { $_ -notmatch '^(Get-GPO)$' }) }
 
@@ -357,6 +387,102 @@ try {
     Assert ($r.exitCode -eq 0 -and [long]$script:ad[$gpo.Id.ToString()].versionNumber -gt $before) 'pending publication completed'
     $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'noChange') 'pending marker cleared'
+
+    # ---- Definition validation ----
+    $base = { [pscustomobject]@{ id = 'test-def'; gpoName = 'Test'; description = 'd'; allowDefaultPolicy = $false; registry = @(); security = @(); audit = @() } }
+    $script:ctx = New-FakeWorld
+    $bad = @(
+        @{ label = 'HKCU registry key'; set = { param($d) $d.registry = @([pscustomobject]@{ cis = 'x'; key = 'HKCU\Software\X'; valueName = 'A'; type = 'DWord'; value = 1 }) } },
+        @{ label = 'unknown registry type'; set = { param($d) $d.registry = @([pscustomobject]@{ cis = 'x'; key = 'HKLM\Software\X'; valueName = 'A'; type = 'Binary'; value = 1 }) } },
+        @{ label = 'audit setting out of range'; set = { param($d) $d.audit = @([pscustomobject]@{ cis = 'x'; subcategory = 'Audit Logon'; guid = '{0cce9215-69ae-11d9-bed3-505054503030}'; setting = 5 }) } },
+        @{ label = 'unknown security section'; set = { param($d) $d.security = @([pscustomobject]@{ cis = 'x'; section = 'File Security'; key = 'k'; value = 'v' }) } },
+        @{ label = 'task over plain http'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'http://example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
+        @{ label = 'task file name with a path'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = '..\a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
+        @{ label = 'task bad hash'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = 'abc' } }) } },
+        @{ label = 'task arguments with a command separator'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install; Remove-Item C:\'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
+        @{ label = 'URL with user info'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = ''; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://user@example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
+        @{ label = 'WMI query outside SELECT'; set = { param($d) $d | Add-Member wmiFilter ([pscustomobject]@{ name = 'F'; description = 'd'; queries = @('DELETE FROM Win32_Process') }) } },
+        @{ label = 'WMI filter name with LDAP metacharacters'; set = { param($d) $d | Add-Member wmiFilter ([pscustomobject]@{ name = 'F*)(x'; description = 'd'; queries = @('SELECT * FROM Win32_ComputerSystem') }) } }
+    )
+    foreach ($case in $bad) {
+        $d = & $base; & $case.set $d
+        $script:calls.Clear()
+        $r = Invoke-GpoBaseline -Action Install -DefinitionObject $d -Apply 'true' -Context $script:ctx
+        Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) "invalid definition refused: $($case.label)"
+    }
+    foreach ($id in @('cis-ws2022-dc-low-risk', 'comet-vss-provider-qemu')) { Assert (-not (Test-GpbDefinition (Get-GpbDefinition $id))) "embedded definition valid: $id" }
+
+    # ---- Comet VSS provider: WMI-filtered GPO with a hash-pinned GPP scheduled task ----
+    $comet = Get-GpbDefinition 'comet-vss-provider-qemu'
+    $task = $comet.tasks[0]
+    Assert ($task.file.url -match '^https://raw\.githubusercontent\.com/Relianco/device-scripts/[0-9a-f]{40}/windows/packages/comet-vss-provider/Invoke-CometVssProvider\.ps1$') 'Comet script pinned to a commit'
+    $pinned = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $root 'windows/packages/comet-vss-provider/Invoke-CometVssProvider.ps1')).Hash.ToLower()
+    Assert ($task.file.sha256 -eq $pinned) 'Comet pin matches the comet-vss-provider package in this repo'
+    Assert (($comet.wmiFilter.queries -join ' ') -match 'Manufacturer = "QEMU"' -and ($comet.wmiFilter.queries -join ' ') -match 'ProductType <> 1') 'WMI filter targets QEMU servers'
+    Assert (@($comet.registry).Count -eq 0) 'no GPP or registry replace of AppEnvironmentExtra'
+
+    $script:ctx = New-FakeWorld
+    $script:downloadBody = 'fake comet script'
+    $fakeHash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($script:downloadBody))) -replace '-', '').ToLower()
+    $testComet = $comet | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $testComet.tasks[0].file.sha256 = $fakeHash
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Context $script:ctx
+    $kinds = @($r.report.changes | ForEach-Object { $_.kind })
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan' -and (Get-Writes).Count -eq 0 -and $script:downloads.Count -eq 0) 'Comet plan writes and downloads nothing'
+    foreach ($k in @('create', 'wmiFilter', 'wmiLink', 'file', 'tasks')) { Assert ($kinds -contains $k) "Comet plan lists $k" }
+
+    # A pin mismatch stops before any write.
+    $testComet.tasks[0].file.sha256 = ('0' * 64)
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 1 -and -not @($script:calls | Where-Object { $_ -match '^(New-GPO|New-ADObject|Backup-GPO|Set-)' })) 'hash mismatch makes no GPO or AD write'
+    Assert (-not $script:gpos.ContainsKey($testComet.gpoName)) 'hash mismatch created no GPO'
+    $testComet.tasks[0].file.sha256 = $fakeHash
+
+    $script:calls.Clear(); $script:downloads.Clear()
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'applied') "Comet apply: $($r.report | ConvertTo-Json -Depth 5 -Compress)"
+    Assert ($script:downloads.Count -eq 1 -and $script:downloads[0] -eq $task.file.url) 'pinned URL downloaded once'
+    $cg = $script:gpos[$testComet.gpoName]
+    $filter = @($script:wmi.Values)[0]
+    Assert ($script:wmi.Count -eq 1 -and $filter.'msWMI-Parm1' -match [regex]::Escape('[relian-gpo-baseline:comet-vss-provider-qemu]')) 'WMI filter created with marker'
+    $q1 = $comet.wmiFilter.queries[0]; $q2 = $comet.wmiFilter.queries[1]
+    Assert ($filter.'msWMI-Parm2' -ceq "2;3;10;$($q1.Length);WQL;root\CIMv2;$q1;3;10;$($q2.Length);WQL;root\CIMv2;$q2;") 'WMI filter query encoding'
+    Assert ($script:ad[$cg.Id.ToString()].gPCWQLFilter -eq "[example.invalid;$($filter.'msWMI-ID');0]") 'WMI filter linked to the GPO'
+    $cgDir = Join-Path $script:ctx.PoliciesPath ('{' + $cg.Id.ToString().ToUpper() + '}')
+    Assert ([IO.File]::ReadAllText((Join-Path $cgDir 'Machine\Scripts\Relian\Invoke-CometVssProvider.ps1')) -eq $script:downloadBody) 'pinned script stored in SYSVOL'
+    [xml]$tx = [IO.File]::ReadAllText((Join-Path $cgDir 'Machine\Preferences\ScheduledTasks\ScheduledTasks.xml'))
+    $t2 = $tx.ScheduledTasks.TaskV2
+    Assert ($tx.ScheduledTasks.clsid -eq '{CC63F200-7309-4ba0-B154-A71CD118DBCC}' -and $t2.clsid -eq '{D8896631-B747-47a7-84A6-C155337F3BC8}') 'GPP TaskV2 class ids'
+    Assert ($t2.Properties.runAs -eq 'NT AUTHORITY\System' -and $t2.Properties.action -eq 'R' -and $t2.removePolicy -eq '1') 'task runs as SYSTEM and is removed when the GPO no longer applies'
+    $exec = $t2.Properties.Task.Actions.Exec
+    Assert ($exec.Command -eq 'powershell.exe' -and $exec.Arguments.Contains($fakeHash) -and $exec.Arguments.Contains("\\example.invalid\SYSVOL\example.invalid\Policies\{$($cg.Id.ToString().ToUpper())}\Machine\Scripts\Relian\Invoke-CometVssProvider.ps1") -and $exec.Arguments.Contains('-Action Install')) 'task checks the pin, then runs the SYSVOL copy'
+    Assert ($t2.Properties.Task.Triggers.BootTrigger -and $t2.Properties.Task.Triggers.TimeTrigger.Repetition.Interval -eq 'PT60M') 'task runs at boot and hourly'
+    $ext = $script:ad[$cg.Id.ToString()].gPCMachineExtensionNames
+    Assert ($ext.Contains('[{00000000-0000-0000-0000-000000000000}{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}]') -and $ext.Contains('[{AADCED64-746C-4633-A97C-D61349046527}{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}]')) 'GPP Scheduled Tasks CSE registered'
+
+    $script:calls.Clear(); $script:downloads.Clear()
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and $script:downloads.Count -eq 0 -and (Get-Writes).Count -eq 0) 'Comet rerun changes and downloads nothing'
+
+    # Task drift on the owned GPO: backup first, then repair.
+    [IO.File]::WriteAllText((Join-Path $cgDir 'Machine\Preferences\ScheduledTasks\ScheduledTasks.xml'), '<ScheduledTasks/>')
+    $script:calls.Clear()
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
+    $writes = Get-Writes
+    Assert ($r.exitCode -eq 0 -and $writes[1] -eq 'Backup-GPO' -and @($r.report.changes).Count -ge 1) "task drift backed up then repaired: $($writes -join ', ')"
+
+    # A same-named WMI filter without the marker is foreign.
+    $script:ctx = New-FakeWorld
+    $script:wmi['{AAAAAAAA-0000-0000-0000-000000000000}'] = @{ DistinguishedName = 'CN={AAAAAAAA-0000-0000-0000-000000000000},CN=SOM,CN=WMIPolicy,CN=System,DC=example,DC=invalid'; 'msWMI-Name' = $comet.wmiFilter.name; 'msWMI-Parm1' = 'by hand'; 'msWMI-Parm2' = 'x'; 'msWMI-ID' = '{AAAAAAAA-0000-0000-0000-000000000000}' }
+    $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'foreign WMI filter refused'
+
+    # Uninstall removes the owned GPO and its now-unused owned WMI filter.
+    $script:ctx = New-FakeWorld
+    [void](Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx)
+    $script:calls.Clear()
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and ($script:calls -contains 'Remove-GPO') -and ($script:calls -contains 'Remove-ADObject') -and $script:wmi.Count -eq 0) 'uninstall removes GPO and owned WMI filter'
 
     # Output cap.
     $big = [ordered]@{ status = 'plan'; changes = @(1..400 | ForEach-Object { [ordered]@{ kind = 'registry'; target = ('HKLM\Software\Policies\' + ('x' * 80)); current = $null; desired = 'é' * 20 } }) }
