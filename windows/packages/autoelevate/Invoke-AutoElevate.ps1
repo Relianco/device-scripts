@@ -566,7 +566,8 @@ function Get-AutoElevateMsiArgumentList {
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
-    return @('/i', $InstallerPath, '/quiet', '/norestart') + @($Properties) + $log
+    # Start-Process joins the array with spaces, so a path is quoted to stay one argument.
+    return @('/i', ('"' + $InstallerPath + '"'), '/quiet', '/norestart') + @($Properties) + $log
 }
 
 # Stop order matters: the delayed-start service can start the agent again.
@@ -1082,6 +1083,11 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
+# An empty hash is a no-op before parameter validation and before the URL is read.
+if ($PSBoundParameters.ContainsKey('InstallerSha256') -and [string]::IsNullOrWhiteSpace($InstallerSha256)) {
+    exit 0
+}
+
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
         [Console]::Error.WriteLine("missing parameter $name")
@@ -1095,9 +1101,8 @@ Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
 $script:AutoElevateSecret = $autoelevateKey
 $autoelevateExit = 1
 try {
-    if (Test-AutoElevateUrlHasUserInfo -Url $InstallerUrl) {
-        Add-AutoElevateError -Message 'refusing a URL that contains userinfo for installer'
-    } elseif ($Section -eq 'Evidence') {
+    # The installer URL is checked for userinfo only where it is downloaded (Invoke-AutoElevateAction).
+    if ($Section -eq 'Evidence') {
         $script:AutoElevateReport = Get-AutoElevateEvidence
         $autoelevateExit = 0
     } elseif (-not [string]::IsNullOrEmpty($Section)) {

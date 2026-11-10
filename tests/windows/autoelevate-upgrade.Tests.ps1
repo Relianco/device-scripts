@@ -247,6 +247,50 @@ try {
     foreach ($want in @('"Version":"2.8.2.0"', 'Example Company', 'Main Office', '"LicenseKey":"present"', '"Registered":true', 'AutoElevateAgent', '11921', 'AEAlert')) {
         if (-not $json.Contains($want)) { Fail "evidence lacks $want : $json" }
     }
+
+    # 11. Paths with spaces stay one argument once Start-Process joins the array.
+    $spaced = 'C:\Windows\Temp\dir with space\AESetup.msi'
+    $spacedLog = 'C:\Program Data\Relian\msiexec install.log'
+    $props = @("LICENSE_KEY=`"$($script:Key)`"", 'COMPANY_NAME="Example Company"')
+    $flat = (Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $spaced -ProductCode '' -Properties $props -LogPath $spacedLog) -join ' '
+    if (-not $flat.StartsWith("/i `"$spaced`" /quiet /norestart")) { Fail "spaced installer path: $flat" }
+    if (-not $flat.EndsWith("/l*v `"$spacedLog`"")) { Fail "spaced log path: $flat" }
+    if ((ConvertTo-AutoElevateRedacted -Text $flat).Contains($script:Key)) { Fail 'flattened arguments kept the key after redaction' }
+
+    # 12. Userinfo is refused only where the installer is downloaded.
+    $userInfoUrl = -join @('https://', 'user', '@', 'example.invalid/AESetup.msi')
+    Reset-Case
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl $userInfoUrl -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot)
+    if ($code -ne 0 -or $script:Calls -notcontains 'msiexec uninstall' -or $script:Calls -contains 'download') { Fail "uninstall with a userinfo URL exit $code calls $($script:Calls -join ', ')" }
+    Reset-Case
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Install' -Action 'Install' -PinVersion '2.11.1959' -InstallerUrl $userInfoUrl -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot)
+    if ($code -ne 1 -or $script:Calls.Count -ne 0) { Fail "install with a userinfo URL exit $code calls $($script:Calls -join ', ')" }
+
+    # 13. The script entry point, as the runner starts it. Uninstall only off Windows, so no agent is touched.
+    $pwsh = (Get-Process -Id $PID).Path
+    $childRoot = Join-Path $script:Root 'child'
+    function Invoke-Child {
+        param([string[]]$Arguments)
+        $output = & $pwsh -NoProfile -File $scriptPath -DeploymentType Install -PinVersion '2.11.1959' -MarkerRoot $childRoot @Arguments 2>&1
+        return [pscustomobject]@{ Code = $LASTEXITCODE; Text = (@($output) -join "`n") }
+    }
+    $run = Invoke-Child -Arguments @('-Action', 'Install', '-InstallerUrl', $userInfoUrl, '-InstallerSha256', '')
+    if ($run.Code -ne 0 -or $run.Text -ne '') { Fail "empty hash with a userinfo URL: exit $($run.Code) [$($run.Text)]" }
+    $run = Invoke-Child -Arguments @('-Action', 'Install', '-InstallerUrl', $userInfoUrl, '-Section', 'Evidence')
+    if ($run.Code -ne 0 -or $run.Text -notlike '*"Section":"Evidence"*') { Fail "evidence with a userinfo URL: exit $($run.Code) [$($run.Text)]" }
+    $env:AE_LICENSE_KEY = $script:Key
+    try {
+        $run = Invoke-Child -Arguments @('-Action', 'Install', '-Section', 'Evidence')
+        if ($run.Code -ne 0 -or $run.Text.Contains($script:Key)) { Fail "evidence with AE_LICENSE_KEY set: exit $($run.Code)" }
+    } finally {
+        Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
+    }
+    if (-not $IsWindows) {
+        $run = Invoke-Child -Arguments @('-Action', 'Install', '-InstallerUrl', $userInfoUrl)
+        if ($run.Code -ne 1 -or $run.Text -notlike '*userinfo*') { Fail "install with a userinfo URL: exit $($run.Code) [$($run.Text)]" }
+        $run = Invoke-Child -Arguments @('-Action', 'Uninstall', '-InstallerUrl', $userInfoUrl)
+        if ($run.Code -ne 0) { Fail "uninstall with a userinfo URL: exit $($run.Code) [$($run.Text)]" }
+    }
 } finally {
     if (Test-Path -LiteralPath $script:Root) {
         Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue

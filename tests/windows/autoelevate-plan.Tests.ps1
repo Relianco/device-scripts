@@ -264,7 +264,7 @@ Assert-Plan -Plan $unknown -Expect (New-Expect -ExitCode 1) -Label 'unknown acti
 
 $installArgs = Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\autoelevate.msi' -ProductCode ''
 if ($null -eq $installArgs -or $installArgs.Count -ne 4 -or
-    $installArgs[0] -cne '/i' -or $installArgs[1] -cne 'C:\cache\autoelevate.msi' -or
+    $installArgs[0] -cne '/i' -or $installArgs[1] -cne '"C:\cache\autoelevate.msi"' -or
     $installArgs[2] -cne '/quiet' -or $installArgs[3] -cne '/norestart') {
     Fail "install arguments $($installArgs -join ' ')"
 }
