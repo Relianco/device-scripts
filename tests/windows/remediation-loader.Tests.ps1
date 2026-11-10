@@ -299,6 +299,7 @@ $env:RELIAN_DEPLOY_TEST = '1'
 
 # Windows only: the real ACL calls on real NTFS, and Windows PowerShell 5.1.
 if ($env:OS -eq 'Windows_NT') {
+    # Dot-sourcing the loader assigns the real ReadSddl and ProtectDirectory unconditionally, so no seam survives the reload.
     $script:ProtectDirectory = $null
     . $loaderPath
     $real = Join-Path $tempRoot 'real-acl'
