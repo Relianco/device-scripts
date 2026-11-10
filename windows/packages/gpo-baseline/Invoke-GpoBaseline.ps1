@@ -341,9 +341,21 @@ function Get-GpbPlan {
         if ($audit.Contains($item.guid)) { $cur = $audit[$item.guid].Value }
         if ($cur -ne [string]$item.setting) { $changes.Add([ordered]@{ kind = 'audit'; target = $item.subcategory; current = $cur; desired = [string]$item.setting; cis = $item.cis; item = $item }) }
     }
+    # Matching files are not enough: clients skip them unless the CSE pair is registered
+    # and AD and GPT.INI carry the same version. A run that stopped between the two is repaired.
+    $pairs = @()
+    if (@($Def.security).Count) { $pairs += $GpbSecurityCse }
+    if (@($Def.audit).Count) { $pairs += $GpbAuditCse }
+    if ($Gpo -and $pairs.Count) {
+        $pub = Get-GpbPublishState -Context $Context -Gpo $Gpo
+        $missing = (Add-GpbExtensionNames -Current $pub.ext -Pairs $pairs) -ne (Add-GpbExtensionNames -Current $pub.ext -Pairs @())
+        if ($missing -or $pub.adVersion -ne $pub.iniVersion) {
+            $changes.Add([ordered]@{ kind = 'publish'; target = 'versionNumber, gPCMachineExtensionNames'; current = "ad=$($pub.adVersion) ini=$($pub.iniVersion) cseMissing=$missing"; desired = 'consistent' })
+        }
+    }
     if ($LinkTo) {
         $link = $null
-        if ($Gpo) { $link = @((Get-GPInheritance -Target $LinkTo -Server $Context.Server).GpoLinks | Where-Object { $_.GpoId -eq $Gpo.Id }) | Select-Object -First 1 }
+        if ($Gpo) { $link = @((Get-GPInheritance -Target $LinkTo -Server $Context.Server -ErrorAction Stop).GpoLinks | Where-Object { $_.GpoId -eq $Gpo.Id }) | Select-Object -First 1 }
         if (-not $link) { $changes.Add([ordered]@{ kind = 'link'; target = $LinkTo; current = $null; desired = $(if ($LinkOn) { 'enabled' } else { 'disabled' }) }) }
         elseif ([bool]$link.Enabled -ne $LinkOn) { $changes.Add([ordered]@{ kind = 'link'; target = $LinkTo; current = $(if ($link.Enabled) { 'enabled' } else { 'disabled' }); desired = $(if ($LinkOn) { 'enabled' } else { 'disabled' }); exists = $true }) }
     }
@@ -365,8 +377,10 @@ function Save-GpbBackup {
     Protect-GpbBackupRoot $Context.BackupRoot
     $dir = Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}')
     [void](New-Item -ItemType Directory -Path $dir -Force)
-    $backup = Backup-GPO -Guid $Gpo.Id -Path $dir -Comment "relian-gpo-baseline $DefinitionId" -Server $Context.Server
-    $id = [string]$backup.Id
+    $backup = Backup-GPO -Guid $Gpo.Id -Path $dir -Comment "relian-gpo-baseline $DefinitionId" -Server $Context.Server -ErrorAction Stop
+    $id = ''
+    if ($backup -and $backup.PSObject.Properties['Id']) { $id = [string]$backup.Id }
+    if (-not $id) { throw 'Backup-GPO returned no backup id. Nothing was changed.' }
     if ($Record) {
         $state = [ordered]@{ backupId = $id; gpoId = [string]$Gpo.Id; definition = $DefinitionId; utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
         [IO.File]::WriteAllText((Join-Path $dir 'last-backup.json'), $state)
@@ -374,39 +388,47 @@ function Save-GpbBackup {
     return $id
 }
 
-function Update-GpbVersion {
-    param($Context, $Gpo, [string[]]$Pairs)
+# AD versionNumber and gPCMachineExtensionNames, and the GPT.INI text and version.
+function Get-GpbPublishState {
+    param($Context, $Gpo)
     $dn = 'CN={' + $Gpo.Id.ToString().ToUpper() + '},CN=Policies,CN=System,' + $Context.DomainDN
-    $obj = Get-ADObject -Identity $dn -Properties versionNumber, gPCMachineExtensionNames -Server $Context.Server
+    $obj = Get-ADObject -Identity $dn -Properties versionNumber, gPCMachineExtensionNames -Server $Context.Server -ErrorAction Stop
     $ext = ''
     if ($obj.PSObject.Properties['gPCMachineExtensionNames'] -and $obj.gPCMachineExtensionNames) { $ext = [string]$obj.gPCMachineExtensionNames }
-    $adVersion = 0
-    if ($obj.PSObject.Properties['versionNumber'] -and $null -ne $obj.versionNumber) { $adVersion = [long]$obj.versionNumber }
+    $adVersion = [long]0
+    if ($obj.PSObject.Properties['versionNumber'] -and $null -ne $obj.versionNumber) { $adVersion = ([long]$obj.versionNumber) -band [long]4294967295 }
     $iniPath = Join-Path (Get-GpbGpoDir $Context $Gpo) 'GPT.INI'
     $ini = ''
     if ([IO.File]::Exists($iniPath)) { $ini = [Text.Encoding]::Default.GetString([IO.File]::ReadAllBytes($iniPath)) }
     $m = [regex]::Match($ini, '(?im)^\s*Version\s*=\s*(\d+)\s*$')
-    $iniVersion = 0
+    $iniVersion = [long]0
     if ($m.Success) { $iniVersion = [long]$m.Groups[1].Value }
-    $next = Get-GpbNextVersion -AdVersion $adVersion -IniVersion $iniVersion
+    return @{ dn = $dn; ext = $ext; adVersion = $adVersion; iniPath = $iniPath; ini = $ini; match = $m; iniVersion = $iniVersion }
+}
+
+function Update-GpbVersion {
+    param($Context, $Gpo, [string[]]$Pairs)
+    $st = Get-GpbPublishState -Context $Context -Gpo $Gpo
+    $dn = $st.dn; $ext = $st.ext; $iniPath = $st.iniPath; $ini = $st.ini; $m = $st.match
+    $next = Get-GpbNextVersion -AdVersion $st.adVersion -IniVersion $st.iniVersion
     if ($m.Success) { $ini = $ini.Substring(0, $m.Index) + "Version=$next" + $ini.Substring($m.Index + $m.Length) }
     elseif ($ini -match '(?im)^\[General\]\s*$') { $ini = [regex]::Replace($ini, '(?im)^\[General\]\s*$', "[General]`r`nVersion=$next", 1) }
     else { $ini = "[General]`r`nVersion=$next`r`n" + $ini }
     # SYSVOL first, then AD: a client that sees the new AD version must find the new files.
     [IO.File]::WriteAllBytes($iniPath, [Text.Encoding]::Default.GetBytes($ini))
-    Set-ADObject -Identity $dn -Replace @{ versionNumber = (ConvertTo-GpbAdVersion $next); gPCMachineExtensionNames = (Add-GpbExtensionNames -Current $ext -Pairs $Pairs) } -Server $Context.Server
+    Set-ADObject -Identity $dn -Replace @{ versionNumber = (ConvertTo-GpbAdVersion $next); gPCMachineExtensionNames = (Add-GpbExtensionNames -Current $ext -Pairs $Pairs) } -Server $Context.Server -ErrorAction Stop
 }
 
 function Invoke-GpbApply {
     param($Context, $Def, $Gpo, $Changes, [string]$LinkTo, [bool]$LinkOn, $Report)
     if (-not $Gpo) {
-        $Gpo = New-GPO -Name $Def.gpoName -Comment ("[relian-gpo-baseline:$($Def.id)] Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server
+        $Gpo = New-GPO -Name $Def.gpoName -Comment ("[relian-gpo-baseline:$($Def.id)] Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server -ErrorAction Stop
         $Report.gpo.id = [string]$Gpo.Id; $Report.gpo.exists = $true; $Report.gpo.owned = $true
     } else {
         $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record
     }
     foreach ($c in @($Changes | Where-Object { $_.kind -eq 'registry' })) {
-        Set-GPRegistryValue -Guid $Gpo.Id -Key $c.item.key -ValueName $c.item.valueName -Type $c.item.type -Value $c.item.value -Server $Context.Server | Out-Null
+        Set-GPRegistryValue -Guid $Gpo.Id -Key $c.item.key -ValueName $c.item.valueName -Type $c.item.type -Value $c.item.value -Server $Context.Server -ErrorAction Stop | Out-Null
     }
     $pairs = @()
     $security = @($Changes | Where-Object { $_.kind -eq 'security' })
@@ -432,11 +454,15 @@ function Invoke-GpbApply {
         [IO.File]::WriteAllText($path, (ConvertTo-GpbAuditCsv $rows), [Text.UTF8Encoding]::new($false))
         $pairs += $GpbAuditCse
     }
+    if (@($Changes | Where-Object { $_.kind -eq 'publish' }).Count) {
+        if (@($Def.security).Count) { $pairs += $GpbSecurityCse }
+        if (@($Def.audit).Count) { $pairs += $GpbAuditCse }
+    }
     if ($pairs.Count) { Update-GpbVersion -Context $Context -Gpo $Gpo -Pairs $pairs }
     foreach ($c in @($Changes | Where-Object { $_.kind -eq 'link' })) {
         $state = 'No'; if ($LinkOn) { $state = 'Yes' }
-        if ($c.Contains('exists')) { Set-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server | Out-Null }
-        else { New-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server | Out-Null }
+        if ($c.Contains('exists')) { Set-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server -ErrorAction Stop | Out-Null }
+        else { New-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server -ErrorAction Stop | Out-Null }
     }
     return $Gpo
 }
@@ -455,6 +481,8 @@ function Test-GpbFlag {
 
 function Invoke-GpoBaseline {
     param([string]$Action = 'Install', [string]$Definition = '', [string]$Apply = '', [string]$LinkTo = '', [string]$LinkEnabled = '', [string]$AllowDefaultPolicy = '', $Context, $DefinitionObject)
+    # Binary cmdlets report most failures as non-terminating errors; every one must stop the run.
+    $ErrorActionPreference = 'Stop'
     $report = [ordered]@{ version = '1'; status = 'plan'; action = $Action; definition = $Definition; gpo = [ordered]@{}; changes = @(); backupId = $null }
     $refuse = { param($Why) $report.status = 'refused'; $report.reason = $Why; return @{ report = $report; exitCode = 1 } }
     try {
@@ -493,8 +521,8 @@ function Invoke-GpoBaseline {
             if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
             if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
             $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
-            if ($isDefault) { Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server | Out-Null; $report.status = 'restored' }
-            else { Remove-GPO -Guid $gpo.Id -Server $Context.Server | Out-Null; $report.status = 'removed' }
+            if ($isDefault) { Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server -ErrorAction Stop | Out-Null; $report.status = 'restored' }
+            else { Remove-GPO -Guid $gpo.Id -Server $Context.Server -ErrorAction Stop | Out-Null; $report.status = 'removed' }
             return @{ report = $report; exitCode = 0 }
         }
 

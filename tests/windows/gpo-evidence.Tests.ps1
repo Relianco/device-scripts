@@ -84,20 +84,23 @@ try {
     [void](New-Item -ItemType Directory -Path (Join-Path $gppDir 'Machine\Microsoft\Windows NT\Audit') -Force)
     [IO.File]::WriteAllText((Join-Path $gppDir 'Machine\Microsoft\Windows NT\Audit\audit.csv'), "Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value`r`n,System,Audit Logon,{0cce9215-69ae-11d9-bed3-505054503030},Success,,1`r`n")
 
-    $hits = @(Find-GpeCpassword -PoliciesPath $policies -Ids @($ddpId, $gppId))
+    $scan = Find-GpeCpassword -PoliciesPath $policies -Ids @($ddpId, $gppId)
+    $hits = @($scan.hits)
+    Assert ($scan.complete -and $scan.files -eq 1) 'cpassword scan complete'
     Assert ($hits.Count -eq 1 -and $hits[0].id -eq $gppId.ToString() -and $hits[0].count -eq 1 -and $hits[0].file -like 'Machine*Groups.xml') 'cpassword found by file and count'
     Assert (($hits | ConvertTo-Json -Compress) -notmatch $secret) 'cpassword value never printed'
 
-    $ctx = @{ PoliciesPath = $policies; DomainDN = 'DC=example,DC=invalid'; ConfigDN = $null; IsDc = $true; Forest = [pscustomobject]@{ ForestMode = 'Windows2016Forest' }
+    $ctx = @{ Server = 'dc1.example.invalid'; PoliciesPath = $policies; DomainDN = 'DC=example,DC=invalid'; ConfigDN = $null; IsDc = $true; Forest = [pscustomobject]@{ ForestMode = 'Windows2016Forest' }
         Domain = [pscustomobject]@{ DNSRoot = 'example.invalid'; NetBIOSName = 'EXAMPLE'; DomainMode = 'Windows2016Domain'; PDCEmulator = 'dc1.example.invalid' } }
     function New-FakeGpo { param([guid]$Id, [string]$Name, [int]$Ad, [int]$Sv)
         [pscustomobject]@{ Id = $Id; DisplayName = $Name; Owner = 'EXAMPLE\Domain Admins'; CreationTime = [datetime]'2020-01-01'; ModificationTime = [datetime]'2026-01-01'; GpoStatus = 'AllSettingsEnabled'
             WmiFilter = $null; Computer = [pscustomobject]@{ DSVersion = $Ad; SysvolVersion = $Sv }; User = [pscustomobject]@{ DSVersion = 0; SysvolVersion = 0 } } }
     $script:fakeGpos = @((New-FakeGpo $ddpId 'Default Domain Policy' 3 3), (New-FakeGpo $gppId 'Legacy drive maps' 5 4))
     1..120 | ForEach-Object { $script:fakeGpos += New-FakeGpo ([guid]::NewGuid()) ("Zone policy number $_ with a long descriptive name") 1 1 }
-    function Get-GPO { param([switch]$All, $Guid, $Name, $ErrorAction) if ($All) { return $script:fakeGpos } foreach ($g in $script:fakeGpos) { if (($Guid -and $g.Id -eq [guid]$Guid) -or ($Name -and $g.DisplayName -eq $Name)) { return $g } } throw [ArgumentException]::new('not found') }
-    function Get-GPPermission { param($Guid, [switch]$All) @([pscustomobject]@{ Permission = 'GpoApply'; Denied = $false; Trustee = [pscustomobject]@{ Name = 'Authenticated Users' } }) }
-    function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $ErrorAction)
+    $script:servers = [Collections.Generic.List[string]]::new()
+    function Get-GPO { param([switch]$All, $Guid, $Name, $Server, $ErrorAction) $script:servers.Add([string]$Server); if ($All) { return $script:fakeGpos } foreach ($g in $script:fakeGpos) { if (($Guid -and $g.Id -eq [guid]$Guid) -or ($Name -and $g.DisplayName -eq $Name)) { return $g } } throw [ArgumentException]::new('not found') }
+    function Get-GPPermission { param($Guid, [switch]$All, $Server, $ErrorAction) @([pscustomobject]@{ Permission = 'GpoApply'; Denied = $false; Trustee = [pscustomobject]@{ Name = 'Authenticated Users' } }) }
+    function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $Server, $ErrorAction)
         if ($Identity) { throw [ArgumentException]::new('missing') }
         @([pscustomobject]@{ DistinguishedName = 'DC=example,DC=invalid'; gPLink = "[LDAP://cn={$ddpId},cn=policies,cn=system,DC=example,DC=invalid;0]" }) }
 
@@ -116,7 +119,7 @@ try {
 
     function Get-ADDefaultDomainPasswordPolicy { [pscustomobject]@{ MinPasswordLength = 8; PasswordHistoryCount = 1; ComplexityEnabled = $false; MaxPasswordAge = [timespan]::Zero; MinPasswordAge = [timespan]::Zero; LockoutThreshold = 20; LockoutDuration = [timespan]::FromMinutes(15); LockoutObservationWindow = [timespan]::FromMinutes(15); ReversibleEncryptionEnabled = $false } }
     function Get-ADFineGrainedPasswordPolicy { param($Filter) @() }
-    function Get-GPInheritance { param($Target) [pscustomobject]@{ GpoLinks = @([pscustomobject]@{ DisplayName = 'Default Domain Policy'; Enabled = $true; Enforced = $false; Order = 1 }) } }
+    function Get-GPInheritance { param($Target, $Server, $ErrorAction) [pscustomobject]@{ GpoLinks = @([pscustomobject]@{ DisplayName = 'Default Domain Policy'; Enabled = $true; Enforced = $false; Order = 1 }) } }
     $p = Invoke-GpoEvidence -Section Policy -Context $ctx | ConvertFrom-Json
     Assert ($p.defaultDomainPolicy.systemAccess.MinimumPasswordLength -eq '8' -and $p.defaultDomainPolicy.kerberos.MaxTicketAge -eq '10') 'default domain policy values'
     Assert (-not $p.defaultDomainPolicy.systemAccess.PSObject.Properties['NewAdministratorName']) 'non-allowlisted keys omitted'
@@ -132,7 +135,7 @@ try {
     $missing = Invoke-GpoEvidence -Section Gpo -Gpo 'No such policy' -Context $ctx | ConvertFrom-Json
     Assert ($missing.gpo.status -eq 'notFound') 'unknown GPO reported'
 
-    function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $ErrorAction)
+    function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $Server, $ErrorAction)
         if ($Identity -like '*DFSR-GlobalSettings*') { return [pscustomobject]@{ 'msDFSR-Flags' = 48 } }
         if ($Identity) { throw [ArgumentException]::new('missing') }
         @([pscustomobject]@{ DistinguishedName = 'DC=example,DC=invalid'; gPLink = "[LDAP://cn={$ddpId},cn=policies,cn=system,DC=example,DC=invalid;0]" }) }
@@ -146,6 +149,15 @@ try {
     Assert ($s.sysvol.serviceDFSR -eq 'Running' -and $s.sysvol.serviceNtFrs -eq 'absent' -and $s.sysvol.dfsrWarnings7d.'4012' -eq 2) 'SYSVOL health hints'
     Assert ($s.gpoCount -eq 122 -and $s.versionMismatchCount -eq 1 -and $s.cpassword[0].count -eq 1) 'summary counts'
     Assert ([Text.Encoding]::UTF8.GetByteCount($sj) -le 8000 -and $sj -notmatch $secret) 'summary bounded and redacted'
+
+    # Review: a capped scan says so instead of reporting a clean result.
+    [void](New-Item -ItemType Directory -Path (Join-Path $gppDir 'User\Preferences\Drives') -Force)
+    [IO.File]::WriteAllText((Join-Path $gppDir 'User\Preferences\Drives\Drives.xml'), '<Drives/>')
+    $capped = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId) -MaxFiles 1
+    Assert (-not $capped.complete) 'capped cpassword scan marked incomplete'
+    Assert ($s.cpasswordScan.complete -eq $true) 'summary reports scan completeness'
+    # Review: GPO versions come from the same DC as the SYSVOL path.
+    Assert ($script:servers.Count -gt 0 -and -not @($script:servers | Where-Object { $_ -ne 'dc1.example.invalid' })) 'Get-GPO bound to the context DC'
 
     $huge = [ordered]@{ status = 'collected'; rows = @(1..500 | ForEach-Object { 'é' * 50 }) }
     $hj = ConvertTo-GpeBoundedJson $huge

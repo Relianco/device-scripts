@@ -63,6 +63,8 @@ function New-FakeWorld {
     $script:links = @{}
     $script:failSetAfter = -1
     $script:setCount = 0
+    $script:backupFails = $false
+    $script:removeFails = $false
     $policies = Join-Path $tmp ([guid]::NewGuid().ToString('n'))
     [void](New-Item -ItemType Directory -Path $policies)
     return @{ Server = 'pdc.example.invalid'; DomainDN = 'DC=example,DC=invalid'; PoliciesPath = $policies; BackupRoot = (Join-Path $policies 'backups'); IsPdc = $true }
@@ -92,7 +94,7 @@ function Get-GPO {
     return $g
 }
 function New-GPO {
-    param($Name, $Comment, $Server)
+    param($Name, $Comment, $Server, $ErrorAction)
     $script:calls.Add('New-GPO')
     return (Add-FakeGpo -Context $script:ctx -Name $Name -Comment $Comment)
 }
@@ -103,7 +105,7 @@ function Get-GPRegistryValue {
     return $script:regValues[$k]
 }
 function Set-GPRegistryValue {
-    param($Guid, $Key, $ValueName, $Type, $Value, $Server)
+    param($Guid, $Key, $ValueName, $Type, $Value, $Server, $ErrorAction)
     $script:setCount++
     if ($script:failSetAfter -ge 0 -and $script:setCount -gt $script:failSetAfter) { throw 'simulated write failure' }
     $script:calls.Add("Set-GPRegistryValue $Key\$ValueName")
@@ -113,35 +115,37 @@ function Set-GPRegistryValue {
     $o.gPCMachineExtensionNames = Add-GpbExtensionNames -Current $o.gPCMachineExtensionNames -Pairs @($reg)
 }
 function Backup-GPO {
-    param($Guid, $Path, $Comment, $Server)
+    param($Guid, $Path, $Comment, $Server, $ErrorAction)
     $script:calls.Add('Backup-GPO')
+    # Non-terminating, as a binary cmdlet reports most failures.
+    if ($script:backupFails) { Write-Error 'backup failed'; return }
     Assert (Test-Path -LiteralPath $Path) 'backup folder exists before Backup-GPO'
     return [pscustomobject]@{ Id = [guid]'11111111-2222-3333-4444-555555555555' }
 }
-function Restore-GPO { param($BackupId, $Path, $Server) $script:calls.Add("Restore-GPO $BackupId") }
-function Remove-GPO { param($Guid, $Server) $script:calls.Add('Remove-GPO'); $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName) }
+function Restore-GPO { param($BackupId, $Path, $Server, $ErrorAction) $script:calls.Add("Restore-GPO $BackupId") }
+function Remove-GPO { param($Guid, $Server, $ErrorAction) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName) }
 function Get-ADObject {
-    param($Identity, $Properties, $Server)
+    param($Identity, $Properties, $Server, $ErrorAction)
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     $o = $script:ad[$id]
     return [pscustomobject]@{ versionNumber = $o.versionNumber; gPCMachineExtensionNames = $o.gPCMachineExtensionNames }
 }
 function Set-ADObject {
-    param($Identity, $Replace, $Server)
+    param($Identity, $Replace, $Server, $ErrorAction)
     $script:calls.Add('Set-ADObject')
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     foreach ($k in $Replace.Keys) { $script:ad[$id][$k] = $Replace[$k] }
 }
 function Get-GPInheritance {
-    param($Target, $Server)
+    param($Target, $Server, $ErrorAction)
     return [pscustomobject]@{ GpoLinks = @($script:links.Values | Where-Object { $_.Target -eq $Target }) }
 }
 function New-GPLink {
-    param($Guid, $Target, $LinkEnabled, $Server)
+    param($Guid, $Target, $LinkEnabled, $Server, $ErrorAction)
     $script:calls.Add("New-GPLink $LinkEnabled")
     $script:links["$Guid|$Target"] = [pscustomobject]@{ GpoId = [guid]$Guid; Target = $Target; Enabled = ($LinkEnabled -eq 'Yes') }
 }
-function Set-GPLink { param($Guid, $Target, $LinkEnabled, $Server) $script:calls.Add("Set-GPLink $LinkEnabled") }
+function Set-GPLink { param($Guid, $Target, $LinkEnabled, $Server, $ErrorAction) $script:calls.Add("Set-GPLink $LinkEnabled") }
 function Protect-GpbBackupRoot { param($Path) $script:calls.Add('Protect-GpbBackupRoot') }
 function Get-Writes { return ,@($script:calls | Where-Object { $_ -notmatch '^(Get-GPO)$' }) }
 
@@ -282,6 +286,44 @@ try {
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
     $writes = Get-Writes
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'removed' -and $writes[-1] -eq 'Remove-GPO' -and ($writes -contains 'Backup-GPO')) 'owned GPO backed up then removed'
+
+    # Review: a non-terminating cmdlet error must stop the run. A failed backup must
+    # leave the GPO unchanged, and a failed Remove-GPO must not report success.
+    $script:ctx = New-FakeWorld
+    [void](Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx)
+    $gpo = $script:gpos[$def.gpoName]
+    $first = $def.registry[0]
+    $script:regValues["$($gpo.Id)|$($first.key)|$($first.valueName)"] = [pscustomobject]@{ Value = 99; Type = $first.type }
+    $script:backupFails = $true; $script:calls.Clear()
+    # Devices run without StrictMode, so a missing backup id must not be caught by it here.
+    $ErrorActionPreference = 'Continue'; Set-StrictMode -Off
+    try { $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx 2>$null }
+    finally { $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest }
+    Assert ($r.exitCode -eq 1 -and -not @($script:calls | Where-Object { $_ -like 'Set-GPRegistryValue*' })) "failed backup stops before any write: $($script:calls -join ', ')"
+    $script:backupFails = $false
+    $script:removeFails = $true
+    # Devices run without StrictMode, so a missing backup id must not be caught by it here.
+    $ErrorActionPreference = 'Continue'; Set-StrictMode -Off
+    try { $r = Invoke-GpoBaseline -Action Uninstall -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx 2>$null }
+    finally { $ErrorActionPreference = 'Stop'; Set-StrictMode -Version Latest }
+    Assert ($r.exitCode -eq 1 -and $r.report.status -ne 'removed') 'failed Remove-GPO is not reported as removed'
+    $script:removeFails = $false
+
+    # Review: files that match but were never published (version or CSE missing) are repaired.
+    $script:ctx = New-FakeWorld
+    [void](Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx)
+    $gpo = $script:gpos[$def.gpoName]
+    $script:ad[$gpo.Id.ToString()].gPCMachineExtensionNames = $reg
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Context $script:ctx
+    Assert (@($r.report.changes | Where-Object { $_.kind -eq 'publish' }).Count -eq 1) 'missing CSE registration planned'
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $script:ad[$gpo.Id.ToString()].gPCMachineExtensionNames -eq ($reg + $sec + $aud)) 'CSE registration repaired'
+    $script:ad[$gpo.Id.ToString()].versionNumber = 1
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
+    $iniVersion = [long]([regex]::Match([IO.File]::ReadAllText((Join-Path (Join-Path $script:ctx.PoliciesPath ('{' + $gpo.Id.ToString().ToUpper() + '}')) 'GPT.INI')), 'Version=(\d+)').Groups[1].Value)
+    Assert ($r.exitCode -eq 0 -and [long]$script:ad[$gpo.Id.ToString()].versionNumber -eq $iniVersion) 'AD and GPT.INI version mismatch repaired'
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange') 'repaired GPO is stable'
 
     # Output cap.
     $big = [ordered]@{ status = 'plan'; changes = @(1..400 | ForEach-Object { [ordered]@{ kind = 'registry'; target = ('HKLM\Software\Policies\' + ('x' * 80)); current = $null; desired = 'é' * 20 } }) }

@@ -166,24 +166,27 @@ function Get-GpeInfValues {
 function Read-GpeText { param([string]$Path) if ([IO.File]::Exists($Path)) { return [IO.File]::ReadAllText($Path) } return $null }
 function Get-GpeGpoDir { param($Context, $Id) Join-Path $Context.PoliciesPath ('{' + ([string]$Id).ToUpper() + '}') }
 
-# Counts cpassword attributes in Preferences XML; the value is never kept.
+# Counts cpassword attributes in Preferences XML; the value is never kept. "complete" is
+# false when the file cap stopped the scan, so a capped scan never reads as clean.
 function Find-GpeCpassword {
-    param([string]$PoliciesPath, $Ids, [int]$MaxFiles = 400)
+    param([string]$PoliciesPath, $Ids, [int]$MaxFiles = 2000)
     $seen = 0
+    $hits = [Collections.Generic.List[object]]::new()
     foreach ($id in @($Ids)) {
         foreach ($side in @('Machine', 'User')) {
             $dir = Join-Path (Join-Path $PoliciesPath ('{' + ([string]$id).ToUpper() + '}')) "$side\Preferences"
             if (-not (Test-Path -LiteralPath $dir)) { continue }
             foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue)) {
-                if (++$seen -gt $MaxFiles) { return }
+                if (++$seen -gt $MaxFiles) { return [pscustomobject]@{ hits = $hits.ToArray(); complete = $false; files = $MaxFiles } }
                 $count = [regex]::Matches([IO.File]::ReadAllText($file.FullName), '(?i)\bcpassword="[^"]+"').Count
                 if ($count) {
                     $relative = $side + '\Preferences\' + $file.FullName.Substring($dir.Length).TrimStart('\', '/')
-                    [pscustomobject]@{ id = ([string]$id).ToLowerInvariant(); file = $relative; count = $count }
+                    $hits.Add([pscustomobject]@{ id = ([string]$id).ToLowerInvariant(); file = $relative; count = $count })
                 }
             }
         }
     }
+    return [pscustomobject]@{ hits = $hits.ToArray(); complete = $true; files = $seen }
 }
 
 function Read-GpeRsop {
@@ -219,18 +222,19 @@ function Get-GpeContext {
     $domain = Get-ADDomain -ErrorAction Stop
     $isDc = $false
     try { $isDc = [int](Get-CimInstance Win32_ComputerSystem -OperationTimeoutSec 5 -ErrorAction Stop).DomainRole -ge 4 } catch { }
-    # A DC reads its own SYSVOL copy, so a version mismatch shows this DC's replication.
-    $sysvolHost = [string]$domain.DNSRoot; if ($isDc) { $sysvolHost = $env:COMPUTERNAME }
+    # One server for AD and SYSVOL reads: this DC, so a version mismatch shows its own
+    # replication state, or the PDC emulator from a member.
+    $server = [string]$domain.PDCEmulator; if ($isDc) { $server = $env:COMPUTERNAME }
     $forest = $null; try { $forest = Get-ADForest -ErrorAction Stop } catch { }
-    $config = $null; try { $config = [string](Get-ADRootDSE -ErrorAction Stop).configurationNamingContext } catch { }
-    return @{ Domain = $domain; Forest = $forest; DomainDN = [string]$domain.DistinguishedName; ConfigDN = $config; IsDc = $isDc; PoliciesPath = "\\$sysvolHost\SYSVOL\$($domain.DNSRoot)\Policies" }
+    $config = $null; try { $config = [string](Get-ADRootDSE -Server $server -ErrorAction Stop).configurationNamingContext } catch { }
+    return @{ Domain = $domain; Forest = $forest; DomainDN = [string]$domain.DistinguishedName; ConfigDN = $config; IsDc = $isDc; Server = $server; PoliciesPath = "\\$server\SYSVOL\$($domain.DNSRoot)\Policies" }
 }
 
 function Get-GpeLinkMap {
     param($Context)
     $map = @{}
-    $objects = @(Get-ADObject -LDAPFilter '(gPLink=*)' -Properties gPLink -ErrorAction Stop)
-    if ($Context.ConfigDN) { try { $objects += @(Get-ADObject -SearchBase ("CN=Sites," + $Context.ConfigDN) -LDAPFilter '(gPLink=*)' -Properties gPLink -ErrorAction Stop) } catch { } }
+    $objects = @(Get-ADObject -LDAPFilter '(gPLink=*)' -Properties gPLink -Server $Context.Server -ErrorAction Stop)
+    if ($Context.ConfigDN) { try { $objects += @(Get-ADObject -SearchBase ("CN=Sites," + $Context.ConfigDN) -LDAPFilter '(gPLink=*)' -Properties gPLink -Server $Context.Server -ErrorAction Stop) } catch { } }
     foreach ($o in $objects) {
         foreach ($l in @(ConvertFrom-GpeLinks ([string]$o.gPLink))) {
             if (-not $map.ContainsKey($l.id)) { $map[$l.id] = [Collections.Generic.List[object]]::new() }
@@ -249,13 +253,13 @@ function Get-GpeVersionRow {
 function Get-GpeSysvol {
     param($Context)
     $dn = $Context.DomainDN
-    $exists = { param($Identity) try { [void](Get-ADObject -Identity $Identity -ErrorAction Stop); return $true } catch { return $false } }
+    $exists = { param($Identity) try { [void](Get-ADObject -Identity $Identity -Server $Context.Server -ErrorAction Stop); return $true } catch { return $false } }
     $dfsr = & $exists "CN=Domain System Volume,CN=DFSR-GlobalSettings,CN=System,$dn"
     $frs = & $exists "CN=Domain System Volume (SYSVOL share),CN=File Replication Service,CN=System,$dn"
     $r = [ordered]@{ type = 'unknown'; dfsrObject = $dfsr; frsObject = $frs; migrationState = $null }
     if ($dfsr -and -not $frs) { $r.type = 'DFSR' } elseif ($frs -and -not $dfsr) { $r.type = 'FRS (deprecated)' } elseif ($frs -and $dfsr) { $r.type = 'migrating' }
     try {
-        $flags = (Get-ADObject -Identity "CN=DFSR-GlobalSettings,CN=System,$dn" -Properties 'msDFSR-Flags' -ErrorAction Stop).'msDFSR-Flags'
+        $flags = (Get-ADObject -Identity "CN=DFSR-GlobalSettings,CN=System,$dn" -Properties 'msDFSR-Flags' -Server $Context.Server -ErrorAction Stop).'msDFSR-Flags'
         $states = @{ 0 = 'Start'; 16 = 'Prepared'; 32 = 'Redirected'; 48 = 'Eliminated' }
         if ($null -ne $flags -and $states.ContainsKey([int]$flags)) { $r.migrationState = $states[[int]$flags] }
     } catch { }
@@ -284,23 +288,26 @@ function Get-GpeSummary {
             })
     } catch { $Report.dcs = Get-GpeError $_ }
     try { $Report.sysvol = Get-GpeSysvol $Context } catch { $Report.sysvol = Get-GpeError $_ }
-    $gpos = @(Get-GPO -All -ErrorAction Stop)
+    $gpos = @(Get-GPO -All -Server $Context.Server -ErrorAction Stop)
     $mismatch = @($gpos | Where-Object { (Get-GpeVersionRow $_).mismatch })
     $Report.gpoCount = $gpos.Count
     $Report.allSettingsDisabled = @($gpos | Where-Object { [string]$_.GpoStatus -eq 'AllSettingsDisabled' }).Count
     $Report.versionMismatches = @($mismatch | Select-Object -First 15 | ForEach-Object { $v = Get-GpeVersionRow $_; [ordered]@{ name = (Protect-GpeText $_.DisplayName -Max 80); id = [string]$_.Id; ad = $v.ad; sysvol = $v.sysvol } })
     $Report.versionMismatchCount = $mismatch.Count
     $names = @{}; foreach ($g in $gpos) { $names[$g.Id.ToString().ToLowerInvariant()] = $g.DisplayName }
-    $hits = @(Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id }))
-    $Report.cpassword = @($hits | ForEach-Object { [ordered]@{ gpo = (Protect-GpeText ([string]$names[$_.id]) -Max 80); id = $_.id; file = (Protect-GpeText $_.file -Max 120); count = $_.count } })
+    $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })
+    $Report.cpasswordScan = [ordered]@{ complete = $scan.complete; files = $scan.files }
+    $Report.cpassword = @($scan.hits | ForEach-Object { [ordered]@{ gpo = (Protect-GpeText ([string]$names[$_.id]) -Max 80); id = $_.id; file = (Protect-GpeText $_.file -Max 120); count = $_.count } })
     try { $Report.unlinked = @($gpos).Count - @((Get-GpeLinkMap $Context).Keys).Count } catch { $Report.unlinked = Get-GpeError $_ }
 }
 
 function Get-GpeGposSection {
     param($Context, $Report, [int]$Start)
-    $gpos = @(Get-GPO -All -ErrorAction Stop | Sort-Object @{ Expression = { -not (Get-GpeVersionRow $_).mismatch } }, DisplayName)
+    $gpos = @(Get-GPO -All -Server $Context.Server -ErrorAction Stop | Sort-Object @{ Expression = { -not (Get-GpeVersionRow $_).mismatch } }, DisplayName)
     $links = Get-GpeLinkMap $Context
-    $cp = @{}; foreach ($h in @(Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id }))) { $cp[$h.id] = [int]$cp[$h.id] + $h.count }
+    $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })
+    $cp = @{}; foreach ($h in @($scan.hits)) { $cp[$h.id] = [int]$cp[$h.id] + $h.count }
+    $Report.cpasswordScanComplete = $scan.complete
     $Report.gpoTotal = $gpos.Count; $Report.offset = $Start
     $rows = [Collections.Generic.List[object]]::new()
     $budget = 7000 - [Text.Encoding]::UTF8.GetByteCount(($Report | ConvertTo-Json -Depth 8 -Compress))
@@ -314,7 +321,7 @@ function Get-GpeGposSection {
         if ($script:GpeClock.Elapsed.TotalSeconds -gt 40) { $row.apply = 'timeBudget' }
         else {
             try {
-                $perm = @(Get-GPPermission -Guid $g.Id -All -ErrorAction Stop)
+                $perm = @(Get-GPPermission -Guid $g.Id -All -Server $Context.Server -ErrorAction Stop)
                 $row.apply = @($perm | Where-Object { [string]$_.Permission -eq 'GpoApply' -and -not $_.Denied } | Select-Object -First 4 | ForEach-Object { Protect-GpeText ([string]$_.Trustee.Name) -Max 60 })
                 $row.deny = @($perm | Where-Object { $_.Denied }).Count
             } catch { $row.apply = 'unavailable' }
@@ -350,7 +357,7 @@ function Get-GpePolicySection {
     } catch { $Report.effective = Get-GpeError $_ }
     try { $Report.fineGrainedPolicies = @(Get-ADFineGrainedPasswordPolicy -Filter * -ErrorAction Stop).Count } catch { $Report.fineGrainedPolicies = Get-GpeError $_ }
     try {
-        $Report.domainRootLinks = @((Get-GPInheritance -Target $Context.DomainDN -ErrorAction Stop).GpoLinks | ForEach-Object { [ordered]@{ name = (Protect-GpeText ([string]$_.DisplayName) -Max 80); order = [int]$_.Order; enabled = [bool]$_.Enabled; enforced = [bool]$_.Enforced } })
+        $Report.domainRootLinks = @((Get-GPInheritance -Target $Context.DomainDN -Server $Context.Server -ErrorAction Stop).GpoLinks | ForEach-Object { [ordered]@{ name = (Protect-GpeText ([string]$_.DisplayName) -Max 80); order = [int]$_.Order; enabled = [bool]$_.Enabled; enforced = [bool]$_.Enforced } })
     } catch { $Report.domainRootLinks = Get-GpeError $_ }
 }
 
@@ -367,8 +374,8 @@ function Get-GpeRsopSection {
 function Get-GpeGpoSection {
     param($Context, $Report, [string]$Target)
     try {
-        if ($Target -match '^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$') { $g = Get-GPO -Guid $Target.Trim('{', '}') -ErrorAction Stop }
-        else { $g = Get-GPO -Name $Target -ErrorAction Stop }
+        if ($Target -match '^\{?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}?$') { $g = Get-GPO -Guid $Target.Trim('{', '}') -Server $Context.Server -ErrorAction Stop }
+        else { $g = Get-GPO -Name $Target -Server $Context.Server -ErrorAction Stop }
     } catch [System.ArgumentException] { $Report.gpo = @{ status = 'notFound' }; return }
     $id = $g.Id.ToString().ToLowerInvariant(); $v = Get-GpeVersionRow $g
     $Report.gpo = [ordered]@{ name = (Protect-GpeText $g.DisplayName -Max 80); id = $id; status = [string]$g.GpoStatus; ad = $v.ad; sysvol = $v.sysvol; mismatch = $v.mismatch; links = @() }
@@ -393,7 +400,9 @@ function Get-GpeGpoSection {
                 $f = $_.Split(','); if ($f.Count -ge 7) { [ordered]@{ subcategory = (Protect-GpeText $f[2] -Max 80); setting = (Protect-GpeText $f[4] -Max 40); value = $f[6] } }
             })
     }
-    $hits = @{}; foreach ($h in @(Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($id))) { $hits[$h.file] = $h.count }
+    $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($id)
+    $Report.cpasswordScanComplete = $scan.complete
+    $hits = @{}; foreach ($h in @($scan.hits)) { $hits[$h.file] = $h.count }
     $Report.preferences = @()
     foreach ($side in @('Machine', 'User')) {
         $pref = Join-Path $dir "$side\Preferences"
