@@ -44,6 +44,16 @@ $f = New-Fake
 $r = Invoke-ElMain -Action Install -Source 'a/b'
 Assert ($f.Creates -eq 0 -and -not ($r.Result.Contains('Source'))) 'A rejected Source is not created or echoed'
 
+# An empty pin changes nothing for any action.
+$f = New-Fake -Sources @{ 'Here' = 'Application' }
+foreach ($a in @('Install', 'Update', 'Repair', 'Uninstall')) {
+    $r = Invoke-ElMain -Action $a -Source 'Here' -PinVersion ''
+    Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'disabled') "Empty pin disables $a"
+    $r = Invoke-ElMain -Action $a -Source 'bad/name' -PinVersion ' '
+    Assert ($r.ExitCode -eq 0) "Empty pin exits 0 before validation: $a"
+}
+Assert ($f.Creates -eq 0 -and $f.Deletes -eq 0) 'Empty pin writes nothing'
+
 # Install creates once, is idempotent, and verifies.
 $f = New-Fake
 $r = Invoke-ElMain -Action Install -Source 'My App'

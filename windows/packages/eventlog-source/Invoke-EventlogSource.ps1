@@ -24,6 +24,7 @@
     Uses [System.Diagnostics.EventLog]::CreateEventSource with EventSourceCreationData, which works on Windows
     PowerShell 5.1 and PowerShell 7. New-EventLog wraps the same call and does not exist in PowerShell 7.
     https://learn.microsoft.com/dotnet/api/system.diagnostics.eventlog.createeventsource
+    An empty -PinVersion exits 0 and changes nothing, for every action.
     No download. Prints one JSON line, at most 2000 bytes. Exit 0 on success, 1 on any refusal or error.
 #>
 [CmdletBinding()]
@@ -61,8 +62,10 @@ function Get-ElRegisteredLog([string]$Name) {
 function Test-ElSameLog([string]$A, [string]$B) { $A -ieq $B }
 
 function Invoke-ElMain {
-    param([string]$Action = '', [string]$Section = '', [string]$Source = '', [string]$LogName = '', [string]$CreateLog = '')
+    param([string]$Action = '', [string]$Section = '', [string]$Source = '', [string]$LogName = '', [string]$CreateLog = '', [string]$PinVersion = 'pinned')
     $result = [ordered]@{ Package = 'eventlog-source'; Action = $Action; Section = $Section; Status = 'error' }
+    # An empty pin is the off switch, as in the other packages: exit 0, change nothing, for every action.
+    if ([string]::IsNullOrWhiteSpace($PinVersion)) { $result.Status = 'disabled'; return @{ ExitCode = 0; Result = $result } }
     $fail = { param($reason) $result.Reason = $reason; return @{ ExitCode = 1; Result = $result } }
 
     if ($Section -notin @('', 'Evidence')) { return & $fail 'unsupported section' }
@@ -128,7 +131,7 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
 }
 
 try {
-    $run = Invoke-ElMain -Action $Action -Section $Section -Source $Source -LogName $LogName -CreateLog $CreateLog
+    $run = Invoke-ElMain -Action $Action -Section $Section -Source $Source -LogName $LogName -CreateLog $CreateLog -PinVersion $PinVersion
 } catch {
     $run = @{ ExitCode = 1; Result = [ordered]@{ Package = 'eventlog-source'; Status = 'error'; Reason = $_.Exception.Message } }
 }
