@@ -642,7 +642,7 @@ if ($env:RELIAN_DEPLOY_TEST -ne '1') {
         if ((Get-FupMode -Action $Action) -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
         $fupArgs = Get-FupArgs -IsoUrl $IsoUrl -IsoSha256 $IsoSha256 -BypassHardwareCheck $BypassHardwareCheck -WorkerMode:($Worker -eq 'true')
     } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     $script:FupJson = $null
     if ($Worker -eq 'true') { $code = Invoke-FupWorker $fupArgs } else { $code = Invoke-FupMain $fupArgs }
     # Last stdout line is the JSON, so a log reader can find it.

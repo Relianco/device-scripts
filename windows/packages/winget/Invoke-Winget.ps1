@@ -788,7 +788,7 @@ $script:DownloadFile = {
         throw 'refusing to download while a test is running'
     }
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.ServicePointManager]::SecurityProtocol
+        $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     } catch {
         # Windows PowerShell 5.1 needs TLS 1.2. PowerShell 7 already negotiates it.
     }
