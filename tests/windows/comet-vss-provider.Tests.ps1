@@ -126,3 +126,21 @@ $script:CvRead = { param($svc) [pscustomobject]@{ Exists = $false; Kind = $null;
 $r = Invoke-CvMain -Action Install
 Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'cometNotInstalled' -and $f.Writes -eq 0) 'No Comet services: nothing to do'
 Assert ((Invoke-CvMain -Action Install -Section Bogus).ExitCode -eq 1) 'Unknown section refused'
+
+# Idle helpers as seen on a real host (both -Action= and bare forms) are not jobs; real jobs and unreadable lines are.
+$exe = '"C:\Program Files\Comet Backup\backup-tool.exe"'
+$f = New-Fake -Delegate @() -Elevator @() -CommandLines @("$exe cmd -ValidateConfig=false -Action=elevator-server", "$exe cmd -ValidateConfig=false -Action=delegate-server", '.\backup-tool.exe stream')
+Assert (-not (Test-CvJobRunning)) 'Real idle helper command lines are not a job'
+foreach ($jobLine in @("$exe cmd -ValidateConfig=false -Action=backup", "$exe cmd -Action=stream-x", "$exe backup", '"C:\Program Files\stream tools\backup-tool.exe" backup --rule 1', "$exe cmd -Action=backup -Action=stream")) {
+    $f = New-Fake -Delegate @() -Elevator @() -CommandLines @($jobLine)
+    Assert (Test-CvJobRunning) "Job command line counts as running: $jobLine"
+}
+$f = New-Fake -Delegate @() -Elevator @() -CommandLines @($null)
+Assert (Test-CvJobRunning) 'Unreadable command line counts as running'
+
+# Install reports the post-write state, keeping the old lines as Before.
+$f = New-Fake -Delegate @('TEMP=Z:\Temp') -Elevator @($line) -CommandLines $idle
+$r = Invoke-CvMain -Action Install
+$d = $r.Result.Services | Where-Object { $_.Service -eq 'backup.delegate' }
+Assert ($d.Compliant -and (Same $d.Lines @('TEMP=Z:\Temp', $line)) -and (Same $d.Before @('TEMP=Z:\Temp'))) 'Written service shows post-write Lines/Compliant and Before'
+Assert (-not ($r.Result.Services | Where-Object { $_.Service -eq 'backup.elevator' }).Contains('Before')) 'Untouched service has no Before'
