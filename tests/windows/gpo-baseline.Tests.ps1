@@ -398,6 +398,7 @@ try {
         @{ label = 'unknown security section'; set = { param($d) $d.security = @([pscustomobject]@{ cis = 'x'; section = 'File Security'; key = 'k'; value = 'v' }) } },
         @{ label = 'task over plain http'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'http://example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
         @{ label = 'task file name with a path'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = '..\a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
+        @{ label = 'uppercase task hash'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = ('A' * 64) } }) } },
         @{ label = 'task bad hash'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = 'abc' } }) } },
         @{ label = 'task arguments with a command separator'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = '-Action Install; Remove-Item C:\'; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
         @{ label = 'URL with user info'; set = { param($d) $d | Add-Member tasks @([pscustomobject]@{ name = 'T'; description = 'd'; arguments = ''; intervalMinutes = 60; bootDelayMinutes = 5; file = [pscustomobject]@{ name = 'a.ps1'; url = 'https://user@example.invalid/a.ps1'; sha256 = ('a' * 64) } }) } },
@@ -478,6 +479,9 @@ try {
     Assert ($t2.Properties.runAs -eq 'NT AUTHORITY\System' -and $t2.Properties.action -eq 'R' -and $t2.removePolicy -eq '1') 'task runs as SYSTEM and is removed when the GPO no longer applies'
     $exec = $t2.Properties.Task.Actions.Exec
     Assert ($exec.Command -eq 'powershell.exe' -and $exec.Arguments.Contains($fakeHash) -and $exec.Arguments.Contains("\\example.invalid\SYSVOL\example.invalid\Policies\{$($cg.Id.ToString().ToUpper())}\Machine\Scripts\Relian\Invoke-CometVssProvider.ps1") -and $exec.Arguments.Contains('-Action Install')) 'task checks the pin, then runs the SYSVOL copy'
+    # Task Scheduler trigger schema order: Repetition, StartBoundary, ..., Enabled.
+    $tt = $t2.Properties.Task.Triggers.TimeTrigger
+    Assert ((@($tt.ChildNodes | ForEach-Object { $_.LocalName }) -join ',') -eq 'Repetition,StartBoundary,Enabled') 'TimeTrigger children in schema order'
     Assert ($t2.Properties.Task.Triggers.BootTrigger -and $t2.Properties.Task.Triggers.TimeTrigger.Repetition.Interval -eq 'PT60M') 'task runs at boot and hourly'
     $ext = $script:ad[$cg.Id.ToString()].gPCMachineExtensionNames
     Assert ($ext.Contains('[{00000000-0000-0000-0000-000000000000}{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}]') -and $ext.Contains('[{AADCED64-746C-4633-A97C-D61349046527}{CAB54552-DEEA-4691-817E-ED4A4D1AFC72}]')) 'GPP Scheduled Tasks CSE registered'

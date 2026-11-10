@@ -201,7 +201,7 @@ function Test-GpbDefinition {
         if ([string](Get-GpbProp $f 'name') -notmatch '^[A-Za-z0-9._-]+\.ps1$') { return 'Task file name is invalid.' }
         $url = [string](Get-GpbProp $f 'url')
         if ($Action -ne 'Uninstall' -and $url -notmatch '^https://[^/@\s]+/[^\s"]+$') { return 'Task file URL must be https without user info.' }
-        if ([string](Get-GpbProp $f 'sha256') -notmatch '^[0-9a-f]{64}$') { return 'Task file sha256 must be 64 lowercase hex characters.' }
+        if ([string](Get-GpbProp $f 'sha256') -cnotmatch '^[0-9a-f]{64}$') { return 'Task file sha256 must be 64 lowercase hex characters.' }
         # Arguments are placed in a -Command line: words, dashes and = only.
         if ([string](Get-GpbProp $t 'arguments') -notmatch '^[A-Za-z0-9 =_.-]*$') { return 'Task arguments may hold letters, digits, spaces, = _ . - only.' }
         if ([int](Get-GpbProp $t 'intervalMinutes') -lt 15 -or [int](Get-GpbProp $t 'intervalMinutes') -gt 1440) { return 'Task intervalMinutes must be 15 to 1440.' }
@@ -300,7 +300,7 @@ function ConvertTo-GpbTasksXml {
         [void]$sb.Append("<RegistrationInfo><Author>Relian gpo-baseline</Author><Description>$(& $e $t.description)</Description></RegistrationInfo>")
         [void]$sb.Append('<Principals><Principal id="Author"><UserId>NT AUTHORITY\System</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>')
         [void]$sb.Append('<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT30M</ExecutionTimeLimit><Priority>7</Priority></Settings>')
-        [void]$sb.Append("<Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT$([int]$t.bootDelayMinutes)M</Delay></BootTrigger><TimeTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT$([int]$t.intervalMinutes)M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></TimeTrigger></Triggers>")
+        [void]$sb.Append("<Triggers><BootTrigger><Enabled>true</Enabled><Delay>PT$([int]$t.bootDelayMinutes)M</Delay></BootTrigger><TimeTrigger><Repetition><Interval>PT$([int]$t.intervalMinutes)M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled></TimeTrigger></Triggers>")
         [void]$sb.Append("<Actions Context=`"Author`"><Exec><Command>powershell.exe</Command><Arguments>$(& $e $arguments)</Arguments></Exec></Actions></Task></Properties></TaskV2>`r`n")
     }
     [void]$sb.Append("</ScheduledTasks>`r`n")
