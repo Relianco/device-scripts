@@ -70,3 +70,6 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/maintenance-session-close.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Windows PowerShell 5.1 is the host on Server 2016 guests.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/comet-vss-provider.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
