@@ -61,10 +61,14 @@ if ($InstallerUrl -cne [string]$release.sourceUrl -or $InstallerSha256 -cne [str
     Fail 'script defaults do not match windows/releases/autoelevate.json'
 }
 $packageText = [System.IO.File]::ReadAllText($scriptPath)
-foreach ($banned in @('LICENSE_KEY', 'COMPANY_NAME', 'LOCATION_NAME', 'Ninja-Property', 'ELEVATION_MODE', 'BLOCKER_MODE')) {
+# Registration properties are allowed now. The key comes only from AE_LICENSE_KEY, never a field.
+foreach ($banned in @('Ninja-Property', 'BLOCKER_MODE')) {
     if ($packageText.Contains($banned)) {
         Fail "package contains $banned"
     }
+}
+if (-not $packageText.Contains('$env:AE_LICENSE_KEY')) {
+    Fail 'package does not read AE_LICENSE_KEY'
 }
 
 $builtinVersion = & $script:GetInstalledAutoElevateVersion
@@ -260,7 +264,7 @@ Assert-Plan -Plan $unknown -Expect (New-Expect -ExitCode 1) -Label 'unknown acti
 
 $installArgs = Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\autoelevate.msi' -ProductCode ''
 if ($null -eq $installArgs -or $installArgs.Count -ne 4 -or
-    $installArgs[0] -cne '/i' -or $installArgs[1] -cne 'C:\cache\autoelevate.msi' -or
+    $installArgs[0] -cne '/i' -or $installArgs[1] -cne '"C:\cache\autoelevate.msi"' -or
     $installArgs[2] -cne '/quiet' -or $installArgs[3] -cne '/norestart') {
     Fail "install arguments $($installArgs -join ' ')"
 }
@@ -323,7 +327,7 @@ function Reset-AutoElevateCase {
         return [string]$script:ProductCode
     }
     $script:InvokeMsiExec = {
-        param($Mode, $InstallerPath, $ProductCode)
+        param($Mode, $ArgumentList, $InstallerPath, $ProductCode)
         $existed = $false
         if (-not [string]::IsNullOrWhiteSpace($InstallerPath)) {
             $existed = Test-Path -LiteralPath $InstallerPath
@@ -333,7 +337,21 @@ function Reset-AutoElevateCase {
                 ProductCode      = [string]$ProductCode
                 InstallerExisted = [bool]$existed
             })
+        $script:InstalledVersion = $script:AfterVersion
         return 0
+    }
+    # Services and registration: a registered device with the agent running.
+    $script:ServiceWait = { param($Seconds) }
+    $script:ServiceStopped = $false
+    $script:GetAutoElevateService = {
+        param($Name)
+        $status = if ($script:ServiceStopped) { 'Stopped' } else { 'Running' }
+        return [pscustomobject]@{ Name = $Name; Status = $status }
+    }
+    $script:StopAutoElevateService = { param($Name) $script:ServiceStopped = $true }
+    $script:StartAutoElevateService = { param($Name) $script:ServiceStopped = $false }
+    $script:GetAutoElevateRegistration = {
+        return [pscustomobject]@{ Values = [ordered]@{ CompanyName = 'Example Company'; LocationName = 'Main Office' }; HasLicenseKey = $true; HasSettings = $true }
     }
 }
 
@@ -350,6 +368,7 @@ function Invoke-Case {
         [string]$InstallerSha256 = $script:GoodSha,
         [string]$CancelPath = ''
     )
+    $script:AfterVersion = $PinVersion
     return [int](Invoke-AutoElevateAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot)
 }
 
@@ -560,13 +579,14 @@ try {
     Reset-AutoElevateCase
     $script:InstalledVersion = ''
     $script:InvokeMsiExec = {
-        param($Mode, $InstallerPath, $ProductCode)
+        param($Mode, $ArgumentList, $InstallerPath, $ProductCode)
         $script:MsiCalls.Add([pscustomobject]@{
                 Mode             = [string]$Mode
                 ProductCode      = [string]$ProductCode
                 InstallerExisted = (Test-Path -LiteralPath $InstallerPath)
             })
         $env:RELIAN_DEPLOY_CANCEL = '1'
+        $script:InstalledVersion = $script:AfterVersion
         return 0
     }
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
@@ -575,12 +595,13 @@ try {
     Reset-AutoElevateCase
     $script:InstalledVersion = ''
     $script:InvokeMsiExec = {
-        param($Mode, $InstallerPath, $ProductCode)
+        param($Mode, $ArgumentList, $InstallerPath, $ProductCode)
         $script:MsiCalls.Add([pscustomobject]@{
                 Mode             = [string]$Mode
                 ProductCode      = [string]$ProductCode
                 InstallerExisted = $true
             })
+        $script:InstalledVersion = $script:AfterVersion
         return 3010
     }
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
@@ -591,7 +612,7 @@ try {
     $script:InstalledVersion = '2.0.0.0'
     Set-Marker '2.0.0.0'
     $script:InvokeMsiExec = {
-        param($Mode, $InstallerPath, $ProductCode)
+        param($Mode, $ArgumentList, $InstallerPath, $ProductCode)
         $script:MsiCalls.Add([pscustomobject]@{
                 Mode             = [string]$Mode
                 ProductCode      = [string]$ProductCode
