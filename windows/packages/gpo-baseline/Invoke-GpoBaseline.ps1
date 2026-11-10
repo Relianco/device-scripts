@@ -221,6 +221,8 @@ $script:GpbDownload = {
     param($Url, $Path)
     # Shared guard (tests/windows/tls12.Tests.ps1): add Tls12 only on legacy explicit defaults.
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
+    # One attempt by design: Apply is operator-started and a failed download exits 1 before any
+    # GPO or AD write, so rerunning is the retry. The runner keeps its own retries for the package.
     Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -ErrorAction Stop | Out-Null
 }
 
@@ -260,6 +262,8 @@ function ConvertTo-GpbTasksXml {
         $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
         $uid = Get-GpbStableGuid ($Gpo.Id.ToString() + '|' + $t.name)
         [void]$sb.Append("<TaskV2 clsid=`"{D8896631-B747-47a7-84A6-C155337F3BC8}`" name=`"$(& $e $t.name)`" image=`"1`" changed=`"2026-11-10 00:00:00`" uid=`"{$uid}`" userContext=`"0`" removePolicy=`"1`">")
+        # NT AUTHORITY\System with S4U is what GPMC writes for a SYSTEM preference task; Task Scheduler
+        # runs it as LocalSystem, which reaches SYSVOL as the computer account.
         [void]$sb.Append("<Properties action=`"R`" name=`"$(& $e $t.name)`" runAs=`"NT AUTHORITY\System`" logonType=`"S4U`"><Task version=`"1.3`">")
         [void]$sb.Append("<RegistrationInfo><Author>Relian gpo-baseline</Author><Description>$(& $e $t.description)</Description></RegistrationInfo>")
         [void]$sb.Append('<Principals><Principal id="Author"><UserId>NT AUTHORITY\System</UserId><LogonType>S4U</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>')
