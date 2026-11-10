@@ -189,6 +189,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 
 **Policy and configuration.** These change settings.
 
+- `eventlog-source`: registers one Windows event log source as SYSTEM so a program that creates its own source stops asking for admin rights. Parameters `Source` (required), `LogName` (default `Application`), and `CreateLog`. `Section` set to `Evidence` is read-only. Uninstall removes only that source and never a log.
 - `gpo-baseline`: applies an embedded Group Policy definition on the PDC emulator. Plan-only unless `Apply` is `true`. It backs up an existing GPO first. Definitions: `cis-ws2022-dc-low-risk` and `comet-vss-provider-qemu`.
 - `wu-policy`: finds local policy values that turn off automatic Windows Update. `Fix` set to `true` removes them, after a backup. It does nothing on a WSUS-managed device.
 - `apply-action`: applies one registry action from `windows/actions/<id>.json`. The pin is `<id>:<sha256 of that file>`.

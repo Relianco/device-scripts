@@ -77,3 +77,5 @@ jobs:
           # Windows PowerShell 5.1 is the host on Server 2016 guests.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/comet-vss-provider.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/eventlog-source.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
