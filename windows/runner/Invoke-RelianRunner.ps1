@@ -43,6 +43,8 @@ function Write-RelianRunnerDetail {
 
 function Test-RelianUrlHasUserInfo {
     param([Parameter(Mandatory)][string]$Url)
+    # The regex is for an empty name: [Uri] reports no UserInfo for https://@host.
+    if ($Url -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { return $true }
     try {
         $uri = [Uri]$Url
         if (-not $uri.IsAbsoluteUri) {
