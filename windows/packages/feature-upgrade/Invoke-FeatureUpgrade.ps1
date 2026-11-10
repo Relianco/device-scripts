@@ -34,16 +34,15 @@
     task with -Worker true. The worker re-checks the hash, mounts, runs
     setup.exe /auto upgrade /quiet /noreboot /eula accept /dynamicupdate disable
     /copylogs <dir> through Start-Process -PassThru, waits up to 6 hours for the
-    real exit code, always dismounts, writes the result to state.json and the
-    device field, and removes its task. Exit 0 or 3010/1641 means staged: the
+    real exit code, always dismounts, writes the result to state.json, and
+    removes its task. The next run reports that state on stdout. Exit 0 or 3010/1641 means staged: the
     upgrade finishes at the next reboot, which this package never starts.
 
     It never reboots, never touches security services, safe mode, Windows Update
     folders or IFEO keys.
 
-    The result is one line of compact JSON, printed last on stdout and written to
-    the NinjaOne device field relianFeatureUpgrade. Uninstall changes nothing and
-    exits 0.
+    The result is one line of compact JSON, printed last on stdout. The package
+    writes no RMM field. Uninstall changes nothing and exits 0.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM
@@ -64,7 +63,6 @@ param(
 
 $ProgressPreference = 'SilentlyContinue'
 
-$FupFieldName = 'relianFeatureUpgrade'
 $FupMutexName = 'Global\RelianFeatureUpgrade'
 $FupTaskName = 'Relian Feature Upgrade'
 $FupMarginBytes = 20GB
@@ -463,36 +461,11 @@ function Start-FupWorker {
     Start-ScheduledTask -TaskName $FupTaskName
 }
 
-# Pure: quotes a value for a native command line under Windows PowerShell 5.1.
-function ConvertTo-FupNativeArg {
-    param([string]$Value)
-    return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
-}
-
-# Same write as the feature-update package: the agent CLI's stdin, then a read-back.
-function Set-FupField {
-    param([string]$Value)
-    $cli = Join-Path $env:ProgramData 'NinjaRMMAgent\ninjarmm-cli.exe'
-    if (Test-Path -LiteralPath $cli) {
-        try {
-            $null = $Value | & $cli set --stdin $FupFieldName 2>&1
-            $back = (& $cli get $FupFieldName 2>$null) -join "`n"
-            if ($back.Trim() -eq $Value) { return $true }
-        } catch { }
-    }
-    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try { Ninja-Property-Set $FupFieldName (ConvertTo-FupNativeArg $Value); return $true } catch { }
-    }
-    return $false
-}
-
-# Writes the field, keeps the JSON for the caller to print last, returns the exit code.
+# Keeps the JSON for the caller to print last, returns the exit code.
 function Out-FupResult {
     param([System.Collections.Specialized.OrderedDictionary]$Result)
     $Result['timestamp'] = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $json = $Result | ConvertTo-Json -Depth 4 -Compress
-    if (Set-FupField $json) { Write-Status "Written to $FupFieldName" }
-    else { Write-Status 'Custom field not written; the JSON line below is the result' 'WARN' }
     $script:FupJson = $json
     if (@('failed', 'rolledBack', 'interrupted') -contains $Result['status']) { return 1 }
     return 0
@@ -503,7 +476,7 @@ function New-FupResult {
     return [ordered]@{ status = $Status; message = $Message }
 }
 
-# Run by NinjaOne. Returns the exit code.
+# Run by the deploy runner. Returns the exit code.
 function Invoke-FupMain {
     param($A)
     $mutex = New-Object Threading.Mutex($false, $FupMutexName)

@@ -188,11 +188,6 @@ Assert-Same (Get-FurVerdict $r) 'appraiser Exp task disabled; not offered by WU'
 $r.appraiser.indicators = [ordered]@{}; $r.appraiser['task'] = [ordered]@{ state = 'Disabled' }
 Assert-Same (Get-FurVerdict $r) 'appraiser never evaluated 24H2/25H2; appraiser stale: task disabled / Exp task disabled; not offered by WU' 'exp disabled when stale'
 
-# Native argument quoting survives the MSVCRT parser.
-Assert-Same (ConvertTo-FurNativeArg '{"a":"b"}') '{\"a\":\"b\"}' 'plain quotes'
-Assert-Same (ConvertTo-FurNativeArg '{"p":"C:\\x\\"}') '{\"p\":\"C:\\x\\\\\"}' 'backslash before quote'
-Assert-Same (ConvertTo-FurNativeArg 'none') 'none' 'no quotes'
-
 # Out-of-servicing Pro releases, stale UBR, and a missing cumulative update.
 $r = New-Record; $r.os['ubr'] = 6199; $r.os['edition'] = 'Professional'; $r.wuSearch['titles'] = @('AMD System Driver Update (23.19.0.6) [Drivers]'); $r.wuSearch['cumulativeOffered'] = $false
 Assert-Same (Get-FurVerdict $r) '23H2 out of servicing (UBR 6199 is the last cumulative update); no cumulative update offered; not offered by WU' 'pro 23H2 final'
@@ -278,11 +273,10 @@ foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinV
     if ($source.IndexOf($need, [StringComparison]::Ordinal) -lt 0) { Fail "param block lacks $need" }
 }
 
-# Pin record and script agree on the field; the package arguments example decodes to what the script reads.
+# The pin record names no RMM field; the package arguments example decodes to what the script reads.
 $release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/feature-update.json') | ConvertFrom-Json
 Assert-Same $release.installsSoftware $false 'pin record installsSoftware'
-Assert-Same $FurFieldName $release.ninjaField 'script field name and pin record'
-Assert-Same $FurFieldName 'relianFeatureUpdate' 'field name unchanged'
+if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
 $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('eyJGaXgiOiJ0cnVlIn0='))
 Assert-Same $decoded '{"Fix":"true"}' 'documented package arguments'
 if ($release.packageArguments.IndexOf('eyJGaXgiOiJ0cnVlIn0=', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the base64 example' }
