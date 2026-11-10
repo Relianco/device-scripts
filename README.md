@@ -2,7 +2,7 @@
 
 Public scripts that a managed device downloads and runs without a login. A technician pastes one small script into NinjaOne. That script downloads a second script, checks its SHA256, and runs it.
 
-This repo is public. It holds no client name, device id, token, password, or home-directory path. A script that needs a secret reads it on the device, from a NinjaOne Secure custom field or a script variable.
+This repo is public. It holds no client name, device id, token, password, or home-directory path. A package that needs a secret reads it from an environment variable that its caller sets on the device. No package reads a NinjaOne field.
 
 ## Pick your reader
 
@@ -160,7 +160,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 - `putty`: installs PuTTY.
 - `quicklook`: installs QuickLook.
 - `sysmon`: installs Sysmon.
-- `tailscale`: installs the Tailscale client and joins it with a tag. `ClientTag` comes in package arguments. The auth key never goes on a command line. It comes from the `AuthKey` environment variable, or from the NinjaOne Secure field named by `AuthKeyField`.
+- `tailscale`: installs the Tailscale client and joins it with a tag. `ClientTag` comes in package arguments. The auth key never goes on a command line. It comes only from the `AuthKey` environment variable, which the caller sets before it starts the runner. The package reads no NinjaOne field.
 - `teams`: installs Microsoft Teams from a pinned bootstrapper and MSIX.
 - `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
 - `vlc`: installs VLC.
@@ -230,7 +230,7 @@ An unknown parameter, or a missing one, exits 1. The runner prints no trace, so 
 --package-url "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/linux/packages/tailscale/tailscale.sh" --package-sha256 "<package-sha256>" --action "Install" --pin-version "1.104.4" --package-arguments-b64 "Q2xpZW50VGFnPXRhZzpjbGllbnQtZXhhbXBsZQ=="
 ```
 
-That base64 string is `ClientTag=tag:client-example`. Set the auth key as the `AuthKey` script variable in NinjaOne, or in a Secure custom field.
+That base64 string is `ClientTag=tag:client-example`. Set the auth key in the `AuthKey` environment variable of the runner process. Do not put it in package arguments: they are kept in the job's activity history.
 
 Packages in `linux/packages/`:
 
@@ -265,7 +265,7 @@ For a security reviewer. This is what a pasted script can and cannot do.
 - **The two PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. They check each SHA256 before they run anything.
 - **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
 - **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
-- **Neither runner calls the NinjaOne API.** Some packages write a result to a NinjaOne device field (`feature-update`, `feature-upgrade`, `restart-notice`, `wu-policy`, `outlook-autocomplete`). `tailscale` reads a Secure field for its auth key, on Windows and Linux. No package reads `relian_git_deploy_token`.
+- **Neither runner calls the NinjaOne API.** Some packages write a result to a NinjaOne device field (`feature-update`, `feature-upgrade`, `restart-notice`, `wu-policy`, `outlook-autocomplete`). `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. No package reads `relian_git_deploy_token`.
 - **Read-only packages** are tested for it. The tests scan their source for write commands, or run them against stubs.
 - **Changing packages** say so in their header: what they change, what they back up first, and what they never do (reboot, start Setup, change firewall rules).
 - **Hash pins and the repo.** A pin names exact bytes. Moving `main` cannot change what a pinned device runs.

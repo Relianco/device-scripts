@@ -1,10 +1,9 @@
 #!/bin/bash
 # Tailscale for Debian and Proxmox VE hosts. The runner passes only
 # --deployment-type, --action, and --pin-version, so the rest comes from
-# NinjaOne script variables on the runner, which arrive as environment variables:
+# environment variables (package arguments, or whatever starts the runner):
 #   ClientTag     the tag to advertise, such as tag:client-example (required)
-#   AuthKey       the auth key; when empty, the Secure custom field is read
-#   AuthKeyField  the Secure custom field name, default tailscaleAuthKey
+#   AuthKey       the auth key, needed only to join. The package reads no RMM field.
 # The pin version is a floor. apt installs the newest version in the repo.
 # The key never goes on a command line: tailscale reads it from a 0600 file.
 # Nothing else on the host is changed: no firewall, no sshd, no PVE config.
@@ -17,7 +16,6 @@ TS_CODENAMES='bookworm trixie'
 TS_KEYRING='/usr/share/keyrings/tailscale-archive-keyring.gpg'
 TS_LIST='/etc/apt/sources.list.d/tailscale.list'
 TS_KEY_DIR=''
-TS_NINJA_MISSING=0
 
 ts_error() {
   printf '%s\n' "$1" >&2
@@ -110,7 +108,7 @@ ts_plan() {
     PLAN_JOIN='key'
     if [[ "$has_key" != 1 ]]; then
       PLAN_EXIT=1
-      PLAN_REASON='a join is needed and no auth key was found in the AuthKey script variable or the auth key custom field'
+      PLAN_REASON='a join is needed and the AuthKey environment variable is empty'
     fi
   fi
   return 0
@@ -155,15 +153,6 @@ ts_apt_update() {
 ts_apt_install() { DEBIAN_FRONTEND=noninteractive apt-get install -y -q tailscale; }
 ts_enable_service() { systemctl enable --now tailscaled; }
 ts_tailscale() { tailscale "$@"; }
-ts_ninja_get() {
-  local cli="${NINJA_DATA_PATH:-/opt/NinjaRMMAgent/programdata}/ninjarmm-cli"
-  if [[ ! -x "$cli" ]]; then
-    TS_NINJA_MISSING=1
-    return 1
-  fi
-  # Exit 1 prints an error description, which must not be taken as the key.
-  "$cli" get "$1" 2>/dev/null
-}
 
 # Three attempts, as in the runner: retry curl proxy DNS, DNS, connection, timeout,
 # and TLS connect failures (5, 6, 7, 28, 35) and HTTP 408, 429, 500, 502, 503, 504 only.
@@ -264,21 +253,10 @@ ts_main() {
     return 0
   fi
 
-  local tag field key has_key=0
+  local tag key has_key=0
   tag="$(ts_first_env ClientTag clientTag clienttag)"
-  field="$(ts_first_env AuthKeyField authKeyField authkeyfield)"
-  [[ -n "$field" ]] || field='tailscaleAuthKey'
   key="$(ts_first_env AuthKey authKey authkey)"
   unset AuthKey authKey authkey
-  if [[ -z "$key" ]]; then
-    # Not in a command substitution, so TS_NINJA_MISSING survives.
-    local field_file
-    field_file="$(mktemp)" || return 1
-    if ts_ninja_get "$field" > "$field_file"; then
-      key="$(ts_trim "$(cat -- "$field_file")")"
-    fi
-    rm -f -- "$field_file"
-  fi
   if [[ -n "$key" ]]; then
     if ! ts_valid_key "$key"; then
       key=''
@@ -313,9 +291,6 @@ ts_main() {
     ts_plan "$action" "$pin" "$installed" "$state" "$tags" "$has_key" "$tag"
     if [[ -n "$PLAN_EXIT" ]]; then
       [[ -z "$PLAN_REASON" ]] || ts_error "$PLAN_REASON"
-      if [[ "$PLAN_EXIT" -ne 0 && "$has_key" -eq 0 && "$TS_NINJA_MISSING" -eq 1 ]]; then
-        ts_error 'ninjarmm-cli was not found in the package process'
-      fi
       key=''
       return "$PLAN_EXIT"
     fi

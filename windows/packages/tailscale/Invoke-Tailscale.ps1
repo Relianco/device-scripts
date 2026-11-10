@@ -3,9 +3,8 @@
 # InstallerUrl and InstallerSha256 are the pin in windows/releases/tailscale.json.
 # The runner copies this script alone, so the values are inlined.
 # ClientTag comes in PackageArguments. The auth key does not: PackageArguments
-# becomes the child command line. The key is the AuthKey environment variable
-# (a NinjaOne script variable on the runner) when set, else the NinjaOne Secure
-# custom field named by AuthKeyField, read with Ninja-Property-Get.
+# becomes the child command line. The key is the AuthKey environment variable,
+# set by whatever starts the runner. The package reads no RMM field.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
@@ -14,8 +13,7 @@ param(
     [string]$InstallerUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-1.104.4-amd64.msi',
     [string]$InstallerSha256 = '1d12cd8b1d6dbb447da8579b1a5268ae2fc050967bebfaa02e32d2bb645ef6ee',
     [string]$CancelPath = '',
-    [string]$ClientTag = '',
-    [string]$AuthKeyField = 'tailscaleAuthKey'
+    [string]$ClientTag = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,7 +108,7 @@ function Get-TailscalePlan {
     $needInstall = $null -eq $installed -or $installed.CompareTo($pin) -lt 0
     $needJoin = -not $running
     if ($needJoin -and -not $HasAuthKey) {
-        return New-TailscalePlan -ExitCode 1 -Reason 'a join is needed and no auth key was found in the AuthKey script variable or the auth key custom field'
+        return New-TailscalePlan -ExitCode 1 -Reason 'a join is needed and the AuthKey environment variable is empty'
     }
     if (-not $needInstall -and -not $needJoin) {
         return New-TailscalePlan -ExitCode 0
@@ -409,37 +407,6 @@ $script:GetInstalledTailscaleVersion = {
     return $best.ToString()
 }
 
-# Returns '' when the cmdlet is missing or the read fails. The value is never printed.
-$script:NinjaCmdletMissing = $false
-$script:GetNinjaProperty = {
-    param($Name)
-    if ($null -eq (Get-Command -Name 'Ninja-Property-Get' -ErrorAction SilentlyContinue)) {
-        $script:NinjaCmdletMissing = $true
-        return ''
-    }
-    try {
-        return [string](Ninja-Property-Get -Name $Name 2>$null)
-    } catch {
-        return ''
-    }
-}
-
-# The script variable wins. The custom field is read only when it is empty.
-function Resolve-TailscaleAuthKey {
-    param(
-        [string]$EnvValue,
-        [string]$FieldName
-    )
-    if (-not [string]::IsNullOrWhiteSpace($EnvValue)) {
-        return $EnvValue.Trim()
-    }
-    if ([string]::IsNullOrWhiteSpace($FieldName)) {
-        return ''
-    }
-    $value = [string](& $script:GetNinjaProperty -Name $FieldName)
-    return $value.Trim()
-}
-
 $script:GetTailscaleStatus = {
     $exe = Get-TailscaleExePath
     if (-not (Test-Path -LiteralPath $exe)) {
@@ -496,7 +463,6 @@ function Invoke-TailscaleAction {
         [string]$CancelPath,
         [string]$ClientTag,
         [string]$AuthKey,
-        [string]$AuthKeyField = '',
         [string]$HostName
     )
 
@@ -513,7 +479,7 @@ function Invoke-TailscaleAction {
         Write-TailscaleError 'refusing a URL that contains userinfo for installer'
         return 1
     }
-    $AuthKey = Resolve-TailscaleAuthKey -EnvValue $AuthKey -FieldName $AuthKeyField
+    $AuthKey = ([string]$AuthKey).Trim()
     $hasKey = -not [string]::IsNullOrWhiteSpace($AuthKey)
     if ($hasKey -and -not (Test-TailscaleAuthKeyShape -Key $AuthKey)) {
         Write-TailscaleError 'AuthKey is not a Tailscale auth key'
@@ -536,9 +502,6 @@ function Invoke-TailscaleAction {
             if ($null -ne $plan.ExitCode) {
                 if (-not [string]::IsNullOrWhiteSpace($plan.Reason)) {
                     Write-TailscaleError $plan.Reason
-                }
-                if (-not $hasKey -and $script:NinjaCmdletMissing -and [int]$plan.ExitCode -ne 0) {
-                    Write-TailscaleError 'Ninja-Property-Get is not available in the package process'
                 }
                 return [int]$plan.ExitCode
             }
@@ -607,7 +570,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 $tailscaleKey = [string]$env:AuthKey
 Remove-Item -LiteralPath 'Env:AuthKey' -ErrorAction SilentlyContinue
 try {
-    $tailscaleExit = [int](Invoke-TailscaleAction -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -ClientTag $ClientTag -AuthKey $tailscaleKey -AuthKeyField $AuthKeyField -HostName $env:COMPUTERNAME)
+    $tailscaleExit = [int](Invoke-TailscaleAction -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -ClientTag $ClientTag -AuthKey $tailscaleKey -HostName $env:COMPUTERNAME)
 } catch {
     # The exception text could carry an argument. Do not print it.
     [Console]::Error.WriteLine('Tailscale package failed')
