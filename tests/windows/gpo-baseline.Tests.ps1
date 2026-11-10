@@ -412,6 +412,23 @@ try {
     }
     foreach ($id in @('cis-ws2022-dc-low-risk', 'comet-vss-provider-qemu')) { Assert (-not (Test-GpbDefinition (Get-GpbDefinition $id))) "embedded definition valid: $id" }
 
+    # Review: transient download failures get three attempts; other failures one.
+    $script:GpbRetryDelay = { param($Seconds) }
+    $script:dlCalls = 0
+    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; if ($script:dlCalls -lt 3) { throw [System.Net.WebException]::new('timed out', [System.Net.WebExceptionStatus]::Timeout) }; [IO.File]::WriteAllText($Path, 'x') }
+    $tmpDl = Join-Path $tmp 'dl-test'
+    Invoke-GpbDownloadFile -Url 'https://example.invalid/a.ps1' -Path $tmpDl
+    Assert ($script:dlCalls -eq 3 -and [IO.File]::Exists($tmpDl)) 'timeout retried up to three attempts'
+    $script:dlCalls = 0
+    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; throw [System.Net.Http.HttpRequestException]::new('not found', $null, [System.Net.HttpStatusCode]::NotFound) }
+    $failed = $false; try { Invoke-GpbDownloadFile -Url 'https://example.invalid/a.ps1' -Path $tmpDl } catch { $failed = $true }
+    Assert ($failed -and $script:dlCalls -eq 1) 'HTTP 404 not retried'
+    $script:dlCalls = 0
+    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; throw [System.Net.Http.HttpRequestException]::new('busy', $null, [System.Net.HttpStatusCode]::ServiceUnavailable) }
+    $failed = $false; try { Invoke-GpbDownloadFile -Url 'https://example.invalid/a.ps1' -Path $tmpDl } catch { $failed = $true }
+    Assert ($failed -and $script:dlCalls -eq 3) 'HTTP 503 retried three times then fails'
+    $script:GpbDownload = { param($Url, $Path) $script:downloads.Add($Url); [IO.File]::WriteAllText($Path, $script:downloadBody) }
+
     # ---- Comet VSS provider: WMI-filtered GPO with a hash-pinned GPP scheduled task ----
     $comet = Get-GpbDefinition 'comet-vss-provider-qemu'
     $task = $comet.tasks[0]
@@ -433,9 +450,11 @@ try {
 
     # A pin mismatch stops before any write.
     $testComet.tasks[0].file.sha256 = ('0' * 64)
+    $script:downloads.Clear()
     $r = Invoke-GpoBaseline -Action Install -DefinitionObject $testComet -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 1 -and -not @($script:calls | Where-Object { $_ -match '^(New-GPO|New-ADObject|Backup-GPO|Set-)' })) 'hash mismatch makes no GPO or AD write'
     Assert (-not $script:gpos.ContainsKey($testComet.gpoName)) 'hash mismatch created no GPO'
+    Assert ($script:downloads.Count -eq 1) 'hash mismatch is not retried'
     $testComet.tasks[0].file.sha256 = $fakeHash
 
     $script:calls.Clear(); $script:downloads.Clear()

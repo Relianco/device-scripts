@@ -221,9 +221,40 @@ $script:GpbDownload = {
     param($Url, $Path)
     # Shared guard (tests/windows/tls12.Tests.ps1): add Tls12 only on legacy explicit defaults.
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
-    # One attempt by design: Apply is operator-started and a failed download exits 1 before any
-    # GPO or AD write, so rerunning is the retry. The runner keeps its own retries for the package.
     Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing -ErrorAction Stop | Out-Null
+}
+
+$script:GpbRetryDelay = { param($Seconds) Start-Sleep -Seconds $Seconds }
+
+# Transient: timeout, connection, TLS or DNS failure, or HTTP 408/429/5xx gateway codes.
+function Test-GpbTransient {
+    param($Exception)
+    $e = $Exception
+    for ($n = 0; $null -ne $e -and $n -lt 8; $n++) {
+        $code = $null
+        if ($e.PSObject.Properties['StatusCode'] -and $null -ne $e.StatusCode) { $code = [int]$e.StatusCode }
+        elseif ($e.PSObject.Properties['Response'] -and $null -ne $e.Response -and $e.Response.PSObject.Properties['StatusCode']) { $code = [int]$e.Response.StatusCode }
+        if ($null -ne $code) { return (@(408, 429, 500, 502, 503, 504) -contains $code) }
+        if ($e -is [TimeoutException] -or $e -is [Net.Sockets.SocketException] -or $e -is [Threading.Tasks.TaskCanceledException]) { return $true }
+        if ($e -is [Net.WebException] -and @('Timeout', 'NameResolutionFailure', 'ConnectFailure', 'SecureChannelFailure', 'ReceiveFailure', 'SendFailure', 'ConnectionClosed', 'KeepAliveFailure') -contains [string]$e.Status) { return $true }
+        if ($e.PSObject.Properties['HttpRequestError'] -and @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded') -contains [string]$e.HttpRequestError) { return $true }
+        $e = $e.InnerException
+    }
+    return $false
+}
+
+# Three attempts (waits 5 s, 20 s) for transient failures only. The hash is checked by the caller, once.
+function Invoke-GpbDownloadFile {
+    param([string]$Url, [string]$Path)
+    $delays = @(5, 20)
+    for ($attempt = 1; ; $attempt++) {
+        try { & $script:GpbDownload $Url $Path; return }
+        catch {
+            if ($attempt -ge 3 -or -not (Test-GpbTransient $_.Exception)) { throw }
+            if ([IO.File]::Exists($Path)) { [IO.File]::Delete($Path) }
+            & $script:GpbRetryDelay $delays[$attempt - 1]
+        }
+    }
 }
 
 # msWMI-Parm2: "<count>;" then per query "3;10;<len>;WQL;root\CIMv2;<query>;" (the GPMC encoding).
@@ -611,7 +642,7 @@ function Invoke-GpbApply {
     try {
         foreach ($c in @($Changes | Where-Object { $_.kind -eq 'file' })) {
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ('relian-gpb-' + [guid]::NewGuid().ToString('n'))
-            & $script:GpbDownload $c.item.file.url $tmp
+            Invoke-GpbDownloadFile -Url $c.item.file.url -Path $tmp
             $got = Get-GpbSha256 $tmp
             if ($got -ne $c.item.file.sha256) { throw "Downloaded $($c.item.file.name) has SHA256 $got, not the pinned $($c.item.file.sha256). Nothing was changed." }
             $downloaded[$c.item.file.name] = $tmp
