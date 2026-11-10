@@ -679,6 +679,10 @@ function Invoke-RelianRunner {
     return [int]$exitCode
 }
 
+# Server 2016 PowerShell 5.1 defaults to explicit TLS 1.0/1.1; Azure Storage needs 1.2.
+# SystemDefault (0) and any set with Tls12/Tls13 are left alone so modern hosts keep TLS 1.3.
+$tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
+
 # Dot-sourcing under test defines functions and does not download.
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
