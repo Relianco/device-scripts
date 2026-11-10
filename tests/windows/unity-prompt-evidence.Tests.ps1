@@ -5,8 +5,11 @@ $env:RELIAN_DEPLOY_TEST='1'
 function Assert($ok,$message){if(-not $ok){throw "FAIL $message"}}
 $sid='S-1-5-21-111-222-333-1001'
 $account='EXAMPLE\User'
+$fixtureProfile=Join-Path ([IO.Path]::GetTempPath()) ('unity-evidence-'+[guid]::NewGuid().ToString('n'))
+[void][IO.Directory]::CreateDirectory($fixtureProfile)
+try {
 $script:ReadCount=0
-$script:Context=[pscustomobject]@{Account=$account;Sid=$sid;ProfileCount=1;Loaded=$true;Special=$false;HiveLoaded=$true;Profile='C:\Profiles\Example'}
+$script:Context=[pscustomobject]@{Account=$account;Sid=$sid;ProfileCount=1;Loaded=$true;Special=$false;HiveLoaded=$true;Profile=$fixtureProfile}
 $script:UnityContext={param($ExpectedSid) $script:Context}
 $script:UnityLogEvidence={ $script:ReadCount++; [ordered]@{LogExists=$false;SourceExists=$true;RegisteredLog='Application';ExpectedLog='UnityAccounting';BindingMatches=$false} }
 $script:UnityUserEvidence={param($Sid) $script:ReadCount++; @([ordered]@{View='Registry32';KeyExists=$false;ValueExists=$false;Kind=$null;Value=$null},[ordered]@{View='Registry64';KeyExists=$true;ValueExists=$true;Kind='String';Value='1'})}
@@ -41,3 +44,6 @@ $big=[ordered]@{Status='evidence';Runtime=@{GacAssemblies=@(('x'*10000))}}
 $json=ConvertTo-UnityEvidenceJson $big
 Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 8000 -and $json -match 'outputTooLarge') 'oversized evidence fails explicitly within transport bound'
 Write-Output 'unity-prompt-evidence tests passed'
+} finally {
+    Remove-Item -LiteralPath $fixtureProfile -Recurse -Force
+}
