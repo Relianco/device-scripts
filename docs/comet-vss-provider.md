@@ -66,3 +66,7 @@ The package downloads nothing. It prints one JSON line.
 Pass these with the usual runner pins: `-PackageUrl`, `-PackageSha256`,
 `-ToolkitUrl`, `-ToolkitSha256`, `-BrandPackUrl`, `-BrandPackSha256` and
 `-PinVersion "1.0.0"`.
+
+The `comet-vss-provider-qemu` GPO definition in `gpo-baseline` downloads the
+script from a content-addressed blob. A new script version means publishing a
+new blob and bumping both the URL and the sha256 together.

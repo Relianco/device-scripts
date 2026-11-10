@@ -146,10 +146,10 @@ $GpbDefinitionJson = @'
   "tasks": [
    {
     "name": "Relian Comet VSS provider",
-    "description": "Adds COMET_FORCE_VSS_PROVIDER=system to Comet's service environment if missing (merge, never replace). Managed by the Relian gpo-baseline package.",
+    "description": "Adds COMET_FORCE_VSS_PROVIDER=system to Comet's service environment if missing (merge, never replace). Managed by the Relian gpo-baseline package. A new script version means publishing a new content-addressed blob and bumping both the URL and the sha256 together.",
     "file": {
      "name": "Invoke-CometVssProvider.ps1",
-     "url": "https://raw.githubusercontent.com/Relianco/device-scripts/f79dba25ebe5130e67b20789a3c8d626da75f659/windows/packages/comet-vss-provider/Invoke-CometVssProvider.ps1",
+     "url": "https://relianpub.blob.core.windows.net/pub/sec/Invoke-CometVssProvider-2311bb495f855e34c6b8db7f50ae8b02498d5258750590c3e5cdd672f2cfb8ba.ps1",
      "sha256": "2311bb495f855e34c6b8db7f50ae8b02498d5258750590c3e5cdd672f2cfb8ba"
     },
     "arguments": "-Action Install",
