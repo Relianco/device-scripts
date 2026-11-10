@@ -173,6 +173,9 @@ function Get-GpbDefinition {
 function Get-GpbProp { param($Object, [string]$Name) if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.$Name } }
 
 # Returns the first problem with a definition, or $null. Embedded and test definitions both pass here.
+# Every action validates, Uninstall included: definitions are embedded, a test keeps each one
+# valid, so an invalid definition never ships. An empty sha256 is invalid, not "skip": unlike
+# the runner's PackageSha256, a definition pin is never optional.
 function Test-GpbDefinition {
     param($Def)
     if ([string](Get-GpbProp $Def 'id') -notmatch '^[a-z0-9][a-z0-9-]{0,63}$') { return 'Definition id is invalid.' }

@@ -413,6 +413,8 @@ try {
     foreach ($id in @('cis-ws2022-dc-low-risk', 'comet-vss-provider-qemu')) { Assert (-not (Test-GpbDefinition (Get-GpbDefinition $id))) "embedded definition valid: $id" }
 
     # Review: transient download failures get three attempts; other failures one.
+    # A response-bearing exception that builds the same way on .NET Framework and .NET.
+    if (-not ('GpbFakeHttpException' -as [type])) { Add-Type -TypeDefinition 'public class GpbFakeHttpException : System.Exception { public GpbFakeHttpException(int code) : base("HTTP " + code) { StatusCode = code; } public int StatusCode { get; set; } }' }
     $script:GpbRetryDelay = { param($Seconds) }
     $script:dlCalls = 0
     $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; if ($script:dlCalls -lt 3) { throw [System.Net.WebException]::new('timed out', [System.Net.WebExceptionStatus]::Timeout) }; [IO.File]::WriteAllText($Path, 'x') }
@@ -420,11 +422,11 @@ try {
     Invoke-GpbDownloadFile -Url 'https://example.invalid/a.ps1' -Path $tmpDl
     Assert ($script:dlCalls -eq 3 -and [IO.File]::Exists($tmpDl)) 'timeout retried up to three attempts'
     $script:dlCalls = 0
-    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; throw [System.Net.Http.HttpRequestException]::new('not found', $null, [System.Net.HttpStatusCode]::NotFound) }
+    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; throw [GpbFakeHttpException]::new(404) }
     $failed = $false; try { Invoke-GpbDownloadFile -Url 'https://example.invalid/a.ps1' -Path $tmpDl } catch { $failed = $true }
-    Assert ($failed -and $script:dlCalls -eq 1) 'HTTP 404 not retried'
+    Assert ($failed -and $script:dlCalls -eq 1 -and (Test-GpbTransient ([GpbFakeHttpException]::new(404))) -eq $false -and (Test-GpbTransient ([GpbFakeHttpException]::new(503)))) 'HTTP 404 not retried; status reaches the classifier'
     $script:dlCalls = 0
-    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; throw [System.Net.Http.HttpRequestException]::new('busy', $null, [System.Net.HttpStatusCode]::ServiceUnavailable) }
+    $script:GpbDownload = { param($Url, $Path) $script:dlCalls++; throw [GpbFakeHttpException]::new(503) }
     $failed = $false; try { Invoke-GpbDownloadFile -Url 'https://example.invalid/a.ps1' -Path $tmpDl } catch { $failed = $true }
     Assert ($failed -and $script:dlCalls -eq 3) 'HTTP 503 retried three times then fails'
     $script:GpbDownload = { param($Url, $Path) $script:downloads.Add($Url); [IO.File]::WriteAllText($Path, $script:downloadBody) }
