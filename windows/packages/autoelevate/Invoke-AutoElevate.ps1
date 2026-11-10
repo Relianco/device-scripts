@@ -840,6 +840,31 @@ $script:ServiceWait = {
     Start-Sleep -Seconds ([int]$Seconds)
 }
 
+# sc.exe labels are localized. Only a recognized complete action section establishes
+# recovery configuration; unknown output must not be reported as no recovery actions.
+function ConvertFrom-AutoElevateRecoveryOutput {
+    param([string[]]$Lines, [int]$ExitCode)
+    if ($ExitCode -ne 0) { return 'unknown' }
+    $found = $false
+    $actions = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $Lines) {
+        $row = [string]$line
+        if ($row -cmatch '^\s*FAILURE_ACTIONS\s*:\s*(.*)$') {
+            if ($found) { return 'unknown' }
+            $found = $true
+            $row = $Matches[1]
+        } elseif (-not $found) { continue }
+        if ([string]::IsNullOrWhiteSpace($row)) { continue }
+        if ($row -cnotmatch '^\s*(RESTART|RUN PROCESS|REBOOT|NONE)\s+--\s+Delay\s*=\s*[0-9]+\s+milliseconds\.\s*$') {
+            return 'unknown'
+        }
+        $actions.Add($Matches[1].ToLowerInvariant())
+    }
+    if (-not $found) { return 'unknown' }
+    if ($actions.Count -eq 0) { return 'none' }
+    return $actions -join ', '
+}
+
 $script:GetAutoElevateService = {
     param($Name)
     $cim = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
@@ -847,12 +872,8 @@ $script:GetAutoElevateService = {
         return $null
     }
     # A restart recovery action runs after a crash, not after a stop request.
-    $failure = (& sc.exe qfailure $Name 2>$null) -join ' '
-    $actions = @([regex]::Matches($failure, 'RESTART|RUN PROCESS|REBOOT') | ForEach-Object { $_.Value.ToLowerInvariant() })
-    $recovery = 'none'
-    if ($actions.Count -gt 0) {
-        $recovery = $actions -join ', '
-    }
+    $failure = @(& sc.exe qfailure $Name 2>$null)
+    $recovery = ConvertFrom-AutoElevateRecoveryOutput -Lines $failure -ExitCode $LASTEXITCODE
     return [pscustomobject]@{
         Name      = $Name
         Status    = [string]$cim.State
