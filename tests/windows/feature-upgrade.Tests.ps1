@@ -231,7 +231,6 @@ Remove-Item -LiteralPath $stateFile, (Join-Path $tmp 'logs') -Recurse -Force
 
 # Invoke-FupMain with the machine mocked.
 function Initialize-FupDir { }
-function Set-FupField { param($Value) $true }
 function Get-FupLastBoot { [datetime]::UtcNow.AddDays(-1) }
 function Get-FupOsBuild { $script:osBuild }
 function Test-FupRebootPending { $script:rebootPending }
@@ -381,8 +380,7 @@ foreach ($bad in @('Restart-Computer', 'shutdown', 'msconfig', 'bcdedit', 'Softw
 
 # Pin record and README.
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/feature-upgrade.json') -Raw | ConvertFrom-Json
-Assert-Same $release.ninjaField 'relianFeatureUpgrade' 'pin record field'
-Assert-Same $release.ninjaField $FupFieldName 'pin record matches script field'
+if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
 $readme = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
 if ($readme.IndexOf('windows/packages/feature-upgrade/Invoke-FeatureUpgrade.ps1', [StringComparison]::Ordinal) -lt 0) { Fail 'README lacks the package section' }
 

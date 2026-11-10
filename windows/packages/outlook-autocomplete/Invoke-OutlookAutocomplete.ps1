@@ -12,7 +12,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$OaFieldName = 'relianOutlookAutocomplete'
 $oaProgramData = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
 $script:OaBackupRoot = "$oaProgramData\Relian\OutlookAutocomplete"
 $OaMaxStreamBytes = 67108864
@@ -524,27 +523,6 @@ function ConvertTo-BoundedOaJson {
  } | ConvertTo-Json -Depth 4 -Compress)
 }
 
-function ConvertTo-OaNativeArg {
- param([string]$Value)
- return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
-}
-
-function Set-OaField {
- param([string]$Value)
- $cli = "$oaProgramData\NinjaRMMAgent\ninjarmm-cli.exe"
- if (Test-Path -LiteralPath $cli) {
-  try {
-   $null = $Value | & $cli set --stdin $OaFieldName 2>&1
-   $back = (& $cli get $OaFieldName 2>$null) -join "`n"
-   if ($back.Trim() -eq $Value) { return $true }
-  } catch { }
- }
- if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-  try { Ninja-Property-Set $OaFieldName (ConvertTo-OaNativeArg $Value); return $true } catch { }
- }
- return $false
-}
-
 function Invoke-Main {
  param([string]$Match = '', [switch]$Fix, [switch]$CloseOutlook)
  try {
@@ -552,8 +530,6 @@ function Invoke-Main {
   $run = Invoke-OaRun -Match $Match -Fix:$Fix -CloseOutlook:$CloseOutlook
   $json = ConvertTo-BoundedOaJson -Record $run.record
   Write-Status "Verdict: $($run.record.verdict) ($([Text.Encoding]::UTF8.GetByteCount($json)) bytes)"
-  if (Set-OaField $json) { Write-Status "Written to $OaFieldName" }
-  else { Write-Status 'Custom field not written; the JSON line below is the result' 'WARN' }
   Write-Output $json
   exit $run.exitCode
  } catch {
