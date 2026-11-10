@@ -17,6 +17,15 @@ Supply the affected console user's exact account and SID. Run elevated so
 the script can inspect the loaded user hive. Entra accounts can have
 `S-1-12-1` SIDs; do not assume every user SID starts with `S-1-5-21`.
 
+From this folder, replace these placeholders with the verified user identity:
+
+```powershell
+& ./Get-UnityPromptEvidence.ps1 `
+    -DeploymentType Install -Action Install -PinVersion '1.0.0' `
+    -ExpectedSid '<affected-user-SID>' `
+    -ExpectedAccount '<domain-or-authority>\<account>'
+```
+
 Use the existing
 [`Invoke-MsiRepair.ps1`](../msi-repair/Invoke-MsiRepair.ps1) with
 `Section=Evidence` and the product code below for installer events.
@@ -68,8 +77,10 @@ Then create the expected pair:
 
 Read back both log existence and source binding. If ownership is unknown,
 investigate the existing source instead of deleting registry keys manually.
-The package never deletes a log. Removing its owned source is the supported
-undo operation; the custom log and its records remain.
+The package never deletes a log. The removal example above applies to the
+incorrect source under `Application`. Windows refuses `DeleteEventSource`
+when the source has the same name as its log, so there is no automated undo
+for the correct `UnityAccounting` pair here. Preserve the log and its records.
 
 ## SAP SE: the application's user-registration check fails
 
