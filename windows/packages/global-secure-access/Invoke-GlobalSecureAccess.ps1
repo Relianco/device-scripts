@@ -229,12 +229,15 @@ function Test-GsaCancelled {
 
 function Invoke-GsaAction {
     param([string]$Action, [string]$PinVersion, [string]$InstallerPath, [string]$InstallerUrl,
-        [string]$InstallerSha256, [string]$CancelPath)
+        [string]$InstallerSha256, [string]$CancelPath, [string]$DeploymentType = 'Install')
     if ([string]::IsNullOrWhiteSpace($InstallerSha256) -or [string]::IsNullOrWhiteSpace($PinVersion)) { return 0 }
     $cache = ''
     $phase = 'validating parameters'
     try {
         if ($InstallerSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Invalid installer SHA256.' }
+        # The runner uses DeploymentType Install for both Install and Update.
+        # Every other phase is unsupported, even if Action defaults to Install.
+        if ($DeploymentType -ne 'Install') { throw 'GSA supports the Install deployment phase only.' }
         if ($Action -notin @('Install', 'Update')) { throw 'GSA supports Install and Update only.' }
         $pin = ConvertTo-GsaVersion $PinVersion
         if (-not [string]::IsNullOrWhiteSpace($InstallerUrl)) {
@@ -306,4 +309,4 @@ function Invoke-GsaAction {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-exit (Invoke-GsaAction -Action $Action -PinVersion $PinVersion -InstallerPath $InstallerPath -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath)
+exit (Invoke-GsaAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerPath $InstallerPath -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath)

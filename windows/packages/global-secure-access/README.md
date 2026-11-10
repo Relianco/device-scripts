@@ -25,7 +25,9 @@ A clean device goes straight to installation. Missing or unreadable versions,
 missing cached uninstallers, orphaned MSI registrations, or old and current
 bundles coexisting fail closed. It does not uninstall equal/newer clients,
 repair broken registrations, or support the runner's Repair, Reinstall, or
-Uninstall actions.
+Uninstall actions. `DeploymentType` must be `Install`, which is the runner's
+phase for both Install and Update. Other phases are rejected before discovery
+or download, including an Uninstall phase paired with the default Install action.
 
 The default SHA256 is
 `d274b91fea1b14c4fbb59391c38905dbaa64ce57ba7fa226fedf523e06205413`.

@@ -97,6 +97,22 @@ $script:discovered = 0
 Assert ((Invoke-GsaAction -Action Uninstall -PinVersion '2.34.222' -InstallerSha256 ('a'*64)) -eq 1) 'unsupported uninstall fails closed'
 Assert ($script:discovered -eq 0) 'unsupported uninstall cannot remove a client'
 
+# DeploymentType is the runner's install/uninstall phase, not the logical Action.
+# An Uninstall phase must never silently use Action's standalone Install default.
+foreach ($deployment in @('Uninstall', 'Repair', 'Reinstall', '', 'Bogus')) {
+    foreach ($actionName in @('Install', 'Update')) {
+        $script:discovered = 0; $events.Clear()
+        $result = Invoke-GsaAction -DeploymentType $deployment -Action $actionName -PinVersion '2.34.222' -InstallerSha256 ('a'*64)
+        Assert ($result -eq 1 -and $script:discovered -eq 0 -and $events.Count -eq 0) 'unsupported deployment phase must stop before discovery or preparation'
+    }
+}
+foreach ($actionName in @('Install', 'Update')) {
+    $script:discovered = 0
+    $result = Invoke-GsaAction -DeploymentType Install -Action $actionName -PinVersion '2.34.222' -InstallerSha256 ('a'*64)
+    Assert ($result -eq 0 -and $script:discovered -eq 1) 'runner Install phase permits Install and Update actions'
+}
+$script:discovered = 0
+Assert ((Invoke-GsaAction -DeploymentType Uninstall -Action Install -InstallerSha256 '') -eq 0 -and $script:discovered -eq 0) 'empty hash remains the off switch for every deployment phase'
 Write-Host 'PASS GSA replacement, version boundaries, failure and reboot handling'
 
 # Real preparation exercises download retries and hash verification; only network
