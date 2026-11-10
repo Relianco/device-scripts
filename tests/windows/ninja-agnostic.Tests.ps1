@@ -28,13 +28,6 @@ foreach ($sample in @('& $cli get x # ninjarmm-cli.exe', 'Ninja-Property-Set a b
 }
 if ($regex.IsMatch('Run it through the deploy runner (NinjaOne script 374).')) { Fail 'lint flags a plain NinjaOne mention' }
 
-# shortcut: tailscale still reads its auth key from a Secure field; its own PR removes it.
-# A listed file that no longer matches fails, so the list cannot go stale.
-$pending = @(
-    'linux/packages/tailscale/tailscale.sh',
-    'windows/packages/tailscale/Invoke-Tailscale.ps1'
-)
-
 $roots = @('windows/packages', 'windows/jobs', 'windows/releases', 'linux/packages', 'macos/packages')
 $files = foreach ($r in $roots) {
     $p = Join-Path $repoRoot $r
@@ -46,10 +39,6 @@ $found = @()
 foreach ($file in $files) {
     $rel = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
     $hits = @(Select-String -LiteralPath $file.FullName -Pattern $regex.ToString() -AllMatches:$false)
-    if ($pending -contains $rel) {
-        if ($hits.Count -eq 0) { Fail "$rel no longer couples to NinjaOne: remove it from the pending list" }
-        continue
-    }
     foreach ($h in $hits) { $found += "${rel}:$($h.LineNumber): $($h.Line.Trim())" }
 }
 if ($found.Count) { Fail ("NinjaOne coupling in packages:`n" + ($found -join "`n")) }
