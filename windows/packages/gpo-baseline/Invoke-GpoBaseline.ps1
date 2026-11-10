@@ -349,8 +349,9 @@ function Get-GpbPlan {
     if ($Gpo -and $pairs.Count) {
         $pub = Get-GpbPublishState -Context $Context -Gpo $Gpo
         $missing = (Add-GpbExtensionNames -Current $pub.ext -Pairs $pairs) -ne (Add-GpbExtensionNames -Current $pub.ext -Pairs @())
-        if ($missing -or $pub.adVersion -ne $pub.iniVersion) {
-            $changes.Add([ordered]@{ kind = 'publish'; target = 'versionNumber, gPCMachineExtensionNames'; current = "ad=$($pub.adVersion) ini=$($pub.iniVersion) cseMissing=$missing"; desired = 'consistent' })
+        $pending = [IO.File]::Exists((Join-Path (Get-GpbStateDir $Context $Gpo) 'pending-publish'))
+        if ($missing -or $pending -or $pub.adVersion -ne $pub.iniVersion) {
+            $changes.Add([ordered]@{ kind = 'publish'; target = 'versionNumber, gPCMachineExtensionNames'; current = "ad=$($pub.adVersion) ini=$($pub.iniVersion) cseMissing=$missing pending=$pending"; desired = 'consistent' })
         }
     }
     if ($LinkTo) {
@@ -371,12 +372,21 @@ function Protect-GpbBackupRoot {
     if ($LASTEXITCODE -ne 0) { throw "icacls inheritance exited $LASTEXITCODE" }
 }
 
-function Save-GpbBackup {
-    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record)
+# Per-GPO folder for backups and state, under the SYSTEM/Administrators-only root.
+function Initialize-GpbStateDir {
+    param($Context, $Gpo)
     [void](New-Item -ItemType Directory -Path $Context.BackupRoot -Force)
     Protect-GpbBackupRoot $Context.BackupRoot
-    $dir = Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}')
+    $dir = Get-GpbStateDir $Context $Gpo
     [void](New-Item -ItemType Directory -Path $dir -Force)
+    return $dir
+}
+
+function Get-GpbStateDir { param($Context, $Gpo) Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}') }
+
+function Save-GpbBackup {
+    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record)
+    $dir = Initialize-GpbStateDir $Context $Gpo
     $backup = Backup-GPO -Guid $Gpo.Id -Path $dir -Comment "relian-gpo-baseline $DefinitionId" -Server $Context.Server -ErrorAction Stop
     $id = ''
     if ($backup -and $backup.PSObject.Properties['Id']) { $id = [string]$backup.Id }
@@ -433,6 +443,13 @@ function Invoke-GpbApply {
     }
     $pairs = @()
     $security = @($Changes | Where-Object { $_.kind -eq 'security' })
+    $audit = @($Changes | Where-Object { $_.kind -eq 'audit' })
+    # Marker first: if publication fails after the files change, the next plan retries it.
+    $marker = $null
+    if ($security.Count -or $audit.Count -or @($Changes | Where-Object { $_.kind -eq 'publish' }).Count) {
+        $marker = Join-Path (Initialize-GpbStateDir $Context $Gpo) 'pending-publish'
+        [IO.File]::WriteAllText($marker, [datetime]::UtcNow.ToString('o'))
+    }
     if ($security.Count) {
         $path = Get-GpbInfPath $Context $Gpo
         $inf = ConvertFrom-GpbInf (Read-GpbText $path)
@@ -444,7 +461,6 @@ function Invoke-GpbApply {
         [IO.File]::WriteAllText($path, (ConvertTo-GpbInf $inf), [Text.Encoding]::Unicode)
         $pairs += $GpbSecurityCse
     }
-    $audit = @($Changes | Where-Object { $_.kind -eq 'audit' })
     if ($audit.Count) {
         $path = Get-GpbAuditPath $Context $Gpo
         $rows = ConvertFrom-GpbAuditCsv (Read-GpbText $path)
@@ -460,6 +476,7 @@ function Invoke-GpbApply {
         if (@($Def.audit).Count) { $pairs += $GpbAuditCse }
     }
     if ($pairs.Count) { Update-GpbVersion -Context $Context -Gpo $Gpo -Pairs $pairs }
+    if ($marker) { [IO.File]::Delete($marker) }
     foreach ($c in @($Changes | Where-Object { $_.kind -eq 'link' })) {
         $state = 'No'; if ($LinkOn) { $state = 'Yes' }
         if ($c.Contains('exists')) { Set-GPLink -Guid $Gpo.Id -Target $LinkTo -LinkEnabled $state -Server $Context.Server -ErrorAction Stop | Out-Null }

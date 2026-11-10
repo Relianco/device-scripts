@@ -65,6 +65,8 @@ function New-FakeWorld {
     $script:setCount = 0
     $script:backupFails = $false
     $script:removeFails = $false
+    $script:adGetCount = 0
+    $script:adGetFailAt = -1
     $policies = Join-Path $tmp ([guid]::NewGuid().ToString('n'))
     [void](New-Item -ItemType Directory -Path $policies)
     return @{ Server = 'pdc.example.invalid'; DomainDN = 'DC=example,DC=invalid'; PoliciesPath = $policies; BackupRoot = (Join-Path $policies 'backups'); IsPdc = $true }
@@ -132,6 +134,8 @@ function Remove-GPO { [CmdletBinding()] param($Guid, $Server) $script:calls.Add(
 function Get-ADObject {
     [CmdletBinding()]
     param($Identity, $Properties, $Server)
+    $script:adGetCount++
+    if ($script:adGetCount -eq $script:adGetFailAt) { throw 'simulated AD read failure' }
     $id = ([regex]::Match($Identity, '\{([0-9a-fA-F-]{36})\}').Groups[1].Value).ToLower()
     $o = $script:ad[$id]
     return [pscustomobject]@{ versionNumber = $o.versionNumber; gPCMachineExtensionNames = $o.gPCMachineExtensionNames }
@@ -334,6 +338,25 @@ try {
     Assert ($r.exitCode -eq 0 -and [long]$script:ad[$gpo.Id.ToString()].versionNumber -eq $iniVersion) 'AD and GPT.INI version mismatch repaired'
     $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'noChange') 'repaired GPO is stable'
+
+    # Review: files written but never published (AD read failed before GPT.INI) are
+    # published on the next run, even though every value already matches.
+    $script:ctx = New-FakeWorld
+    [void](Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx)
+    $gpo = $script:gpos[$def.gpoName]
+    $infPath = Join-Path (Join-Path $script:ctx.PoliciesPath ('{' + $gpo.Id.ToString().ToUpper() + '}')) 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
+    [IO.File]::WriteAllText($infPath, "[Unicode]`r`nUnicode=yes`r`n", [Text.Encoding]::Unicode)
+    $before = [long]$script:ad[$gpo.Id.ToString()].versionNumber
+    $script:adGetCount = 0; $script:adGetFailAt = 2
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
+    $script:adGetFailAt = -1
+    Assert ($r.exitCode -eq 1 -and [long]$script:ad[$gpo.Id.ToString()].versionNumber -eq $before) 'publication failure leaves version unchanged and exits 1'
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Context $script:ctx
+    Assert (@($r.report.changes | Where-Object { $_.kind -eq 'publish' }).Count -eq 1) 'pending publication planned after failure'
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and [long]$script:ad[$gpo.Id.ToString()].versionNumber -gt $before) 'pending publication completed'
+    $r = Invoke-GpoBaseline -Action Install -Definition 'cis-ws2022-dc-low-risk' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange') 'pending marker cleared'
 
     # Output cap.
     $big = [ordered]@{ status = 'plan'; changes = @(1..400 | ForEach-Object { [ordered]@{ kind = 'registry'; target = ('HKLM\Software\Policies\' + ('x' * 80)); current = $null; desired = 'é' * 20 } }) }

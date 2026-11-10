@@ -181,14 +181,19 @@ function Get-GpeGpoDir { param($Context, $Id) Join-Path $Context.PoliciesPath ('
 function Find-GpeCpassword {
     param([string]$PoliciesPath, $Ids, [int]$MaxFiles = 2000)
     $seen = 0
+    $errors = 0
     $hits = [Collections.Generic.List[object]]::new()
     foreach ($id in @($Ids)) {
         foreach ($side in @('Machine', 'User')) {
             $dir = Join-Path (Join-Path $PoliciesPath ('{' + ([string]$id).ToUpper() + '}')) "$side\Preferences"
             if (-not (Test-Path -LiteralPath $dir)) { continue }
-            foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue)) {
-                if (++$seen -gt $MaxFiles) { return [pscustomobject]@{ hits = $hits.ToArray(); complete = $false; files = $MaxFiles } }
-                $text = [IO.File]::ReadAllText($file.FullName)
+            $enumErrors = $null
+            $files = @(Get-ChildItem -LiteralPath $dir -Recurse -Filter '*.xml' -File -ErrorAction SilentlyContinue -ErrorVariable enumErrors)
+            # An unreadable subtree makes the scan incomplete, never clean.
+            $errors += @($enumErrors).Count
+            foreach ($file in $files) {
+                if (++$seen -gt $MaxFiles) { return [pscustomobject]@{ hits = $hits.ToArray(); complete = $false; files = $MaxFiles; errors = $errors } }
+                try { $text = [IO.File]::ReadAllText($file.FullName) } catch { $errors++; continue }
                 try { $count = @(([xml]$text).SelectNodes("//@*[local-name()='cpassword']") | Where-Object { $_.Value }).Count }
                 catch { $count = [regex]::Matches($text, '(?i)\bcpassword\s*=\s*("[^"]+"|''[^'']+'')').Count }
                 if ($count) {
@@ -198,7 +203,7 @@ function Find-GpeCpassword {
             }
         }
     }
-    return [pscustomobject]@{ hits = $hits.ToArray(); complete = $true; files = $seen }
+    return [pscustomobject]@{ hits = $hits.ToArray(); complete = ($errors -eq 0); files = $seen; errors = $errors }
 }
 
 function Read-GpeRsop {
@@ -314,7 +319,7 @@ function Get-GpeSummary {
     $Report.versionMismatchCount = $mismatch.Count
     $names = @{}; foreach ($g in $gpos) { $names[$g.Id.ToString().ToLowerInvariant()] = $g.DisplayName }
     $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })
-    $Report.cpasswordScan = [ordered]@{ complete = $scan.complete; files = $scan.files }
+    $Report.cpasswordScan = [ordered]@{ complete = $scan.complete; files = $scan.files; errors = $scan.errors }
     $Report.cpassword = @($scan.hits | ForEach-Object { [ordered]@{ gpo = (Protect-GpeText ([string]$names[$_.id]) -Max 80); id = $_.id; file = (Protect-GpeText $_.file -Max 120); count = $_.count } })
     try { $Report.unlinked = @($gpos).Count - @((Get-GpeLinkMap $Context).Keys).Count } catch { $Report.unlinked = Get-GpeError $_ }
 }

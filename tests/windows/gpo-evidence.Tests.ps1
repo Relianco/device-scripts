@@ -159,6 +159,12 @@ try {
     [void](New-Item -ItemType Directory -Path (Join-Path $gppDir 'User\Preferences\Drives') -Force)
     [IO.File]::WriteAllText((Join-Path $gppDir 'User\Preferences\Drives\Drives.xml'), '<Drives/>')
     $capped = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId) -MaxFiles 1
+    # Review: an unreadable Preferences subtree is not a clean result.
+    & {
+        function Get-ChildItem { [CmdletBinding()] param($LiteralPath, [switch]$Recurse, $Filter, [switch]$File) Write-Error 'Access to the path is denied.' }
+        $denied = Find-GpeCpassword -PoliciesPath $policies -Ids @($gppId)
+        Assert (-not $denied.complete -and $denied.errors -ge 1) 'enumeration error marks the scan incomplete'
+    }
     # Review: valid XML with single quotes or spaces around = is still counted.
     $altId = [guid]::NewGuid(); $altDir = New-GpoDir $altId
     [void](New-Item -ItemType Directory -Path (Join-Path $altDir 'Machine\Preferences\Services') -Force)
