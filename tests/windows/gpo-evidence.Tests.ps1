@@ -68,6 +68,9 @@ Assert ($rsop.applied.Count -eq 1 -and $rsop.applied[0].name -eq 'Default Domain
 Assert (@($rsop.notApplied | Where-Object { $_.name -eq 'Filtered' -and $_.reason -eq 'wmiFilter' }).Count -eq 1) 'WMI-filtered GPO'
 Assert (@($rsop.notApplied | Where-Object { $_.name -eq 'Denied' -and $_.reason -eq 'securityFilter' }).Count -eq 1) 'security-filtered GPO'
 Assert ($rsop.extensions[0].name -eq 'Security' -and $rsop.extensions[0].error -eq 1332) 'extension error'
+# Review: AppliedOrder directly under GPO (not inside Link) also counts as applied.
+$direct = Read-GpeRsop ([xml]'<Rsop><ComputerResults><GPO><Name>Direct</Name><Enabled>true</Enabled><IsValid>true</IsValid><FilterAllowed>true</FilterAllowed><AccessDenied>false</AccessDenied><AppliedOrder>2</AppliedOrder><Link><SOMPath>example.invalid</SOMPath></Link></GPO></ComputerResults></Rsop>')
+Assert ($direct.applied.Count -eq 1 -and $direct.applied[0].order -eq 2 -and $direct.applied[0].som -eq 'example.invalid') 'AppliedOrder under GPO read'
 $nested = Read-GpeRsop ([xml]'<Rsop><ComputerResults><ExtensionStatus><Extension><Name>Registry</Name><Error>0</Error><LoggingStatus>Complete</LoggingStatus></Extension><Extension><Name>Security</Name><Error>5</Error><LoggingStatus>Complete</LoggingStatus></Extension></ExtensionStatus></ComputerResults></Rsop>')
 Assert ($nested.extensions.Count -eq 2 -and $nested.extensions[1].name -eq 'Security' -and $nested.extensions[1].error -eq 5) 'nested Extension records read'
 

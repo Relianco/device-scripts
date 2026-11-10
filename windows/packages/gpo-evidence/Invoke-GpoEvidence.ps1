@@ -214,8 +214,11 @@ function Read-GpeRsop {
     $r = [ordered]@{ som = (Protect-GpeText (& $node $computer 'SOM') -Max 160); site = (& $node $computer 'Site'); slowLink = ((& $node $computer 'SlowLink') -eq 'true'); applied = @(); notApplied = @(); extensions = @() }
     foreach ($g in @($computer.SelectNodes("*[local-name()='GPO']"))) {
         $link = $g.SelectSingleNode("*[local-name()='Link']")
-        $som = ''; $order = 0
-        if ($link) { $som = & $node $link 'SOMPath'; [void][int]::TryParse((& $node $link 'AppliedOrder'), [ref]$order) }
+        # AppliedOrder is read from the GPO element and from its Link; either layout counts.
+        $som = ''; $order = 0; $linkOrder = 0
+        [void][int]::TryParse((& $node $g 'AppliedOrder'), [ref]$order)
+        if ($link) { $som = & $node $link 'SOMPath'; [void][int]::TryParse((& $node $link 'AppliedOrder'), [ref]$linkOrder) }
+        $order = [Math]::Max($order, $linkOrder)
         $reason = $null
         if ((& $node $g 'AccessDenied') -eq 'true') { $reason = 'securityFilter' }
         elseif ((& $node $g 'FilterAllowed') -eq 'false') { $reason = 'wmiFilter' }
