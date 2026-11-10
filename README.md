@@ -149,7 +149,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 - `7-zip`: installs 7-Zip.
 - `acrobat`: installs Adobe Acrobat. Parameter `Edition` picks the edition.
 - `adobe-reader`: installs Adobe Acrobat Reader.
-- `autoelevate`: installs the AutoElevate agent.
+- `autoelevate`: installs or upgrades the AutoElevate agent. Before an upgrade it stops the agent's services, or exits 1 without running msiexec if one will not stop. An upgrade keeps the stored registration. A fresh install, or a device with no stored registration, needs `CompanyName` and `LocationName` (optional `CompanyInitials`, `ElevationMode` `audit`, `live` or `policy`) in package arguments and the license key in the `AE_LICENSE_KEY` environment variable. The key is never a parameter. `Section` `Evidence` is a read-only report. See `docs/autoelevate.md`.
 - `chrome`: installs Google Chrome.
 - `edge`: installs Microsoft Edge.
 - `everything`: installs Everything, the file search tool.
@@ -265,7 +265,7 @@ For a security reviewer. This is what a pasted script can and cannot do.
 - **The two PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. They check each SHA256 before they run anything.
 - **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
 - **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
-- **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. No package reads `relian_git_deploy_token`.
+- **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. `autoelevate` takes its license key only from the `AE_LICENSE_KEY` environment variable. No package reads `relian_git_deploy_token`.
 - **Read-only packages** are tested for it. The tests scan their source for write commands, or run them against stubs.
 - **Changing packages** say so in their header: what they change, what they back up first, and what they never do (reboot, start Setup, change firewall rules).
 - **Hash pins and the repo.** A pin names exact bytes. Moving `main` cannot change what a pinned device runs.
