@@ -3,6 +3,8 @@ Set-StrictMode -Version Latest
 
 $windowsRoot = Join-Path $PSScriptRoot 'windows'
 $tests = @(Get-ChildItem -LiteralPath $windowsRoot -Filter '*.Tests.ps1' -Recurse | Sort-Object -Property FullName)
+# Repo-level tests sit directly under tests/.
+$tests += @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.Tests.ps1' -File | Sort-Object -Property FullName)
 if ($tests.Count -eq 0) {
     [Console]::Error.WriteLine('No tests found')
     exit 1
