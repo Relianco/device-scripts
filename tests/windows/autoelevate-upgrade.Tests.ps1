@@ -21,14 +21,8 @@ foreach ($command in @('Get-AutoElevateRegistrationProperties', 'Stop-AutoElevat
     }
 }
 
-# The key never arrives as a script parameter, so the runner cannot put it on a command line.
 $scriptParams = @((Get-Command $scriptPath).Parameters.Keys)
-foreach ($name in $scriptParams) {
-    if ($name -match 'License|Key') {
-        Fail "script has a parameter $name"
-    }
-}
-foreach ($name in @('Section', 'CompanyName', 'CompanyInitials', 'LocationName', 'ElevationMode')) {
+foreach ($name in @('Section', 'CompanyName', 'CompanyInitials', 'LocationName', 'ElevationMode', 'LicenseKey')) {
     if ($scriptParams -notcontains $name) {
         Fail "script has no parameter $name"
     }
@@ -230,6 +224,24 @@ try {
     $code = Invoke-Case
     if ($code -ne 1) { Fail "version below pin after install exit $code" }
 
+    # 8b. Key precedence: a non-empty LicenseKey argument wins, else AE_LICENSE_KEY.
+    $envKey = 'ENVKEY-0000-ENVKEY'
+    $env:AE_LICENSE_KEY = $envKey
+    try {
+        if ((Select-AutoElevateKey -Argument $script:Key) -cne $script:Key) { Fail 'argument key did not win over the environment' }
+        if ((Select-AutoElevateKey -Argument '') -cne $envKey) { Fail 'empty argument did not fall back to the environment' }
+        if ((Select-AutoElevateKey -Argument '  ') -cne $envKey) { Fail 'blank argument did not fall back to the environment' }
+    } finally {
+        Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
+    }
+    if ((Select-AutoElevateKey -Argument '') -cne '') { Fail 'no argument and no environment did not give an empty key' }
+    # The argument key reaches the msiexec plan, and is redacted from the printed text.
+    Reset-Case
+    $code = Invoke-Case -LicenseKey (Select-AutoElevateKey -Argument $script:Key) -CompanyName 'Example Co' -LocationName 'Main Office'
+    if ($code -ne 0) { Fail "install with an argument key exit $code" }
+    if (-not ($script:Calls -join ' ').Contains('msiexec install')) { Fail 'argument key install did not run msiexec' }
+    if ((Get-AllText).Contains($script:Key)) { Fail 'argument key appeared in output, report or logs' }
+
     # 9. Redaction helper.
     $red = ConvertTo-AutoElevateRedacted -Text "/i x.msi LICENSE_KEY=`"$($script:Key)`" COMPANY_NAME=`"A`""
     if ($red.Contains($script:Key) -or $red -notlike '*COMPANY_NAME="A"*') { Fail "redaction: $red" }
@@ -295,7 +307,11 @@ try {
     } finally {
         Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
     }
+    $run = Invoke-Child -Arguments @('-Action', 'Install', '-Section', 'Evidence', '-LicenseKey', $script:Key)
+    if ($run.Code -ne 0 -or $run.Text.Contains($script:Key)) { Fail "evidence with a LicenseKey argument: exit $($run.Code)" }
     if (-not $IsWindows) {
+        $run = Invoke-Child -Arguments @('-Action', 'Install', '-InstallerUrl', $userInfoUrl, '-LicenseKey', $script:Key, '-CompanyName', 'Example', '-LocationName', 'Main')
+        if ($run.Code -ne 1 -or $run.Text.Contains($script:Key)) { Fail "install with a LicenseKey argument leaked or passed: exit $($run.Code) [$($run.Text)]" }
         $run = Invoke-Child -Arguments @('-Action', 'Install', '-InstallerUrl', $userInfoUrl)
         if ($run.Code -ne 1 -or $run.Text -notlike '*userinfo*') { Fail "install with a userinfo URL: exit $($run.Code) [$($run.Text)]" }
         $run = Invoke-Child -Arguments @('-Action', 'Uninstall', '-InstallerUrl', $userInfoUrl)

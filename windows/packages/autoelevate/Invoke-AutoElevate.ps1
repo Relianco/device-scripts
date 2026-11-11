@@ -3,8 +3,9 @@
 # InstallerUrl and InstallerSha256 are the pin in windows/releases/autoelevate.json.
 # The runner copies this script alone, so the values are inlined.
 # CompanyName, CompanyInitials, LocationName and ElevationMode come in PackageArguments.
-# The license key does not: PackageArguments becomes the child command line. The key is
-# the AE_LICENSE_KEY environment variable, set by whatever starts the runner.
+# The license key is the LicenseKey argument if it is not empty, else the AE_LICENSE_KEY
+# environment variable. The argument is kept in NinjaOne activity history and is on the
+# child command line; the environment variable is neither. Either way it is redacted from output.
 # MSI property names are from the AESetup.msi Property, AppSearch and CustomAction tables
 # and https://support.cyberfox.com/115003703811-System-Agent-Installation
 # -Section Evidence is a read-only report.
@@ -21,7 +22,11 @@ param(
     [string]$CompanyName = '',
     [string]$CompanyInitials = '',
     [string]$LocationName = '',
-    [string]$ElevationMode = ''
+    [string]$ElevationMode = '',
+    # Owner decision (2026-11-10): the key may arrive as a package argument. This knowingly
+    # puts it in NinjaOne activity history and on the child command line. AE_LICENSE_KEY
+    # stays supported for callers that want neither. Do not remove this parameter.
+    [string]$LicenseKey = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -173,6 +178,12 @@ function Get-AutoElevatePlan {
 $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
 $script:AutoElevateReport = [ordered]@{ Package = 'autoelevate' }
 $script:AutoElevateSecret = ''
+
+function Select-AutoElevateKey {
+    param([string]$Argument)
+    if (-not [string]::IsNullOrWhiteSpace($Argument)) { return [string]$Argument }
+    return [string]$env:AE_LICENSE_KEY
+}
 
 function ConvertTo-AutoElevateRedacted {
     param([string]$Text)
@@ -629,17 +640,17 @@ function Get-AutoElevateRegistrationProperties {
             # The MSI reads the existing registration back from the registry.
             return [pscustomobject]@{ ExitCode = $null; Reason = ''; Properties = @() }
         }
-        return & $refuse 'AutoElevate is not registered on this device: set the AE_LICENSE_KEY environment variable and pass CompanyName and LocationName'
+        return & $refuse 'AutoElevate is not registered on this device: pass LicenseKey or set the AE_LICENSE_KEY environment variable, and pass CompanyName and LocationName'
     }
     # Registration values go to the MSI as a set, so a partial set is refused.
     if ([string]::IsNullOrWhiteSpace($LicenseKey)) {
-        return & $refuse 'registration needs the AE_LICENSE_KEY environment variable'
+        return & $refuse 'registration needs the LicenseKey argument or the AE_LICENSE_KEY environment variable'
     }
     if ([string]::IsNullOrWhiteSpace($CompanyName) -or [string]::IsNullOrWhiteSpace($LocationName)) {
         return & $refuse 'registration needs CompanyName and LocationName'
     }
     if (-not [regex]::IsMatch($LicenseKey, '\A[A-Za-z0-9._+/=-]{8,256}\z')) {
-        return & $refuse 'AE_LICENSE_KEY has characters a license key does not use'
+        return & $refuse 'the license key has characters a license key does not use'
     }
     # Names: letters, digits, space and . , & ' ( ) _ - ; no quote, so the msiexec quoting holds.
     $namePattern = '\A[A-Za-z0-9][A-Za-z0-9 .,&''()_-]{0,99}\z'
@@ -1136,7 +1147,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 # Read once, then remove from this process so msiexec and anything later does not inherit it.
-$autoelevateKey = [string]$env:AE_LICENSE_KEY
+$autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey
 Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
 $script:AutoElevateSecret = $autoelevateKey
 $autoelevateExit = 1
@@ -1161,6 +1172,7 @@ try {
     $autoelevateExit = 1
 } finally {
     $autoelevateKey = $null
+    $LicenseKey = $null
 }
 Write-Output (ConvertTo-AutoElevateReportJson -Report $script:AutoElevateReport)
 exit $autoelevateExit
