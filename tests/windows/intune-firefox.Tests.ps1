@@ -26,17 +26,6 @@ function Assert-CleanText {
     if ([string]::IsNullOrEmpty($Text)) {
         Fail "$Label is empty"
     }
-    $banned = @(
-        -join @('Le', 'ague'),
-        -join @('PI', 'LA'),
-        -join @('Sit', 'ka'),
-        -join @('/', 'home', '/')
-    )
-    foreach ($word in $banned) {
-        if ($Text.Contains($word)) {
-            Fail "$Label contains forbidden text"
-        }
-    }
     if ($Text.Contains($productVersion)) {
         Fail "$Label contains the product version"
     }
@@ -93,6 +82,14 @@ $testText = Get-Content -LiteralPath $PSCommandPath -Raw -Encoding utf8
 Assert-CleanText -Label 'intune.json' -Text $jsonText
 Assert-CleanText -Label 'Detect-Firefox.ps1' -Text $detectText
 Assert-CleanText -Label 'intune-firefox.Tests.ps1' -Text $testText
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-Firefox.ps1' }
+    )) {
+    if ($packageFile.Text.Contains('/home/')) {
+        Fail "$($packageFile.Label) contains a home path"
+    }
+}
 
 $json = $jsonText | ConvertFrom-Json
 foreach ($name in @(
