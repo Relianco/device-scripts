@@ -427,11 +427,51 @@ $script:GetLatestHandshake = {
     }
 }
 
+$script:RetryDelay = {
+    param($Seconds)
+    Start-Sleep -Seconds ([int]$Seconds)
+}
+
+# Retry only timeouts, connection and DNS failures, and HTTP 408, 429, 500, 502, 503, 504.
+function Test-WgcDownloadIsTransient {
+    param($Exception)
+    $current = $Exception
+    for ($guard = 0; $null -ne $current -and $guard -lt 8; $guard++) {
+        $names = @($current.PSObject.Properties.Name)
+        $status = $null
+        if ($names -contains 'StatusCode' -and $null -ne $current.StatusCode) {
+            $status = $current.StatusCode
+        } elseif ($names -contains 'Response' -and $null -ne $current.Response -and @($current.Response.PSObject.Properties.Name) -contains 'StatusCode') {
+            $status = $current.Response.StatusCode
+        }
+        if ($null -ne $status) {
+            try { $code = [int]$status } catch { $code = 0 }
+            if ($code -ge 100 -and $code -le 599) {
+                return @(408, 429, 500, 502, 503, 504) -contains $code
+            }
+        }
+        if ($current -is [System.TimeoutException] -or $current -is [System.Net.Sockets.SocketException]) {
+            return $true
+        }
+        if ($current -is [System.Net.WebException] -and @('Timeout', 'NameResolutionFailure', 'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'ConnectionClosed', 'KeepAliveFailure') -contains [string]$current.Status) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
 function Save-WgcInstaller {
     param([string]$Url, [string]$Sha256, [string]$Destination)
+    $delays = @(5, 20)
     for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $thrown = $null
         try {
             [void](& $script:DownloadFile -Url $Url -Destination $Destination)
+        } catch {
+            $thrown = $_.Exception
+        }
+        if ($null -eq $thrown) {
             if ((& $script:GetFileSha256 -Path $Destination) -ceq $Sha256) {
                 return $true
             }
@@ -439,12 +479,24 @@ function Save-WgcInstaller {
             # A hash mismatch is not retried.
             Write-WgcError 'hash mismatch for installer'
             return $false
-        } catch {
-            Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
         }
+        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+        if (-not (Test-WgcDownloadIsTransient -Exception $thrown) -or $attempt -eq 3) {
+            break
+        }
+        [void](& $script:RetryDelay -Seconds $delays[$attempt - 1])
     }
     Write-WgcError 'download failed for installer'
     return $false
+}
+
+# The pin for this device's architecture.
+function Get-WgcApplicablePin {
+    param($Pins, [string]$Arch)
+    if ($Arch -ceq 'ARM64') {
+        return [pscustomobject]@{ Url = [string]$Pins.ArmUrl; Sha256 = [string]$Pins.ArmSha256 }
+    }
+    return [pscustomobject]@{ Url = [string]$Pins.Url; Sha256 = [string]$Pins.Sha256 }
 }
 
 function Invoke-WireGuardClientAction {
@@ -457,11 +509,18 @@ function Invoke-WireGuardClientAction {
     }
     $result = { param($Code) [pscustomobject]@{ ExitCode = [int]$Code; Report = $report } }
 
-    if ([string]::IsNullOrWhiteSpace($PinVersion)) {
+    # An empty pin, or an empty hash for this device's architecture, disables the package.
+    $applicable = Get-WgcApplicablePin -Pins $Pins -Arch ([string](& $script:GetArch))
+    if ([string]::IsNullOrWhiteSpace($PinVersion) -or [string]::IsNullOrWhiteSpace($applicable.Sha256)) {
         return (& $result 0)
     }
     if (@('Install', 'Update', 'Repair', 'Uninstall', 'Check') -cnotcontains $Action) {
         Write-WgcError "action $Action is not supported"
+        return (& $result 1)
+    }
+    # Only actions that may download check the pin. Uninstall and Check never download.
+    if (@('Install', 'Update', 'Repair') -ccontains $Action -and ((Test-WgcUrlHasUserInfo -Url $applicable.Url) -or -not (Test-WgcPinHash -Sha256 $applicable.Sha256))) {
+        Write-WgcError 'invalid installer pin'
         return (& $result 1)
     }
     if (-not (Test-WgcTunnelName -Name $Settings.TunnelName)) {
@@ -512,9 +571,8 @@ function Invoke-WireGuardClientAction {
     $have = $null
     if ($installed -ne '') { try { $have = [version]$installed } catch { $have = $null } }
     if ($null -eq $have -or $have.CompareTo($pin) -lt 0) {
-        $arm = (& $script:GetArch) -ceq 'ARM64'
-        $url = if ($arm) { $Pins.ArmUrl } else { $Pins.Url }
-        $sha = if ($arm) { $Pins.ArmSha256 } else { $Pins.Sha256 }
+        $url = $applicable.Url
+        $sha = $applicable.Sha256
         if (Test-WgcCancelled -CancelPath $CancelPath) { return (& $result 130) }
         $cache = Join-Path ([IO.Path]::GetTempPath()) ('relian-wireguard-' + [guid]::NewGuid().ToString('n'))
         New-Item -ItemType Directory -Path $cache -Force | Out-Null
@@ -588,19 +646,14 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
-# An empty hash is a no-op before parameter validation.
-if ($PSBoundParameters.ContainsKey('InstallerSha256') -and [string]::IsNullOrWhiteSpace($InstallerSha256)) {
+$pins = [pscustomobject]@{ Url = $InstallerUrl; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = $ArmInstallerSha256 }
+# An empty hash for this device's architecture is a no-op before parameter validation.
+if ([string]::IsNullOrWhiteSpace((Get-WgcApplicablePin -Pins $pins -Arch ([string](& $script:GetArch))).Sha256)) {
     exit 0
 }
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
         [Console]::Error.WriteLine("missing parameter $name")
-        exit 1
-    }
-}
-foreach ($pair in @(@($InstallerUrl, $InstallerSha256), @($ArmInstallerUrl, $ArmInstallerSha256))) {
-    if ((Test-WgcUrlHasUserInfo -Url $pair[0]) -or -not (Test-WgcPinHash -Sha256 $pair[1])) {
-        [Console]::Error.WriteLine('invalid installer pin')
         exit 1
     }
 }
@@ -614,7 +667,6 @@ $settings = [pscustomobject]@{
     AllowedIPs = $AllowedIPs; PersistentKeepalive = $PersistentKeepalive; NrptNamespaces = $NrptNamespaces
     NrptServers = $NrptServers; DisableGsaPrivateAccess = $DisableGsaPrivateAccess
 }
-$pins = [pscustomobject]@{ Url = $InstallerUrl; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = $ArmInstallerSha256 }
 try {
     $out = Invoke-WireGuardClientAction -Action $runAction -PinVersion $PinVersion -CancelPath $CancelPath -Settings $settings -Pins $pins
     $code = $out.ExitCode

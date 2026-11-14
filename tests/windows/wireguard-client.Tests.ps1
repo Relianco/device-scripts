@@ -28,7 +28,7 @@ $devKey = [Convert]::ToBase64String([byte[]](32..1))
 $devPub = [Convert]::ToBase64String([byte[]](40..9))
 if (-not (Test-WgcKey -Key $serverKey)) { Fail 'valid key rejected' }
 if (Test-WgcKey -Key 'abc=') { Fail 'short key accepted' }
-foreach ($bad in @('Sitka', 'a b', '', ('x' * 40))) { if (Test-WgcTunnelName -Name $bad) { Fail "tunnel name $bad accepted" } }
+foreach ($bad in @('Office', 'a b', '', ('x' * 40))) { if (Test-WgcTunnelName -Name $bad) { Fail "tunnel name $bad accepted" } }
 if (-not (Test-WgcIpv4Cidr -Cidr '192.0.2.10/32') -or (Test-WgcIpv4Cidr -Cidr '192.0.2.300/32') -or (Test-WgcIpv4Cidr -Cidr '192.0.2.1/33')) { Fail 'cidr check' }
 if (-not (Test-WgcEndpoint -Endpoint '198.51.100.7:51820') -or (Test-WgcEndpoint -Endpoint '198.51.100.7') -or (Test-WgcEndpoint -Endpoint 'h:70000')) { Fail 'endpoint check' }
 
@@ -141,5 +141,36 @@ $state.Rules.Add([pscustomobject]@{ Name = 'foreign'; Namespace = @('.x.example.
 $out = Invoke-WireGuardClientAction -Action 'Uninstall' -PinVersion '1.1.1' -Settings (New-Settings) -Pins $pins
 if ($out.ExitCode -ne 0 -or $null -ne $state.Service -or $state.Gsa -ne 0) { Fail 'uninstall' }
 if ($state.Rules.Count -ne 1 -or $state.Rules[0].Name -cne 'foreign') { Fail 'uninstall removed a foreign rule or kept its own' }
+
+# Uninstall never downloads, so a bad installer URL does not block it.
+$state.Service = [pscustomobject]@{ Name = 'WireGuardTunnel$office'; Status = 'Running'; StartType = 'Automatic' }
+$badPins = [pscustomobject]@{ Url = 'https://user:secret@example.invalid/w.msi'; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = $ArmInstallerSha256 }
+$out = Invoke-WireGuardClientAction -Action 'Uninstall' -PinVersion '1.1.1' -Settings (New-Settings) -Pins $badPins
+if ($out.ExitCode -ne 0 -or $null -ne $state.Service) { Fail 'uninstall blocked by an installer URL' }
+# Install with the same URL is refused before any download.
+$downloads = 0
+$script:DownloadFile = { param($Url, $Destination) $script:downloads++ }
+$state.Installed = ''
+$out = Invoke-WireGuardClientAction -Action 'Install' -PinVersion '1.1.1' -Settings (New-Settings) -Pins $badPins
+if ($out.ExitCode -ne 1 -or $downloads -ne 0) { Fail 'userinfo URL not refused on install' }
+
+# Downloads: a 404 is tried once, a 503 three times.
+$script:RetryDelay = { param($Seconds) }
+$script:DownloadFile = { param($Url, $Destination) $script:downloads++; throw [System.Net.Http.HttpRequestException]::new('x', $null, [System.Net.HttpStatusCode]::NotFound) }
+$downloads = 0
+if (Save-WgcInstaller -Url $InstallerUrl -Sha256 $InstallerSha256 -Destination (Join-Path ([IO.Path]::GetTempPath()) 'wgc-test.msi')) { Fail '404 reported success' }
+if ($downloads -ne 1) { Fail "404 was tried $downloads times" }
+$script:DownloadFile = { param($Url, $Destination) $script:downloads++; throw [System.Net.Http.HttpRequestException]::new('x', $null, [System.Net.HttpStatusCode]::ServiceUnavailable) }
+$downloads = 0
+[void](Save-WgcInstaller -Url $InstallerUrl -Sha256 $InstallerSha256 -Destination (Join-Path ([IO.Path]::GetTempPath()) 'wgc-test.msi'))
+if ($downloads -ne 3) { Fail "503 was tried $downloads times" }
+
+# ARM64 with an empty ARM64 hash is a no-op: nothing downloaded or written.
+$script:GetArch = { 'ARM64' }
+$written = $state.Written
+$downloads = 0
+$armOff = [pscustomobject]@{ Url = $InstallerUrl; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = '' }
+$out = Invoke-WireGuardClientAction -Action 'Install' -PinVersion '1.1.1' -Settings (New-Settings) -Pins $armOff
+if ($out.ExitCode -ne 0 -or $downloads -ne 0 -or $state.Written -ne $written) { Fail 'empty ARM64 hash was not a no-op on ARM64' }
 
 Write-Output 'wireguard-client tests passed'
