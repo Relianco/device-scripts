@@ -490,13 +490,14 @@ function Save-WgcInstaller {
     return $false
 }
 
-# The pin for this device's architecture.
+# The hash for this device's architecture, and the name of its URL field.
+# The URL itself is read only after the empty-hash no-op.
 function Get-WgcApplicablePin {
     param($Pins, [string]$Arch)
     if ($Arch -ceq 'ARM64') {
-        return [pscustomobject]@{ Url = [string]$Pins.ArmUrl; Sha256 = [string]$Pins.ArmSha256 }
+        return [pscustomobject]@{ UrlField = 'ArmUrl'; Sha256 = [string]$Pins.ArmSha256 }
     }
-    return [pscustomobject]@{ Url = [string]$Pins.Url; Sha256 = [string]$Pins.Sha256 }
+    return [pscustomobject]@{ UrlField = 'Url'; Sha256 = [string]$Pins.Sha256 }
 }
 
 function Invoke-WireGuardClientAction {
@@ -519,7 +520,7 @@ function Invoke-WireGuardClientAction {
         return (& $result 1)
     }
     # Only actions that may download check the pin. Uninstall and Check never download.
-    if (@('Install', 'Update', 'Repair') -ccontains $Action -and ((Test-WgcUrlHasUserInfo -Url $applicable.Url) -or -not (Test-WgcPinHash -Sha256 $applicable.Sha256))) {
+    if (@('Install', 'Update', 'Repair') -ccontains $Action -and ((Test-WgcUrlHasUserInfo -Url ([string]$Pins.($applicable.UrlField))) -or -not (Test-WgcPinHash -Sha256 $applicable.Sha256))) {
         Write-WgcError 'invalid installer pin'
         return (& $result 1)
     }
@@ -571,7 +572,7 @@ function Invoke-WireGuardClientAction {
     $have = $null
     if ($installed -ne '') { try { $have = [version]$installed } catch { $have = $null } }
     if ($null -eq $have -or $have.CompareTo($pin) -lt 0) {
-        $url = $applicable.Url
+        $url = [string]$Pins.($applicable.UrlField)
         $sha = $applicable.Sha256
         if (Test-WgcCancelled -CancelPath $CancelPath) { return (& $result 130) }
         $cache = Join-Path ([IO.Path]::GetTempPath()) ('relian-wireguard-' + [guid]::NewGuid().ToString('n'))

@@ -144,7 +144,7 @@ if ($state.Rules.Count -ne 1 -or $state.Rules[0].Name -cne 'foreign') { Fail 'un
 
 # Uninstall never downloads, so a bad installer URL does not block it.
 $state.Service = [pscustomobject]@{ Name = 'WireGuardTunnel$office'; Status = 'Running'; StartType = 'Automatic' }
-$badPins = [pscustomobject]@{ Url = 'https://user:secret@example.invalid/w.msi'; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = $ArmInstallerSha256 }
+$badPins = [pscustomobject]@{ Url = 'https://user@example.invalid/w.msi'; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = $ArmInstallerSha256 }
 $out = Invoke-WireGuardClientAction -Action 'Uninstall' -PinVersion '1.1.1' -Settings (New-Settings) -Pins $badPins
 if ($out.ExitCode -ne 0 -or $null -ne $state.Service) { Fail 'uninstall blocked by an installer URL' }
 # Install with the same URL is refused before any download.
@@ -169,8 +169,12 @@ if ($downloads -ne 3) { Fail "503 was tried $downloads times" }
 $script:GetArch = { 'ARM64' }
 $written = $state.Written
 $downloads = 0
-$armOff = [pscustomobject]@{ Url = $InstallerUrl; Sha256 = $InstallerSha256; ArmUrl = $ArmInstallerUrl; ArmSha256 = '' }
+$armOff = [pscustomobject]@{ Url = $InstallerUrl; Sha256 = $InstallerSha256; ArmSha256 = '' }
+# The URL must not be read when the hash is empty. A getter exception can be swallowed, so count reads.
+$script:urlReads = 0
+$armOff | Add-Member -MemberType ScriptProperty -Name ArmUrl -Value { $script:urlReads++; 'https://example.invalid/w.msi' }
 $out = Invoke-WireGuardClientAction -Action 'Install' -PinVersion '1.1.1' -Settings (New-Settings) -Pins $armOff
 if ($out.ExitCode -ne 0 -or $downloads -ne 0 -or $state.Written -ne $written) { Fail 'empty ARM64 hash was not a no-op on ARM64' }
+if ($script:urlReads -ne 0) { Fail 'installer URL was read before the empty-hash no-op' }
 
 Write-Output 'wireguard-client tests passed'
