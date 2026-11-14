@@ -79,3 +79,5 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/eventlog-source.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-stale-computers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
