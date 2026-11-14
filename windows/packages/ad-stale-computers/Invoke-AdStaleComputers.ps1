@@ -124,6 +124,12 @@ function Get-AscExclusion {
     return $null
 }
 
+function Get-AscClipped {
+    param([AllowEmptyString()][string]$Text, [int]$Max)
+    if ($Text.Length -le $Max) { return $Text }
+    return $Text.Substring(0, $Max) + '[clipped]'
+}
+
 function Test-AscStale {
     param($Computer, [datetime]$Cutoff)
     $last = ConvertFrom-AscFileTime $Computer.lastLogonTimestamp
@@ -242,7 +248,7 @@ function Invoke-AscReport {
         $rows.Add([ordered]@{
                 name = [string]$c.Name; dn = [string]$c.DistinguishedName; os = [string]$c.OperatingSystem
                 lastLogon = Format-AscDate (ConvertFrom-AscFileTime $c.lastLogonTimestamp); pwdLastSet = Format-AscDate (ConvertFrom-AscFileTime $c.pwdLastSet)
-                enabled = [bool]$c.Enabled; description = [string]$c.Description; stale = $isStale; bitlocker = $bl; laps = Get-AscLapsKind $c
+                enabled = [bool]$c.Enabled; description = (Get-AscClipped ([string]$c.Description) 200); stale = $isStale; bitlocker = $bl; laps = Get-AscLapsKind $c
             })
     }
     $page = @($rows | Select-Object -Skip $Offset)
@@ -256,7 +262,9 @@ function Invoke-AscReport {
         $report.truncated = $keep -lt $page.Count
         if ($Offset + $keep -lt $rows.Count) { $report.nextOffset = $Offset + $keep } else { $report.Remove('nextOffset') }
         $json = $report | ConvertTo-Json -Depth 6 -Compress
-        if ([Text.Encoding]::UTF8.GetByteCount($json) -le $script:AscMaxBytes -or $keep -eq 0) { return $json }
+        if ([Text.Encoding]::UTF8.GetByteCount($json) -le $script:AscMaxBytes) { return $json }
+        # Clipped fields keep one row far below the budget; refuse rather than loop on the same offset.
+        if ($keep -le 1) { throw 'A single computer row exceeds the output budget.' }
     }
 }
 
