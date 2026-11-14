@@ -19,7 +19,8 @@
 
     Report is read-only. It lists workstation computer objects: name, DN, operating system,
     lastLogonTimestamp, pwdLastSet, enabled, the number of BitLocker recovery children, and
-    whether LAPS manages the computer. It skips domain controllers, servers (OperatingSystem
+    whether LAPS manages the computer. It skips domain controllers (and objects left in the
+    Domain Controllers OU), AZUREADSSOACC, servers (OperatingSystem
     like *Server*), cluster objects (servicePrincipalName MSClusterVirtualServer) and anything
     under an OU whose name holds "Server". Stale means lastLogonTimestamp and pwdLastSet are
     both older than Days. It prints no password.
@@ -110,6 +111,10 @@ function Get-AscExclusion {
     $group = 0; if ($Computer.primaryGroupID) { $group = [int]$Computer.primaryGroupID }
     # 8192 SERVER_TRUST_ACCOUNT; 516 Domain Controllers, 521 Read-only Domain Controllers.
     if (($uac -band 8192) -or $group -eq 516 -or $group -eq 521) { return 'domainController' }
+    # A leftover object of a removed DC keeps its OU but can lose the flags above.
+    if ((Get-AscParentDn ([string]$Computer.DistinguishedName)) -match '(?i)\AOU=Domain Controllers,') { return 'domainController' }
+    # Seamless SSO's Kerberos account: disabling it breaks Entra sign-in from domain machines.
+    if ([string]$Computer.Name -eq 'AZUREADSSOACC') { return 'entraSeamlessSso' }
     if ([string]$Computer.OperatingSystem -like '*Server*') { return 'server' }
     foreach ($spn in @($Computer.servicePrincipalName)) {
         if ([string]$spn -like 'MSClusterVirtualServer/*') { return 'cluster' }
@@ -159,12 +164,21 @@ function Get-AscLapsAttributes {
     return , $attrs
 }
 
+# The AD module returns an empty collection, not $null, for an attribute that has no value.
+function Get-AscValue {
+    param($Computer, [string]$Name)
+    $prop = $Computer.PSObject.Properties[$Name]
+    if (-not $prop) { return $null }
+    $values = @($prop.Value | Where-Object { $null -ne $_ -and "$_" -ne '' })
+    if ($values.Count -eq 0) { return $null }
+    return $values[0]
+}
+
 function Get-AscLapsKind {
     param($Computer)
     $kinds = @()
     foreach ($p in @(@('ms-Mcs-AdmPwdExpirationTime', 'legacy'), @('msLAPS-PasswordExpirationTime', 'windows'))) {
-        $prop = $Computer.PSObject.Properties[$p[0]]
-        if ($prop -and $null -ne $prop.Value) { $kinds += $p[1] }
+        if ($null -ne (Get-AscValue $Computer $p[0])) { $kinds += $p[1] }
     }
     return ($kinds -join '+')
 }
@@ -219,7 +233,7 @@ function Invoke-AscReport {
         $parent = Get-AscParentDn ([string]$r.DistinguishedName)
         if ($recovery.ContainsKey($parent)) { $recovery[$parent]++ } else { $recovery[$parent] = 1 }
     }
-    $excluded = [ordered]@{ domainController = 0; server = 0; cluster = 0; serversOu = 0 }
+    $excluded = [ordered]@{ domainController = 0; entraSeamlessSso = 0; server = 0; cluster = 0; serversOu = 0 }
     $rows = [Collections.Generic.List[object]]::new()
     $all = @(& $script:AscGetComputers $props)
     $stale = 0
@@ -272,9 +286,8 @@ function Invoke-AscApply {
             $entry.bitlocker += [ordered]@{ recoveryGuid = [string]$guid; recoveryKey = [string]$r.'msFVE-RecoveryPassword'; created = Format-AscDate $r.whenCreated }
         }
         foreach ($a in $laps) {
-            $prop = $c.PSObject.Properties[$a]
-            if (-not $prop -or $null -eq $prop.Value) { continue }
-            $v = $prop.Value
+            $v = Get-AscValue $c $a
+            if ($null -eq $v) { continue }
             if ($v -is [byte[]]) { $v = [Convert]::ToBase64String($v) }
             $entry.laps[$a] = [string]$v
         }

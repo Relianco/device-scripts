@@ -43,7 +43,13 @@ Assert ((Get-AscExclusion (New-Pc 'DC1' -Uac 8192 -Group 516)) -eq 'domainContro
 Assert ((Get-AscExclusion (New-Pc 'SV1' -Os 'Windows Server 2022 Standard')) -eq 'server') 'server excluded'
 Assert ((Get-AscExclusion (New-Pc 'CNO' -Spn @('MSClusterVirtualServer/CNO'))) -eq 'cluster') 'cluster excluded'
 Assert ((Get-AscExclusion (New-Pc 'X' -Ou 'OU=Member Servers,DC=example,DC=invalid')) -eq 'serversOu') 'servers OU excluded'
+Assert ((Get-AscExclusion (New-Pc 'OLDDC' -Os $null -Ou 'OU=Domain Controllers,DC=example,DC=invalid')) -eq 'domainController') 'leftover DC object excluded'
+Assert ((Get-AscExclusion (New-Pc 'AZUREADSSOACC' -Os $null -Ou 'CN=Computers,DC=example,DC=invalid')) -eq 'entraSeamlessSso') 'seamless SSO account excluded'
 Assert ($null -eq (Get-AscExclusion (New-Pc 'PC1'))) 'workstation in scope'
+# An unset attribute comes back as an empty collection.
+$empty = New-Pc 'E'; $empty | Add-Member 'ms-Mcs-AdmPwdExpirationTime' ([Collections.ArrayList]::new()); $empty | Add-Member 'msLAPS-PasswordExpirationTime' ''
+Assert ((Get-AscLapsKind $empty) -eq '') 'empty LAPS attributes are not LAPS'
+Assert ((Get-AscLapsKind (New-Pc 'L' -Laps)) -eq 'legacy') 'legacy LAPS seen'
 $now = [datetime]'2026-11-14'; $cut = $now.AddDays(-180)
 Assert (Test-AscStale (New-Pc 'A') $cut) 'old is stale'
 Assert (-not (Test-AscStale (New-Pc 'B' -Last '2026-11-01') $cut)) 'recent logon not stale'
