@@ -50,6 +50,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:AscMaxNames = 10
+$script:AscMaxBytes = 8000
 $script:AscDisabledOu = 'Disabled Computers'
 
 # AD access sits in script blocks so the tests can replace each one.
@@ -209,19 +210,6 @@ function Protect-AscBackup {
     }
 }
 
-function ConvertTo-AscBoundedJson {
-    param($Report, [string]$ListKey, [int]$MaxBytes = 8000)
-    $rows = @($Report[$ListKey])
-    $count = $rows.Count
-    while ($true) {
-        $Report[$ListKey] = @($rows | Select-Object -First $count)
-        $json = $Report | ConvertTo-Json -Depth 6 -Compress
-        if ([Text.Encoding]::UTF8.GetByteCount($json) -le $MaxBytes -or $count -eq 0) { return @{ Json = $json; Count = $count } }
-        $count--
-        $Report.truncated = $true
-    }
-}
-
 function Invoke-AscReport {
     param([int]$Days, [string]$Filter = 'Stale', [int]$Offset = 0, [datetime]$Now = [datetime]::UtcNow)
     if (@('Stale', 'All') -notcontains $Filter) { throw 'Filter must be Stale or All.' }
@@ -255,12 +243,14 @@ function Invoke-AscReport {
         version = '1'; status = 'collected'; mode = 'Report'; cutoff = Format-AscDate $cutoff; filter = $Filter
         total = $all.Count; excluded = $excluded; stale = $stale; matched = $rows.Count; offset = $Offset; truncated = $false; computers = $page
     }
-    $bounded = ConvertTo-AscBoundedJson $report 'computers'
-    if ($Offset + $bounded.Count -lt $rows.Count) {
-        $report.nextOffset = $Offset + $bounded.Count
-        $bounded = ConvertTo-AscBoundedJson $report 'computers'
+    # Page and nextOffset are sized together, so a cut row is never skipped by the next page.
+    for ($keep = $page.Count; ; $keep--) {
+        $report.computers = @($page | Select-Object -First $keep)
+        $report.truncated = $keep -lt $page.Count
+        if ($Offset + $keep -lt $rows.Count) { $report.nextOffset = $Offset + $keep } else { $report.Remove('nextOffset') }
+        $json = $report | ConvertTo-Json -Depth 6 -Compress
+        if ([Text.Encoding]::UTF8.GetByteCount($json) -le $script:AscMaxBytes -or $keep -eq 0) { return $json }
     }
-    return $bounded.Json
 }
 
 function Invoke-AscApply {
@@ -306,6 +296,14 @@ function Invoke-AscApply {
 
     $protected = Protect-AscBackup -Value @($backup) -RecipientKey $RecipientKey
     $failed = @($results | Where-Object { $_.result -ne 'planned' }).Count -gt 0
+    $report = [ordered]@{
+        version = '1'; status = 'ok'; mode = 'Apply'; whatIf = $WhatIf; move = $Move
+        cutoff = Format-AscDate $cutoff; description = $description; computers = @($results); backup = $protected
+    }
+    # The backup is the only copy the operator gets, so it must never be cut. 600 bytes per row
+    # covers the longest later result text and the moved-to DN.
+    $planned = [Text.Encoding]::UTF8.GetByteCount(($report | ConvertTo-Json -Depth 6 -Compress)) + 600 * $accepted.Count
+    if ($planned -gt $script:AscMaxBytes) { throw 'The output would exceed 8000 bytes. Pass fewer names.' }
 
     if (-not $WhatIf) {
         $target = $null
@@ -325,14 +323,12 @@ function Invoke-AscApply {
             }
         }
     }
-    $report = [ordered]@{
-        version = '1'; status = $(if ($failed) { 'partial' } else { 'ok' }); mode = 'Apply'; whatIf = $WhatIf; move = $Move
-        cutoff = Format-AscDate $cutoff; description = $description; computers = @($results); backup = $protected
-    }
+    if ($failed) { $report.status = 'partial' }
     return @{ Json = ($report | ConvertTo-Json -Depth 6 -Compress); Failed = $failed }
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
+if ([string]::IsNullOrWhiteSpace($PinVersion)) { exit 0 }
 if ($Action -eq 'Uninstall') { Write-Output '{"status":"nothingToUninstall"}'; exit 0 }
 if (@('Install', 'Update', 'Repair', 'Reinstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
 try {

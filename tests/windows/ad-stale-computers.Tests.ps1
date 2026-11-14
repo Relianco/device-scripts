@@ -28,6 +28,10 @@ Assert ($null -eq (ConvertFrom-AscFileTime ([int64]::MaxValue))) 'max filetime i
 Assert ((Format-AscDate (ConvertFrom-AscFileTime (& $ft '2025-01-02'))) -eq '2025-01-02') 'filetime round trip'
 Assert ((Get-AscParentDn 'CN=PC1,OU=Desk\, Front,DC=example,DC=invalid') -eq 'OU=Desk\, Front,DC=example,DC=invalid') 'escaped comma in parent'
 
+# Synthetic secrets, made per run.
+$secretPw = (1..8 | ForEach-Object { Get-Random -Minimum 100000 -Maximum 999999 }) -join '-'
+$lapsValue = [guid]::NewGuid().ToString('n')
+
 # Scope rules.
 function New-Pc {
     param($Name, $Os = 'Windows 10 Pro', $Last = '2025-01-01', $Pwd = '2025-01-01', $Ou = 'OU=Workstations,DC=example,DC=invalid', $Spn = @(), $Group = 515, $Uac = 4096, [switch]$Laps)
@@ -36,7 +40,7 @@ function New-Pc {
         lastLogonTimestamp = $(if ($Last) { & $ft $Last } else { $null }); pwdLastSet = $(if ($Pwd) { & $ft $Pwd } else { 0 })
         servicePrincipalName = $Spn; primaryGroupID = $Group; userAccountControl = $Uac
     }
-    if ($Laps) { $o | Add-Member 'ms-Mcs-AdmPwdExpirationTime' 1; $o | Add-Member 'ms-Mcs-AdmPwd' 'lapsplain-123' }
+    if ($Laps) { $o | Add-Member 'ms-Mcs-AdmPwdExpirationTime' 1; $o | Add-Member 'ms-Mcs-AdmPwd' $lapsValue }
     return $o
 }
 Assert ((Get-AscExclusion (New-Pc 'DC1' -Uac 8192 -Group 516)) -eq 'domainController') 'dc excluded'
@@ -74,7 +78,6 @@ $script:Pcs = @(
 $script:AscSchemaHas = { param($Name) $Name -like 'ms-Mcs-*' }
 $script:AscGetComputers = { param($Properties) $script:Pcs }
 $script:AscGetComputer = { param($Name, $Properties) $script:Pcs | Where-Object { $_.Name -eq $Name } }
-$secretPw = '111111-222222-333333-444444-555555-666666-777777-888888'
 $script:AscGetRecoveryAll = { @([pscustomobject]@{ DistinguishedName = 'CN=2025-01-01T00:00:00-00:00{AAAA},CN=OLD1,OU=Workstations,DC=example,DC=invalid' }) }
 $script:AscGetRecovery = {
     param($Dn)
@@ -98,6 +101,13 @@ $page = $json | ConvertFrom-Json
 Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 8000 -and $page.truncated -and $page.nextOffset -eq $page.computers.Count) 'report paged'
 $page2 = Invoke-AscReport -Days 180 -Offset $page.nextOffset -Now $now | ConvertFrom-Json
 Assert ($page2.computers[0].name -ne $page.computers[0].name) 'second page moves on'
+$seen = [Collections.Generic.List[string]]::new(); $next = 0
+for ($i = 0; $i -lt 20 -and $null -ne $next; $i++) {
+    $pg = Invoke-AscReport -Days 180 -Offset $next -Now $now | ConvertFrom-Json
+    foreach ($c in $pg.computers) { $seen.Add($c.name) }
+    $next = if ($pg.PSObject.Properties['nextOffset']) { $pg.nextOffset } else { $null }
+}
+Assert ($seen.Count -eq 122 -and @($seen | Select-Object -Unique).Count -eq 122) 'paging returns every row once'
 $script:Pcs = @($script:Pcs | Where-Object { $_.Name -notlike 'PC*' })
 
 # Apply: key pair for the round trip.
@@ -119,14 +129,14 @@ Assert $threw 'apply refuses a short key'
 $w = Invoke-AscApply -Names @('OLD1', 'NEW1', 'SV1', 'NOPE') -Days 180 -RecipientKey $pub -WhatIf $true -Move $true -Now $now
 Assert ($script:Writes.Count -eq 0) 'WhatIf writes nothing'
 Assert ($w.Failed) 'refusals fail the run'
-Assert ($w.Json -notmatch [regex]::Escape($secretPw) -and $w.Json -notmatch 'lapsplain') 'no plain secret in output'
+Assert ($w.Json -notmatch [regex]::Escape($secretPw) -and $w.Json -notmatch $lapsValue) 'no plain secret in output'
 $wr = $w.Json | ConvertFrom-Json
 $res = @{}; foreach ($c in $wr.computers) { $res[$c.name] = $c.result }
 Assert ($res.OLD1 -eq 'planned' -and $res.NEW1 -eq 'refused:notStale' -and $res.SV1 -eq 'refused:server' -and $res.NOPE -eq 'notFound') 'apply plan'
 $b = Unprotect-Backup $wr.backup
 $old1 = $b | Where-Object name -eq 'OLD1'
 Assert ($old1.bitlocker[0].recoveryKey -eq $secretPw -and $old1.bitlocker[0].recoveryGuid -eq [guid]::Empty.ToString()) 'bitlocker backed up'
-Assert ($old1.laps.'ms-Mcs-AdmPwd' -eq 'lapsplain-123') 'laps backed up'
+Assert ($old1.laps.'ms-Mcs-AdmPwd' -eq $lapsValue) 'laps backed up'
 Assert (@($b).Count -eq 3) 'every found computer backed up'
 
 $a = Invoke-AscApply -Names @('OLD1', 'OLD2') -Days 180 -RecipientKey $pub -WhatIf $false -Move $false -Now $now
@@ -137,8 +147,23 @@ $m = Invoke-AscApply -Names @('OLD2') -Days 180 -RecipientKey $pub -WhatIf $fals
 Assert (($script:Writes -join '|') -eq 'disable CN=OLD2,OU=Workstations,DC=example,DC=invalid Disabled by Relian 2026-11-14 stale >180d|ou Disabled Computers|move CN=OLD2,OU=Workstations,DC=example,DC=invalid') 'move after disable'
 Assert ($m.computers[0].result -eq 'disabledMoved' -and $m.computers[0].movedTo -eq 'OU=Disabled Computers,DC=example,DC=invalid') 'move reported'
 
+$script:Writes.Clear()
+$big = $script:AscGetRecovery
+$script:AscGetRecovery = { param($Dn) @(1..60 | ForEach-Object { [pscustomobject]@{ 'msFVE-RecoveryGuid' = [guid]::NewGuid().ToByteArray(); 'msFVE-RecoveryPassword' = (1..8 | ForEach-Object { Get-Random -Minimum 100000 -Maximum 999999 }) -join '-'; whenCreated = [datetime]'2025-01-01' } }) }
+$threw = $false; try { [void](Invoke-AscApply -Names @('OLD1', 'OLD2') -Days 180 -RecipientKey $pub -WhatIf $false -Move $true -Now $now) } catch { $threw = $_.Exception.Message -like '*8000 bytes*' }
+Assert ($threw -and $script:Writes.Count -eq 0) 'oversized output refused before any change'
+$script:AscGetRecovery = $big
+
 $script:AscDisable = { param($Dn, $Description) throw [UnauthorizedAccessException]::new('denied') }
 $f = Invoke-AscApply -Names @('OLD2') -Days 180 -RecipientKey $pub -WhatIf $false -Move $true -Now $now
 Assert ($f.Failed -and ($f.Json | ConvertFrom-Json).computers[0].result -eq 'planned;failed:UnauthorizedAccessException') 'write failure reported'
+
+
+# An empty pin is the off switch: exit 0 before the AD module or any argument is read.
+$env:RELIAN_DEPLOY_TEST = $null
+$host5 = (Get-Process -Id $PID).Path
+$out = & $host5 -NoProfile -File $path -Action Install -PinVersion '' -Mode Apply -Names 'OLD1'
+Assert ($LASTEXITCODE -eq 0 -and -not $out) 'empty pin exits 0 and does nothing'
+$env:RELIAN_DEPLOY_TEST = '1'
 
 Write-Output 'ad-stale-computers tests passed'
