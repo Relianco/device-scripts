@@ -54,6 +54,11 @@ Assert ($null -eq (Get-AscExclusion (New-Pc 'PC1'))) 'workstation in scope'
 $empty = New-Pc 'E'; $empty | Add-Member 'ms-Mcs-AdmPwdExpirationTime' ([Collections.ArrayList]::new()); $empty | Add-Member 'msLAPS-PasswordExpirationTime' ''
 Assert ((Get-AscLapsKind $empty) -eq '') 'empty LAPS attributes are not LAPS'
 Assert ((Get-AscLapsKind (New-Pc 'L' -Laps)) -eq 'legacy') 'legacy LAPS seen'
+$bin = New-Pc 'B'; $bin | Add-Member 'msLAPS-EncryptedPassword' ([Collections.ArrayList]@(, [byte[]](1, 2, 3)))
+$v = Get-AscValue $bin 'msLAPS-EncryptedPassword'
+Assert ($v -is [byte[]] -and $v.Length -eq 3) 'binary value stays one byte array'
+$bin.'msLAPS-EncryptedPassword' = [byte[]](4, 5)
+Assert ((Get-AscValue $bin 'msLAPS-EncryptedPassword') -is [byte[]]) 'bare byte array stays whole'
 $now = [datetime]'2026-11-14'; $cut = $now.AddDays(-180)
 Assert (Test-AscStale (New-Pc 'A') $cut) 'old is stale'
 Assert (-not (Test-AscStale (New-Pc 'B' -Last '2026-11-01') $cut)) 'recent logon not stale'
@@ -111,7 +116,7 @@ Assert ($seen.Count -eq 122 -and @($seen | Select-Object -Unique).Count -eq 122)
 $script:Pcs = @($script:Pcs | Where-Object { $_.Name -notlike 'PC*' })
 
 # Apply: key pair for the round trip.
-$rsa = [Security.Cryptography.RSA]::Create(2048)
+$rsa = [Security.Cryptography.RSA]::Create(); $rsa.KeySize = 2048
 $pub = [Convert]::ToBase64String($rsa.ExportParameters($false).Modulus)
 function Unprotect-Backup($b) {
     $aes = [Security.Cryptography.Aes]::Create(); $aes.Key = $rsa.Decrypt([Convert]::FromBase64String($b.key), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
@@ -162,7 +167,8 @@ Assert ($f.Failed -and ($f.Json | ConvertFrom-Json).computers[0].result -eq 'pla
 # An empty pin is the off switch: exit 0 before the AD module or any argument is read.
 $env:RELIAN_DEPLOY_TEST = $null
 $host5 = (Get-Process -Id $PID).Path
-$out = & $host5 -NoProfile -File $path -Action Install -PinVersion '' -Mode Apply -Names 'OLD1'
+# -Command, because Windows PowerShell 5.1 drops an empty native argument.
+$out = & $host5 -NoProfile -Command "& '$path' -Action Install -PinVersion '' -Mode Apply -Names OLD1; exit `$LASTEXITCODE"
 Assert ($LASTEXITCODE -eq 0 -and -not $out) 'empty pin exits 0 and does nothing'
 $env:RELIAN_DEPLOY_TEST = '1'
 

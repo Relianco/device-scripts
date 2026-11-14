@@ -170,9 +170,11 @@ function Get-AscValue {
     param($Computer, [string]$Name)
     $prop = $Computer.PSObject.Properties[$Name]
     if (-not $prop) { return $null }
+    # The comma keeps a binary value (msLAPS-EncryptedPassword) one byte[] instead of unrolling it.
+    if ($prop.Value -is [byte[]]) { return , $prop.Value }
     $values = @($prop.Value | Where-Object { $null -ne $_ -and "$_" -ne '' })
     if ($values.Count -eq 0) { return $null }
-    return $values[0]
+    return , $values[0]
 }
 
 function Get-AscLapsKind {
@@ -294,11 +296,11 @@ function Invoke-AscApply {
         $results.Add($row)
     }
 
-    $protected = Protect-AscBackup -Value @($backup) -RecipientKey $RecipientKey
+    $protected = Protect-AscBackup -Value $backup.ToArray() -RecipientKey $RecipientKey
     $failed = @($results | Where-Object { $_.result -ne 'planned' }).Count -gt 0
     $report = [ordered]@{
         version = '1'; status = 'ok'; mode = 'Apply'; whatIf = $WhatIf; move = $Move
-        cutoff = Format-AscDate $cutoff; description = $description; computers = @($results); backup = $protected
+        cutoff = Format-AscDate $cutoff; description = $description; computers = $results.ToArray(); backup = $protected
     }
     # The backup is the only copy the operator gets, so it must never be cut. 600 bytes per row
     # covers the longest later result text and the moved-to DN.
