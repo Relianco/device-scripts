@@ -27,8 +27,8 @@
 
     Apply re-reads each named computer and refuses it unless it is a stale workstation by the
     same rules. It first collects every refused-or-not computer's BitLocker recovery passwords
-    and LAPS passwords and prints them only as "backup": AES-256-CBC over gzip JSON, the AES
-    key wrapped with RSA-OAEP (SHA-1) to RecipientKey, so NinjaOne activity history never holds
+    and LAPS passwords and prints them only as "backup": AES-256-CBC over gzip JSON with an
+    HMAC-SHA256 over "2|iv|data", both keys wrapped with RSA-OAEP (SHA-1) to RecipientKey, so NinjaOne activity history never holds
     a plain secret. Then it disables each accepted computer and sets its Description. It deletes
     nothing. Exit 0 when every named computer was handled, 1 otherwise.
 #>
@@ -205,8 +205,13 @@ function Protect-AscBackup {
         $p = [Security.Cryptography.RSAParameters]::new()
         $p.Modulus = $modulus; $p.Exponent = [byte[]](1, 0, 1)
         $rsa.ImportParameters($p)
-        # shortcut: no MAC over the ciphertext; it only travels through NinjaOne back to the operator.
-        return [ordered]@{ v = '1'; key = [Convert]::ToBase64String($rsa.Encrypt($aes.Key, $true)); iv = [Convert]::ToBase64String($aes.IV); data = [Convert]::ToBase64String($cipher) }
+        # Encrypt-then-MAC: HMAC-SHA256 with its own key over "2|iv|data". RSA wraps aesKey+macKey (64 bytes).
+        $macKey = [byte[]]::new(32)
+        $rng = [Security.Cryptography.RNGCryptoServiceProvider]::new(); $rng.GetBytes($macKey); $rng.Dispose()
+        $iv = [Convert]::ToBase64String($aes.IV); $data = [Convert]::ToBase64String($cipher)
+        $hmac = [Security.Cryptography.HMACSHA256]::new($macKey)
+        $mac = [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes("2|$iv|$data"))); $hmac.Dispose()
+        return [ordered]@{ v = '2'; key = [Convert]::ToBase64String($rsa.Encrypt([byte[]]($aes.Key + $macKey), $true)); iv = $iv; data = $data; mac = $mac }
     } finally {
         $aes.Dispose(); $rsa.Dispose()
     }

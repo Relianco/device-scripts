@@ -67,7 +67,7 @@ Assert (Test-AscStale (New-Pc 'D' -Last $null -Pwd $null) $cut) 'never logged on
 
 # Argument checks.
 Assert ((ConvertTo-AscNameList ' PC1, PC2 ,PC1').Count -eq 2) 'names trimmed and unique'
-foreach ($bad in @('', 'a)(cn=*', ('A' * 16), (1..11 | ForEach-Object { "PC$_" }) -join ',')) {
+foreach ($bad in @('', 'a)(cn=*', ('A' * 16), ((1..11 | ForEach-Object { "PC$_" }) -join ','))) {
     $threw = $false; try { [void](ConvertTo-AscNameList $bad) } catch { $threw = $true }
     Assert $threw "names refused: $bad"
 }
@@ -116,10 +116,13 @@ Assert ($seen.Count -eq 122 -and @($seen | Select-Object -Unique).Count -eq 122)
 $script:Pcs = @($script:Pcs | Where-Object { $_.Name -notlike 'PC*' })
 
 # Apply: key pair for the round trip.
-$rsa = [Security.Cryptography.RSA]::Create(); $rsa.KeySize = 2048
+$rsa = [Security.Cryptography.RSACryptoServiceProvider]::new(2048)
 $pub = [Convert]::ToBase64String($rsa.ExportParameters($false).Modulus)
 function Unprotect-Backup($b) {
-    $aes = [Security.Cryptography.Aes]::Create(); $aes.Key = $rsa.Decrypt([Convert]::FromBase64String($b.key), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
+    $keys = $rsa.Decrypt([Convert]::FromBase64String($b.key), [Security.Cryptography.RSAEncryptionPadding]::OaepSHA1)
+    $hmac = [Security.Cryptography.HMACSHA256]::new([byte[]]$keys[32..63])
+    if ($b.v -ne '2' -or [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes("2|$($b.iv)|$($b.data)"))) -ne $b.mac) { throw 'backup MAC mismatch' }
+    $aes = [Security.Cryptography.Aes]::Create(); $aes.Key = [byte[]]$keys[0..31]
     $aes.IV = [Convert]::FromBase64String($b.iv); $c = [Convert]::FromBase64String($b.data)
     $gz = [IO.Compression.GZipStream]::new([IO.MemoryStream]::new($aes.CreateDecryptor().TransformFinalBlock($c, 0, $c.Length)), [IO.Compression.CompressionMode]::Decompress)
     $out = [IO.MemoryStream]::new(); $gz.CopyTo($out)
@@ -140,6 +143,9 @@ $res = @{}; foreach ($c in $wr.computers) { $res[$c.name] = $c.result }
 Assert ($res.OLD1 -eq 'planned' -and $res.NEW1 -eq 'refused:notStale' -and $res.SV1 -eq 'refused:server' -and $res.NOPE -eq 'notFound') 'apply plan'
 $b = Unprotect-Backup $wr.backup
 $old1 = $b | Where-Object name -eq 'OLD1'
+$tampered = $wr.backup.PSObject.Copy(); $d = [Convert]::FromBase64String($tampered.data); $d[0] = $d[0] -bxor 1; $tampered.data = [Convert]::ToBase64String($d)
+$threw = $false; try { [void](Unprotect-Backup $tampered) } catch { $threw = $_.Exception.Message -like '*MAC mismatch*' }
+Assert $threw 'tampered backup detected'
 Assert ($old1.bitlocker[0].recoveryKey -eq $secretPw -and $old1.bitlocker[0].recoveryGuid -eq [guid]::Empty.ToString()) 'bitlocker backed up'
 Assert ($old1.laps.'ms-Mcs-AdmPwd' -eq $lapsValue) 'laps backed up'
 Assert (@($b).Count -eq 3) 'every found computer backed up'
