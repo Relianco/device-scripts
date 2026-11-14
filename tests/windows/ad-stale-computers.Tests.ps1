@@ -168,6 +168,11 @@ $script:AscGetRecovery = { param($Dn) @(1..60 | ForEach-Object { [pscustomobject
 $threw = $false; try { [void](Invoke-AscApply -Names @('OLD1', 'OLD2') -Days 180 -RecipientKey $pub -WhatIf $false -Move $true -Now $now) } catch { $threw = $_.Exception.Message -like '*8000 bytes*' }
 Assert ($threw -and $script:Writes.Count -eq 0) 'oversized output refused before any change'
 $script:AscGetRecovery = $big
+# Ten long-DN computers without keys fit when not moving.
+$script:Pcs = @($script:Pcs) + @(1..10 | ForEach-Object { New-Pc ('BIG{0:D2}' -f $_) -Ou ('OU=' + ('y' * 40) + ',OU=Workstations,DC=example,DC=invalid') })
+$ten = Invoke-AscApply -Names @(1..10 | ForEach-Object { 'BIG{0:D2}' -f $_ }) -Days 180 -RecipientKey $pub -WhatIf $true -Move $false -Now $now
+Assert (-not $ten.Failed -and [Text.Encoding]::UTF8.GetByteCount($ten.Json) -le 8000) 'ten names fit in place'
+$script:Pcs = @($script:Pcs | Where-Object { $_.Name -notlike 'BIG*' })
 
 $script:AscDisable = { param($Dn, $Description) throw [UnauthorizedAccessException]::new('denied') }
 $f = Invoke-AscApply -Names @('OLD2') -Days 180 -RecipientKey $pub -WhatIf $false -Move $true -Now $now

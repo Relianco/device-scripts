@@ -307,9 +307,10 @@ function Invoke-AscApply {
         version = '1'; status = 'ok'; mode = 'Apply'; whatIf = $WhatIf; move = $Move
         cutoff = Format-AscDate $cutoff; description = $description; computers = $results.ToArray(); backup = $protected
     }
-    # The backup is the only copy the operator gets, so it must never be cut. 600 bytes per row
-    # covers the longest later result text and the moved-to DN.
-    $planned = [Text.Encoding]::UTF8.GetByteCount(($report | ConvertTo-Json -Depth 6 -Compress)) + 600 * $accepted.Count
+    # The backup is the only copy the operator gets, so it must never be cut. Per row, reserve the
+    # longest later result text, plus the moved-to DN when moving.
+    $reserve = 64; if ($Move) { $reserve = 600 }
+    $planned = [Text.Encoding]::UTF8.GetByteCount(($report | ConvertTo-Json -Depth 6 -Compress)) + $reserve * $accepted.Count
     if ($planned -gt $script:AscMaxBytes) { throw 'The output would exceed 8000 bytes. Pass fewer names.' }
 
     if (-not $WhatIf) {
