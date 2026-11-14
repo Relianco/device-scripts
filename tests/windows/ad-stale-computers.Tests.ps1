@@ -100,6 +100,10 @@ Assert ($r.excluded.server -eq 1 -and $r.excluded.domainController -eq 1) 'repor
 Assert (($r.computers | Where-Object name -eq 'OLD1').bitlocker -eq 1 -and ($r.computers | Where-Object name -eq 'OLD1').laps -eq 'legacy') 'report bitlocker and laps'
 $all = Invoke-AscReport -Days 180 -Filter All -Now $now | ConvertFrom-Json
 Assert ($all.matched -eq 3) 'report all'
+$script:Pcs[0].Description = 'note'; $script:Pcs[0].Enabled = $false
+$rd = (Invoke-AscReport -Days 180 -Now $now | ConvertFrom-Json).computers | Where-Object name -eq 'OLD1'
+Assert ($rd.description -eq 'note' -and -not $rd.enabled) 'report reads back Enabled and Description'
+$script:Pcs[0].Description = $null; $script:Pcs[0].Enabled = $true
 $script:Pcs = @(1..120 | ForEach-Object { New-Pc ('PC{0:D3}' -f $_) -Ou ('OU=' + ('x' * 60) + ',DC=example,DC=invalid') }) + @($script:Pcs)
 $json = Invoke-AscReport -Days 180 -Now $now
 $page = $json | ConvertFrom-Json

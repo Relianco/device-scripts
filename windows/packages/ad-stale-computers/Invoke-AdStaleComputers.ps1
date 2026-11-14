@@ -18,7 +18,7 @@
                     root, created if missing. Default false: disable in place.
 
     Report is read-only. It lists workstation computer objects: name, DN, operating system,
-    lastLogonTimestamp, pwdLastSet, enabled, the number of BitLocker recovery children, and
+    lastLogonTimestamp, pwdLastSet, enabled, Description, the number of BitLocker recovery children, and
     whether LAPS manages the computer. It skips domain controllers (and objects left in the
     Domain Controllers OU), AZUREADSSOACC, servers (OperatingSystem
     like *Server*), cluster objects (servicePrincipalName MSClusterVirtualServer) and anything
@@ -242,7 +242,7 @@ function Invoke-AscReport {
         $rows.Add([ordered]@{
                 name = [string]$c.Name; dn = [string]$c.DistinguishedName; os = [string]$c.OperatingSystem
                 lastLogon = Format-AscDate (ConvertFrom-AscFileTime $c.lastLogonTimestamp); pwdLastSet = Format-AscDate (ConvertFrom-AscFileTime $c.pwdLastSet)
-                enabled = [bool]$c.Enabled; stale = $isStale; bitlocker = $bl; laps = Get-AscLapsKind $c
+                enabled = [bool]$c.Enabled; description = [string]$c.Description; stale = $isStale; bitlocker = $bl; laps = Get-AscLapsKind $c
             })
     }
     $page = @($rows | Select-Object -Skip $Offset)
