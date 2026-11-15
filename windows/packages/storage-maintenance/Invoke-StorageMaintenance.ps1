@@ -1621,7 +1621,9 @@ function Remove-SmRecycleBin {
   if(([int64]$sidDir.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
   foreach($info in @($sidDir.EnumerateFiles('$I*'))) {
    if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
-   if($info.LastWriteTimeUtc -ge $CutoffUtc) { continue }
+   $deleted=$null
+   try { if(Test-SmPlainChain $info.FullName) { $deleted=ConvertFrom-SmRecycleRecord ([IO.File]::ReadAllBytes($info.FullName)) } } catch { }
+   if($null -eq $deleted -or $deleted -ge $CutoffUtc) { continue }
    $data=Join-Path $sidDir.FullName ('$R'+$info.Name.Substring(2))
    try {
     if([IO.Directory]::Exists($data)) {
@@ -1647,10 +1649,27 @@ function Get-SmCleanmgrSelection {
  @($Available | Where-Object { $want -contains $_ })
 }
 
-# Windows.old removes the rollback option, so only after Windows' own 10-day rollback window.
+# Deletion time from a $I record: version 1 or 2, deletion FILETIME at byte 16. Anything
+# unreadable, zero or in the future returns $null and the item is kept.
+function ConvertFrom-SmRecycleRecord {
+ param([byte[]]$Bytes,[datetime]$Now=[datetime]::UtcNow)
+ if($null -eq $Bytes -or $Bytes.Length -lt 24) { return $null }
+ $version=[BitConverter]::ToInt64($Bytes,0); $ft=[BitConverter]::ToInt64($Bytes,16)
+ if($version -notin @(1,2) -or $ft -le 0) { return $null }
+ try { $t=[datetime]::FromFileTimeUtc($ft) } catch { return $null }
+ if($t -lt [datetime]'2000-01-01' -or $t -gt $Now.ToUniversalTime()) { return $null }
+ $t
+}
+
+# Windows.old removes the rollback option. Eligible only after the rollback window, counted from
+# the current OS install (upgrade) date, with the window read from the device (DISM
+# /Set-OSUninstallWindow writes UninstallWindow). Unknown dates or window keep Windows.old.
 function Test-SmWindowsOldEligible {
- param($CreatedUtc,[datetime]$Now=[datetime]::UtcNow)
- $null -ne $CreatedUtc -and ([datetime]$CreatedUtc) -lt $Now.ToUniversalTime().AddDays(-$script:SmWindowsOldDays)
+ param($CreatedUtc,$InstalledUtc,$WindowDays,[datetime]$Now=[datetime]::UtcNow)
+ if($null -eq $CreatedUtc -or $null -eq $InstalledUtc -or $null -eq $WindowDays) { return $false }
+ if("$WindowDays" -notmatch '^\d{1,4}$') { return $false }
+ $days=[math]::Max([int]$WindowDays,$script:SmWindowsOldDays); $limit=$Now.ToUniversalTime().AddDays(-$days)
+ ([datetime]$CreatedUtc) -lt $limit -and ([datetime]$InstalledUtc) -lt $limit
 }
 
 # Shrink only a limit above 5 % of the volume; UNBOUNDED reads as the uint64 maximum.
@@ -1658,7 +1677,15 @@ function Test-SmShadowShrink { param($MaxSpace,$Capacity) [decimal]$Capacity -gt
 
 $script:SmFreeBytes={ [int64](Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -OperationTimeoutSec 5 -ErrorAction Stop).FreeSpace }
 $script:SmDeliveryOptimization={ if(-not (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) { throw 'Delete-DeliveryOptimizationCache unavailable' }; Delete-DeliveryOptimizationCache -Force -ErrorAction Stop }
-$script:SmWindowsOldCreated={ $p=Join-Path $env:SystemDrive 'Windows.old'; if([IO.Directory]::Exists($p)) { ([IO.DirectoryInfo]::new($p)).CreationTimeUtc } }
+$script:SmWindowsOldState={
+ $s=@{CreatedUtc=$null;InstalledUtc=$null;WindowDays=$null}
+ $p=Join-Path $env:SystemDrive 'Windows.old'; if(-not [IO.Directory]::Exists($p)) { return $s }
+ $s.CreatedUtc=([IO.DirectoryInfo]::new($p)).CreationTimeUtc
+ try { $s.InstalledUtc=([datetime]::new(1970,1,1,0,0,0,[DateTimeKind]::Utc)).AddSeconds([double](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).InstallDate) } catch { }
+ # No value means the Windows default of 10 days; an unreadable key leaves it unknown.
+ try { $w=(Get-ItemProperty 'HKLM:\SYSTEM\Setup' -ErrorAction Stop).UninstallWindow; $s.WindowDays=if($null -eq $w){$script:SmWindowsOldDays}else{$w} } catch { }
+ $s
+}
 $script:SmCleanmgr={
  param([bool]$IncludePreviousInstallations,[int]$Seconds)
  $base='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'; $flag='StateFlags{0:D4}' -f $script:SmSageSet
@@ -1721,7 +1748,8 @@ function Invoke-SmCleanupTier {
   Remove-SmAgedFiles $dir $cutoff $deadline -Include '\.iso(\.part)?$' -NoRecurse
  }
  if($A.Tier -eq 'Aggressive') {
-  $windowsOld=Test-SmWindowsOldEligible (& $script:SmWindowsOldCreated)
+  $old=& $script:SmWindowsOldState
+  $windowsOld=Test-SmWindowsOldEligible $old.CreatedUtc $old.InstalledUtc $old.WindowDays
   $steps+=& $measure 'Cleanmgr' { $r=& $script:SmCleanmgr $windowsOld ([int]($deadline-[datetime]::UtcNow).TotalSeconds); @{Detail=('{0}; previousInstallations={1}; handlers={2}' -f $r.State,$windowsOld,@($r.Handlers).Count)} }
   $steps+=& $measure 'ShadowStorage' { @{Detail=(& $script:SmShadowShrink)} }
  }

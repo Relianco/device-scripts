@@ -63,12 +63,12 @@ try {
     Assert ($late.TimedOut -and $late.Files -eq 0 -and (Test-Path (Join-Path $root 'late/old.tmp'))) 'Deadline stops the walk'
 
     # App caches: only cache folders, never cookies, logins, IndexedDB, Local Storage or Documents.
-    $p = Join-Path $root 'Users/alice'
+    $p = Join-Path $root 'profile-fixture'
     foreach ($d in @('AppData/Local/Microsoft/Edge/User Data/Default/Cache', 'AppData/Local/Microsoft/Edge/User Data/Default/Code Cache',
             'AppData/Local/Microsoft/Edge/User Data/Default/Service Worker/CacheStorage', 'AppData/Local/Microsoft/Edge/User Data/Default/IndexedDB',
             'AppData/Local/Microsoft/Edge/User Data/Default/Local Storage', 'AppData/Local/Microsoft/Edge/User Data/ShaderCache',
             'AppData/Local/Google/Chrome/User Data/Profile 1/GPUCache', 'AppData/Local/Packages/MSTeams_8wekyb3d8bbwe/LocalCache/Microsoft/MSTeams/EBWebView/Default/Cache',
-            'AppData/Roaming/Microsoft/Teams/Cache', 'Documents/Cache', 'Downloads/Cache', 'OneDrive - Contoso/Cache')) { $null = New-Item -ItemType Directory -Force (Join-Path $p $d) }
+            'AppData/Roaming/Microsoft/Teams/Cache', 'Documents/Cache', 'Downloads/Cache', 'OneDrive - Org/Cache')) { $null = New-Item -ItemType Directory -Force (Join-Path $p $d) }
     $caches = @(Get-SmAppCacheRoots $p | ForEach-Object { $_.Substring($p.Length + 1).Replace('\', '/') })
     foreach ($want in @('User Data/Default/Cache', 'Default/Code Cache', 'Service Worker/CacheStorage', 'User Data/ShaderCache', 'Profile 1/GPUCache', 'EBWebView/Default/Cache', 'Teams/Cache')) {
         Assert (@($caches | Where-Object { $_.EndsWith($want) }).Count -eq 1) "Cache root found: $want"
@@ -82,16 +82,29 @@ try {
     foreach ($n in @('Temp','WindowsUpdateDownload', 'CrashDumps', 'ServicingLogs', 'AppCache')) { Assert (@($cats | Where-Object { $_.Name -eq $n }).Count -gt 0) "Category present: $n" }
     Assert (@($cats | Where-Object { $_.Root -match '(?i)\$WINDOWS\.~(BT|WS)|Windows\.old|[\\/]ESD$|FeatureUpgrade|hiberfil|pagefile' }).Count -eq 0) 'Upgrade staging, rollback and the upgrade ISO folder are never generic roots'
 
-    # Recycle Bin: aged by the $I deletion record; recent items stay.
+    # Recycle Bin: aged by the deletion time inside the $I record, never by file dates.
+    function New-IRecord($Path, [int]$DeletedDaysAgo, [int64]$Version = 2) {
+        $b = New-Object byte[] 32
+        [BitConverter]::GetBytes($Version).CopyTo($b, 0)
+        [BitConverter]::GetBytes([datetime]::UtcNow.AddDays(-$DeletedDaysAgo).ToFileTimeUtc()).CopyTo($b, 16)
+        $null = New-Item -ItemType Directory -Force (Split-Path -Parent $Path); [IO.File]::WriteAllBytes($Path, $b)
+    }
     $bin = Join-Path $root 'bin/S-1-5-21-1'
-    New-File (Join-Path $bin '$IA1.txt') 30; New-File (Join-Path $bin '$RA1.txt') 1
-    New-File (Join-Path $bin '$IB2') 30; New-File (Join-Path $bin '$RB2/inner/file.txt') 1
-    New-File (Join-Path $bin '$IC3.txt') 1; New-File (Join-Path $bin '$RC3.txt') 1
+    New-IRecord (Join-Path $bin '$IA1.txt') 30 1; New-File (Join-Path $bin '$RA1.txt') 1
+    New-IRecord (Join-Path $bin '$IB2') 30; New-File (Join-Path $bin '$RB2/inner/file.txt') 1
+    # Recent deletion with an old file date: the record decides, so it stays.
+    New-IRecord (Join-Path $bin '$IC3.txt') 1; [IO.File]::SetLastWriteTimeUtc((Join-Path $bin '$IC3.txt'), [datetime]::UtcNow.AddDays(-30)); New-File (Join-Path $bin '$RC3.txt') 30
+    # Unreadable or future records keep the item.
+    New-File (Join-Path $bin '$ID4.txt') 30; New-File (Join-Path $bin '$RD4.txt') 30
+    New-IRecord (Join-Path $bin '$IE5.txt') -5; New-File (Join-Path $bin '$RE5.txt') 30
+    New-IRecord (Join-Path $bin '$IF6.txt') 30 7; New-File (Join-Path $bin '$RF6.txt') 30
     $rb = Remove-SmRecycleBin (Join-Path $root 'bin') $cutoff $deadline
-    Assert ((Test-Path (Join-Path $bin '$IC3.txt')) -and (Test-Path (Join-Path $bin '$RC3.txt'))) 'A recently recycled item is kept'
+    Assert ((Test-Path (Join-Path $bin '$IC3.txt')) -and (Test-Path (Join-Path $bin '$RC3.txt'))) 'A recently recycled item is kept even when its record file looks old'
     Assert (-not (Test-Path (Join-Path $bin '$RA1.txt')) -and -not (Test-Path (Join-Path $bin '$IA1.txt'))) 'An item recycled long ago goes, whatever its own file date'
     Assert (-not (Test-Path (Join-Path $bin '$RB2'))) 'A recycled folder goes with its contents'
+    foreach ($k in 'D4', 'E5', 'F6') { Assert (Test-Path (Join-Path $bin ('$R' + $k + '.txt'))) "Invalid record $k keeps the item" }
     Assert ($rb.Files -eq 2) 'Recycle Bin counts deleted data files'
+    Assert ($null -eq (ConvertFrom-SmRecycleRecord ([byte[]](1, 2, 3)))) 'A short record is unreadable'
 
     # cleanmgr: never Downloads, Recycle Bin or File History; Windows.old only when allowed.
     $available = @('DownloadsFolder', 'Recycle Bin', 'User file versions', 'BranchCache', 'Previous Installations', 'Temporary Files', 'Update Cleanup', 'Windows Upgrade Log Files')
@@ -101,9 +114,13 @@ try {
     Assert ((Get-SmCleanmgrSelection $available $true) -contains 'Previous Installations') 'Previous Installations only when Windows.old is eligible'
 
     $now = [datetime]::UtcNow
-    Assert (Test-SmWindowsOldEligible $now.AddDays(-11) $now) 'Windows.old older than 10 days is eligible'
-    Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-9) $now)) 'Windows.old inside the rollback window is kept'
-    Assert (-not (Test-SmWindowsOldEligible $null $now)) 'No Windows.old, nothing to do'
+    Assert (Test-SmWindowsOldEligible $now.AddDays(-11) $now.AddDays(-11) 10 $now) 'Windows.old and the upgrade older than 10 days are eligible'
+    Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-9) $now.AddDays(-9) 10 $now)) 'Windows.old inside the rollback window is kept'
+    Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $now.AddDays(-40) 60 $now)) 'An extended rollback window is honoured'
+    Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $now.AddDays(-3) 10 $now)) 'A recent upgrade keeps an old Windows.old folder'
+    Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $null 10 $now)) 'Unknown upgrade date keeps Windows.old'
+    Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $now.AddDays(-40) $null $now)) 'Unknown rollback window keeps Windows.old'
+    Assert (-not (Test-SmWindowsOldEligible $null $now $now)) 'No Windows.old, nothing to do'
     Assert (Test-SmShadowShrink ([uint64]::MaxValue) 1000) 'Unbounded shadow storage is shrunk'
     Assert (-not (Test-SmShadowShrink 50 1000)) 'Shadow storage at 5 percent is left alone'
 
@@ -135,7 +152,7 @@ try {
 
         $script:SmCleanmgr = { param($Prev, $Seconds) $script:cleanPrev = $Prev; @{ Handlers = @('Temporary Files'); State = 'exited'; ExitCode = 0 } }
         $script:SmShadowShrink = { 'alreadyAtOrBelow5Percent' }
-        $script:SmWindowsOldCreated = { [datetime]::UtcNow.AddDays(-3) }
+        $script:SmWindowsOldState = { @{ CreatedUtc = [datetime]::UtcNow.AddDays(-40); InstalledUtc = [datetime]::UtcNow.AddDays(-3); WindowDays = 10 } }
         $steps = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Aggressive) @($p))
         Assert ($script:cleanPrev -eq $false) 'A recent Windows.old keeps the rollback option'
         Assert (@($steps | Where-Object { $_.Name -eq 'ShadowStorage' -and $_.Status -eq 'done' }).Count -eq 1) 'Aggressive tier reviews shadow storage'

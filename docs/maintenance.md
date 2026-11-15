@@ -188,7 +188,7 @@ Every category deletes only files older than `TempAgeDays` (default 7 days). A f
 **Aggressive** (`Tier='Aggressive'`) does everything in Safe, then:
 
 - **Cleanmgr:** Disk Cleanup with a fixed handler list (sageset 77). The list never includes Downloads, the Recycle Bin or File History. Each run rewrites the list, so a handler added by hand is removed again.
-- **Windows.old:** included in Cleanmgr only when `Windows.old` is more than 10 days old. Removing it removes the option to go back to the previous Windows version.
+- **Windows.old:** included in Cleanmgr only when both `Windows.old` and the upgrade are older than the rollback window. The window is the device's `UninstallWindow` setting, at least 10 days. An unknown date or window keeps `Windows.old`. Removing it removes the option to go back to the previous Windows version.
 - **ShadowStorage:** shrinks the restore-point space on C: to 5 % when its limit is higher. Windows deletes the oldest restore points to fit.
 
 ### What it never touches
