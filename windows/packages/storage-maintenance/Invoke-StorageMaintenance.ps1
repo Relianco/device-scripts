@@ -1541,9 +1541,11 @@ function Remove-SmAgedFiles {
  if(-not (Test-SmPlainChain $Root)) { $res.Error='Root or an ancestor is a reparse point or cloud file'; return [pscustomobject]$res }
  $dirs=New-Object Collections.Generic.List[string]; $stack=New-Object Collections.Generic.Stack[string]; $stack.Push($Root)
  while($stack.Count) {
+  if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
   $dir=$stack.Pop(); $dirs.Add($dir)
-  try { $entries=@([IO.DirectoryInfo]::new($dir).EnumerateFileSystemInfos()) } catch { $res.Failed++; continue }
-  foreach($e in $entries) {
+  # Streamed, not materialized: the deadline holds inside a very large folder too.
+  try { $entries=[IO.DirectoryInfo]::new($dir).EnumerateFileSystemInfos() } catch { $res.Failed++; continue }
+  try { foreach($e in $entries) {
    if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
    if(([int64]$e.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
    if($e -is [IO.DirectoryInfo]) { if(-not $NoRecurse) { $stack.Push($e.FullName) }; continue }
@@ -1554,7 +1556,7 @@ function Remove-SmAgedFiles {
     if(-not (Test-SmPlainChain $e.FullName)) { throw 'Reparse or cloud ancestor' }
     $len=$e.Length; & $script:SmDelete $e.FullName; $res.Files++; $res.LogicalBytes+=$len
    } catch { $res.Failed++ }
-  }
+  } } catch { $res.Failed++ }
  }
  if($RemoveEmptyDirs) {
   $last=if($IncludeRoot){0}else{1}
@@ -1675,6 +1677,14 @@ function Test-SmWindowsOldEligible {
 
 # Shrink only a limit above 5 % of the volume; UNBOUNDED reads as the uint64 maximum.
 function Test-SmShadowShrink { param($MaxSpace,$Capacity) [decimal]$Capacity -gt 0 -and [decimal]$MaxSpace -gt ([decimal]$Capacity*0.05) }
+# vssadmin is called with /On=<system drive> only; storage hosted on another volume is left alone.
+function Get-SmShadowAction {
+ param($Storage,$Volume)
+ if($null -eq $Storage) { return 'noShadowStorage' }
+ if("$($Storage.DiffVolume.DeviceID)" -ne "$($Volume.DeviceID)") { return 'withheldOtherVolume' }
+ if(-not (Test-SmShadowShrink $Storage.MaxSpace $Volume.Capacity)) { return 'alreadyAtOrBelow5Percent' }
+ 'resize'
+}
 
 $script:SmFreeBytes={ [int64](Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -OperationTimeoutSec 5 -ErrorAction Stop).FreeSpace }
 $script:SmDeliveryOptimization={ if(-not (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) { throw 'Delete-DeliveryOptimizationCache unavailable' }; Delete-DeliveryOptimizationCache -Force -ErrorAction Stop }
@@ -1704,8 +1714,8 @@ $script:SmCleanmgr={
 $script:SmShadowShrink={
  $vol=@(Get-CimInstance Win32_Volume -Filter "DriveLetter='$($env:SystemDrive)'" -OperationTimeoutSec 5 -ErrorAction Stop)[0]
  $storage=@(Get-CimInstance Win32_ShadowStorage -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Volume.DeviceID -eq $vol.DeviceID })
- if(-not $storage.Count) { return 'noShadowStorage' }
- if(-not (Test-SmShadowShrink $storage[0].MaxSpace $vol.Capacity)) { return 'alreadyAtOrBelow5Percent' }
+ $action=Get-SmShadowAction @($storage)[0] $vol
+ if($action -ne 'resize') { return $action }
  $out=& (Join-Path $env:windir 'System32\vssadmin.exe') Resize ShadowStorage ('/For='+$env:SystemDrive) ('/On='+$env:SystemDrive) '/MaxSize=5%' 2>&1
  if($LASTEXITCODE -ne 0) { throw ('vssadmin exit '+$LASTEXITCODE+': '+(($out | Out-String).Trim())) }
  'resizedTo5Percent'

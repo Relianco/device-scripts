@@ -64,6 +64,7 @@ try {
     $emptyRoot = Join-Path $root 'empty'; $null = New-Item -ItemType Directory $emptyRoot
     $prune = Remove-SmAgedFiles $emptyRoot ([datetime]::MaxValue) ([datetime]::UtcNow.AddSeconds(-1)) -RemoveEmptyDirs -IncludeRoot
     Assert ($prune.TimedOut -and (Test-Path $emptyRoot)) 'Folder pruning stops at the deadline too'
+    Assert ((Remove-SmAgedFiles $emptyRoot $cutoff ([datetime]::UtcNow.AddSeconds(-1))).TimedOut) 'The deadline is checked before each folder, even an empty one'
 
     # App caches: only cache folders, never cookies, logins, IndexedDB, Local Storage or Documents.
     $p = Join-Path $root 'profile-fixture'
@@ -127,6 +128,10 @@ try {
     Assert (-not (Test-SmWindowsOldEligible $null $now 10 $now)) 'No Windows.old, nothing to do'
     Assert (Test-SmShadowShrink ([uint64]::MaxValue) 1000) 'Unbounded shadow storage is shrunk'
     Assert (-not (Test-SmShadowShrink 50 1000)) 'Shadow storage at 5 percent is left alone'
+    $vol = [pscustomobject]@{ DeviceID = 'vol-c'; Capacity = 1000 }
+    Assert ((Get-SmShadowAction ([pscustomobject]@{ DiffVolume = @{ DeviceID = 'vol-c' }; MaxSpace = 900 }) $vol) -eq 'resize') 'Same-volume shadow storage is resized'
+    Assert ((Get-SmShadowAction ([pscustomobject]@{ DiffVolume = @{ DeviceID = 'vol-d' }; MaxSpace = 900 }) $vol) -eq 'withheldOtherVolume') 'Shadow storage on another volume is left alone'
+    Assert ((Get-SmShadowAction $null $vol) -eq 'noShadowStorage') 'No shadow storage, nothing to do'
 
     # Orchestration: an unsafe guard withholds every category; a live upgrade keeps its ISO.
     $priorWin = $env:windir; $priorPd = $env:ProgramData; $priorSd = $env:SystemDrive
