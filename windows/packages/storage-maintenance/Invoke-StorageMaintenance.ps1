@@ -1859,7 +1859,8 @@ function Invoke-SmMaintenance {
    $scan=if($collected.GuardChanged){[pscustomobject]@{Roots=@();Files=@();TopFiles=@();TopFolders=@();Partial=$true;Light=$true;GuardReasons=@($collected.Reasons);EntriesVisited=0;SkippedReparseOrCloud=0;Errors=@();Seconds=0}}else{Get-SmScan $scanRoots $A.MaxFiles $A.MaxSeconds $A.TempAgeDays}; $r.Scan=$scan
    if($scan.Light) { $g=[pscustomobject]@{Safe=$false;Light=$true;Reasons=@($scan.GuardReasons)}; $r.Guards=$g; $r.Omissions+='Traversal abandoned because Setup/unknown servicing state appeared during scan.' }
    foreach($f in $scan.Files) { $f | Add-Member -NotePropertyName CleanupRoot -NotePropertyValue $null; foreach($tempRoot in $roots) { if($f.Path.StartsWith($tempRoot.TrimEnd('\')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { $f.CleanupRoot=$tempRoot; break } } }
-   # A capped or partly unreadable scan is evidence quality, reported as PartialScan, not a cleanup outcome.
+   # A capped or partly unreadable scan is evidence quality (PartialScan): it limits a report, not a cleanup.
+   if($A.Mode -ne 'Cleanup' -and ($scan.Partial -or $scan.Errors.Count)) { $r.Status='partial' }
    $cacheFiles=@($scan.Files | Where-Object { $_.Path -match '(?i)\\(Cache|Code Cache|GPUCache|ShaderCache|CacheStorage)\\|\\MSTeams_[^\\]+\\LocalCache\\|\\Adobe\\AcroCef\\' })
    $r.Evidence['ApplicationCaches']=@($cacheFiles | Group-Object { if($_.Path -match '(?i)^(.+?\\(?:Cache|Code Cache|GPUCache|ShaderCache|CacheStorage))\\') { $Matches[1] } else { $_.Root } } | Sort-Object Count -Descending | Select-Object -First 30 | ForEach-Object { @{Path=$_.Name;ObservedLogicalBytes=($_.Group | Measure-Object LogicalBytes -Sum).Sum;Partial=$scan.Partial;Policy='report only; close owning application and review before manual cleanup';ReclaimableBytes=$null} })
    foreach($p in $r.Profiles) { $size=Get-SmProfileSize $scan $p.Path; $p.LogicalBytes=$size.LogicalBytes; $p.SizePartial=$size.Partial }

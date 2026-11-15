@@ -280,6 +280,7 @@ try {
  $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)
  $summary=ConvertTo-SmSummary $r 'r.json' | ConvertFrom-Json
  Assert ($r.Status -eq 'complete' -and $summary.PartialScan -and $null -eq $summary.ComponentCleanup) 'A capped scan alone leaves the run complete and reports PartialScan'
+ Assert ((Invoke-SmMaintenance (Get-SmArguments)).Status -eq 'partial') 'A capped scan still makes a Report run partial'
  # Incomplete profile evidence only matters to a run that reports or removes profiles.
  $realCollect=$script:SmCollectProfiles
  $script:SmCollectProfiles={ [pscustomobject]@{Complete=$false;TimedOut=$true;GuardChanged=$false;Reasons=@();Entries=@();ElapsedSeconds=0.01;Error='provider timeout'} }

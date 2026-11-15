@@ -222,11 +222,13 @@ The stdout JSON's `Status` describes the cleanup actions:
 
 - `complete`: every action finished.
 - `partial`: an action did not finish, failed or ran out of time. The reason is in the action's **Error**.
+
+In a Report run, `partial` also means the scan stopped at its cap or skipped entries.
 - `withheld`: a safety check stopped the cleanup.
 - `nativeMarkerPresent`: a servicing marker blocks maintenance. See `NativeMarker` and [Leftover servicing marker](#leftover-servicing-marker). The run exits 2, so NinjaOne shows it as failed and can alert.
 - `failed`: the run itself failed. It exits 1.
 
-`PartialScan: true` means the size scan stopped at its cap (20,000 entries or 30 seconds) or skipped entries. That limits the size report only. It does not change `Status`.
+`PartialScan: true` means the size scan stopped at its cap (20,000 entries or 30 seconds) or skipped entries. In a Cleanup run it does not change `Status`.
 
 `ComponentCleanup` is `null` when the step did not run. Otherwise it has **Status** (`commandCompleted`, `failed`, `nativeStillRunning` or `withheld`), DISM's **ExitCode** and **Error**.
 
