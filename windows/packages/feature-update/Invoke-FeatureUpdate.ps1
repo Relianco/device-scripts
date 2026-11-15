@@ -511,7 +511,8 @@ function Get-FurFixPlan {
     $task = if ($a.Contains('task')) { $a.task } else { $null }
     $state = if ($task -and $task.Contains('state')) { "$($task.state)" } else { '' }
     if ($state -eq 'Disabled') { $plan.Add('EnableAppraiserTask') }
-    # VDOT disables the Exp task together with the main one.
+    # VDOT disables the Exp task together with the main one. Get-FurExpTaskState is the
+    # existing pure helper defined further down in this file (the verdict uses it too).
     if ("$(Get-FurExpTaskState $a)" -eq 'Disabled') { $plan.Add('EnableAppraiserExpTask') }
     if ($state -eq 'Running' -or $state -eq 'missing' -or $state -eq '') { return @($plan) }
 
