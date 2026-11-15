@@ -171,7 +171,7 @@ Use this when a PC runs low on disk space. It frees space from caches, old tempo
 
 A tier needs `Mode='Cleanup'`. `Tier='None'` (the default) adds nothing to the existing temp cleanup.
 
-Every category deletes only files older than `TempAgeDays` (default 7 days). A file counts as old only when both its write time and its creation time are old.
+Each file category deletes only files older than `TempAgeDays` (default 7 days). A file counts as old only when both its write time and its creation time are old. Two steps have no age filter: the Delivery Optimization cache (Windows downloads it again on demand) and Disk Cleanup in the Aggressive tier, which applies its own rules per handler.
 
 **Safe** (`Tier='Safe'`):
 

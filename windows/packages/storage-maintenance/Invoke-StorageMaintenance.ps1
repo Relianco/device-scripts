@@ -1747,6 +1747,8 @@ function Invoke-SmCleanupTier {
   $steps+=& $measure $name { foreach($c in $mine) { $opt=@{}; foreach($k in 'Include','Exclude') { if($c[$k]) { $opt[$k]=$c[$k] } }; Remove-SmAgedFiles $c.Root $cutoff $deadline @opt -NoRecurse:([bool]$c.NoRecurse) -RemoveEmptyDirs:([bool]$c.Prune) } }
  }
  $steps+=& $measure 'RecycleBin' { Remove-SmRecycleBin (Join-Path $env:SystemDrive '$Recycle.Bin') $cutoff $deadline }
+ # Not age-filtered, by design: the DO cache only holds update content that Windows downloads
+ # again on demand, and its cmdlet has no age option. Requested for the Safe tier explicitly.
  $steps+=& $measure 'DeliveryOptimization' { $null=& $script:SmDeliveryOptimization; @{Detail='Delete-DeliveryOptimizationCache'} }
  # The feature-upgrade package removes its ISO itself after success; a failed or rolled-back
  # attempt leaves it. Only a terminal, aged attempt qualifies; a running or staged one never does.
@@ -1762,7 +1764,14 @@ function Invoke-SmCleanupTier {
  if($A.Tier -eq 'Aggressive') {
   $old=& $script:SmWindowsOldState
   $windowsOld=Test-SmWindowsOldEligible $old.CreatedUtc $old.InstalledUtc $old.WindowDays
-  $steps+=& $measure 'Cleanmgr' { $r=& $script:SmCleanmgr $windowsOld ([int]($deadline-[datetime]::UtcNow).TotalSeconds); @{Detail=('{0}; previousInstallations={1}; handlers={2}' -f $r.State,$windowsOld,@($r.Handlers).Count)} }
+  # cleanmgr applies its own age rules per handler; TempAgeDays does not reach it (Aggressive only).
+  $steps+=& $measure 'Cleanmgr' {
+   $r=& $script:SmCleanmgr $windowsOld ([int]($deadline-[datetime]::UtcNow).TotalSeconds)
+   $detail='{0}; previousInstallations={1}; handlers={2}' -f $r.State,$windowsOld,@($r.Handlers).Count
+   if($r.State -ne 'exited') { throw ('cleanmgr still running at the deadline; not stopped ('+$detail+')') }
+   if($r.ExitCode -ne 0) { throw ('cleanmgr exit '+$r.ExitCode+' ('+$detail+')') }
+   @{Detail=$detail}
+  }
   $steps+=& $measure 'ShadowStorage' { @{Detail=(& $script:SmShadowShrink)} }
  }
  $steps

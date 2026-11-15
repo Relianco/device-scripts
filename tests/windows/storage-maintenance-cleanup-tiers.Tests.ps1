@@ -165,6 +165,12 @@ try {
         $steps = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Aggressive) @($p))
         Assert ($script:cleanPrev -eq $false) 'A recent Windows.old keeps the rollback option'
         Assert (@($steps | Where-Object { $_.Name -eq 'ShadowStorage' -and $_.Status -eq 'done' }).Count -eq 1) 'Aggressive tier reviews shadow storage'
+        $script:SmCleanmgr = { param($Prev, $Seconds) @{ Handlers = @('Temporary Files'); State = 'stillRunning' } }
+        $slow = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Aggressive) @($p) | Where-Object { $_.Name -eq 'Cleanmgr' })[0]
+        Assert ($slow.Status -ne 'done' -and $slow.Error -match 'still running') 'A cleanmgr still running is not reported as done'
+        $script:SmCleanmgr = { param($Prev, $Seconds) @{ Handlers = @('Temporary Files'); State = 'exited'; ExitCode = 5 } }
+        $bad = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Aggressive) @($p) | Where-Object { $_.Name -eq 'Cleanmgr' })[0]
+        Assert ($bad.Status -ne 'done' -and $bad.Error -match 'exit 5') 'A cleanmgr failure is reported'
 
         # A refused root (a junction or symlink) makes its category partial with the reason.
         if ($linked) {
