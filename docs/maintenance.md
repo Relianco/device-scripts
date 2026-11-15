@@ -72,6 +72,19 @@ For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires
 
 `ProfileReport='true'` adds a per-profile census and prints a compact schema-v2 JSON (under 9.5 KB) for a device custom field instead of the v1 summary. When it would not fit, the lowest-ranked entries lose their detail first (keeping SID, decision, age and size), then whole entries drop; the summary still counts every profile. It requires `Mode='Report'` with `RemoveProfiles` and `ComponentCleanup` false; the package refuses any other combination, and a report run never enters the cleanup branch. Pass `ProfileAgeDays='90'` for the shared-device threshold.
 
+#### Write the report to a NinjaOne custom field
+
+The package only prints. The runner (`windows/runner/Invoke-RelianRunner.ps1`) is the NinjaOne layer and can store the JSON. Both maintenance packages run through it, so no other script is involved. Set the runner parameter `ReportCustomField` to the field name:
+
+- Create a device custom field of type **Multi-line text** (a plain text field is too short for 9.5 KB). Permissions: Automation **Read/Write**, API **Read-only**.
+- The name must match `^[A-Za-z][A-Za-z0-9]{0,39}$`, for example `relianProfileReport`. A bad name fails the run with exit 1 before anything downloads.
+- The runner writes only when the package exited 0, the package arguments are exactly `ProfileReport` `true` with `Mode` `Report` (or no `Mode`) and no `RemoveProfiles` or `ComponentCleanup`, and the action is not `Uninstall`. For any other run it parses and writes nothing.
+- Marker contract: the package output must hold exactly one line that starts with `{"schemaVersion":2,"package":"storage-maintenance",`. The runner writes that line unchanged. It never re-serialises or cuts it.
+- It refuses a line over 9,500 UTF-8 bytes, which the package already keeps below.
+- A missing `Ninja-Property-Set` cmdlet or a failed write prints one line naming only the field. The run status and the package output are unchanged.
+
+An empty `ReportCustomField` (the default) changes nothing. A fleet roll-up reads the field through the NinjaOne API.
+
 - `SharedDevices`: comma-separated computer names that are shared or loaner PCs. A device not on the list reports a stale profile as `KeepNotSharedDevice`; personal devices never delete profiles.
 - `PrimaryUserHint`: optional account name or UPN of the RMM's last-logged-on user.
 

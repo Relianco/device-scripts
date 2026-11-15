@@ -59,7 +59,7 @@ All Windows paths start with `windows/`. Run every script below as **System** in
 
 **Paste:** put `windows/runner/Invoke-RelianRunner.ps1` in the NinjaOne script library. Set **Run As** to System.
 
-**Parameters** (all required except the last two):
+**Parameters** (all required except the last three):
 
 - `-PackageUrl` and `-PackageSha256`: the package script and its hash.
 - `-ToolkitUrl` and `-ToolkitSha256`: the PSAppDeployToolkit 4.1.8 zip and its hash.
@@ -68,6 +68,7 @@ All Windows paths start with `windows/`. Run every script below as **System** in
 - `-PinVersion`: a version, or another pin the package defines. A package that does not use the pin accepts any version text, such as `1.0.0`.
 - `-CancelPath`: optional. A file path. If the file exists, the run exits 130. The environment variable `RELIAN_DEPLOY_CANCEL=1` does the same.
 - `-PackageArguments`: optional. Base64 JSON, described above.
+- `-ReportCustomField`: optional. A NinjaOne device custom field name (`^[A-Za-z][A-Za-z0-9]{0,39}$`). After a successful `storage-maintenance` run with `ProfileReport` `true` and `Mode` `Report`, the runner writes the report JSON to that field. Empty (default) writes nothing. Any other run writes nothing and the runner reads none of its output. See `docs/maintenance.md`.
 
 The toolkit and the brand pack come from `https://relianpub.blob.core.windows.net/pub/sec/`. Run `scripts/publish-relian-packs.ps1` to print their URLs. The file name in each URL ends with the file's SHA256, so the hash is the part before `.zip`. It uploads nothing unless you pass `-Publish`. The toolkit pin is in `windows/releases/psadt.json`.
 
