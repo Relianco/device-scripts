@@ -12,7 +12,8 @@
     registry value, changes no policy, and starts no upgrade.
 
     With -Fix true it repairs only what keeps the compatibility appraiser from
-    running: it enables the "Microsoft Compatibility Appraiser" task and,
+    running: it enables the "Microsoft Compatibility Appraiser" task and its
+    "Microsoft Compatibility Appraiser Exp" sibling where disabled and,
     when the appraiser data is
     stale, starts that task without waiting (it runs 5 to 30 minutes; run the
     check again later to read the result). It never reboots, never starts the
@@ -510,6 +511,8 @@ function Get-FurFixPlan {
     $task = if ($a.Contains('task')) { $a.task } else { $null }
     $state = if ($task -and $task.Contains('state')) { "$($task.state)" } else { '' }
     if ($state -eq 'Disabled') { $plan.Add('EnableAppraiserTask') }
+    # VDOT disables the Exp task together with the main one.
+    if ("$(Get-FurExpTaskState $a)" -eq 'Disabled') { $plan.Add('EnableAppraiserExpTask') }
     if ($state -eq 'Running' -or $state -eq 'missing' -or $state -eq '') { return @($plan) }
 
     # Stale: the newest evaluation is missing or over 30 days old (a task run is
@@ -537,6 +540,7 @@ function Invoke-FurFix {
         try {
             switch ($step) {
                 'EnableAppraiserTask' { $null = Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
+                'EnableAppraiserExpTask' { $null = Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser Exp' -ErrorAction Stop }
                 'RunAppraiser' {
                     # Asynchronous: the scan outlives the run.
                     try { Start-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }

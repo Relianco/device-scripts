@@ -176,7 +176,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 
 - `storage-maintenance`: reports disk use and cleanup candidates. `Mode` is `Report` (default) or `Cleanup`. Profile removal is a separate opt-in. It never reboots.
 - `update-maintenance`: reports update services, policy, and servicing state. `Mode` is `Report` (default) or `Repair`. It never reboots and never starts Setup.
-- `feature-update`: read-only check of why Windows Update has not offered the next feature update. `Fix` set to `true` repairs only the compatibility appraiser task.
+- `feature-update`: read-only check of why Windows Update has not offered the next feature update. `Fix` set to `true` repairs only the compatibility appraiser tasks (the main task and its Exp sibling, both of which VDOT disables).
 - `feature-upgrade`: runs an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task, so the job returns quickly. It changes the device.
 - `restart-notice`: restarts a device that has a restart pending, after a notice to the signed-in user. `ReportOnly` set to `true` reports who is signed in and restarts nothing.
 - `outlook-autocomplete`: counts, and with `Fix` set to `true` removes, matching rows in Classic Outlook autocomplete caches. It is read-only by default.
