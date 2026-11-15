@@ -79,7 +79,8 @@ The package only prints, and neither the package nor the runner calls NinjaOne. 
 1. Create a device custom field of type **Multi-line text** (a plain text field is too short for 9.5 KB), for example `relianProfileReport`. Permissions: Automation **Read/Write**, API **Read-only**. The name must match `^[A-Za-z][A-Za-z0-9]{0,39}$`.
 2. Paste `windows/collectors/runner-report-field.ps1` into the NinjaOne script library and run it as **System**.
 3. Parameters: `-RunnerUrl` (raw URL of `windows/runner/Invoke-RelianRunner.ps1` at a pinned commit), `-RunnerSha256` (64 lowercase hex characters), `-ReportCustomField "relianProfileReport"`, then every runner parameter exactly as for the runner. Use `-PackageArguments` for `{"ProfileReport":"true","Mode":"Report"}`. An empty `-RunnerSha256` exits 0 and downloads nothing, like the runner. An empty `-PackageSha256`, `-ToolkitSha256` or `-BrandPackSha256` also exits 0, because Windows PowerShell 5.1 would drop the empty value before the runner saw it.
-4. The script downloads the runner, checks its hash, runs it as a child with `-ReportOutputPath` set, and returns the runner's exit code and output unchanged.
+4. Use it for report runs only: it refuses `-Action Uninstall` and any forwarded URL with a user name, before downloading anything. Run an uninstall through the runner.
+5. The script downloads the runner, checks its hash, runs it as a child with `-ReportOutputPath` set, and returns the runner's exit code and output unchanged.
 
 How it stays safe:
 

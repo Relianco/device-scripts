@@ -89,7 +89,7 @@ function Get-RelianReportLine {
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $null }
     if ($item.LastWriteTimeUtc -lt $StartedUtc.AddSeconds(-2)) { return $null }
     if ($item.Length -gt $script:ReportMaxBytes) { return $null }
-    $text = [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false, $true))
+    try { $text = [System.IO.File]::ReadAllText($Path, [System.Text.UTF8Encoding]::new($false, $true)) } catch { return $null }
     if ($text -match "[\r\n]" -or -not $text.StartsWith($script:ReportMarker, [StringComparison]::Ordinal)) { return $null }
     if ([Text.Encoding]::UTF8.GetByteCount($text) -gt $script:ReportMaxBytes) { return $null }
     try { if ((($text | ConvertFrom-Json).mode) -cne 'Report') { return $null } } catch { return $null }
@@ -109,6 +109,11 @@ function Invoke-RelianReportField {
     if ($RunnerSha256 -cnotmatch '\A[0-9a-f]{64}\z') { Write-Host 'RunnerSha256 must be 64 lowercase hex characters'; return 1 }
     if ($field -notmatch '\A[A-Za-z][A-Za-z0-9]{0,39}\z') { Write-Host 'invalid ReportCustomField'; return 1 }
     if ([string]::IsNullOrWhiteSpace($RunnerUrl)) { Write-Host 'RunnerUrl is required'; return 1 }
+    # Nothing is downloaded for a forwarded URL with userinfo, or for Uninstall: a report run is never an uninstall.
+    if (@($RunnerArguments | Where-Object { $_ -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@' }).Count) { Write-Host 'refusing a URL that contains userinfo'; return 1 }
+    for ($i = 0; $i -lt @($RunnerArguments).Count - 1; $i++) {
+        if ($RunnerArguments[$i] -match '\A-Action\z' -and $RunnerArguments[$i + 1] -ieq 'Uninstall') { Write-Host 'this script runs report runs only; run an uninstall through the runner'; return 1 }
+    }
     if (@($RunnerArguments | Where-Object { $_ -match '\A-ReportOutputPath\z' }).Count) { Write-Host 'ReportOutputPath is set by this script'; return 1 }
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
 

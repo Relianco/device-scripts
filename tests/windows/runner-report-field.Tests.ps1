@@ -22,7 +22,7 @@ $base = Join-Path ([IO.Path]::GetTempPath()) ('rfld-' + [guid]::NewGuid().ToStri
 
 $script:failFirst = 0; $script:failWith = ''
 function Invoke-Case {
-    param([string]$Content, [int]$Code = 0, [bool]$HasCmd = $true, [bool]$WriteThrows = $false, [int]$AgeSeconds = 0,
+    param($Content, [int]$Code = 0, [bool]$HasCmd = $true, [bool]$WriteThrows = $false, [int]$AgeSeconds = 0,
           [string]$Name = $field, [string]$Url = 'https://example.invalid/runner.ps1', [string]$Hash = $sha,
           [string[]]$Extra = @('-PackageUrl', 'p', '-Action', 'Repair'), [bool]$Link = $false)
     $script:writes = [System.Collections.Generic.List[object]]::new()
@@ -42,7 +42,7 @@ function Invoke-Case {
                 $target = Join-Path $base 'target.json'; [IO.File]::WriteAllText($target, $script:c.Content)
                 [void](New-Item -ItemType SymbolicLink -Path $path -Target $target)
             } else {
-                [IO.File]::WriteAllText($path, $script:c.Content)
+                if ($script:c.Content -is [byte[]]) { [IO.File]::WriteAllBytes($path, $script:c.Content) } else { [IO.File]::WriteAllText($path, $script:c.Content) }
                 (Get-Item -LiteralPath $path).LastWriteTimeUtc = [datetime]::UtcNow.AddSeconds(-$script:c.Age)
             }
         }
@@ -77,6 +77,8 @@ $r = Invoke-Case -Content $report -Hash $sha.ToUpperInvariant(); if ($r.Code -ne
 $r = Invoke-Case -Content $report -Code 3; if ($r.Code -ne 3) { Fail "code was $($r.Code)" }; Assert-NoWrite 'failed run' $r
 # No file means no report run: silent, code 0.
 $r = Invoke-Case -Content $null; if ($r.Code -ne 0) { Fail 'no file changed the code' }; Assert-NoWrite 'no file' $r
+# Invalid UTF-8 is ignored, not fatal.
+$r = Invoke-Case -Content ([byte[]](0x7B, 0xC3, 0x28)); if ($r.Code -ne 0) { Fail 'invalid UTF-8 report changed the code' }; Assert-NoWrite 'invalid utf8' $r
 
 # Report file guards: size, freshness, link, shape, mode.
 $fill = 9500 - [Text.Encoding]::UTF8.GetByteCount((New-Report))
@@ -118,6 +120,8 @@ $script:failFirst = 3; $r = Invoke-Case -Content $report; if ($r.Code -ne 1 -or 
 $script:failFirst = 1; $script:failWith = [InvalidOperationException]::new('permanent')
 $r = Invoke-Case -Content $report; if ($r.Code -ne 1 -or $script:downloads -ne 1 -or $script:delays -ne 0) { Fail 'permanent failure was retried' }
 $script:failFirst = 0
+$r = Invoke-Case -Content $report -Extra @('-PackageUrl', ('https://' + 'u' + [char]58 + 'p' + [char]64 + 'example.invalid/p.ps1')); if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 'forwarded userinfo URL downloaded the runner' }
+$r = Invoke-Case -Content $report -Extra @('-Action', 'Uninstall'); if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 'Uninstall downloaded the runner' }
 $r = Invoke-Case -Content $report -Extra @('-ReportOutputPath', 'C:\x'); if ($r.Code -ne 1 -or $script:ran.Count -ne 0) { Fail 'caller ReportOutputPath accepted' }
 
 # The default child launcher returns one integer even when the runner prints output.
