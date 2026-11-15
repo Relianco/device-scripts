@@ -59,7 +59,7 @@ $suite = {
  Assert ($script:calls.Count -eq 0) 'writer re-checks the name'
  # The real report builder stays under the cap the writer enforces.
  $big = Report 'Report' $true
- $big.ProfileReport.Profiles = @(1..150 | ForEach-Object { [pscustomobject]@{sid = "S-1-5-21-$_"; decision = 'StaleCandidate'; ageDays = 99; totalBytes = $_; account = 'a' * 80; path = 'C:\Users\' + ('p' * 200); reason = 'r' * 300} })
+ $big.ProfileReport.Profiles = @(1..150 | ForEach-Object { [pscustomobject]@{sid = "S-1-5-21-$_"; decision = 'StaleCandidate'; ageDays = 99; totalBytes = $_; account = 'a' * 80; path = 'C:\Data\' + ('p' * 200); reason = 'r' * 300} })
  Run $big $field
  Assert ($script:calls.Count -eq 1 -and [Text.Encoding]::UTF8.GetByteCount($script:calls[0][1]) -le 9500) 'a maximal report is written whole and within the cap'
 }
