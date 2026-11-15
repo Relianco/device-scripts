@@ -7,7 +7,7 @@ param([string]$DeploymentType, [string]$Action, [string]$PinVersion,
  [string]$Mode='Report', [string]$TempAgeDays='7', [string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false', [string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000', [string]$MaxSeconds='30', [string]$ProfileReport='false', [string]$PrimaryUserHint='', [string]$SharedDevices='',
- [string]$ReviewedReports='', [string]$RemovalCooldownDays='1')
+ [string]$ReviewedReports='', [string]$RemovalCooldownDays='1', [string]$ReportCustomField='')
 
 $script:SmPackagePath=$PSCommandPath
 
@@ -15,7 +15,7 @@ function Get-SmArguments {
  param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false',[string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000',[string]$MaxSeconds='30',[string]$ProfileReport='false',[string]$PrimaryUserHint='',[string]$SharedDevices='',
- [string]$ReviewedReports='',[string]$RemovalCooldownDays='1')
+ [string]$ReviewedReports='',[string]$RemovalCooldownDays='1',[string]$ReportCustomField='')
  if ($Mode -cnotin @('Report','Cleanup')) { throw 'Mode must be Report or Cleanup' }
  $a=@{ Mode=$Mode; ExcludeProfiles=@($ExcludeProfiles.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
  if ($PrimaryUserHint.Length -gt 256 -or $PrimaryUserHint -match '[\x00-\x1f]') { throw 'Invalid PrimaryUserHint' }; $a.PrimaryUserHint=$PrimaryUserHint.Trim()
@@ -31,6 +31,12 @@ function Get-SmArguments {
   if ($n[1] -notmatch '^\d{1,7}$' -or [int]$n[1] -lt $n[2] -or [int]$n[1] -gt $n[3]) { throw "Invalid $($n[0])" }; $a[$n[0]]=[int]$n[1]
  }
  if ($a.ProfileReport -and ($a.Mode -ne 'Report' -or $a.RemoveProfiles -or $a.ComponentCleanup)) { throw 'ProfileReport is report-only: Mode must be Report and RemoveProfiles and ComponentCleanup false' }
+ # Empty writes nothing. A name is only accepted for a ProfileReport run, so no other run can reach the writer.
+ if ($ReportCustomField -ne '') {
+  if ($ReportCustomField -notmatch '^[A-Za-z][A-Za-z0-9]{0,39}\z') { throw 'ReportCustomField must be a NinjaOne custom field name: a letter, then up to 39 letters or digits' }
+  if (-not $a.ProfileReport) { throw 'ReportCustomField needs ProfileReport true' }
+ }
+ $a.ReportCustomField=$ReportCustomField
  return $a
 }
 
@@ -1715,14 +1721,30 @@ function Close-SmSession {
   Close-ADTSession -ExitCode $Code
  }
 }
+# Writes the printed report JSON to a NinjaOne custom field. Never throws and never alters the run: a failure is one warning line naming the field only.
+# shortcut: only the script-environment cmdlet is tried (a child process may not have it); add the agent command line if a device shows that.
+function Write-SmReportField {
+ param([string]$Field,[string]$Json)
+ try {
+  if($Field -notmatch '^[A-Za-z][A-Za-z0-9]{0,39}\z') { Write-Host 'WARNING ReportCustomField not written: invalid name'; return }
+  # Refused rather than truncated: a cut JSON would be unreadable. The report already respects this cap.
+  if([Text.Encoding]::UTF8.GetByteCount($Json) -gt 9500) { Write-Host "WARNING ReportCustomField '$Field' not written: report over 9500 bytes"; return }
+  if(-not (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue)) { Write-Host "WARNING ReportCustomField '$Field' not written: writer unavailable"; return }
+  $ErrorActionPreference='Stop'; Ninja-Property-Set $Field $Json
+  Write-Host "Report written to custom field '$Field'"
+ } catch { Write-Host "WARNING ReportCustomField '$Field' not written: write failed" }
+}
 function Complete-SmRun {
- param($Report)
+ param($Report,[string]$ReportCustomField='')
  $script:SmExitCode=1
  try {
   if($script:SmUiOpen) { try { Close-ADTInstallationProgress } catch { $Report.Notifications+=('close failed: '+$_.Exception.Message) } }
   try { & $script:SmSave $Report } catch { $Report.Errors+=('Report file write failed: '+$_.Exception.Message); $Report.Status='failed' }
   Write-Host "Storage maintenance: $($Report.Status); mode $($Report.Mode); actions $($Report.Actions.Count). Free-space delta includes concurrent system activity."
-  if($Report.ProfileReport) { ConvertTo-SmProfileReportJson $Report } else { ConvertTo-SmSummary $Report $Report.ReportPath }
+  if($Report.ProfileReport) {
+   $json=ConvertTo-SmProfileReportJson $Report; $json
+   if($ReportCustomField -and $Report.Mode -eq 'Report') { Write-SmReportField $ReportCustomField $json }
+  } else { ConvertTo-SmSummary $Report $Report.ReportPath }
   $script:SmExitCode=if($Report.Status -eq 'failed') {1}else{0}
  } finally { Close-SmSession $script:SmExitCode }
 }
@@ -1732,9 +1754,9 @@ if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { Write-Output '{"Status":"notApplicable","Reason":"Maintenance has no uninstall action"}'; exit 0 }
  try {
-  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices -ReviewedReports $ReviewedReports -RemovalCooldownDays $RemovalCooldownDays
+  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices -ReviewedReports $ReviewedReports -RemovalCooldownDays $RemovalCooldownDays -ReportCustomField $ReportCustomField
   $r=Invoke-SmMaintenance $a
-  Complete-SmRun $r
+  Complete-SmRun $r $a.ReportCustomField
   exit $script:SmExitCode
  } catch {
   if($r) { $r.Status='failed'; $r.Errors+='Runtime or toolkit session closure failed'; try { & $script:SmSave $r } catch { } }

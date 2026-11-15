@@ -28,6 +28,14 @@ foreach ($sample in @('& $cli get x # ninjarmm-cli.exe', 'Ninja-Property-Set a b
 }
 if ($regex.IsMatch('Run it through the deploy runner (NinjaOne script 374).')) { Fail 'lint flags a plain NinjaOne mention' }
 
+# One reviewed exception: storage-maintenance may write its ProfileReport JSON to a custom field
+# the caller names (ReportCustomField). Only the property setter is allowed there; every other
+# coupling is still flagged in that file.
+$exemptFile = 'windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1'
+$exemptRegex = [regex]::new((($patterns | Where-Object { $_ -ne 'Ninja-Property-' }) -join '|'), 'IgnoreCase')
+if ($exemptRegex.IsMatch('Ninja-Property-Set a b')) { Fail 'exemption hides the property setter everywhere' }
+if (-not $exemptRegex.IsMatch('ninjarmm-cli.exe set a b')) { Fail 'exemption hides ninjarmm-cli' }
+
 $roots = @('windows/packages', 'windows/jobs', 'windows/releases', 'linux/packages', 'macos/packages')
 $files = foreach ($r in $roots) {
     $p = Join-Path $repoRoot $r
@@ -38,7 +46,7 @@ if (@($files).Count -lt 10) { Fail "only $(@($files).Count) files scanned" }
 $found = @()
 foreach ($file in $files) {
     $rel = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
-    $hits = @(Select-String -LiteralPath $file.FullName -Pattern $regex.ToString() -AllMatches:$false)
+    $hits = @(Select-String -LiteralPath $file.FullName -Pattern $(if ($rel -eq $exemptFile) { $exemptRegex.ToString() } else { $regex.ToString() }) -AllMatches:$false)
     foreach ($h in $hits) { $found += "${rel}:$($h.LineNumber): $($h.Line.Trim())" }
 }
 if ($found.Count) { Fail ("NinjaOne coupling in packages:`n" + ($found -join "`n")) }

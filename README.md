@@ -174,7 +174,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 
 **Windows maintenance.** These change the device only when you ask.
 
-- `storage-maintenance`: reports disk use and cleanup candidates. `Mode` is `Report` (default) or `Cleanup`. Profile removal is a separate opt-in, off by default: shared devices only, after two reviewed report runs, at most 5 profiles per run, with a cooldown and a hash-chained audit log on the device. `ProfileReport=true` adds a report-only per-profile census. It never reboots.
+- `storage-maintenance`: reports disk use and cleanup candidates. `Mode` is `Report` (default) or `Cleanup`. Profile removal is a separate opt-in, off by default: shared devices only, after two reviewed report runs, at most 5 profiles per run, with a cooldown and a hash-chained audit log on the device. `ProfileReport=true` adds a report-only per-profile census; the optional `ReportCustomField` writes its JSON to a NinjaOne custom field. It never reboots.
 - `update-maintenance`: reports update services, policy, and servicing state. `Mode` is `Report` (default) or `Repair`. It never reboots and never starts Setup.
 - `feature-update`: read-only check of why Windows Update has not offered the next feature update. `Fix` set to `true` repairs only the compatibility appraiser tasks (the main task and its Exp sibling, both of which VDOT disables).
 - `feature-upgrade`: runs an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task, so the job returns quickly. It changes the device.
@@ -296,7 +296,7 @@ Rules for a package script:
 1. **The runner copies the script alone.** Inline every URL, hash, and setting. Do not read a sibling file.
 2. **Parameters are not `Mandatory`.** A mandatory parameter prompts when a test dot-sources the file. Take `DeploymentType`, `Action`, `PinVersion`, and your own names as plain strings.
 3. **Check the hash before you run a download.** Exit 1 on a mismatch, and do not retry. Exit 1 on a URL with userinfo. If the script downloads, carry the TLS guard line that the other packages carry.
-4. **Do not call NinjaOne.** Report through stdout and the exit code. `tests/windows/ninja-agnostic.Tests.ps1` fails on a custom-field read or write, `ninjarmm-cli`, the NinjaOne API, or the deploy token.
+4. **Do not call NinjaOne.** Report through stdout and the exit code. `tests/windows/ninja-agnostic.Tests.ps1` fails on a custom-field read or write, `ninjarmm-cli`, the NinjaOne API, or the deploy token. One reviewed exception: `storage-maintenance` may call `Ninja-Property-Set` to write its `ProfileReport` JSON to the field named by `ReportCustomField`.
 5. **Keep it Windows PowerShell 5.1 compatible.**
 6. **Keep PowerShell output bounded.** NinjaOne truncates long output. Print one JSON line.
 
