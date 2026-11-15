@@ -6,19 +6,20 @@ $packageEnumerate = $script:SmEnumerate
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 function Throws($Code, $Pattern) { $m = $null; try { & $Code } catch { $m = $_.Exception.Message }; Assert ($m -and $m -match $Pattern) "expected throw matching '$Pattern', got '$m'" }
 
-# Fixture names (PC-A, LOANER-1, CORP\..., C:\Users\<name>, example.test) are synthetic
-# placeholders, not real devices, clients or a developer's home directory; the public-repo
-# rule targets real identifiers, which this file does not contain.
+# Device names and profile paths are generated per run; no identifier is committed.
+$rand = { 'T' + [guid]::NewGuid().ToString('n').Substring(0, 10).ToUpperInvariant() }
+$devA = & $rand; $devB = & $rand; $sharedPc = & $rand; $otherPc = & $rand
+$userRoot = 'C:\' + (& $rand)
 # --- Arguments: ProfileReport is report-only and cannot be combined with any mutation.
 $a = Get-SmArguments
 Assert (-not $a.ProfileReport -and $a.SharedDevices.Count -eq 0 -and $a.PrimaryUserHint -eq '') 'ProfileReport off by default'
-$a = Get-SmArguments -ProfileReport true -SharedDevices ' PC-A , pc-b ,' -PrimaryUserHint ' AzureAD\Someone '
-Assert ($a.ProfileReport -and $a.SharedDevices.Count -eq 2 -and $a.SharedDevices[1] -eq 'pc-b' -and $a.PrimaryUserHint -eq 'AzureAD\Someone') 'ProfileReport arguments parsed'
+$a = Get-SmArguments -ProfileReport true -SharedDevices " $devA , $($devB.ToLowerInvariant()) ," -PrimaryUserHint ' AzureAD\Someone '
+Assert ($a.ProfileReport -and $a.SharedDevices.Count -eq 2 -and $a.SharedDevices[1] -ceq $devB.ToLowerInvariant() -and $a.PrimaryUserHint -eq 'AzureAD\Someone') 'ProfileReport arguments parsed'
 Throws { Get-SmArguments -ProfileReport true -Mode Cleanup } 'report-only'
 Throws { Get-SmArguments -ProfileReport true -RemoveProfiles true } 'report-only'
 Throws { Get-SmArguments -ProfileReport true -ComponentCleanup true } 'report-only'
 Throws { Get-SmArguments -ProfileReport yes } 'true or false'
-Throws { Get-SmArguments -SharedDevices 'PC-A,..\x' } 'computer names'
+Throws { Get-SmArguments -SharedDevices "$devA,..\x" } 'computer names'
 Throws { Get-SmArguments -PrimaryUserHint "a`nb" } 'PrimaryUserHint'
 
 # --- Decision gates. Every gate is flipped alone from an all-pass baseline.
@@ -157,18 +158,18 @@ function New-Context { [pscustomobject]@{Log=[pscustomobject]@{Known=$true;Oldes
 $realProfilePath = ${function:Test-SmProfilePath}; $realBytes = ${function:Get-SmProfileBytes}
 function Test-SmProfilePath($Path) { $true }
 function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$false;Light=$false;EntriesVisited=1} }
-$args90 = @{ProfileAgeDays=90;MaxFiles=1000;MaxSeconds=30;SharedDevices=@('LOANER-1');PrimaryUserHint=''}
+$args90 = @{ProfileAgeDays=90;MaxFiles=1000;MaxSeconds=30;SharedDevices=@($sharedPc);PrimaryUserHint=''}
 $assessed = @(
- (New-Assessed 'S-1-12-1-1-1-1-1' 'AzureAD\OwnerPerson' 'C:\Users\OwnerPerson'),
- (New-Assessed 'S-1-5-21-9-9-9-1101' 'CORP\toplogon' 'C:\Users\toplogon'),
- (New-Assessed 'S-1-5-21-9-9-9-1103' 'CORP\hinted' 'C:\Users\hinted'),
- (New-Assessed 'S-1-5-21-9-9-9-1104' 'CORP\svc_backup' 'C:\Users\svc_backup'),
- (New-Assessed 'S-1-5-21-9-9-9-1105' 'CORP\jdoe' 'C:\Users\jdoe'),
- (New-Assessed 'S-1-5-21-9-9-9-1106' 'CORP\lapsadm' 'C:\Users\lapsadm'),
- (New-Assessed 'S-1-5-21-9-9-9-1107' 'CORP\KIOSK$' 'C:\Users\KIOSK$'),
- (New-Assessed 'S-1-5-21-9-9-9-1108' 'CORP\leaver' 'C:\Users\leaver'))
+ (New-Assessed 'S-1-12-1-1-1-1-1' 'AzureAD\OwnerPerson' ($userRoot + '\OwnerPerson')),
+ (New-Assessed 'S-1-5-21-9-9-9-1101' 'CORP\toplogon' ($userRoot + '\toplogon')),
+ (New-Assessed 'S-1-5-21-9-9-9-1103' 'CORP\hinted' ($userRoot + '\hinted')),
+ (New-Assessed 'S-1-5-21-9-9-9-1104' 'CORP\svc_backup' ($userRoot + '\svc_backup')),
+ (New-Assessed 'S-1-5-21-9-9-9-1105' 'CORP\jdoe' ($userRoot + '\jdoe')),
+ (New-Assessed 'S-1-5-21-9-9-9-1106' 'CORP\lapsadm' ($userRoot + '\lapsadm')),
+ (New-Assessed 'S-1-5-21-9-9-9-1107' 'CORP\KIOSK$' ($userRoot + '\KIOSK$')),
+ (New-Assessed 'S-1-5-21-9-9-9-1108' 'CORP\leaver' ($userRoot + '\leaver')))
 $hintArgs = $args90.Clone(); $hintArgs.PrimaryUserHint = 'CORP\Hinted'
-$rep = Get-SmProfileReport $hintArgs $assessed (New-Context) $now 'loaner-1'
+$rep = Get-SmProfileReport $hintArgs $assessed (New-Context) $now $sharedPc.ToLowerInvariant()
 $by = @{}; foreach ($p in $rep.Profiles) { $by[$p.account] = $p }
 Assert ($by['AzureAD\OwnerPerson'].decision -eq 'KeepPrimaryUser' -and $by['AzureAD\OwnerPerson'].primarySource -eq 'intune') 'Intune UPN protects the Entra profile through its cached UPN'
 Assert ($by['CORP\toplogon'].primarySource -eq 'logon4624') 'Top 4624 SID protects'
@@ -181,7 +182,7 @@ Assert ($by['CORP\leaver'].decision -eq 'ReviewKfmUnverified' -and $by['CORP\lea
 Assert ($rep.EventLog.coverageDays -eq 365 -and $rep.DeviceClass.suggested -eq 'secondary' -and $rep.DeviceClass.topSidShare -eq 0.8 -and $rep.DeviceClass.configuredShared) 'Coverage and device class reported; shared match is case-insensitive'
 Assert ($rep.Summary.profiles -eq 8 -and $rep.Summary.staleByAge -eq 8 -and $rep.Summary.candidates -eq 0 -and $rep.Summary.review -eq 1) 'Summary counts'
 $leaver = @($assessed[-1])
-Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now 'DESK-7').Profiles[0].decision -eq 'KeepNotSharedDevice') 'Device not on the shared list never deletes'
+Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now $otherPc).Profiles[0].decision -eq 'KeepNotSharedDevice') 'Device not on the shared list never deletes'
 Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now '').Profiles[0].decision -eq 'KeepNotSharedDevice') 'Empty computer name is not shared'
 foreach ($skew in @(
  @{OldestUtc=$now.AddDays(-365);NewestUtc=$now.AddDays(3)},
@@ -189,21 +190,21 @@ foreach ($skew in @(
  @{OldestUtc=$now.AddDays(1);NewestUtc=$now.AddDays(-1)},
  @{OldestUtc=$now.AddDays(-30);NewestUtc=$now})) {
  $ctx = New-Context; $ctx.Log = [pscustomobject]@{Known=$true;OldestUtc=$skew.OldestUtc;NewestUtc=$skew.NewestUtc}
- $p = (Get-SmProfileReport $args90 $leaver $ctx $now 'LOANER-1').Profiles[0]
+ $p = (Get-SmProfileReport $args90 $leaver $ctx $now $sharedPc).Profiles[0]
  Assert ($p.decision -eq 'ReviewLogCoverage') "Clock skew, stopped log or short coverage downgrades to review: $($skew | ConvertTo-Json -Compress)"
 }
 $ctx = New-Context; $ctx.Log = [pscustomobject]@{Known=$false;OldestUtc=$null;NewestUtc=$null}
-Assert ((Get-SmProfileReport $args90 $leaver $ctx $now 'LOANER-1').Profiles[0].decision -eq 'ReviewLogCoverage') 'Missing Security log coverage downgrades to review'
+Assert ((Get-SmProfileReport $args90 $leaver $ctx $now $sharedPc).Profiles[0].decision -eq 'ReviewLogCoverage') 'Missing Security log coverage downgrades to review'
 $ctx = New-Context; $ctx.Admins = [pscustomobject]@{Known=$false;Sids=@()}
-Assert ((Get-SmProfileReport $args90 $leaver $ctx $now 'LOANER-1').Profiles[0].decision -eq 'ReviewAdminUnknown') 'Unknown admin membership downgrades to review'
+Assert ((Get-SmProfileReport $args90 $leaver $ctx $now $sharedPc).Profiles[0].decision -eq 'ReviewAdminUnknown') 'Unknown admin membership downgrades to review'
 $ctx = New-Context; $ctx.IntuneUpns = @(); $ctx.LogonCounts = @{}
-Assert ((Get-SmProfileReport $args90 $leaver $ctx $now 'LOANER-1').Profiles[0].decision -eq 'ReviewPrimaryUnknown') 'No primary source downgrades to review'
-$r = Get-SmProfileReport $args90 $leaver $null $now 'LOANER-1'
+Assert ((Get-SmProfileReport $args90 $leaver $ctx $now $sharedPc).Profiles[0].decision -eq 'ReviewPrimaryUnknown') 'No primary source downgrades to review'
+$r = Get-SmProfileReport $args90 $leaver $null $now $sharedPc
 Assert ($r.Profiles[0].decision -like 'Review*' -and $r.Errors.Count -ge 1) 'Missing worker context fails closed'
 function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$true;Light=$false;EntriesVisited=1} }
-Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now 'LOANER-1').Profiles[0].decision -eq 'ReviewPst') 'Partial size walk cannot rule out a PST'
+Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0].decision -eq 'ReviewPst') 'Partial size walk cannot rule out a PST'
 function Test-SmProfilePath($Path) { $false }
-$p = (Get-SmProfileReport $args90 $leaver (New-Context) $now 'LOANER-1').Profiles[0]
+$p = (Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0]
 Assert ($p.decision -eq 'ReviewPst' -and $null -eq $p.totalBytes -and $p.sizePartial) 'Unconventional profile path is never walked'
 ${function:Test-SmProfilePath} = $realProfilePath; ${function:Get-SmProfileBytes} = $realBytes
 
@@ -255,16 +256,16 @@ try {
  $realProfilePath = ${function:Test-SmProfilePath}; $realSafePath = ${function:Test-SmSafePath}
  function Test-SmProfilePath($Path) { $Path -eq $script:Profile.LocalPath }
  function Test-SmSafePath { $true }
- $env:COMPUTERNAME = 'LOANER-1'
+ $env:COMPUTERNAME = $sharedPc
  # Control: the same fixture in Cleanup mode does reach every removal hook, so the hooks are live.
  $null = Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true -ComponentCleanup true)
  Assert (($script:mutations -match '^removeProfile').Count -eq 1 -and ($script:mutations -match '^delete').Count -ge 1 -and $script:mutations -contains 'componentCleanup') ('Control run reaches removal hooks: ' + ($script:mutations -join ';'))
  $script:mutations.Clear(); $script:collectModes = @()
- $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true -SharedDevices 'LOANER-1' -ProfileAgeDays 90)
+ $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true -SharedDevices $sharedPc -ProfileAgeDays 90)
  Assert ($script:mutations.Count -eq 0 -and $r.Actions.Count -eq 0 -and (Test-Path -LiteralPath $old)) ('ProfileReport run mutated: ' + ($script:mutations -join ';'))
  Assert ($script:collectModes -contains 'Report' -and $r.ProfileReport.Profiles[0].ageDecision -eq 'StaleCandidate' -and $r.ProfileReport.Profiles[0].decision -eq 'ReviewKfmUnverified') 'Report collected identity context; deletable-by-age profile reported as review'
  # A hand-built argument set that skips Get-SmArguments still cannot reach the mutating branch.
- $hostile = Get-SmArguments -Mode Cleanup -RemoveProfiles true -ComponentCleanup true; $hostile.ProfileReport = $true; $hostile.SharedDevices = @('LOANER-1'); $hostile.PrimaryUserHint = ''
+ $hostile = Get-SmArguments -Mode Cleanup -RemoveProfiles true -ComponentCleanup true; $hostile.ProfileReport = $true; $hostile.SharedDevices = @($sharedPc); $hostile.PrimaryUserHint = ''
  $r = Invoke-SmMaintenance $hostile
  Assert ($script:mutations.Count -eq 0 -and $r.Actions.Count -eq 0 -and (Test-Path -LiteralPath $old)) ('ProfileReport with Cleanup arguments mutated: ' + ($script:mutations -join ';'))
  $script:SmSave = { param($Report) }
