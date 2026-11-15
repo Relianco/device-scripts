@@ -92,10 +92,11 @@ function Invoke-Run { param([string]$Name, [string]$Blob = $blob, [string]$Actio
     $r = Invoke-RelianRunner -PackageUrl 'https://example.invalid/p' -PackageSha256 $H -ToolkitUrl 'https://example.invalid/t' -ToolkitSha256 $H -BrandPackUrl 'https://example.invalid/b' -BrandPackSha256 $H -Action $Action -PinVersion '1.0.0' -PackageArguments $Blob -ReportOutputPath $Name 6>$null
     return [int]$r
 }
-foreach ($bad in @('report.json', 'rel\report.json', '.\report.json')) {
+foreach ($bad in @('report.json', 'rel\report.json', '.\report.json', 'C:report.json', '\report.json', '\\host', 'C:')) {
     $script:StubStdout = $report
     if ((Invoke-Run -Name $bad) -ne 1 -or $script:calls.Count -ne 0 -or $script:writes.Count -ne 0) { Fail "relative path [$bad] was accepted" }
 }
+foreach ($good in @('C:\ProgramData\r\report.json', 'D:/r/report.json', '\\host\share\report.json')) { $null = Invoke-Run -Name $good; if ($script:writes.Count -ne 1) { Fail "qualified path [$good] was refused" } }
 if ((Invoke-Run -Name $field -H '') -ne 0 -or $script:writes.Count -ne 0) { Fail 'empty hash did not exit 0 quietly' }
 
 # Wiring: writes after a successful run; never after a failed run, nor with no field set.

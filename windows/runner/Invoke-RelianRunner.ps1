@@ -655,7 +655,9 @@ function Invoke-RelianRunner {
         return 0
     }
 
-    if ($ReportOutputPath -ne '' -and -not [System.IO.Path]::IsPathRooted($ReportOutputPath)) {
+    # A drive-qualified or UNC path. IsPathRooted also accepts C:name and \name, which depend on the current drive.
+    $fullyQualified = $ReportOutputPath -match '\A([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/])' -or ([System.IO.Path]::DirectorySeparatorChar -eq '/' -and $ReportOutputPath.StartsWith('/'))
+    if ($ReportOutputPath -ne '' -and -not $fullyQualified) {
         Write-RelianRunnerError 'ReportOutputPath must be an absolute path'
         return 1
     }

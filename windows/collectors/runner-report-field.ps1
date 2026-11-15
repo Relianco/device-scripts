@@ -58,14 +58,28 @@ $script:NewHandoffDir = {
     return $path
 }
 $script:DownloadFile = { param($Url, $Destination) Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 120 }
+$script:RetryDelay = { param($Seconds) Start-Sleep -Seconds $Seconds }
 $script:RunRunner = {
     param($RunnerFile, $Arguments)
     $hostPath = (Get-Process -Id $PID).Path
-    & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerFile @Arguments
+    # Out-Host keeps the runner's output out of this function's return value: only the code is returned.
+    & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerFile @Arguments | Out-Host
     return [int]$LASTEXITCODE
 }
 $script:SetCustomField = { param($Name, $Value) Ninja-Property-Set $Name $Value }
 $script:TestCustomFieldCmd = { [bool](Get-Command -Name 'Ninja-Property-Set' -ErrorAction SilentlyContinue) }
+
+# Timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504: the runner's retry classes.
+function Test-RelianRetryable {
+    param($Exception)
+    for ($e = $Exception; $null -ne $e; $e = $e.InnerException) {
+        $resp = $e.PSObject.Properties['Response']
+        if ($resp -and $resp.Value) { return @(408, 429, 500, 502, 503, 504) -contains [int]$resp.Value.StatusCode }
+        if ($e -is [TimeoutException] -or $e -is [Threading.Tasks.TaskCanceledException] -or $e -is [Net.Sockets.SocketException]) { return $true }
+        if ($e -is [Net.WebException] -and @('Timeout', 'NameResolutionFailure', 'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'ConnectionClosed') -contains [string]$e.Status) { return $true }
+    }
+    return $false
+}
 
 function Get-RelianReportLine {
     # Returns the report line, or $null. The file is trusted only if fresh, not a link, and well formed.
@@ -85,26 +99,35 @@ function Get-RelianReportLine {
 function Invoke-RelianReportField {
     param([string]$RunnerUrl, [string]$RunnerSha256, [string]$ReportCustomField, [string[]]$RunnerArguments)
     $field = [string]$ReportCustomField
-    if ($field -notmatch '\A[A-Za-z][A-Za-z0-9]{0,39}\z') { Write-Output 'invalid ReportCustomField'; return 1 }
-    if ($RunnerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Write-Output 'refusing a URL that contains userinfo'; return 1 }
-    if ([string]::IsNullOrWhiteSpace($RunnerUrl) -or [string]::IsNullOrWhiteSpace($RunnerSha256)) { Write-Output 'RunnerUrl and RunnerSha256 are required'; return 1 }
-    if (@($RunnerArguments | Where-Object { $_ -match '\A-ReportOutputPath\z' }).Count) { Write-Output 'ReportOutputPath is set by this script'; return 1 }
+    if ($field -notmatch '\A[A-Za-z][A-Za-z0-9]{0,39}\z') { Write-Host 'invalid ReportCustomField'; return 1 }
+    if ($RunnerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Write-Host 'refusing a URL that contains userinfo'; return 1 }
+    # An empty hash is the off switch, as in the runner: exit 0 before anything is downloaded.
+    if ([string]::IsNullOrWhiteSpace($RunnerSha256)) { return 0 }
+    # shortcut: the digest is compared case-insensitively, as the runner does; only the shape is checked here.
+    if ($RunnerSha256.Trim() -notmatch '\A[0-9A-Fa-f]{64}\z') { Write-Host 'RunnerSha256 must be 64 hex characters'; return 1 }
+    if ([string]::IsNullOrWhiteSpace($RunnerUrl)) { Write-Host 'RunnerUrl is required'; return 1 }
+    if (@($RunnerArguments | Where-Object { $_ -match '\A-ReportOutputPath\z' }).Count) { Write-Host 'ReportOutputPath is set by this script'; return 1 }
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
 
     $dir = & $script:NewHandoffDir
     try {
         $runnerFile = Join-Path $dir 'runner.ps1'
         $reportFile = Join-Path $dir 'report.json'
-        try { & $script:DownloadFile $RunnerUrl $runnerFile } catch { Write-Output 'runner download failed'; return 1 }
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $runnerFile).Hash -ne $RunnerSha256.Trim()) { Write-Output 'hash mismatch for runner'; return 1 }
+        $downloaded = $false
+        for ($attempt = 1; $attempt -le 3 -and -not $downloaded; $attempt++) {
+            try { & $script:DownloadFile $RunnerUrl $runnerFile; $downloaded = $true }
+            catch { if ($attempt -eq 3 -or -not (Test-RelianRetryable -Exception $_.Exception)) { break }; & $script:RetryDelay (2 * $attempt) }
+        }
+        if (-not $downloaded) { Write-Host 'runner download failed'; return 1 }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $runnerFile).Hash -ne $RunnerSha256.Trim()) { Write-Host 'hash mismatch for runner'; return 1 }
         $started = [datetime]::UtcNow
         $code = [int](& $script:RunRunner $runnerFile (@($RunnerArguments) + @('-ReportOutputPath', $reportFile)))
         if ($code -ne 0) { return $code }
         $line = Get-RelianReportLine -Path $reportFile -StartedUtc $started
         if ($null -eq $line) { return $code }   # not a report run, or no valid report: nothing to write
-        if (-not [bool](& $script:TestCustomFieldCmd)) { Write-Output "report field '$field' not written: custom-field cmdlet not available"; return $code }
-        try { & $script:SetCustomField $field $line } catch { Write-Output "report field '$field' not written: write failed"; return $code }
-        Write-Output "report written to custom field '$field'"
+        if (-not [bool](& $script:TestCustomFieldCmd)) { Write-Host "report field '$field' not written: custom-field cmdlet not available"; return $code }
+        try { & $script:SetCustomField $field $line } catch { Write-Host "report field '$field' not written: write failed"; return $code }
+        Write-Host "report written to custom field '$field'"
         return $code
     } finally {
         Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
@@ -112,4 +135,4 @@ function Invoke-RelianReportField {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-exit (Invoke-RelianReportField -RunnerUrl $RunnerUrl -RunnerSha256 $RunnerSha256 -ReportCustomField $ReportCustomField -RunnerArguments $RunnerArguments)
+exit ([int](Invoke-RelianReportField -RunnerUrl $RunnerUrl -RunnerSha256 $RunnerSha256 -ReportCustomField $ReportCustomField -RunnerArguments $RunnerArguments))
