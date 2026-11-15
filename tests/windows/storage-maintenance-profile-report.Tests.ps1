@@ -24,7 +24,7 @@ Throws { Get-SmArguments -PrimaryUserHint "a`nb" } 'PrimaryUserHint'
 
 # --- Decision gates. Every gate is flipped alone from an all-pass baseline.
 $kfmOk = [pscustomobject]@{state='verified';redirected=3;accounts=1;localOneDriveFiles=0;outsideKfmFiles=0;error=$null}
-$pass = @{IsPrimary=$false;IsService=$false;IsAdmin=$false;AdminKnown=$true;PrimaryKnown=$true;CoverageDays=120;AgeDays=90;PstBytes=0;PstFiles=0;SizePartial=$false;Shared=$true;Kfm=$kfmOk}
+$pass = @{IsPrimary=$false;IsService=$false;IsAdmin=$false;AdminKnown=$true;PrimaryKnown=$true;CoverageDays=120;AgeDays=90;PstBytes=0;PstFiles=0;MediaFiles=0;SizePartial=$false;Shared=$true;Kfm=$kfmOk}
 function Kfm($Change) { $k = [ordered]@{}; foreach ($p in $kfmOk.PSObject.Properties) { $k[$p.Name] = $p.Value }; foreach ($n in $Change.Keys) { $k[$n] = $Change[$n] }; [pscustomobject]$k }
 function Decide($Base, $Change) { $f = $pass.Clone(); foreach ($k in $Change.Keys) { $f[$k] = $Change[$k] }; (Get-SmReportDecision $Base 'age reason' $f).Decision }
 Assert ((Decide 'StaleCandidate' @{}) -eq 'StaleCandidate') 'Only a profile that passes every gate is a (report-only) candidate'
@@ -50,10 +50,16 @@ $cases = @(
  @(@{Kfm=(Kfm @{localOneDriveFiles=1})}, 'ReviewKfmUploadUnproven'),
  @(@{Kfm=(Kfm @{localOneDriveFiles=$null})}, 'ReviewKfmUploadUnproven'),
  @(@{Kfm=(Kfm @{outsideKfmFiles=1})}, 'ReviewOutsideKfm'),
- @(@{Kfm=(Kfm @{outsideKfmFiles=$null})}, 'ReviewOutsideKfm')
+ @(@{Kfm=(Kfm @{outsideKfmFiles=$null})}, 'ReviewOutsideKfm'),
+ @(@{MediaFiles=1}, 'ReviewUserFoldersNotEmpty'),
+ @(@{MediaFiles=$null}, 'ReviewUserFoldersNotEmpty')
 )
 foreach ($case in $cases) { $got = Decide 'StaleCandidate' $case[0]; Assert ($got -eq $case[1]) ("gate $(($case[0].Keys) -join ','): expected $($case[1]), got $got") }
 Assert ((Decide 'StaleCandidate' @{CoverageDays=90}) -eq 'StaleCandidate') 'Coverage equal to the threshold passes'
+# The Downloads/Videos/Music gate is one named switch: turning it off drops only that gate.
+$script:SmMediaFolderGate = $false
+Assert ((Decide 'StaleCandidate' @{MediaFiles=4}) -eq 'StaleCandidate' -and (Decide 'StaleCandidate' @{MediaFiles=4;PstFiles=1}) -eq 'ReviewPst') 'SmMediaFolderGate=$false drops the user-folder gate and nothing else'
+$script:SmMediaFolderGate = $true
 foreach ($base in @('Protected','KeepRecentConfirmed','KeepRecentProfileService')) { Assert ((Decide $base @{IsPrimary=$true;Shared=$false}) -eq $base) "$base passes through unchanged" }
 Assert ((Decide 'ReviewInconsistent' @{}) -eq 'ReviewInconsistent') 'Age-engine Review is never upgraded'
 Assert ((Decide 'ReviewFallbackOnly' @{}) -eq 'ReviewFallbackOnly') 'An all-pass KFM never upgrades an age-engine Review'
@@ -64,8 +70,8 @@ $kfms = @($null, $kfmOk, (Kfm @{state='unknown'}), (Kfm @{localOneDriveFiles=2})
 $hits = 0
 for ($mask = 0; $mask -lt [math]::Pow(2, $names.Count); $mask++) {
  $change = @{}; for ($i = 0; $i -lt $names.Count; $i++) { $change[$names[$i]] = [bool]($mask -band (1 -shl $i)) }
- foreach ($cov in @($null, 10, 365)) { $change.CoverageDays = $cov; foreach ($pst in @($null, 0, 5)) { $change.PstBytes = $pst; $change.PstFiles = $pst; foreach ($k in $kfms) { $change.Kfm = $k
-  if ((Decide 'StaleCandidate' $change) -eq 'StaleCandidate') { $hits++; Assert ($mask -eq 88 -and $cov -eq 365 -and $pst -eq 0 -and $k -eq $kfmOk) ('Candidate from a failing gate: ' + ($change | ConvertTo-Json -Compress -Depth 3)) } } } }
+ foreach ($cov in @($null, 10, 365)) { $change.CoverageDays = $cov; foreach ($pst in @($null, 0, 5)) { $change.PstBytes = $pst; $change.PstFiles = $pst; foreach ($k in $kfms) { $change.Kfm = $k; foreach ($media in @($null, 0, 3)) { $change.MediaFiles = $media
+  if ((Decide 'StaleCandidate' $change) -eq 'StaleCandidate') { $hits++; Assert ($mask -eq 88 -and $cov -eq 365 -and $pst -eq 0 -and $k -eq $kfmOk -and $media -eq 0) ('Candidate from a failing gate: ' + ($change | ConvertTo-Json -Compress -Depth 3)) } } } } }
 }
 Assert ($hits -eq 1) "Exactly one all-pass combination is a candidate, got $hits"
 
@@ -112,6 +118,7 @@ try {
  Assert ($s.Partial -and $s.Skipped -eq 8 -and $s.CompatLinks -eq 2) "Unexpected links and every unpopulated cloud dir make the size partial; compat junctions do not, skipped=$($s.Skipped)"
  Assert ($s.OneDriveLocal -eq 3) "Every local OneDrive file counts, placeholder or not (an edit can wait behind a tag); desktop.ini, ~`$ owner files and the sync-root marker never upload, got $($s.OneDriveLocal)"
  Assert ($s.Bytes.outsideKfm -eq 800 -and $s.OutsideKfmFiles -eq 2) "Desktop/Documents files outside OneDrive counted, desktop.ini excluded, got $($s.Bytes.outsideKfm)"
+ Assert ($s.MediaFiles -eq 1) "A file in Downloads counts for the user-folder gate, got $($s.MediaFiles)"
  $s = Get-SmProfileBytes $profileRoot $null 3 30
  Assert ($s.Partial -and $s.EntriesVisited -eq 3) 'Entry budget bounds the walk'
  $script:SmScanGuard = { [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('Setup started')} }
@@ -293,7 +300,7 @@ function New-Context { [pscustomobject]@{Log=[pscustomobject]@{Known=$true;Oldes
 $realProfilePath = ${function:Test-SmProfilePath}; $realBytes = ${function:Get-SmProfileBytes}
 function Test-SmProfilePath($Path) { $true }
 $script:pending = 0
-function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$false;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocal=$script:pending;OutsideKfmFiles=0} }
+function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$false;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocal=$script:pending;OutsideKfmFiles=0;MediaFiles=0} }
 $script:hiveReads = 0; $script:SmReadHive = { param($Path, $Root) $script:hiveReads++; throw 'locked' }
 $args90 = @{ProfileAgeDays=90;MaxFiles=1000;MaxSeconds=30;SharedDevices=@($sharedPc);PrimaryUserHint=''}
 $assessed = @(
@@ -351,7 +358,7 @@ $ctx = New-Context; $ctx.IntuneUpns = @(); $ctx.LogonCounts = @{}
 Assert ((Get-SmProfileReport $args90 $leaver $ctx $now $sharedPc).Profiles[0].decision -eq 'ReviewPrimaryUnknown') 'No primary source downgrades to review'
 $r = Get-SmProfileReport $args90 $leaver $null $now $sharedPc
 Assert ($r.Profiles[0].decision -like 'Review*' -and $r.Errors.Count -ge 1) 'Missing worker context fails closed'
-function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$true;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0} }
+function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$true;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0;MediaFiles=0} }
 Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0].decision -eq 'ReviewPst') 'Partial size walk cannot rule out a PST'
 function Test-SmProfilePath($Path) { $false }
 $p = (Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0]
@@ -421,13 +428,22 @@ try {
  function Test-SmProfilePath($Path) { $Path -eq $script:Profile.LocalPath }
  function Test-SmSafePath { $true }
  $env:COMPUTERNAME = $sharedPc
- # Control: the same fixture in Cleanup mode does reach every removal hook, so the hooks are live.
+ $auditDir = Join-Path $root 'audit'; $null = New-Item -ItemType Directory -Path $auditDir
+ $script:SmAuditDirectory = { $auditDir }
+ # Control: the same fixture in Cleanup mode, with the removal plan and recheck gate forced open,
+ # does reach every removal hook, so the hooks are live.
+ $realPlan = $script:SmRemovalPlan; $realRecheck = $script:SmRecheckGate
+ $script:SmRemovalPlan = { param($A, $Report) [pscustomobject]@{Allowed=$true;Code='Ready';Candidates=@($Report.Profiles)} }
+ $script:SmRecheckGate = { [pscustomobject]@{decision='StaleCandidate';lastLogon4624Utc=$null} }
  $null = Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -RemoveProfiles true -ComponentCleanup true)
+ $script:SmRemovalPlan = $realPlan; $script:SmRecheckGate = $realRecheck
  Assert (($script:mutations -match '^removeProfile').Count -eq 1 -and ($script:mutations -match '^delete').Count -ge 1 -and $script:mutations -contains 'componentCleanup') ('Control run reaches removal hooks: ' + ($script:mutations -join ';'))
  $script:mutations.Clear(); $script:collectModes = @()
  $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true -SharedDevices $sharedPc -ProfileAgeDays 90)
  Assert ($script:mutations.Count -eq 0 -and $r.Actions.Count -eq 0 -and (Test-Path -LiteralPath $old)) ('ProfileReport run mutated: ' + ($script:mutations -join ';'))
  Assert ($script:collectModes -contains 'Report' -and $r.ProfileReport.Profiles[0].ageDecision -eq 'StaleCandidate' -and $r.ProfileReport.Profiles[0].decision -eq 'ReviewKfmUnknown') 'Report collected identity context; deletable-by-age profile without a readable hive reported as review'
+ $chain = Test-SmAuditChain $auditDir
+ Assert ($chain.Valid -and $r.Audit.reportHash -eq $chain.Entries[-1].hash -and $chain.Entries[-1].kind -eq 'report' -and $chain.Entries[-2].kind -eq 'decision' -and $chain.Entries[-2].decision -eq 'ReviewKfmUnknown') 'A report run records its decisions and seals them on the audit chain'
  # A full candidate is still only a report line: same run with KFM verified reaches no removal hook.
  $realKfm = ${function:Get-SmKfmState}
  function Get-SmKfmState { [pscustomobject]@{state='verified';redirected=3;accounts=1;localOneDriveFiles=0;outsideKfmFiles=0;error=$null} }

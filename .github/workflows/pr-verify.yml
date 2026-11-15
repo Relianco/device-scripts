@@ -66,6 +66,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/storage-maintenance-profile-report.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Audit chain, atomic replace and the lock file on NTFS, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/storage-maintenance-profile-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/storage-maintenance-profile-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/update-maintenance.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/maintenance-evidence.Tests.ps1

@@ -298,6 +298,12 @@ try {
  $scan=Get-SmScan @($many) 1000 30 7
  Assert ($scan.Partial -and $scan.Light -and $scan.EntriesVisited -lt 140) 'Setup starting during scan stops traversal'
  $script:SmScanGuard={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
+ # The recheck tests below drive the per-profile path with the removal plan and gate matrix
+ # forced open; those gates, the audit chain and the cap have their own tests.
+ $auditTmp=Join-Path $root 'audit'; $null=New-Item -ItemType Directory -Path $auditTmp
+ $script:SmAuditDirectory={ $auditTmp }
+ $script:SmRemovalPlan={ param($A,$Report) [pscustomobject]@{Allowed=$true;Code='Ready';Candidates=@($Report.Profiles)} }
+ $script:SmRecheckGate={ [pscustomobject]@{decision='StaleCandidate';lastLogon4624Utc=$null} }
  # A changed profile cannot be deleted after the first inventory.
  $script:profileReads=0; $script:profileRemovals=0
  $script:SmProfileHiveLoaded={ $false }
