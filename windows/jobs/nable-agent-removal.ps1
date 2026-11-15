@@ -111,16 +111,41 @@ function Test-NaAppEntry {
     return ($Entry.Name -match $script:NaNamePattern) -or ($Entry.Publisher -match $script:NaPublisherPattern)
 }
 
-# The agent's service by name, or by an executable anywhere under an agent folder.
+# True when the path sits inside an agent folder: a direct child of Program Files or ProgramData
+# with an agent folder name. A same-named folder anywhere else is another product's.
+function Test-NaInAgentFolder {
+    param([AllowEmptyString()][string]$Path)
+    foreach ($parent in & $script:NaFolderParents) {
+        $prefix = $parent.TrimEnd('\') + '\'
+        if (-not $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $rest = $Path.Substring($prefix.Length)
+        $cut = $rest.IndexOf('\')
+        if ($cut -gt 0 -and $rest.Substring(0, $cut) -match $script:NaFolderPattern) { return $true }
+    }
+    return $false
+}
+
+function Get-NaExecutable {
+    param([AllowEmptyString()][string]$Command)
+    ([regex]::Match($Command, '\A\s*(?:"(?<e>[^"]+)"|(?<e>.+?\.exe)(?=\s|\z)|(?<e>\S+))')).Groups['e'].Value
+}
+
+# The agent's service by name, or by an executable inside an agent folder.
 function Test-NaServiceEntry {
     param($Service)
     if (Test-NaProtected "$($Service.Name) $($Service.DisplayName) $($Service.Path)") { return $false }
     if ($Service.Name -match $script:NaServicePattern) { return $true }
-    $exe = ([regex]::Match("$($Service.Path)", '\A\s*(?:"(?<e>[^"]+)"|(?<e>.+?\.exe)(?=\s|\z)|(?<e>\S+))')).Groups['e'].Value
-    foreach ($segment in ($exe -split '[\\/]' | Select-Object -SkipLast 1)) {
-        if ($segment -match $script:NaFolderPattern) { return $true }
-    }
-    return $false
+    return Test-NaInAgentFolder (Get-NaExecutable "$($Service.Path)")
+}
+
+# A leftover Add/Remove Programs key is deleted only when its uninstaller lived in an agent folder
+# and that file is now gone. Otherwise the key may be the only sign the software is still installed,
+# so it stays and the run fails. An MSI entry keeps its Windows Installer registration, so it stays too.
+function Test-NaOrphanKey {
+    param($Entry)
+    if ($Entry.Msi -or $Entry.Uninstall -match '(?i)msiexec') { return $false }
+    $exe = Get-NaExecutable "$($Entry.Uninstall)"
+    return $exe -and (Test-NaInAgentFolder $exe) -and -not (& $script:NaFileExists $exe)
 }
 
 function Get-NaState {
@@ -174,7 +199,10 @@ function Invoke-NableRemovalJob {
             foreach ($dir in $left.Folders) {
                 try { & $script:NaRemoveFolder $dir; $log.Add("folder removed: $dir") } catch { $log.Add("folder failed: $dir") }
             }
-            foreach ($entry in $left.Apps) { & $script:NaDeleteKey $entry.Key; $log.Add("uninstall key removed: $($entry.Name)") }
+            foreach ($entry in $left.Apps) {
+                if (Test-NaOrphanKey $entry) { & $script:NaDeleteKey $entry.Key; $log.Add("uninstall key removed: $($entry.Name)") }
+                else { $log.Add("uninstall key kept: $($entry.Name)") }
+            }
             $after = Get-NaState
             if (Test-NaClean $after) {
                 $status = 'removed'; $exitCode = 0

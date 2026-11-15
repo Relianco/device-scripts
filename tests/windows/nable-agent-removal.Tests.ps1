@@ -34,6 +34,7 @@ function Reset-Test {
     $script:Runs = [Collections.Generic.List[string]]::new()
     $script:Removed = [Collections.Generic.List[string]]::new()
     $script:UninstallWorks = $true
+    $script:MsiWorks = $true
     $script:FolderLocked = $false
 }
 $script:NaReadUninstall = { $script:Apps.ToArray() }
@@ -44,7 +45,7 @@ $script:NaSettle = { }
 $script:NaFileExists = { param($Path) $script:Dirs -contains (Get-Parent $Path) }
 $script:NaRun = { param($File, $Arguments)
     $script:Runs.Add("$File $($Arguments -join ' ')")
-    if (-not $script:UninstallWorks) { return 1603 }
+    if (-not $(if ($File -eq 'msiexec.exe') { $script:MsiWorks } else { $script:UninstallWorks })) { return 1603 }
     if ($File -eq 'msiexec.exe') {
         foreach ($a in @($script:Apps | Where-Object { $_.Id -eq $Arguments[1] })) { [void]$script:Apps.Remove($a) }
     } else {
@@ -66,12 +67,12 @@ function Add-Protected {
     $script:Apps.Add((New-App 'S1' 'Sentinel Agent' 'SentinelOne, Inc.' 'C:\Program Files\SentinelOne\uninstall.exe'))
     $script:Apps.Add((New-App 'GSA' 'Global Secure Access Client' 'Microsoft Corporation' 'C:\x\unins000.exe'))
     $script:Apps.Add((New-App 'WG' 'WireGuard' 'WireGuard LLC' 'MsiExec.exe /X{B}'))
-    $script:Svcs.Add((New-Svc 'NinjaRMMAgent' '"C:\Program Files (x86)\sitka-office\NinjaRMMAgent.exe" /service'))
+    $script:Svcs.Add((New-Svc 'NinjaRMMAgent' '"C:\Program Files (x86)\vendor-office\NinjaRMMAgent.exe" /service'))
     $script:Svcs.Add((New-Svc 'SentinelAgent' '"C:\Program Files\SentinelOne\SentinelAgent.exe"'))
     $script:Svcs.Add((New-Svc 'GlobalSecureAccessTunnelingService' 'C:\Program Files\Global Secure Access Client\x.exe'))
     $script:Svcs.Add((New-Svc 'WireGuardTunnel$office' '"C:\Program Files\WireGuard\wireguard.exe" /tunnelservice x'))
     $script:Svcs.Add((New-Svc 'WazuhSvc' 'C:\Program Files (x86)\ossec-agent\wazuh-agent.exe'))
-    $script:Dirs.Add("$pf86\sitka-office")
+    $script:Dirs.Add("$pf86\vendor-office")
     $script:Dirs.Add("$pf86\Advanced Monitoring Agent NinjaOne")
 }
 
@@ -144,11 +145,35 @@ $r = Invoke-Job
 Assert-Same $r.Code 0 'fallback exit'
 Assert-Same $r.Json.status 'removed' 'fallback status'
 foreach ($want in @('svc Advanced Monitoring Agent', 'svc Advanced Monitoring Agent Web Protection', 'svc BASupportExpressStandaloneService_LOGICnow',
-        "dir $amaDir", 'dir C:\ProgramData\GetSupportService_LOGICnow', "key $u32\Advanced Monitoring Agent_is1", "key $u32\$gpCode")) {
+        "dir $amaDir", 'dir C:\ProgramData\GetSupportService_LOGICnow', "key $u32\Advanced Monitoring Agent_is1")) {
     Assert-True ($script:Removed -contains $want) "fallback removed [$want]"
 }
-Assert-Same $script:Removed.Count 7 'fallback removed only agent items'
+Assert-Same $script:Removed.Count 6 'fallback removed only agent items'
 Assert-True (@($r.Json.log) -contains 'uninstall Advanced Monitoring Agent exit 1603') 'log keeps the uninstaller exit code'
+
+# A failed MSI uninstall keeps its key and fails: deleting it would hide an installed product.
+Reset-Test
+Add-Agent
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 2 'failed MSI exit'
+Assert-Same $r.Json.status 'failed' 'failed MSI status'
+Assert-True (-not ($script:Removed -contains "key $u32\$gpCode")) 'failed MSI key kept'
+Assert-True (@($r.Json.apps) -contains 'Advanced Monitoring Agent GP') 'failed MSI reported'
+
+# A publisher-matched part installed outside the agent folders, whose uninstaller fails, keeps its key.
+Reset-Test
+$script:Dirs.Add('C:\Tools\Handler')
+$script:Apps.Add((New-App 'RHA' 'Request Handler Agent' 'N-able Technologies' '"C:\Tools\Handler\unins000.exe"'))
+$script:UninstallWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 2 'outside-folder part exit'
+Assert-Same $r.Json.status 'failed' 'outside-folder part is not reported removed'
+Assert-Same $script:Removed.Count 0 'outside-folder part key kept'
+
+# A same-named folder outside Program Files and ProgramData is another product's.
+Assert-True (-not (Test-NaServiceEntry (New-Svc 'Worker' 'C:\OtherSoftware\Take Control Agent\worker.exe'))) 'agent folder name elsewhere does not match'
+Assert-True (-not (Test-NaServiceEntry (New-Svc 'Worker' "$pf86\Vendor\MspPlatform\worker.exe"))) 'agent folder name deeper down does not match'
 
 # A locked folder: exit 2, failed, the folder named in the report.
 Reset-Test
