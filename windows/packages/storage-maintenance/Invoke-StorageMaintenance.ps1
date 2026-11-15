@@ -7,7 +7,7 @@ param([string]$DeploymentType, [string]$Action, [string]$PinVersion,
  [string]$Mode='Report', [string]$TempAgeDays='7', [string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false', [string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000', [string]$MaxSeconds='30', [string]$ProfileReport='false', [string]$PrimaryUserHint='', [string]$SharedDevices='',
- [string]$ReviewedReports='', [string]$RemovalCooldownDays='1')
+ [string]$ReviewedReports='', [string]$RemovalCooldownDays='1', [string]$Tier='None', [string]$CleanupSeconds='600')
 
 $script:SmPackagePath=$PSCommandPath
 
@@ -15,8 +15,10 @@ function Get-SmArguments {
  param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false',[string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
  [string]$MaxFiles='20000',[string]$MaxSeconds='30',[string]$ProfileReport='false',[string]$PrimaryUserHint='',[string]$SharedDevices='',
- [string]$ReviewedReports='',[string]$RemovalCooldownDays='1')
+ [string]$ReviewedReports='',[string]$RemovalCooldownDays='1',[string]$Tier='None',[string]$CleanupSeconds='600')
  if ($Mode -cnotin @('Report','Cleanup')) { throw 'Mode must be Report or Cleanup' }
+ if ($Tier -cnotin @('None','Safe','Aggressive')) { throw 'Tier must be None, Safe or Aggressive' }
+ if ($Tier -ne 'None' -and $Mode -ne 'Cleanup') { throw 'Tier needs Mode Cleanup' }
  $a=@{ Mode=$Mode; ExcludeProfiles=@($ExcludeProfiles.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
  if ($PrimaryUserHint.Length -gt 256 -or $PrimaryUserHint -match '[\x00-\x1f]') { throw 'Invalid PrimaryUserHint' }; $a.PrimaryUserHint=$PrimaryUserHint.Trim()
  $a.SharedDevices=@($SharedDevices.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -27,10 +29,12 @@ function Get-SmArguments {
  foreach($b in @(@('RemoveProfiles',$RemoveProfiles),@('ComponentCleanup',$ComponentCleanup),@('ProfileReport',$ProfileReport))) {
   if ($b[1] -cnotin @('true','false')) { throw "$($b[0]) must be true or false" }; $a[$b[0]]=$b[1] -ceq 'true'
  }
- foreach($n in @(@('TempAgeDays',$TempAgeDays,1,365),@('ProfileAgeDays',$ProfileAgeDays,30,3650),@('MaxFiles',$MaxFiles,1,2000000),@('MaxSeconds',$MaxSeconds,1,1800),@('RemovalCooldownDays',$RemovalCooldownDays,1,365))) {
+ foreach($n in @(@('TempAgeDays',$TempAgeDays,1,365),@('ProfileAgeDays',$ProfileAgeDays,30,3650),@('MaxFiles',$MaxFiles,1,2000000),@('MaxSeconds',$MaxSeconds,1,1800),@('RemovalCooldownDays',$RemovalCooldownDays,1,365),@('CleanupSeconds',$CleanupSeconds,60,3600))) {
   if ($n[1] -notmatch '^\d{1,7}$' -or [int]$n[1] -lt $n[2] -or [int]$n[1] -gt $n[3]) { throw "Invalid $($n[0])" }; $a[$n[0]]=[int]$n[1]
  }
  if ($a.ProfileReport -and ($a.Mode -ne 'Report' -or $a.RemoveProfiles -or $a.ComponentCleanup)) { throw 'ProfileReport is report-only: Mode must be Report and RemoveProfiles and ComponentCleanup false' }
+ # Both tiers include supported component cleanup (never ResetBase). A tier never removes profiles.
+ $a.Tier=$Tier; if ($Tier -ne 'None') { $a.ComponentCleanup=$true }
  return $a
 }
 
@@ -1506,13 +1510,230 @@ $script:SmUi={ param($Step)
  if($script:SmThemeError) { 'shown; black theme unavailable: '+$script:SmThemeError } else { 'shown' }
 }
 
+# Non-profile cleanup tiers (Mode=Cleanup with Tier=Safe or Aggressive). Each category deletes only
+# files older than TempAgeDays under a fixed root. Documents, Desktop, Downloads, OneDrive, Outlook
+# data, hiberfil, pagefile, profiles and live upgrade staging are never roots. Profiles stay in the
+# separate RemoveProfiles path above and are not part of any tier.
+$script:SmSkipAttributes=1024 -bor 4096 -bor 262144 -bor 4194304
+$script:SmCacheNames='^(Cache|Code Cache|GPUCache|CacheStorage|ShaderCache|GrShaderCache|DawnCache|DawnWebGPUCache|DawnGraphiteCache)$'
+# cleanmgr handlers the Aggressive tier selects. Anything not listed (DownloadsFolder, Recycle Bin,
+# User file versions, BranchCache, Language Pack) is cleared from the sageset profile every run.
+$script:SmCleanmgrHandlers=@('Active Setup Temp Folders','D3D Shader Cache','Delivery Optimization Files','Device Driver Packages','Downloaded Program Files','Internet Cache Files','Old ChkDsk Files','Setup Log Files','System error memory dump files','System error minidump files','Temporary Files','Temporary Setup Files','Thumbnail Cache','Update Cleanup','Upgrade Discarded Files','Windows Error Reporting Files','Windows Upgrade Log Files')
+$script:SmSageSet=77
+$script:SmWindowsOldDays=10
+
+# The path and every ancestor, read just before a delete. A junction swapped in after this
+# check is a residual race; checking right before each delete keeps the window to one call.
+function Test-SmPlainChain {
+ param([string]$Path)
+ $cur=[IO.Path]::GetFullPath($Path)
+ while($cur) {
+  try { if(([int64][IO.File]::GetAttributes($cur) -band $script:SmSkipAttributes) -ne 0) { return $false } } catch { return $false }
+  $cur=[IO.Path]::GetDirectoryName($cur)
+ }
+ $true
+}
+
+function Remove-SmAgedFiles {
+ param([string]$Root,[datetime]$CutoffUtc,[datetime]$DeadlineUtc,[string]$Include='.',[string]$Exclude='^$',[switch]$NoRecurse,[switch]$RemoveEmptyDirs,[switch]$IncludeRoot)
+ $res=[ordered]@{Root=$Root;Files=0;LogicalBytes=[int64]0;Failed=0;TimedOut=$false;Error=$null}
+ if(-not [IO.Directory]::Exists($Root)) { return [pscustomobject]$res }
+ if(-not (Test-SmPlainChain $Root)) { $res.Error='Root or an ancestor is a reparse point or cloud file'; return [pscustomobject]$res }
+ $dirs=New-Object Collections.Generic.List[string]; $stack=New-Object Collections.Generic.Stack[string]; $stack.Push($Root)
+ while($stack.Count) {
+  $dir=$stack.Pop(); $dirs.Add($dir)
+  try { $entries=@([IO.DirectoryInfo]::new($dir).EnumerateFileSystemInfos()) } catch { $res.Failed++; continue }
+  foreach($e in $entries) {
+   if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
+   if(([int64]$e.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
+   if($e -is [IO.DirectoryInfo]) { if(-not $NoRecurse) { $stack.Push($e.FullName) }; continue }
+   # A copied or extracted file keeps an old write time; the newer of the two dates counts.
+   $stamp=if($e.CreationTimeUtc -gt $e.LastWriteTimeUtc){$e.CreationTimeUtc}else{$e.LastWriteTimeUtc}
+   if($stamp -ge $CutoffUtc -or $e.Name -notmatch $Include -or $e.Name -match $Exclude) { continue }
+   try {
+    if(-not (Test-SmPlainChain $e.FullName)) { throw 'Reparse or cloud ancestor' }
+    $len=$e.Length; & $script:SmDelete $e.FullName; $res.Files++; $res.LogicalBytes+=$len
+   } catch { $res.Failed++ }
+  }
+ }
+ if($RemoveEmptyDirs) {
+  $last=if($IncludeRoot){0}else{1}
+  for($i=$dirs.Count-1;$i -ge $last;$i--) {
+   # Creation time, not write time: emptying a folder updates its write time. A folder an installer
+   # created just now is never pruned.
+   try { if([IO.Directory]::GetCreationTimeUtc($dirs[$i]) -lt $CutoffUtc -and -not ([IO.Directory]::EnumerateFileSystemEntries($dirs[$i]).GetEnumerator().MoveNext()) -and (Test-SmPlainChain $dirs[$i])) { [IO.Directory]::Delete($dirs[$i]) } } catch { }
+  }
+ }
+ [pscustomobject]$res
+}
+
+# Browser and Teams cache folders only: never profile data, cookies, logins or IndexedDB.
+function Get-SmAppCacheRoots {
+ param([string]$ProfilePath)
+ $bases=@('AppData\Local\Microsoft\Edge\User Data','AppData\Local\Google\Chrome\User Data','AppData\Local\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\EBWebView','AppData\Roaming\Microsoft\Teams')
+ foreach($b in $bases) {
+  $base=Join-Path $ProfilePath $b
+  if(-not [IO.Directory]::Exists($base) -or -not (Test-SmPlainChain $base)) { continue }
+  # Depth 3 reaches User Data\<profile>\Service Worker\CacheStorage.
+  $queue=New-Object Collections.Generic.Queue[object]; $queue.Enqueue(@($base,0))
+  while($queue.Count) {
+   $item=$queue.Dequeue()
+   try { $children=@([IO.DirectoryInfo]::new($item[0]).EnumerateDirectories()) } catch { continue }
+   foreach($c in $children) {
+    if(([int64]$c.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
+    if($c.Name -match $script:SmCacheNames) { $c.FullName } elseif($item[1] -lt 2) { $queue.Enqueue(@($c.FullName,$item[1]+1)) }
+   }
+  }
+ }
+}
+
+# Fixed category roots for one run. Pure apart from Get-SmAppCacheRoots, so the roots are testable.
+function Get-SmCleanupCategories {
+ param([string[]]$ProfilePaths,[string]$WinDir,[string]$ProgramData)
+ $wer=Join-Path $ProgramData 'Microsoft\Windows\WER'
+ $c=@(
+  @{Name='Temp';Root=(Join-Path $WinDir 'Temp');Prune=$true}
+  @{Name='WindowsUpdateDownload';Root=(Join-Path $WinDir 'SoftwareDistribution\Download');Prune=$true}
+  @{Name='CrashDumps';Root=(Join-Path $WinDir 'Minidump')}
+  @{Name='CrashDumps';Root=(Join-Path $WinDir 'LiveKernelReports')}
+  @{Name='CrashDumps';Root=$WinDir;Include='^MEMORY\.DMP$';NoRecurse=$true}
+  @{Name='CrashDumps';Root=(Join-Path $wer 'ReportArchive');Prune=$true}
+  @{Name='CrashDumps';Root=(Join-Path $wer 'ReportQueue');Prune=$true}
+  @{Name='CrashDumps';Root=(Join-Path $wer 'Temp');Prune=$true}
+  @{Name='ServicingLogs';Root=(Join-Path $WinDir 'Logs\CBS');Include='\.(log|cab)$';Exclude='^CBS\.log$';NoRecurse=$true}
+  @{Name='ServicingLogs';Root=(Join-Path $WinDir 'Logs\DISM');Include='\.log$';Exclude='^dism\.log$';NoRecurse=$true}
+ )
+ foreach($p in @($ProfilePaths | Where-Object { $_ })) {
+  $c+=@{Name='Temp';Root=(Join-Path $p 'AppData\Local\Temp');Prune=$true}
+  $c+=@{Name='CrashDumps';Root=(Join-Path $p 'AppData\Local\CrashDumps')}
+  foreach($cache in @(Get-SmAppCacheRoots $p)) { $c+=@{Name='AppCache';Root=$cache;Prune=$true} }
+ }
+ $c
+}
+
+# Recycle Bin items are aged by their $I record (deletion time), not by the deleted file's dates.
+function Remove-SmRecycleBin {
+ param([string]$Root,[datetime]$CutoffUtc,[datetime]$DeadlineUtc)
+ $res=[ordered]@{Root=$Root;Files=0;LogicalBytes=[int64]0;Failed=0;TimedOut=$false;Error=$null}
+ if(-not [IO.Directory]::Exists($Root) -or -not (Test-SmPlainChain $Root)) { return [pscustomobject]$res }
+ foreach($sidDir in @([IO.DirectoryInfo]::new($Root).EnumerateDirectories())) {
+  if(([int64]$sidDir.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
+  foreach($info in @($sidDir.EnumerateFiles('$I*'))) {
+   if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
+   if($info.LastWriteTimeUtc -ge $CutoffUtc) { continue }
+   $data=Join-Path $sidDir.FullName ('$R'+$info.Name.Substring(2))
+   try {
+    if([IO.Directory]::Exists($data)) {
+     $sub=Remove-SmAgedFiles $data ([datetime]::MaxValue) $DeadlineUtc -RemoveEmptyDirs -IncludeRoot
+     $res.Files+=$sub.Files; $res.LogicalBytes+=$sub.LogicalBytes; $res.Failed+=$sub.Failed
+     if($sub.TimedOut) { $res.TimedOut=$true; return [pscustomobject]$res }
+     if([IO.Directory]::Exists($data)) { throw 'Recycled folder not empty' }
+    } elseif([IO.File]::Exists($data)) {
+     if(-not (Test-SmPlainChain $data)) { throw 'Reparse or cloud item' }
+     $len=([IO.FileInfo]::new($data)).Length; & $script:SmDelete $data; $res.Files++; $res.LogicalBytes+=$len
+    }
+    if(-not (Test-SmPlainChain $info.FullName)) { throw 'Reparse or cloud item' }
+    & $script:SmDelete $info.FullName
+   } catch { $res.Failed++ }
+  }
+ }
+ [pscustomobject]$res
+}
+
+function Get-SmCleanmgrSelection {
+ param([string[]]$Available,[bool]$IncludePreviousInstallations)
+ $want=@($script:SmCleanmgrHandlers)+@(if($IncludePreviousInstallations){'Previous Installations'})
+ @($Available | Where-Object { $want -contains $_ })
+}
+
+# Windows.old removes the rollback option, so only after Windows' own 10-day rollback window.
+function Test-SmWindowsOldEligible {
+ param($CreatedUtc,[datetime]$Now=[datetime]::UtcNow)
+ $null -ne $CreatedUtc -and ([datetime]$CreatedUtc) -lt $Now.ToUniversalTime().AddDays(-$script:SmWindowsOldDays)
+}
+
+# Shrink only a limit above 5 % of the volume; UNBOUNDED reads as the uint64 maximum.
+function Test-SmShadowShrink { param($MaxSpace,$Capacity) [decimal]$Capacity -gt 0 -and [decimal]$MaxSpace -gt ([decimal]$Capacity*0.05) }
+
+$script:SmFreeBytes={ [int64](Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'" -OperationTimeoutSec 5 -ErrorAction Stop).FreeSpace }
+$script:SmDeliveryOptimization={ if(-not (Get-Command Delete-DeliveryOptimizationCache -ErrorAction SilentlyContinue)) { throw 'Delete-DeliveryOptimizationCache unavailable' }; Delete-DeliveryOptimizationCache -Force -ErrorAction Stop }
+$script:SmWindowsOldCreated={ $p=Join-Path $env:SystemDrive 'Windows.old'; if([IO.Directory]::Exists($p)) { ([IO.DirectoryInfo]::new($p)).CreationTimeUtc } }
+$script:SmCleanmgr={
+ param([bool]$IncludePreviousInstallations,[int]$Seconds)
+ $base='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'; $flag='StateFlags{0:D4}' -f $script:SmSageSet
+ $keys=@(Get-ChildItem -LiteralPath $base -ErrorAction Stop)
+ $selected=Get-SmCleanmgrSelection @($keys | ForEach-Object { $_.PSChildName }) $IncludePreviousInstallations
+ foreach($k in $keys) {
+  if($selected -contains $k.PSChildName) { Set-ItemProperty -LiteralPath $k.PSPath -Name $flag -Value 2 -Type DWord -ErrorAction Stop }
+  elseif($null -ne $k.GetValue($flag)) { Remove-ItemProperty -LiteralPath $k.PSPath -Name $flag -ErrorAction Stop }
+ }
+ $p=Start-Process -FilePath (Join-Path $env:windir 'System32\cleanmgr.exe') -ArgumentList ('/sagerun:'+$script:SmSageSet) -PassThru -WindowStyle Hidden
+ # Not killed on timeout: cleanmgr may be inside a servicing call.
+ if(-not $p.WaitForExit([math]::Max(1,$Seconds)*1000)) { return @{Handlers=$selected;State='stillRunning'} }
+ @{Handlers=$selected;State='exited';ExitCode=$p.ExitCode}
+}
+$script:SmShadowShrink={
+ $vol=@(Get-CimInstance Win32_Volume -Filter "DriveLetter='$($env:SystemDrive)'" -OperationTimeoutSec 5 -ErrorAction Stop)[0]
+ $storage=@(Get-CimInstance Win32_ShadowStorage -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Volume.DeviceID -eq $vol.DeviceID })
+ if(-not $storage.Count) { return 'noShadowStorage' }
+ if(-not (Test-SmShadowShrink $storage[0].MaxSpace $vol.Capacity)) { return 'alreadyAtOrBelow5Percent' }
+ $out=& (Join-Path $env:windir 'System32\vssadmin.exe') Resize ShadowStorage ('/For='+$env:SystemDrive) ('/On='+$env:SystemDrive) '/MaxSize=5%' 2>&1
+ if($LASTEXITCODE -ne 0) { throw ('vssadmin exit '+$LASTEXITCODE+': '+(($out | Out-String).Trim())) }
+ 'resizedTo5Percent'
+}
+
+function Invoke-SmCleanupTier {
+ param($A,[string[]]$ProfilePaths)
+ $steps=@(); $deadline=[datetime]::UtcNow.AddSeconds($A.CleanupSeconds); $cutoff=[datetime]::UtcNow.AddDays(-$A.TempAgeDays)
+ $measure={ param($Name,$Work)
+  $step=[ordered]@{Kind='category';Name=$Name;Status='withheld';Files=0;LogicalBytes=[int64]0;Failed=0;FreeBefore=$null;FreeAfter=$null;FreedBytes=$null;Detail=$null;Error=$null}
+  try {
+   if([datetime]::UtcNow -ge $deadline) { throw 'Cleanup time budget exhausted' }
+   if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed; tier stopped' }
+   $step.FreeBefore=& $script:SmFreeBytes
+   $out=& $Work
+   foreach($o in @($out | Where-Object { $_ -is [Collections.IDictionary] -or $_.PSObject.Properties['Files'] })) {
+    if($null -ne $o.Files) { $step.Files+=$o.Files; $step.LogicalBytes+=$o.LogicalBytes; $step.Failed+=$o.Failed; if($o.TimedOut) { $step.Error='Cleanup time budget exhausted' } }
+    if($o.Detail) { $step.Detail=$o.Detail }
+   }
+   $step.Status=if($step.Error){'partial'}else{'done'}
+  } catch { $step.Error=$_.Exception.Message }
+  try { if($null -ne $step.FreeBefore) { $step.FreeAfter=& $script:SmFreeBytes; $step.FreedBytes=$step.FreeAfter-$step.FreeBefore } } catch { }
+  [pscustomobject]$step
+ }
+ $categories=@(Get-SmCleanupCategories $ProfilePaths $env:windir $env:ProgramData)
+ foreach($name in @($categories | ForEach-Object { $_.Name } | Select-Object -Unique)) {
+  $mine=@($categories | Where-Object { $_.Name -eq $name })
+  $steps+=& $measure $name { foreach($c in $mine) { $opt=@{}; foreach($k in 'Include','Exclude') { if($c[$k]) { $opt[$k]=$c[$k] } }; Remove-SmAgedFiles $c.Root $cutoff $deadline @opt -NoRecurse:([bool]$c.NoRecurse) -RemoveEmptyDirs:([bool]$c.Prune) } }
+ }
+ $steps+=& $measure 'RecycleBin' { Remove-SmRecycleBin (Join-Path $env:SystemDrive '$Recycle.Bin') $cutoff $deadline }
+ $steps+=& $measure 'DeliveryOptimization' { $null=& $script:SmDeliveryOptimization; @{Detail='Delete-DeliveryOptimizationCache'} }
+ # The feature-upgrade package removes its ISO itself after success; a failed or rolled-back
+ # attempt leaves it. Only a terminal, aged attempt qualifies; a running or staged one never does.
+ $steps+=& $measure 'FeatureUpgradeIso' {
+  $dir=Join-Path $env:ProgramData 'Relian\FeatureUpgrade'; $statePath=Join-Path $dir 'state.json'
+  if(-not [IO.File]::Exists($statePath)) { return @{Detail='no attempt state'} }
+  $state=Read-SmBoundedText $statePath 65536 | ConvertFrom-Json -ErrorAction Stop
+  if("$($state.status)" -notin @('failed','rolledBack','alreadyCurrent')) { return @{Detail=('attempt '+$state.status+'; ISO kept')} }
+  $stamp=[datetime]::Parse([string]$state.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+  if($stamp -ge $cutoff) { return @{Detail='attempt newer than TempAgeDays; ISO kept'} }
+  Remove-SmAgedFiles $dir $cutoff $deadline -Include '\.iso(\.part)?$' -NoRecurse
+ }
+ if($A.Tier -eq 'Aggressive') {
+  $windowsOld=Test-SmWindowsOldEligible (& $script:SmWindowsOldCreated)
+  $steps+=& $measure 'Cleanmgr' { $r=& $script:SmCleanmgr $windowsOld ([int]($deadline-[datetime]::UtcNow).TotalSeconds); @{Detail=('{0}; previousInstallations={1}; handlers={2}' -f $r.State,$windowsOld,@($r.Handlers).Count)} }
+  $steps+=& $measure 'ShadowStorage' { @{Detail=(& $script:SmShadowShrink)} }
+ }
+ $steps
+}
+
 function ConvertTo-SmSummary {
  param($Report,[string]$ReportPath)
  # All strings are clipped before serialization; item limits and the UTF8 byte
  # fallback make truncation explicit without losing measured volume evidence.
  $clip={ param($Value,[int]$Limit=180) $text=[string]$Value; if($text.Length -gt $Limit) { return $text.Substring(0,$Limit)+'...' }; $text }
  $volumes={ param($Items) @($Items | Select-Object -First 4 | ForEach-Object { @{DeviceID=(& $clip $_.DeviceID 20);Size=$_.Size;FreeSpace=$_.FreeSpace} }) }
- $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true);ProfileRemoval=$Report.RemovalPlan;Audit=$(if($Report.Audit){[ordered]@{code=$Report.Audit.code;headSeq=$Report.Audit.headSeq;error=$Report.Audit.error}})}
+ $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true);Categories=@($Report.Actions | Where-Object { $_.Kind -eq 'category' } | Select-Object -First 12 | ForEach-Object { [ordered]@{Name=$_.Name;Status=$_.Status;Files=$_.Files;FreedBytes=$_.FreedBytes;Detail=(& $clip $_.Detail 80);Error=(& $clip $_.Error 80)} });ProfileRemoval=$Report.RemovalPlan;Audit=$(if($Report.Audit){[ordered]@{code=$Report.Audit.code;headSeq=$Report.Audit.headSeq;error=$Report.Audit.error}})}
  $json=$summary | ConvertTo-Json -Depth 6 -Compress
  if([Text.Encoding]::UTF8.GetByteCount($json) -gt 8000) {
   $summary.GuardReasons=@($summary.GuardReasons | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.Notifications=@(); $summary.Errors=@($summary.Errors | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.FreeSpaceDelta=@(); $summary.TopFolders=@($summary.TopFolders | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TopFiles=@($summary.TopFiles | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TempOpportunities=@($summary.TempOpportunities | Select-Object -First 1 | ForEach-Object { $_.Root=& $clip $_.Root 80; $_ }); $summary.Truncation='Byte cap reached; volume measurements, one consumer/category, first error and decision counts retained. See full local report.'
@@ -1523,7 +1744,7 @@ function ConvertTo-SmSummary {
 
 function Invoke-SmMaintenance {
  param($A)
- $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null; Audit=$null; RemovalPlan=$null }
+ $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only unless Tier is Safe or Aggressive, which delete cache-folder files older than TempAgeDays.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null; Audit=$null; RemovalPlan=$null }
  $acquired=$false; $audit=$null
  # A removal run evaluates the same gate matrix as a report run, freshly, in this run.
  $removal=($A.Mode -eq 'Cleanup' -and $A.RemoveProfiles -and -not $A.ProfileReport)
@@ -1681,6 +1902,12 @@ function Invoke-SmMaintenance {
        }
       }
      }
+     if($A.Tier -ne 'None') {
+      try { $r.Notifications+=& $script:SmUi ('Freeing disk space: '+$A.Tier+' cleanup of caches and old temporary files.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
+      $tierSteps=@(Invoke-SmCleanupTier $A @($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' -and $_.Special -eq $false } | ForEach-Object { $_.LocalPath }))
+      $r.Actions+=$tierSteps
+      if(@($tierSteps | Where-Object { $_.Error }).Count) { $r.Status='partial' }
+     }
      if($A.ComponentCleanup) {
       $step=[ordered]@{Kind='componentCleanup';Status='withheld';Error=$null}
       try { if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed' }; $step['ExitCode']=& $script:SmComponent; $step.Status='commandCompleted' } catch { $step.Error=$_.Exception.Message; $r.Status='partial' }; $r.Actions+=[pscustomobject]$step
@@ -1732,7 +1959,7 @@ if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { Write-Output '{"Status":"notApplicable","Reason":"Maintenance has no uninstall action"}'; exit 0 }
  try {
-  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices -ReviewedReports $ReviewedReports -RemovalCooldownDays $RemovalCooldownDays
+  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices -ReviewedReports $ReviewedReports -RemovalCooldownDays $RemovalCooldownDays -Tier $Tier -CleanupSeconds $CleanupSeconds
   $r=Invoke-SmMaintenance $a
   Complete-SmRun $r
   exit $script:SmExitCode
