@@ -1,0 +1,6 @@
+{
+  "name": "AD group member",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Base64-encoded UTF-8 JSON object, run on a domain controller. {\"User\":\"jdoe@example.com\",\"Group\":\"Staff\",\"ExpiresInDays\":\"7\"} adds jdoe to Staff and registers a task that removes the membership in 7 days, then deletes itself. \"ExpiresOn\":\"yyyy-MM-dd\" sets a date instead. Leave both out for a lasting membership. Add \"Section\":\"Evidence\" for a read-only check. Uninstall removes the membership and the task. Privileged groups and users not in AD are refused."
+}
