@@ -905,7 +905,9 @@ function Test-SmHistoricalUpgrade {
   if($MarkerAbsent) {
    if($null -ne $State -or [string]$CurrentBuild -notmatch '^\d{5,6}$' -or $CurrentBuild -lt 10240 -or $InstalledUtc.Year -lt 2000 -or $InstalledUtc -gt $BootUtc -or $BootUtc -gt [datetime]::UtcNow) { return $false }
   } else {
-   if($State.status -cne 'running' -or [string]$State.isoBuild -notmatch '^\d{5,6}$' -or [int]$State.isoBuild -ne $CurrentBuild) { return $false }
+   # feature-upgrade writes 'staged' once Setup exits 0 and leaves it there after the install reboot, so a
+   # staged marker whose target build is now running is the normal post-upgrade case. Same proofs apply.
+   if($State.status -cnotin @('running','staged') -or [string]$State.isoBuild -notmatch '^\d{5,6}$' -or [int]$State.isoBuild -ne $CurrentBuild) { return $false }
    $stamp=[datetime]::Parse([string]$State.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
    if($stamp.Year -lt 2000 -or $stamp -ge $InstalledUtc -or $InstalledUtc -gt $BootUtc -or $BootUtc -gt [datetime]::UtcNow) { return $false }
   }
@@ -1001,7 +1003,7 @@ function Get-SmGuards {
    foreach($name in $names) { if($name -notin @('SetupHostResult','SetupHostError','SetupPhase','DownlevelBuildNumber','InstallScenario','DownlevelProductName')) { $values[$name]=$null; continue }; if($moKey.GetValueKind($name) -notin @('DWord','QWord','String')) { throw 'MoSetup metadata type unknown' }; $values[$name]=$moKey.GetValue($name) }
   }
   if($hasState) { $s=Read-SmBoundedText $state 65536 | ConvertFrom-Json -ErrorAction Stop }
-  if($hasMo -and ((-not $hasState) -or $s.status -eq 'running') -and -not $light -and -not $created.Count) {
+  if($hasMo -and ((-not $hasState) -or $s.status -in @('running','staged')) -and -not $light -and -not $created.Count) {
    $image=(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State' -ErrorAction Stop).ImageState
    $ini=Read-SmBoundedText (Join-Path $env:SystemRoot 'Setup\State\State.ini') 16384
    $matches=@([regex]::Matches($ini,'(?m)^\s*ImageState\s*=\s*("?)(IMAGE_STATE_[A-Z_]+)\1\s*$'))

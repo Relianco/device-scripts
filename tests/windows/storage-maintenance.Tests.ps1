@@ -18,6 +18,11 @@ foreach($change in @(@{SetupHostResult=1},@{SetupHostError=1},@{SetupPhase=1},@{
 }
 foreach($target in @(27999,28001)) { $bad=$proof.Clone();$bad.State=$proof.State.Clone();$bad.State.isoBuild=$target; Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Exact target required' }
 foreach($stamp in @('bad','2026-10-03Z','2099-01-01Z')) { $bad=$proof.Clone();$bad.State=$proof.State.Clone();$bad.State.time=$stamp; Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Invalid chronology vetoes' }
+# After a successful upgrade the feature-upgrade marker still says 'staged'; with the target build running it is residue.
+$staged=$proof.Clone(); $staged.State=@{status='staged';isoBuild=28000;time='2026-10-01T00:00:00Z'}; Assert (Test-SmHistoricalUpgrade @staged) 'A staged marker whose target build now runs is historical'
+foreach($st in @('failed','rolledBack','Staged')) { $bad=$staged.Clone(); $bad.State=$staged.State.Clone(); $bad.State.status=$st; Assert (-not (Test-SmHistoricalUpgrade @bad)) "Marker status $st is not proof" }
+$bad=$staged.Clone(); $bad.State=$staged.State.Clone(); $bad.State.isoBuild=28001; Assert (-not (Test-SmHistoricalUpgrade @bad)) 'A staged marker for a build not yet running still blocks'
+Assert (${function:Get-SmGuards}.ToString().Contains("status -in @('running','staged')")) 'The guard evaluates historical inference for a staged marker'
 
 
 foreach($key in @('RegistryImage','IniImage')) { $bad=$proof.Clone();$bad[$key]='IMAGE_STATE_UNDEPLOYABLE';Assert (-not (Test-SmHistoricalUpgrade @bad)) 'Noncomplete image vetoes' }
