@@ -120,6 +120,9 @@ function Get-NptLocation {
 }
 
 # Tunnel '' leaves the tunnel alone; Nrpt 'off' removes the tunnel's tagged NRPT rules.
+# Office 'direct' keeps the NRPT rules on (review suggestion declined): that is the production
+# office state, where the network guard stops the tunnel and the rules stay. If their DNS
+# servers fail there, the measurement should show it.
 function Get-NptScenarios {
     param([string]$Location, [bool]$HasTunnel)
     $stop = if ($HasTunnel) { 'Stopped' } else { '' }
@@ -599,6 +602,15 @@ function Remove-NptTasks {
     }
 }
 
+# The tasks go only after a clean restore. Otherwise the logon task stays as the recovery entry
+# point: the next logon restores the saved state first and, with results already written, stops there.
+function Complete-NptRun {
+    param([AllowEmptyCollection()][string[]]$Errors)
+    if (@($Errors).Count -eq 0) { Remove-NptTasks; return 'removed' }
+    Write-NptLog 'restore not clean; tasks kept so the next logon retries the restore'
+    return 'kept'
+}
+
 function Invoke-NptRun {
     $settings = Read-NptSettings
     $user = Get-NptConsoleUser
@@ -607,7 +619,10 @@ function Invoke-NptRun {
     try { $lock = [System.IO.File]::Open((Join-Path $script:NptRoot 'run.lock'), 'OpenOrCreate', 'ReadWrite', 'None') } catch { Write-NptLog 'another run holds the lock'; return 0 }
     try {
         $origPath = Join-Path $script:NptRoot 'original-state.json'
+        $hadSaved = Test-Path -LiteralPath $origPath
         if (-not (Invoke-NptRecover -Path $origPath)) { return 0 }
+        # Saved state next to written results: the measurement is done and this run only recovered.
+        if ($hadSaved -and @(Get-ChildItem -LiteralPath $script:NptRoot -Filter 'results-*.json' -ErrorAction SilentlyContinue).Count) { [void](Complete-NptRun -Errors @()); return 0 }
         $sid = ([System.Security.Principal.NTAccount]$user).Translate([System.Security.Principal.SecurityIdentifier]).Value
         $id = Get-Date -Format 'yyyyMMdd-HHmmss'
         $orig = [ordered]@{
@@ -659,7 +674,7 @@ function Invoke-NptRun {
         Write-NptJson -Path $path -Object $results
         Write-NptLog "wrote $path"
         Get-ChildItem -LiteralPath (Join-Path $script:NptRoot 'work') -Filter "$id-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        Remove-NptTasks
+        [void](Complete-NptRun -Errors $errors)
         [Console]::Out.WriteLine((Get-NptSummary -Results ([pscustomobject]$results | ConvertTo-Json -Depth 8 | ConvertFrom-Json)))
         return 0
     } finally { $lock.Dispose() }

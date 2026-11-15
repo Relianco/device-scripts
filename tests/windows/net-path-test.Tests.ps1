@@ -133,6 +133,12 @@ $joined = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Langua
         @($_.CommandElements | Select-Object -Skip 1 | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.StringConstantType -eq 'BareWord' -and $keywords -contains $_.Value }).Count })
 if ($joined.Count) { Fail "keyword passed as an argument at line $($joined[0].Extent.StartLineNumber)" }
 
+# Tasks are removed only after a clean restore; otherwise they stay as the recovery entry point.
+$removed = [System.Collections.Generic.List[string]]::new()
+function Remove-NptTasks { $removed.Add('x') }
+if ((Complete-NptRun -Errors @('pa: denied')) -ne 'kept' -or $removed.Count -ne 0) { Fail 'tasks removed after a failed restore' }
+if ((Complete-NptRun -Errors @()) -ne 'removed' -or $removed.Count -ne 1) { Fail 'tasks kept after a clean restore' }
+
 # Review fixes that need a device to exercise, held in place by source checks.
 if ($src.Contains('IPv4DefaultGateway.NextHop')) { Fail 'a gateway-less adapter would throw under StrictMode' }
 if (-not $src.Contains('if ($verified -eq $false) { $errors +=')) { Fail 'a failed restore verification must keep the saved state' }
