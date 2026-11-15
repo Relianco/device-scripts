@@ -1586,7 +1586,11 @@ function Invoke-SmMaintenance {
       }
      } else { $r.Errors+=('Audit chain not verified: '+$audit.Chain.Code) }
      $r.Audit.headSeq=$audit.Seq
-    } catch { $r.Audit.error=([string]$_.Exception.Message).Substring(0,[math]::Min(160,([string]$_.Exception.Message).Length)); $r.Errors+=('Audit: '+$r.Audit.error) }
+    } catch {
+     # A decision that is not on the chain withholds every removal in this run (plan: AuditUnavailable).
+     Close-SmAudit $audit; $audit=$null
+     $r.Audit.error=([string]$_.Exception.Message).Substring(0,[math]::Min(160,([string]$_.Exception.Message).Length)); $r.Errors+=('Audit: '+$r.Audit.error)
+    }
    }
    # A profile report never enters the mutating branch, whatever else $A says.
    if($A.Mode -eq 'Cleanup' -and -not $A.ProfileReport) {

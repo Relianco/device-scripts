@@ -30,7 +30,8 @@ Throws { New-SmAuditEntry 1 $script:SmAuditGenesis 'r' 'decision' $t0 @{sid='COR
 Throws { New-SmAuditEntry 1 $script:SmAuditGenesis 'r' 'decision' $t0 @{reason='John Doe left'} } 'canonical alphabet'
 Throws { New-SmAuditEntry 1 $script:SmAuditGenesis 'r' 'decision' $t0 @{account='jdoe'} } 'not allowed'
 Throws { New-SmAuditEntry 1 $script:SmAuditGenesis 'r' 'erase' $t0 @{} } 'Unknown audit kind'
-Assert ((Get-SmPathHash 'C:\Users\Someone\') -eq (Get-SmPathHash 'c:\users\someone')) 'Path hash ignores case and a trailing slash'
+$someDir = 'C:\' + (& $rand) + '\' + (& $rand)
+Assert ((Get-SmPathHash ($someDir + '\')) -eq (Get-SmPathHash $someDir.ToLowerInvariant()) -and (Get-SmPathHash $someDir) -ne (Get-SmPathHash ($someDir + 'x'))) 'Path hash ignores case and a trailing slash, and differs for another folder'
 
 # Only the removal loop in Invoke-SmMaintenance reaches the removal hook; the gates and the audit cannot.
 foreach ($fn in @('Get-SmRemovalPlan','Get-SmReviewedCandidates','Get-SmCooldownState','Sync-SmCooldownMarker','Test-SmAuditChain','Open-SmAudit','Add-SmAuditEntry','New-SmAuditEntry','Write-SmAtomicFile','Get-SmReportDecision')) {
@@ -214,6 +215,9 @@ $suite = {
  function Test-SmSafePath { if ($script:realSafePath) { & $script:realSafePathFn @args } else { $true } }
  function Get-SmKfmState { [pscustomobject]@{state=$(if ($script:kfmFailOnRecheck -and $script:collects -gt 1) { 'unknown' } else { 'verified' });redirected=3;accounts=1;localOneDriveFiles=0;outsideKfmFiles=0;error=$null} }
  $script:SmAuditDirectory = { $script:auditDir }
+ # Wraps whichever Add-SmAuditEntry is in scope (the package's or a mutant's) to simulate a failed write.
+ $script:failDecisionAppend = $false; $addFn = ${function:Add-SmAuditEntry}
+ function Add-SmAuditEntry { param($Audit, $RunId, $Kind, $Fields = @{}, $Now = [datetime]::UtcNow) if ($script:failDecisionAppend -and $Kind -eq 'decision') { throw 'disk full' }; & $addFn $Audit $RunId $Kind $Fields $Now }
  function New-Fixture([int]$Count = 1) {
   $script:base = Join-Path $work ([guid]::NewGuid().ToString('n')); $null = New-Item -ItemType Directory -Path $script:base
   $script:auditDir = Join-Path $script:base 'audit'; $null = New-Item -ItemType Directory -Path $script:auditDir
@@ -260,6 +264,12 @@ $suite = {
  $txt = [IO.File]::ReadAllText((Join-Path $script:auditDir 'audit.jsonl')); [IO.File]::WriteAllText((Join-Path $script:auditDir 'audit.jsonl'), $txt.Replace('"ReviewPst"', '"StaleCandidate"').Replace('candidates1', 'candidates2'))
  $r = Remove-Run $hs
  Assert (@($script:attempts).Count -eq 0 -and $r.RemovalPlan.Code -eq 'AuditEntryEdited') "A tampered chain, no removal: $($r.RemovalPlan.Code)"
+
+ # A decision line that cannot be written withholds every removal in the run, even if later writes work.
+ New-Fixture 1; $hs = Approve
+ $script:failDecisionAppend = $true
+ try { $r = Remove-Run $hs } finally { $script:failDecisionAppend = $false }
+ Assert (@($script:attempts).Count -eq 0 -and $r.RemovalPlan.Code -eq 'AuditUnavailable' -and $r.Audit.error -match 'disk full') "Incomplete decision audit: $($r.RemovalPlan.Code)"
 
  # Per-run cap: seven approved candidates, five removed, the rest wait.
  New-Fixture 7; $hs = Approve
@@ -317,6 +327,8 @@ $suite = {
  $hs = Seed-Reports $script:auditDir $script:Profiles $now @(30, 10)
  $script:realSafePath = $true; $r = Remove-Run $hs
  Assert (@($script:attempts).Count -eq 0) 'A linked profile folder is never removed'
+ # Delete the link itself, never through it (Windows PowerShell 5.1 Remove-Item -Recurse can follow it).
+ [IO.Directory]::Delete($script:Profiles[0].LocalPath, $false)
 
  # Report-only stays unable to delete, even with every removal gate satisfied.
  New-Fixture 1; $hs = Approve
@@ -358,6 +370,7 @@ try {
   'entry hash check' = @("if((Get-SmSha256 `$canonical) -ne `$o.hash) {", 'if($false) {')
   'truncation check' = @("elseif(`$headSeq -gt `$seq) { return (& `$fail 'AuditTruncated') }", 'elseif($headSeq -gt $seq) { }')
   'user-folder gate' = @('$script:SmMediaFolderGate=$true', '$script:SmMediaFolderGate=$false')
+  'audit failure withholds removal' = @('Close-SmAudit $audit; $audit=$null', '$null=$null')
  }
  $mutDir = Join-Path $work 'mutants'; $null = New-Item -ItemType Directory -Path $mutDir
  # The tamper and cooldown checks above run at script level, so the suite gets them as a block too.
