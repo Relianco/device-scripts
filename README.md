@@ -209,6 +209,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 One module per file under `windows/jobs/`.
 
 - `scansnap-update-prompts`: stops ScanSnap Online Update from prompting staff who cannot install updates. It marks the watcher's startup entry disabled and stops a running watcher. A machine without ScanSnap reports `compliant`.
+- `nable-agent-removal`: removes the retired N-able N-sight agent (Advanced Monitoring Agent, its GP installer, Web Protection, Network Management, File Cache, patch and Take Control parts). It runs the vendor uninstallers first, then deletes the services, folders and Add/Remove Programs keys they leave. It refuses anything that names NinjaOne, SentinelOne, Global Secure Access, WireGuard or Wazuh. A machine without the agent reports `compliant`. A Group Policy software installation assignment can put the agent back; remove that assignment first.
 
 ### Pin records
 

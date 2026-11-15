@@ -79,3 +79,6 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/eventlog-source.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # NinjaOne runs jobs in Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/nable-agent-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
