@@ -539,25 +539,57 @@ function Invoke-NptMeasure {
     Write-NptJson -Path (Join-Path $work "$Id-$Name.json") -Object $m
 }
 
+# The orchestrator waits for the measurement file; on any failure an error file ends the wait at once.
+function Invoke-NptMeasureEntry {
+    param([string]$Name, [string]$Id, [bool]$Expect)
+    try {
+        Invoke-NptMeasure -Settings (Read-NptSettings) -Name $Name -Id $Id -Expect $Expect
+        return 0
+    } catch {
+        Write-NptJson -Path (Join-Path (Join-Path $script:NptRoot 'work') "$Id-$Name.json") -Object @{ scenario = $Name; error = $_.Exception.Message }
+        return 1
+    }
+}
+
 # ---------- Mode Run (SYSTEM, from the logon task) ----------
 
+$script:StartMeasure = {
+    param([string]$User, [string]$Arguments)
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask -Action (New-ScheduledTaskAction -Execute (Get-NptPowerShell) -Argument $Arguments) -Principal $principal -Settings $settings -Force | Out-Null
+    Start-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask | Out-Null
+}
+
+# Stops the measurement task and waits until it is no longer running.
+$script:StopMeasure = {
+    Stop-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask -ErrorAction SilentlyContinue | Out-Null
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline -and [string](Get-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask -ErrorAction SilentlyContinue).State -eq 'Running') { Start-Sleep -Seconds 2 }
+}
+
+# Returns the measurement. Throws on a timeout (after stopping the task, so the next scenario
+# never changes the network under a measurement still running) or when Measure wrote an error file.
 function Invoke-NptUserTask {
-    param([string]$User, [string]$Name, [string]$Id, [bool]$Expect, [int]$TimeoutSeconds = 900)
+    param([string]$User, [string]$Name, [string]$Id, [bool]$Expect, [int]$TimeoutSeconds = 900, [int]$PollSeconds = 5)
     $work = Join-Path $script:NptRoot 'work'
     $out = Join-Path $work "$Id-$Name.json"
     Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
     $arg = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Mode Measure -Scenario {1} -RunId {2} -ExpectGsa {3}' -f (Join-Path $script:NptRoot 'Invoke-NetPathTest.ps1'), $Name, $Id, $(if ($Expect) { 'true' } else { 'false' })
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
-    $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask -Action (New-ScheduledTaskAction -Execute (Get-NptPowerShell) -Argument $arg) -Principal $principal -Settings $settings -Force | Out-Null
-    Start-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask
+    & $script:StartMeasure -User $User -Arguments $arg
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds $PollSeconds
         if (Test-Path -LiteralPath $out) {
-            try { return (Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { }
+            $m = $null
+            try { $m = Get-Content -LiteralPath $out -Raw -Encoding UTF8 | ConvertFrom-Json } catch { }
+            if ($null -ne $m) {
+                if ($m.PSObject.Properties['error']) { throw "measure: $($m.error)" }
+                return $m
+            }
         }
     }
+    & $script:StopMeasure
     throw "no measurement for $Name within $TimeoutSeconds s"
 }
 
@@ -602,9 +634,7 @@ function Invoke-NptRun {
                     # A failed restart is recorded; the settle check in Measure shows whether the value took.
                     $entry.gsaRestart = try { & $script:RestartGsa; 'ok' } catch { "error: $($_.Exception.Message)" }
                     Start-Sleep -Seconds 15
-                    $entry.measure = Invoke-NptUserTask -User $user -Name $s.Name -Id $id -Expect $s.ExpectGsa
-                    if ($entry.measure.PSObject.Properties['error']) { $entry.error = "measure: $($entry.measure.error)"; $entry.measure = $null }
-                    if ($null -ne $entry.measure -and $null -ne $entry.measure.metered) { $results.metered = $entry.measure.metered }
+                    $entry.measure = Invoke-NptUserTask -User $user -Name $s.Name -Id $id -Expect $s.ExpectGsa                    if ($null -ne $entry.measure -and $null -ne $entry.measure.metered) { $results.metered = $entry.measure.metered }
                 } catch { $entry.error = $_.Exception.Message }
                 Write-NptLog "scenario $($s.Name) error=[$($entry.error)]"
                 $results.scenarios += [pscustomobject]$entry
@@ -629,7 +659,7 @@ function Invoke-NptRun {
         Write-NptLog "wrote $path"
         Get-ChildItem -LiteralPath (Join-Path $script:NptRoot 'work') -Filter "$id-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
         Remove-NptTasks
-        Write-Output (Get-NptSummary -Results ([pscustomobject]$results | ConvertTo-Json -Depth 8 | ConvertFrom-Json))
+        [Console]::Out.WriteLine((Get-NptSummary -Results ([pscustomobject]$results | ConvertTo-Json -Depth 8 | ConvertFrom-Json)))
         return 0
     } finally { $lock.Dispose() }
 }
@@ -655,16 +685,16 @@ function Invoke-NptInstall {
     $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptRunTask -Action (New-ScheduledTaskAction -Execute (Get-NptPowerShell) -Argument $arg) -Trigger $triggers -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) -Settings $taskSettings -Force | Out-Null
     Write-NptLog "armed: delay=$delay userNow=$user"
-    Write-Output (@{ armed = $true; task = "$($script:NptTaskPath)$($script:NptRunTask)"; delayMinutes = $delay; signedInNow = $user; root = $script:NptRoot; version = $script:NptVersion } | ConvertTo-Json -Compress)
+    [Console]::Out.WriteLine((@{ armed = $true; task = "$($script:NptTaskPath)$($script:NptRunTask)"; delayMinutes = $delay; signedInNow = $user; root = $script:NptRoot; version = $script:NptVersion } | ConvertTo-Json -Compress))
     return 0
 }
 
 function Invoke-NptUninstall {
-    if (-not (Test-Path -LiteralPath $script:NptRoot)) { Remove-NptTasks; Write-Output '{"disarmed":true,"restoreErrors":[],"resultsKept":0}'; return 0 }
+    if (-not (Test-Path -LiteralPath $script:NptRoot)) { Remove-NptTasks; [Console]::Out.WriteLine('{"disarmed":true,"restoreErrors":[],"resultsKept":0}'); return 0 }
     # Stop a run in flight first (its finally block then does not run), and wait for its lock,
     # so the restore below is the last writer.
     foreach ($n in @($script:NptRunTask, $script:NptMeasureTask)) {
-        Stop-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $n -ErrorAction SilentlyContinue
+        Stop-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $n -ErrorAction SilentlyContinue | Out-Null
     }
     $lock = $null
     $deadline = (Get-Date).AddSeconds(60)
@@ -682,7 +712,7 @@ function Invoke-NptUninstall {
     $restored = @()
     foreach ($f in @('Invoke-NetPathTest.ps1', 'settings.json', 'run.lock')) { Remove-Item -LiteralPath (Join-Path $script:NptRoot $f) -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath (Join-Path $script:NptRoot 'work') -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Output (@{ disarmed = $true; restoreErrors = @($restored); resultsKept = @(Get-ChildItem -LiteralPath $script:NptRoot -Filter 'results-*.json' -ErrorAction SilentlyContinue).Count } | ConvertTo-Json -Compress)
+    [Console]::Out.WriteLine((@{ disarmed = $true; restoreErrors = @($restored); resultsKept = @(Get-ChildItem -LiteralPath $script:NptRoot -Filter 'results-*.json' -ErrorAction SilentlyContinue).Count } | ConvertTo-Json -Compress))
     return 0
 }
 
@@ -693,19 +723,19 @@ function Invoke-NptReport {
         $task = Get-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptRunTask -ErrorAction SilentlyContinue
         $log = Join-Path $script:NptRoot 'run.log'
         $tail = if (Test-Path -LiteralPath $log) { (Get-Content -LiteralPath $log -Tail 20) -join "`n" } else { '' }
-        Write-Output ("NETTEST {0} no results yet; task={1}`n{2}" -f $env:COMPUTERNAME, $(if ($task) { $task.State } else { 'absent' }), $tail)
+        [Console]::Out.WriteLine(("NETTEST {0} no results yet; task={1}`n{2}" -f $env:COMPUTERNAME, $(if ($task) { $task.State } else { 'absent' }), $tail))
         return 0
     }
     $text = Get-Content -LiteralPath $latest[0].FullName -Raw -Encoding UTF8
     if ($PageNumber -ge 1) {
         $p = Get-NptPage -Text $text -Page $PageNumber -Size $script:NptPageSize
-        Write-Output ("NETTEST-PAGE {0}/{1} {2}" -f $PageNumber, $p.Pages, $latest[0].Name)
-        Write-Output $p.Text
+        [Console]::Out.WriteLine(("NETTEST-PAGE {0}/{1} {2}" -f $PageNumber, $p.Pages, $latest[0].Name))
+        [Console]::Out.WriteLine($p.Text)
         return 0
     }
     $summary = Get-NptSummary -Results ($text | ConvertFrom-Json)
     $pages = (Get-NptPage -Text $text -Page 0 -Size $script:NptPageSize).Pages
-    Write-Output ("{0}`nfile={1} pages={2}" -f $summary.Substring(0, [math]::Min($summary.Length, 8500)), $latest[0].FullName, $pages)
+    [Console]::Out.WriteLine(("{0}`nfile={1} pages={2}" -f $summary.Substring(0, [math]::Min($summary.Length, 8500)), $latest[0].FullName, $pages))
     return 0
 }
 
@@ -713,16 +743,10 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
-if ($Mode -eq 'Run') { exit (Invoke-NptRun) }
+if ($Mode -eq 'Run') { exit ([int](@(Invoke-NptRun)[-1])) }
 if ($Mode -eq 'Measure') {
     if ($Scenario -notmatch '^[a-z]{1,16}$' -or $RunId -notmatch '^\d{8}-\d{6}$') { exit 1 }
-    try { Invoke-NptMeasure -Settings (Read-NptSettings) -Name $Scenario -Id $RunId -Expect ($ExpectGsa -eq 'true') }
-    catch {
-        # The orchestrator waits for this file; an error file ends the wait at once.
-        Write-NptJson -Path (Join-Path $script:NptRoot "work\$RunId-$Scenario.json") -Object @{ scenario = $Scenario; error = $_.Exception.Message; settled = $null; metered = $null }
-        exit 1
-    }
-    exit 0
+    exit ([int](@(Invoke-NptMeasureEntry -Name $Scenario -Id $RunId -Expect ($ExpectGsa -eq 'true'))[-1]))
 }
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
@@ -735,12 +759,12 @@ if ([string]::IsNullOrWhiteSpace($PinVersion)) { exit 0 }
 if ($Mode -eq 'Report') {
     $n = 0
     if (-not [int]::TryParse($Page, [ref]$n)) { exit 1 }
-    exit (Invoke-NptReport -PageNumber $n)
+    exit ([int](@(Invoke-NptReport -PageNumber $n)[-1]))
 }
 if ($Mode -ne '') { [Console]::Error.WriteLine("unknown Mode $Mode"); exit 1 }
-if ($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { exit (Invoke-NptUninstall) }
+if ($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { exit ([int](@(Invoke-NptUninstall)[-1])) }
 $s = [pscustomobject]@{
     TcpTargets = $TcpTargets; DnsNames = $DnsNames; ListPaths = $ListPaths; ReadFiles = $ReadFiles; WriteTestDirs = $WriteTestDirs
     OfficePrefixes = $OfficePrefixes; TunnelName = $TunnelName; DelayMinutes = $DelayMinutes; TestFileMB = $TestFileMB; MaxFallbackMB = $MaxFallbackMB
 }
-exit (Invoke-NptInstall -Settings $s)
+exit ([int](@(Invoke-NptInstall -Settings $s)[-1]))

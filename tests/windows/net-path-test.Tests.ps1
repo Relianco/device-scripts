@@ -127,7 +127,50 @@ if ($iKeep -lt $iRecover -or $iRemove -lt $iKeep -or $body.Substring($iKeep, $iR
 # Review fixes that need a device to exercise, held in place by source checks.
 if ($src.Contains('IPv4DefaultGateway.NextHop')) { Fail 'a gateway-less adapter would throw under StrictMode' }
 if (-not $src.Contains('if ($verified -eq $false) { $errors +=')) { Fail 'a failed restore verification must keep the saved state' }
-if (-not $src.Contains('an error file ends the wait')) { Fail 'a failed measurement must write an error file' }
+
+# Measurement hand-off, report output and exit codes, against a temporary root.
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ('npt-root-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path (Join-Path $root 'work') -Force | Out-Null
+$savedRoot = $script:NptRoot
+$script:NptRoot = $root
+try {
+    # A measurement that fails (here: no settings.json) writes an error file and returns 1.
+    $rc = @(Invoke-NptMeasureEntry -Name 'gsa' -Id '20261116-091000' -Expect $true)
+    if ($rc.Count -ne 1 -or $rc[0] -ne 1) { Fail "measure entry returned [$rc]" }
+    $ef = Join-Path $root 'work/20261116-091000-gsa.json'
+    if (-not (Test-Path -LiteralPath $ef) -or -not (Get-Content -LiteralPath $ef -Raw | ConvertFrom-Json).error) { Fail 'failed measurement wrote no error file' }
+
+    # The orchestrator turns that error file into an exception at once, without the timeout.
+    $script:StopMeasure = { $calls.Add('stop') }
+    $script:StartMeasure = { param($User, $Arguments) Set-Content -LiteralPath (Join-Path $root 'work/20261116-091000-direct.json') -Value '{"scenario":"direct","error":"boom"}' }
+    $calls.Clear(); $msg = ''
+    try { Invoke-NptUserTask -User 'u' -Name 'direct' -Id '20261116-091000' -Expect $false -TimeoutSeconds 30 -PollSeconds 1 | Out-Null } catch { $msg = $_.Exception.Message }
+    if ($msg -ne 'measure: boom') { Fail "error file not raised: [$msg]" }
+
+    # A timeout stops the measurement task before it throws.
+    $script:StartMeasure = { param($User, $Arguments) }
+    $calls.Clear(); $msg = ''
+    try { Invoke-NptUserTask -User 'u' -Name 'gsa' -Id '20261116-091001' -Expect $true -TimeoutSeconds 1 -PollSeconds 1 | Out-Null } catch { $msg = $_.Exception.Message }
+    if ($msg -notlike 'no measurement*' -or ($calls -join '|') -ne 'stop') { Fail "timeout did not stop the task: [$msg] [$($calls -join '|')]" }
+
+    # A good measurement comes back as the object.
+    $script:StartMeasure = { param($User, $Arguments) Set-Content -LiteralPath (Join-Path $root 'work/20261116-091002-gsa.json') -Value '{"scenario":"gsa","settled":true}' }
+    $m = Invoke-NptUserTask -User 'u' -Name 'gsa' -Id '20261116-091002' -Expect $true -TimeoutSeconds 30 -PollSeconds 1
+    if (-not $m.settled) { Fail 'measurement object not returned' }
+
+    # Report prints to the console and returns only the exit code.
+    $results | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $root 'results-20261116-091000.json')
+    $sw = [System.IO.StringWriter]::new(); $orig = [Console]::Out; [Console]::SetOut($sw)
+    try { $rc = @(Invoke-NptReport -PageNumber 0); $rc1 = @(Invoke-NptReport -PageNumber 1) } finally { [Console]::SetOut($orig) }
+    if ($rc.Count -ne 1 -or $rc[0] -ne 0 -or $rc1.Count -ne 1 -or $rc1[0] -ne 0) { Fail "report returned [$rc] [$rc1]" }
+    $printed = $sw.ToString()
+    foreach ($needle in @('NETTEST PC1', 'pages=1', 'NETTEST-PAGE 1/1', '"runId"')) {
+        if ($printed.IndexOf($needle, [System.StringComparison]::Ordinal) -lt 0) { Fail "report output missing $needle" }
+    }
+} finally {
+    $script:NptRoot = $savedRoot
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # An empty pin exits 0 before any action, including Uninstall. The child runs the real entry point.
 $env:RELIAN_DEPLOY_TEST = $null
