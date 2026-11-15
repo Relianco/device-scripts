@@ -72,6 +72,23 @@ For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires
 
 `ProfileReport='true'` adds a per-profile census and prints a compact schema-v2 JSON (under 9.5 KB) for a device custom field instead of the v1 summary. When it would not fit, the lowest-ranked entries lose their detail first (keeping SID, decision, age and size), then whole entries drop; the summary still counts every profile. It requires `Mode='Report'` with `RemoveProfiles` and `ComponentCleanup` false; the package refuses any other combination, and a report run never enters the cleanup branch. Pass `ProfileAgeDays='90'` for the shared-device threshold.
 
+#### Write the report to a NinjaOne custom field
+
+The package only prints, and neither the package nor the runner calls NinjaOne. To store the JSON in a device custom field, schedule one script, `windows/collectors/runner-report-field.ps1`, in place of `Invoke-RelianRunner.ps1`:
+
+1. Create a device custom field of type **Multi-line text** (a plain text field is too short for 9.5 KB), for example `relianProfileReport`. Permissions: Automation **Read/Write**, API **Read-only**. The name must match `^[A-Za-z][A-Za-z0-9]{0,39}$`.
+2. Paste `windows/collectors/runner-report-field.ps1` into the NinjaOne script library and run it as **System**.
+3. Parameters: `-RunnerUrl` (raw URL of `windows/runner/Invoke-RelianRunner.ps1` at a pinned commit), `-RunnerSha256` (64 lowercase hex characters), `-ReportCustomField "relianProfileReport"`, then every runner parameter exactly as for the runner. Use `-PackageArguments` for `{"ProfileReport":"true","Mode":"Report"}`. An empty `-RunnerSha256` exits 0 and downloads nothing, like the runner. An empty `-PackageSha256`, `-ToolkitSha256` or `-BrandPackSha256` also exits 0, because Windows PowerShell 5.1 would drop the empty value before the runner saw it.
+4. Use it for report runs only: it refuses `-Action Uninstall` and any forwarded URL with a user name, before downloading anything. Run an uninstall through the runner.
+5. The script downloads the runner, checks its hash, runs it as a child with `-ReportOutputPath` set, and returns the runner's exit code and output unchanged.
+
+How it stays safe:
+
+- The runner saves the report only after exit 0, only when the package arguments are exactly `ProfileReport` `true` with `Mode` `Report` (or no `Mode`) and no `RemoveProfiles` or `ComponentCleanup`, and not for `Uninstall`. For any other run it parses and saves nothing.
+- Marker contract: the package output must hold exactly one line that starts with `{"schemaVersion":2,"package":"storage-maintenance",`. It is saved unchanged, never re-serialised or cut.
+- The script reads the saved file only if it was written after the run started, is not a link, is one line of at most 9,500 UTF-8 bytes with that marker and mode `Report`. It then writes the field and deletes the file. The folder is readable by SYSTEM and Administrators only and is removed after every run.
+- A missing `Ninja-Property-Set` cmdlet or a failed write prints one line naming only the field. The exit code and output are unchanged.
+
 - `SharedDevices`: comma-separated computer names that are shared or loaner PCs. A device not on the list reports a stale profile as `KeepNotSharedDevice`; personal devices never delete profiles.
 - `PrimaryUserHint`: optional account name or UPN of the RMM's last-logged-on user.
 
