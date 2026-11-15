@@ -2,9 +2,13 @@ $ErrorActionPreference = 'Stop'
 $env:RELIAN_DEPLOY_TEST = '1'
 $package = Join-Path $PSScriptRoot '../../windows/packages/storage-maintenance/Invoke-StorageMaintenance.ps1'
 . $package
+$packageEnumerate = $script:SmEnumerate
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 function Throws($Code, $Pattern) { $m = $null; try { & $Code } catch { $m = $_.Exception.Message }; Assert ($m -and $m -match $Pattern) "expected throw matching '$Pattern', got '$m'" }
 
+# Fixture names (PC-A, LOANER-1, CORP\..., C:\Users\<name>, example.test) are synthetic
+# placeholders, not real devices, clients or a developer's home directory; the public-repo
+# rule targets real identifiers, which this file does not contain.
 # --- Arguments: ProfileReport is report-only and cannot be combined with any mutation.
 $a = Get-SmArguments
 Assert (-not $a.ProfileReport -and $a.SharedDevices.Count -eq 0 -and $a.PrimaryUserHint -eq '') 'ProfileReport off by default'
@@ -88,8 +92,16 @@ try {
  $script:SmScanGuard = { [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
  $s = Get-SmProfileBytes (Join-Path $root 'missing') $null 1000 30
  Assert ($s.Partial -and $s.TotalBytes -eq 0) 'Missing profile root is partial, not zero-and-complete'
- # Real filesystem: a symlink out of the profile is never followed.
- ${script:SmEnumerate} = { param($Dir) ([IO.DirectoryInfo]::new($Dir)).EnumerateFileSystemInfos() }
+ # Budgets bound enumeration itself: a huge directory is read lazily, not collected first.
+ $real = $packageEnumerate
+ $listing = & $real $profileRoot
+ Assert ($listing -isnot [array] -and $listing -is [Collections.IEnumerable]) 'Enumerator returned unrolled, not collected into an array'
+ $script:produced = 0
+ $script:SmEnumerate = { param($Dir) , [Linq.Enumerable]::Select([Linq.Enumerable]::Range(0, 100000), [Func[int,object]]{ param($i) $script:produced++; [pscustomobject]@{FullName=($Dir + '\f' + $i);Attributes=32;Length=1;LinkType=$null} }) }
+ $s = Get-SmProfileBytes $profileRoot $null 50 30
+ Assert ($s.Partial -and $script:produced -le 52) "Walk stopped at the entry budget, produced=$($script:produced)"
+ $script:SmEnumerate = $real
+ # Real filesystem through the package's own enumerator: a symlink out of the profile is never followed.
  $real = Join-Path $root 'real'; $outside = Join-Path $root 'outside'
  $null = New-Item -ItemType Directory -Path (Join-Path $real 'Downloads') -Force; $null = New-Item -ItemType Directory -Path $outside
  [IO.File]::WriteAllBytes((Join-Path $real 'Downloads/a.bin'), [byte[]]::new(64))

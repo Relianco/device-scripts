@@ -309,7 +309,10 @@ function Get-SmProfileSize {
 # Junctions and symlinks are never entered. A non-link (cloud) reparse directory is entered
 # only inside a top-level OneDrive* folder; recall-on-open directories are skipped. A link
 # swapped in mid-walk can only inflate these read-only counts. Hard links count per name.
-$script:SmEnumerate={ param($Dir) ([IO.DirectoryInfo]::new($Dir)).EnumerateFileSystemInfos() }
+# The leading comma returns the lazy enumerator itself, so budgets and guards apply per entry.
+# Like Get-SmScan, the walk stays in this process: local profile metadata reads are not the
+# identity/event-provider calls that need the killable worker, and recall-on-open dirs are skipped.
+$script:SmEnumerate={ param($Dir) ,([IO.DirectoryInfo]::new($Dir)).EnumerateFileSystemInfos() }
 function Get-SmProfileBytes {
  param([string]$Path,[string]$RecycleRoot,[int]$FileLimit,[double]$Seconds)
  $b=[ordered]@{ost=[int64]0;pst=[int64]0;oneDriveHydrated=[int64]0;oneDriveOnlineOnly=[int64]0;teamsCache=[int64]0;browserCache=[int64]0;temp=[int64]0;downloads=[int64]0;recycleBin=[int64]0}
@@ -321,7 +324,8 @@ function Get-SmProfileBytes {
  :walk while($queue.Count) {
   $item=$queue.Dequeue(); $dir=$item[0]; $recycle=$item[1]
   try {
-   foreach($e in (& $script:SmEnumerate $dir)) {
+   $entries=& $script:SmEnumerate $dir
+   foreach($e in $entries) {
     if($r.EntriesVisited -ge $nextGuard -or $watch.Elapsed.TotalSeconds-$lastGuard -ge 2) {
      try { $g=& $script:SmScanGuard; if($null -eq $g -or $g.Light) { $r.Light=$true } } catch { $r.Light=$true }
      $lastGuard=$watch.Elapsed.TotalSeconds; $nextGuard=$r.EntriesVisited+128
