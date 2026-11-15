@@ -1559,6 +1559,7 @@ function Remove-SmAgedFiles {
  if($RemoveEmptyDirs) {
   $last=if($IncludeRoot){0}else{1}
   for($i=$dirs.Count-1;$i -ge $last;$i--) {
+   if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; break }
    # Creation time, not write time: emptying a folder updates its write time. A folder an installer
    # created just now is never pruned.
    try { if([IO.Directory]::GetCreationTimeUtc($dirs[$i]) -lt $CutoffUtc -and -not ([IO.Directory]::EnumerateFileSystemEntries($dirs[$i]).GetEnumerator().MoveNext()) -and (Test-SmPlainChain $dirs[$i])) { [IO.Directory]::Delete($dirs[$i]) } } catch { }

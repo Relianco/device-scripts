@@ -61,6 +61,9 @@ try {
     New-File (Join-Path $root 'late/old.tmp') 30
     $late = Remove-SmAgedFiles (Join-Path $root 'late') $cutoff ([datetime]::UtcNow.AddSeconds(-1))
     Assert ($late.TimedOut -and $late.Files -eq 0 -and (Test-Path (Join-Path $root 'late/old.tmp'))) 'Deadline stops the walk'
+    $emptyRoot = Join-Path $root 'empty'; $null = New-Item -ItemType Directory $emptyRoot
+    $prune = Remove-SmAgedFiles $emptyRoot ([datetime]::MaxValue) ([datetime]::UtcNow.AddSeconds(-1)) -RemoveEmptyDirs -IncludeRoot
+    Assert ($prune.TimedOut -and (Test-Path $emptyRoot)) 'Folder pruning stops at the deadline too'
 
     # App caches: only cache folders, never cookies, logins, IndexedDB, Local Storage or Documents.
     $p = Join-Path $root 'profile-fixture'
@@ -165,7 +168,7 @@ try {
             $refused = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p) | Where-Object { $_.Name -eq 'CrashDumps' })[0]
             Assert ($refused.Status -eq 'partial' -and $refused.Error -match 'reparse') 'A refused root is reported, not marked done'
             Assert (Test-Path (Join-Path $outside 'keep.doc')) 'Nothing behind the refused root is deleted'
-            Remove-Item -LiteralPath (Join-Path $env:windir 'Minidump') -Force
+            [IO.Directory]::Delete((Join-Path $env:windir 'Minidump'))  # removes the link only; Remove-Item fails on a link in 5.1
         }
 
         $report = [pscustomobject]@{ Status = 'complete'; Mode = 'Cleanup'; Actions = $steps; Guards = @{ Reasons = @() }; Scan = $null; Before = @(); After = @(); FreeSpaceDelta = @(); Profiles = @(); Notifications = @(); Errors = @(); Evidence = @{ Opportunities = @() }; RemovalPlan = $null; Audit = $null }
