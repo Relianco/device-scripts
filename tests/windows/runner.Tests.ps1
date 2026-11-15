@@ -392,15 +392,10 @@ if (-not (Test-Path -LiteralPath $runner)) {
 }
 
 $runnerText = [System.IO.File]::ReadAllText($runner)
-foreach ($banned in @('Ninja-Property-Get', 'relian_git_deploy_token')) {
+foreach ($banned in @('Ninja-Property-Get', 'Ninja-Property-Set', 'relian_git_deploy_token')) {
     if ($runnerText.Contains($banned)) {
         Fail "runner contains $banned"
     }
-}
-# The runner is the NinjaOne layer: it may write one report field (ReportCustomField), through one
-# seam and one presence probe. Packages stay agnostic; ninja-agnostic.Tests.ps1 scans them.
-if ([regex]::Matches($runnerText, 'Ninja-Property-Set').Count -ne 2) {
-    Fail 'runner must name Ninja-Property-Set in exactly two places (the write and its presence probe)'
 }
 
 $env:RELIAN_DEPLOY_TEST = '1'

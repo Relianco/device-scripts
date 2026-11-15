@@ -13,7 +13,7 @@ param(
     [string]$PinVersion,
     [AllowEmptyString()][string]$CancelPath,
     [AllowEmptyString()][string]$PackageArguments = '',
-    [AllowEmptyString()][string]$ReportCustomField = ''
+    [AllowEmptyString()][string]$ReportOutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -507,7 +507,7 @@ function ConvertTo-RelianWindowsCommandLine {
     return ($parts -join ' ')
 }
 
-# The last package process's stdout. Set by InvokePackage; read only by Publish-RelianProfileReport.
+# The last package process's stdout. Set by InvokePackage; read only by Save-RelianProfileReport.
 $script:RelianPackageStdout = ''
 
 # Child process so a package exit does not end a second reinstall call.
@@ -587,19 +587,18 @@ $script:InvokePackage = {
     return [int]$LASTEXITCODE
 }
 
-# Writes the report line a storage-maintenance ProfileReport run printed into one device custom field.
-# The package stays RMM-agnostic: this runner is the NinjaOne layer. Nothing is parsed unless the run was
-# a report-only ProfileReport run that exited 0. Contract: exactly one stdout line starting with the
-# schema marker below; it is written byte for byte, never re-serialised or cut.
+# Saves the report line a storage-maintenance ProfileReport run printed to a file, for an RMM layer to
+# pick up. The runner calls no RMM: this is a plain file write. Nothing is parsed unless the run was a
+# report-only ProfileReport run that exited 0. Contract: exactly one stdout line starting with the schema
+# marker below; it is saved byte for byte, never re-serialised or cut.
 # shortcut: only the storage-maintenance report is recognised; add a marker per package when a second one needs it.
 $script:RelianReportMarker = '{"schemaVersion":2,"package":"storage-maintenance",'
 $script:RelianReportMaxBytes = 9500
-$script:SetCustomField = { param($Name, $Value) Ninja-Property-Set $Name $Value }
-$script:TestCustomFieldCmd = { [bool](Get-Command -Name 'Ninja-Property-Set' -ErrorAction SilentlyContinue) }
+$script:SaveReport = { param($Path, $Text) [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false)) }
 
-function Publish-RelianProfileReport {
+function Save-RelianProfileReport {
     param(
-        [Parameter(Mandatory)][string]$Field,
+        [Parameter(Mandatory)][string]$Path,
         [AllowEmptyString()][string]$Stdout,
         [string]$Action,
         $PackageParameters
@@ -610,7 +609,7 @@ function Publish-RelianProfileReport {
         (-not $arg.ContainsKey('Mode') -or $arg['Mode'] -ceq 'Report') -and
         $arg['RemoveProfiles'] -cne 'true' -and $arg['ComponentCleanup'] -cne 'true'
     if (-not $reportRun) { return }
-    $warn = { param($Why) Write-Host "report field '$Field' not written: $Why" }
+    $warn = { param($Why) Write-Host "report file not written: $Why" }
     $lines = @(([string]$Stdout) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_.StartsWith($script:RelianReportMarker, [StringComparison]::Ordinal) })
     if ($lines.Count -ne 1) { & $warn "expected one report line, found $($lines.Count)"; return }
     $json = [string]$lines[0]
@@ -619,9 +618,8 @@ function Publish-RelianProfileReport {
         $doc = $json | ConvertFrom-Json
         if ($doc.mode -cne 'Report') { & $warn 'report is not a Report-mode run'; return }
     } catch { & $warn 'report is not valid JSON'; return }
-    if (-not [bool](& $script:TestCustomFieldCmd)) { & $warn 'the custom-field cmdlet is not available'; return }
-    try { & $script:SetCustomField $Field $json } catch { & $warn 'write failed'; return }
-    Write-Host "report written to custom field '$Field'"
+    try { & $script:SaveReport $Path $json } catch { & $warn 'write failed'; return }
+    Write-Host 'report file written'
 }
 
 function Invoke-RelianRunner {
@@ -640,7 +638,7 @@ function Invoke-RelianRunner {
         [Parameter(Mandatory)][string]$PinVersion,
         [AllowEmptyString()][string]$CancelPath = '',
         [AllowEmptyString()][string]$PackageArguments = '',
-        [AllowEmptyString()][string]$ReportCustomField = ''
+        [AllowEmptyString()][string]$ReportOutputPath = ''
     )
 
     foreach ($url in @($PackageUrl, $ToolkitUrl, $BrandPackUrl)) {
@@ -657,8 +655,8 @@ function Invoke-RelianRunner {
         return 0
     }
 
-    if ($ReportCustomField -ne '' -and $ReportCustomField -notmatch '\A[A-Za-z][A-Za-z0-9]{0,39}\z') {
-        Write-RelianRunnerError 'invalid ReportCustomField'
+    if ($ReportOutputPath -ne '' -and -not [System.IO.Path]::IsPathRooted($ReportOutputPath)) {
+        Write-RelianRunnerError 'ReportOutputPath must be an absolute path'
         return 1
     }
 
@@ -718,9 +716,9 @@ function Invoke-RelianRunner {
             [System.IO.File]::Copy($packageFile, $scriptPath, $true)
             $script:RelianPackageStdout = ''
             $exitCode = [int](Invoke-RelianPackageSequence -ScriptPath $scriptPath -Action $Action -PinVersion $PinVersion -WorkRoot $work -CancelPath $CancelPath -PackageParameters $packageParameters)
-            if ($exitCode -eq 0 -and $ReportCustomField -ne '') {
-                # A failed write is a warning only: the package result stands.
-                try { Publish-RelianProfileReport -Field $ReportCustomField -Stdout $script:RelianPackageStdout -Action $Action -PackageParameters $packageParameters } catch { Write-Host "report field '$ReportCustomField' not written: unexpected error" }
+            if ($exitCode -eq 0 -and $ReportOutputPath -ne '') {
+                # A failed save is a warning only: the package result stands.
+                try { Save-RelianProfileReport -Path $ReportOutputPath -Stdout $script:RelianPackageStdout -Action $Action -PackageParameters $packageParameters } catch { Write-Host 'report file not written: unexpected error' }
             }
         }
     } catch {

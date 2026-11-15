@@ -74,16 +74,19 @@ For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires
 
 #### Write the report to a NinjaOne custom field
 
-The package only prints. The runner (`windows/runner/Invoke-RelianRunner.ps1`) is the NinjaOne layer and can store the JSON. Both maintenance packages run through it, so no other script is involved. Set the runner parameter `ReportCustomField` to the field name:
+The package only prints, and neither the package nor the runner calls NinjaOne. To store the JSON in a device custom field, schedule one script, `windows/collectors/runner-report-field.ps1`, in place of `Invoke-RelianRunner.ps1`:
 
-- Create a device custom field of type **Multi-line text** (a plain text field is too short for 9.5 KB). Permissions: Automation **Read/Write**, API **Read-only**.
-- The name must match `^[A-Za-z][A-Za-z0-9]{0,39}$`, for example `relianProfileReport`. A bad name fails the run with exit 1 before anything downloads.
-- The runner writes only when the package exited 0, the package arguments are exactly `ProfileReport` `true` with `Mode` `Report` (or no `Mode`) and no `RemoveProfiles` or `ComponentCleanup`, and the action is not `Uninstall`. For any other run it parses and writes nothing.
-- Marker contract: the package output must hold exactly one line that starts with `{"schemaVersion":2,"package":"storage-maintenance",`. The runner writes that line unchanged. It never re-serialises or cuts it.
-- It refuses a line over 9,500 UTF-8 bytes, which the package already keeps below.
-- A missing `Ninja-Property-Set` cmdlet or a failed write prints one line naming only the field. The run status and the package output are unchanged.
+1. Create a device custom field of type **Multi-line text** (a plain text field is too short for 9.5 KB), for example `relianProfileReport`. Permissions: Automation **Read/Write**, API **Read-only**. The name must match `^[A-Za-z][A-Za-z0-9]{0,39}$`.
+2. Paste `windows/collectors/runner-report-field.ps1` into the NinjaOne script library and run it as **System**.
+3. Parameters: `-RunnerUrl` (raw URL of `windows/runner/Invoke-RelianRunner.ps1` at a pinned commit), `-RunnerSha256`, `-ReportCustomField "relianProfileReport"`, then every runner parameter exactly as for the runner. Use `-PackageArguments` for `{"ProfileReport":"true","Mode":"Report"}`. Do not use the runner's empty-hash off switch here.
+4. The script downloads the runner, checks its hash, runs it as a child with `-ReportOutputPath` set, and returns the runner's exit code and output unchanged.
 
-An empty `ReportCustomField` (the default) changes nothing. A fleet roll-up reads the field through the NinjaOne API.
+How it stays safe:
+
+- The runner saves the report only after exit 0, only when the package arguments are exactly `ProfileReport` `true` with `Mode` `Report` (or no `Mode`) and no `RemoveProfiles` or `ComponentCleanup`, and not for `Uninstall`. For any other run it parses and saves nothing.
+- Marker contract: the package output must hold exactly one line that starts with `{"schemaVersion":2,"package":"storage-maintenance",`. It is saved unchanged, never re-serialised or cut.
+- The script reads the saved file only if it was written after the run started, is not a link, is one line of at most 9,500 UTF-8 bytes with that marker and mode `Report`. It then writes the field and deletes the file. The folder is readable by SYSTEM and Administrators only and is removed after every run.
+- A missing `Ninja-Property-Set` cmdlet or a failed write prints one line naming only the field. The exit code and output are unchanged.
 
 - `SharedDevices`: comma-separated computer names that are shared or loaner PCs. A device not on the list reports a stale profile as `KeepNotSharedDevice`; personal devices never delete profiles.
 - `PrimaryUserHint`: optional account name or UPN of the RMM's last-logged-on user.
