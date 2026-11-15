@@ -62,6 +62,7 @@ $script:NptGsaKey = 'Software\Microsoft\Global Secure Access Client'
 $script:NptGsaValue = 'IsPrivateAccessDisabledByUser'
 $script:NptTrayExe = "$env:ProgramFiles\Global Secure Access Client\TrayApp\GlobalSecureAccessClient.exe"
 $script:NptPageSize = 9000
+$script:NptPollSeconds = 5
 
 # ---------- pure helpers ----------
 
@@ -286,9 +287,18 @@ function Invoke-NptRestore {
 # Restores the state an interrupted run saved. The file is deleted only after a clean restore,
 # so a failed restore keeps the true original for the next attempt. Returns $true when clean.
 function Invoke-NptRecover {
-    param([string]$Path)
+    param([string]$Path, [string]$User = '')
     if (-not (Test-Path -LiteralPath $Path)) { return $true }
-    $errors = @(Invoke-NptRestore -Original (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json))
+    $saved = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $errors = @(Invoke-NptRestore -Original $saved)
+    # A signed-in user's tray keeps the scenario's setting until it restarts and re-reads the value.
+    # With nobody signed in no tray runs, and the next sign-in starts one that reads the restored value.
+    if ($errors.Count -eq 0 -and $User) {
+        try {
+            $v = Invoke-NptUserTask -User $User -Name 'restore' -Id (Get-Date -Format 'yyyyMMdd-HHmmss') -Expect ($null -eq $saved.paValue -or [int]$saved.paValue -eq 0) -TimeoutSeconds 300
+            if ($v.settled -eq $false) { $errors += 'verify: DNS did not return to the original Private Access path' }
+        } catch { $errors += "verify: $($_.Exception.Message)" }
+    }
     Write-NptLog "restore of saved state: errors=[$($errors -join '; ')]"
     if ($errors.Count) { return $false }
     Remove-Item -LiteralPath $Path -Force
@@ -377,26 +387,70 @@ function Measure-NptTcp {
     return [pscustomobject]$r
 }
 
+# FILE_FLAG_NO_BUFFERING through CreateFile into a page-aligned VirtualAlloc buffer, so the SMB
+# client cache cannot answer a read and the second scenario reads over the network again.
+$script:NptIoSource = @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class NptIo {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool ReadFile(SafeFileHandle h, IntPtr buffer, uint count, out uint read, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr VirtualAlloc(IntPtr address, UIntPtr size, uint type, uint protect);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool VirtualFree(IntPtr address, UIntPtr size, uint type);
+    public static long ReadUnbuffered(string path, double capSeconds) {
+        const int Chunk = 1 << 20;
+        SafeFileHandle h = CreateFileW(path, 0x80000000u, 3u, IntPtr.Zero, 3u, 0x20000000u | 0x08000000u, IntPtr.Zero);
+        if (h.IsInvalid) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        IntPtr buffer = VirtualAlloc(IntPtr.Zero, (UIntPtr)Chunk, 0x3000u, 0x04u);
+        if (buffer == IntPtr.Zero) { h.Dispose(); throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        try {
+            long total = 0;
+            Stopwatch sw = Stopwatch.StartNew();
+            while (sw.Elapsed.TotalSeconds <= capSeconds) {
+                uint n;
+                if (!ReadFile(h, buffer, (uint)Chunk, out n, IntPtr.Zero)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+                total += n;
+                if (n < Chunk) { break; }
+            }
+            return total;
+        } finally {
+            VirtualFree(buffer, UIntPtr.Zero, 0x8000u);
+            h.Dispose();
+        }
+    }
+}
+'@
+
 function Read-NptFile {
     param([string]$Path, [int]$CapSeconds = 180)
     $r = [ordered]@{ path = $Path; mb = $null; seconds = $null; mbps = $null; mode = ''; error = '' }
-    $buffer = New-Object byte[] (1MB)
     foreach ($mode in @('unbuffered', 'buffered')) {
-        # 0x20000000 is FILE_FLAG_NO_BUFFERING, so the SMB client cache does not answer the read.
-        $opt = if ($mode -eq 'unbuffered') { [System.IO.FileOptions]0x20000000 } else { [System.IO.FileOptions]::SequentialScan }
-        $total = 0L
         try {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            $fs = [System.IO.FileStream]::new($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, 1, $opt)
-            try {
-                while (($n = $fs.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                    $total += $n
-                    if ($sw.Elapsed.TotalSeconds -gt $CapSeconds) { $r.error = 'stopped at time cap'; break }
-                }
-            } finally { $fs.Dispose() }
+            if ($mode -eq 'unbuffered') {
+                if (-not ('NptIo' -as [type])) { Add-Type -TypeDefinition $script:NptIoSource }
+                $sw.Restart()
+                $total = [NptIo]::ReadUnbuffered($Path, [double]$CapSeconds)
+            } else {
+                # Fallback, marked in mode: a repeat read of this file may come from the client cache.
+                $total = 0L
+                $buffer = New-Object byte[] (1MB)
+                $fs = [System.IO.File]::OpenRead($Path)
+                try {
+                    while (($n = $fs.Read($buffer, 0, $buffer.Length)) -gt 0 -and $sw.Elapsed.TotalSeconds -le $CapSeconds) { $total += $n }
+                } finally { $fs.Dispose() }
+            }
             $r.mode = $mode
             $r.mb = [math]::Round($total / 1MB, 1); $r.seconds = [math]::Round($sw.Elapsed.TotalSeconds, 2)
             if ($r.seconds -gt 0) { $r.mbps = [math]::Round($r.mb / $r.seconds, 2) }
+            if ($sw.Elapsed.TotalSeconds -gt $CapSeconds) { $r.error = 'stopped at time cap' }
             return [pscustomobject]$r
         } catch { $r.error = "$mode read: $($_.Exception.Message)" }
     }
@@ -574,7 +628,7 @@ $script:StopMeasure = {
 # Returns the measurement. Throws on a timeout (after stopping the task, so the next scenario
 # never changes the network under a measurement still running) or when Measure wrote an error file.
 function Invoke-NptUserTask {
-    param([string]$User, [string]$Name, [string]$Id, [bool]$Expect, [int]$TimeoutSeconds = 1500, [int]$PollSeconds = 5)
+    param([string]$User, [string]$Name, [string]$Id, [bool]$Expect, [int]$TimeoutSeconds = 1500, [int]$PollSeconds = $script:NptPollSeconds)
     $work = Join-Path $script:NptRoot 'work'
     $out = Join-Path $work "$Id-$Name.json"
     Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
@@ -620,7 +674,7 @@ function Invoke-NptRun {
     try {
         $origPath = Join-Path $script:NptRoot 'original-state.json'
         $hadSaved = Test-Path -LiteralPath $origPath
-        if (-not (Invoke-NptRecover -Path $origPath)) { return 0 }
+        if (-not (Invoke-NptRecover -Path $origPath -User $user)) { return 0 }
         # Saved state next to written results: the measurement is done and this run only recovered.
         if ($hadSaved -and @(Get-ChildItem -LiteralPath $script:NptRoot -Filter 'results-*.json' -ErrorAction SilentlyContinue).Count) { [void](Complete-NptRun -Errors @()); return 0 }
         $sid = ([System.Security.Principal.NTAccount]$user).Translate([System.Security.Principal.SecurityIdentifier]).Value
@@ -720,7 +774,7 @@ function Invoke-NptUninstall {
     if ($null -eq $lock) { [Console]::Error.WriteLine('a run still holds the lock; nothing changed'); return 1 }
     try {
         $origPath = Join-Path $script:NptRoot 'original-state.json'
-        $clean = Invoke-NptRecover -Path $origPath
+        $clean = Invoke-NptRecover -Path $origPath -User (Get-NptConsoleUser)
     } finally { $lock.Dispose() }
     # Keep the tasks, script and saved state: the next run retries the restore before anything else.
     if (-not $clean) { [Console]::Error.WriteLine('restore failed; original-state.json, tasks and script kept, see run.log'); return 1 }

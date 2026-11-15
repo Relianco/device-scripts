@@ -139,6 +139,11 @@ function Remove-NptTasks { $removed.Add('x') }
 if ((Complete-NptRun -Errors @('pa: denied')) -ne 'kept' -or $removed.Count -ne 0) { Fail 'tasks removed after a failed restore' }
 if ((Complete-NptRun -Errors @()) -ne 'removed' -or $removed.Count -ne 1) { Fail 'tasks kept after a clean restore' }
 
+# The unbuffered reader compiles (the P/Invoke calls themselves need Windows).
+Add-Type -TypeDefinition $script:NptIoSource
+if ($null -eq [NptIo].GetMethod('ReadUnbuffered')) { Fail 'NptIo.ReadUnbuffered missing' }
+if ($src.Contains('[System.IO.FileOptions]0x20000000')) { Fail 'FileStream cannot take FILE_FLAG_NO_BUFFERING on .NET Framework' }
+
 # Review fixes that need a device to exercise, held in place by source checks.
 if ($src.Contains('IPv4DefaultGateway.NextHop')) { Fail 'a gateway-less adapter would throw under StrictMode' }
 if (-not $src.Contains('if ($verified -eq $false) { $errors +=')) { Fail 'a failed restore verification must keep the saved state' }
@@ -172,6 +177,17 @@ try {
     $script:StartMeasure = { param($User, $Arguments) Set-Content -LiteralPath (Join-Path $root 'work/20261116-091002-gsa.json') -Value '{"scenario":"gsa","settled":true}' }
     $m = Invoke-NptUserTask -User 'u' -Name 'gsa' -Id '20261116-091002' -Expect $true -TimeoutSeconds 30 -PollSeconds 1
     if (-not $m.settled) { Fail 'measurement object not returned' }
+
+    # Recovery with a signed-in user refreshes the tray and keeps the saved state until DNS shows the original path.
+    $script:NptPollSeconds = 1
+    $saved = Join-Path $root 'original-state.json'
+    $script:RestartGsa = { }
+    foreach ($case in @(@('false', $false), @('true', $true))) {
+        '{"sid":"S-1-5-21-1-2-3-1001","paValue":null,"tunnelName":"","tunnel":"","guard":"","nrpt":[]}' | Set-Content -LiteralPath $saved
+        $script:StartMeasure = [scriptblock]::Create("param(`$User, `$Arguments) if (`$Arguments -match '-RunId (\S+)') { Set-Content -LiteralPath (Join-Path '$root' ('work/' + `$Matches[1] + '-restore.json')) -Value '{""settled"":$($case[0])}' }")
+        $clean = Invoke-NptRecover -Path $saved -User 'CORP\u'
+        if ($clean -ne $case[1] -or (Test-Path -LiteralPath $saved) -eq $case[1]) { Fail "recover with tray check settled=$($case[0]) returned $clean" }
+    }
 
     # Report prints to the console and returns only the exit code.
     $results | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $root 'results-20261116-091000.json')
