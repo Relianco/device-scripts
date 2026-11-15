@@ -174,7 +174,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 
 **Windows maintenance.** These change the device only when you ask.
 
-- `storage-maintenance`: reports disk use and cleanup candidates. `Mode` is `Report` (default) or `Cleanup`. Profile removal is a separate opt-in. It never reboots.
+- `storage-maintenance`: reports disk use and cleanup candidates. `Mode` is `Report` (default) or `Cleanup`. Profile removal is a separate opt-in. `ProfileReport=true` adds a report-only per-profile census. It never reboots.
 - `update-maintenance`: reports update services, policy, and servicing state. `Mode` is `Report` (default) or `Repair`. It never reboots and never starts Setup.
 - `feature-update`: read-only check of why Windows Update has not offered the next feature update. `Fix` set to `true` repairs only the compatibility appraiser tasks (the main task and its Exp sibling, both of which VDOT disables).
 - `feature-upgrade`: runs an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task, so the job returns quickly. It changes the device.

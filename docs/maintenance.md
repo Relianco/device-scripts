@@ -68,6 +68,17 @@ $arguments -join ' '
 
 For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and the chosen `ProfileAgeDays`; optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until the report's candidates and evidence are reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks. It never uses ResetBase.
 
+### Profile report (report only)
+
+`ProfileReport='true'` adds a per-profile census and prints a compact schema-v2 JSON (under 9.5 KB) for a device custom field instead of the v1 summary. It requires `Mode='Report'` with `RemoveProfiles` and `ComponentCleanup` false; the package refuses any other combination, and a report run never enters the cleanup branch. Pass `ProfileAgeDays='90'` for the shared-device threshold.
+
+- `SharedDevices`: comma-separated computer names that are shared or loaner PCs. A device not on the list reports a stale profile as `KeepNotSharedDevice`; personal devices never delete profiles.
+- `PrimaryUserHint`: optional account name or UPN of the RMM's last-logged-on user.
+
+Per profile it reports local bytes (total, OST, PST, OneDrive hydrated and online-only, Teams and browser caches, Temp, Downloads, the SID's Recycle Bin), the last 4624 logon in the window, the ProfileList unload age, primary-user, admin and service flags, and the decision a delete run would take. Sizes come from directory metadata: no file is opened or recalled, junctions and symlinks are never entered, and cloud directories that would populate on open are skipped and mark the size partial. The walk has its own `MaxFiles`/`MaxSeconds` budget, so allow about twice `MaxSeconds` plus evidence time in the RMM timeout.
+
+The age engine's `StaleCandidate` only narrows from there. A primary user (Intune enrollment UPN, the top interactive 4624 SID, or the hint) is `KeepPrimaryUser`. Local Administrators members and names matching `opadmin*`, `admin*`, `svc*`, `*$` or the LAPS account are `Protected`. On a shared device, unknown admin membership, no primary-user source, Security log coverage shorter than `ProfileAgeDays` (or a newest event in the future or older than 2 days), and a PST that is present or not ruled out each give a `Review*` decision. OneDrive KFM and pending uploads are not probed yet, so a profile that passes every gate is `ReviewKfmUnverified`: no profile is a deletion candidate in this version.
+
 The normal scan budget is 20,000 entries and 30 seconds. `MaxFiles` and `MaxSeconds` allow a longer explicitly requested scan; partial coverage remains visible. Long scans belong after the upgrade, and the RMM job timeout must allow the requested budget plus diagnostics and cleanup.
 
 For updates, select `windows/packages/update-maintenance/Invoke-UpdateMaintenance.ps1`. Start with `Mode='Report'`; use explicit `Mode='Repair'` for guarded service recovery and scan verification. `ResetCache='true'` enables cache backup/reset and `RepairImage='true'` enables DISM/SFC. `Scan='true'` requests an online search from Report mode only when guards pass. Timeouts are configurable via `ScanTimeoutSeconds` and `NativeTimeoutSeconds` (10–3600 seconds). Do not use cache reset or image repair as an automatic response to an empty update list.

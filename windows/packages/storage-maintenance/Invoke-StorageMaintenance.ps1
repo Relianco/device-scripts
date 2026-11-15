@@ -6,22 +6,27 @@ Logical bytes are observations, not guaranteed reclaimable physical space.
 param([string]$DeploymentType, [string]$Action, [string]$PinVersion,
  [string]$Mode='Report', [string]$TempAgeDays='7', [string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false', [string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
- [string]$MaxFiles='20000', [string]$MaxSeconds='30')
+ [string]$MaxFiles='20000', [string]$MaxSeconds='30', [string]$ProfileReport='false', [string]$PrimaryUserHint='', [string]$SharedDevices='')
 
 $script:SmPackagePath=$PSCommandPath
 
 function Get-SmArguments {
  param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false',[string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
- [string]$MaxFiles='20000',[string]$MaxSeconds='30')
+ [string]$MaxFiles='20000',[string]$MaxSeconds='30',[string]$ProfileReport='false',[string]$PrimaryUserHint='',[string]$SharedDevices='')
  if ($Mode -cnotin @('Report','Cleanup')) { throw 'Mode must be Report or Cleanup' }
  $a=@{ Mode=$Mode; ExcludeProfiles=@($ExcludeProfiles.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
- foreach($b in @(@('RemoveProfiles',$RemoveProfiles),@('ComponentCleanup',$ComponentCleanup))) {
+ if ($PrimaryUserHint.Length -gt 256 -or $PrimaryUserHint -match '[\x00-\x1f]') { throw 'Invalid PrimaryUserHint' }; $a.PrimaryUserHint=$PrimaryUserHint.Trim()
+ $a.SharedDevices=@($SharedDevices.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+ if ($a.SharedDevices.Count -gt 100 -or @($a.SharedDevices | Where-Object { $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$' }).Count) { throw 'SharedDevices must be a comma-separated list of computer names' }
+ foreach($b in @(@('RemoveProfiles',$RemoveProfiles),@('ComponentCleanup',$ComponentCleanup),@('ProfileReport',$ProfileReport))) {
   if ($b[1] -cnotin @('true','false')) { throw "$($b[0]) must be true or false" }; $a[$b[0]]=$b[1] -ceq 'true'
  }
  foreach($n in @(@('TempAgeDays',$TempAgeDays,1,365),@('ProfileAgeDays',$ProfileAgeDays,30,3650),@('MaxFiles',$MaxFiles,1,2000000),@('MaxSeconds',$MaxSeconds,1,1800))) {
   if ($n[1] -notmatch '^\d{1,7}$' -or [int]$n[1] -lt $n[2] -or [int]$n[1] -gt $n[3]) { throw "Invalid $($n[0])" }; $a[$n[0]]=[int]$n[1]
- }; return $a
+ }
+ if ($a.ProfileReport -and ($a.Mode -ne 'Report' -or $a.RemoveProfiles -or $a.ComponentCleanup)) { throw 'ProfileReport is report-only: Mode must be Report and RemoveProfiles and ComponentCleanup false' }
+ return $a
 }
 
 # Registry profile-service dates are primary evidence on Windows 10 1809+.
@@ -199,7 +204,7 @@ function Get-SmFinalProfileVeto {
 function Invoke-SmProfileWorker {
  param($Profiles,[int]$Days,[datetime]$Now,[double]$Seconds,[string]$Directory,[string]$Mode='Full')
  $watch=[Diagnostics.Stopwatch]::StartNew()
- $r=[ordered]@{Complete=$false;TimedOut=$false;GuardChanged=$false;Reasons=@();Error=$null;Entries=@();FinalVeto=$null;ElapsedSeconds=0.0}
+ $r=[ordered]@{Complete=$false;TimedOut=$false;GuardChanged=$false;Reasons=@();Error=$null;Entries=@();FinalVeto=$null;ReportContext=$null;ElapsedSeconds=0.0}
  $process=$null
  try {
   if($Seconds -le 0) { $r.TimedOut=$true; throw 'Aggregate profile evidence budget exhausted' }
@@ -212,7 +217,7 @@ param([string]$PackagePath,[string]$InputPath,[string]$OutputPath)
 $ErrorActionPreference='Stop'
 $env:RELIAN_DEPLOY_TEST='1'
 . $PackagePath
-$result=[ordered]@{Complete=$false;Error=$null;Entries=@();FinalVeto=$null}
+$result=[ordered]@{Complete=$false;Error=$null;Entries=@();FinalVeto=$null;ReportContext=$null}
 try {
  $data=Import-Clixml -LiteralPath $InputPath
  $manifest=Join-Path (Split-Path -Parent $PackagePath) 'PSAppDeployToolkit\PSAppDeployToolkit.psd1'
@@ -224,6 +229,7 @@ try {
    $evidence=Get-SmProfileEvidence $profile $data.Days $data.Now $context
    $result.Entries+=[pscustomobject]@{SID=$profile.SID;Path=$profile.LocalPath;Evidence=$evidence}
   }
+  if($data.Mode -eq 'Report') { $result.ReportContext=Get-SmReportContext $context $data.Profiles $data.Now }
  }
  $result.Complete=$true
 } catch { $result.Error=$_.Exception.Message }
@@ -242,7 +248,7 @@ try {
   if($r.TimedOut -or $r.GuardChanged) { throw 'Read-only profile evidence interrupted; all profiles require review' }
   if($process.ExitCode -ne 0 -or -not (Test-SmSafePath $outputPath $Directory)) { throw 'Read-only evidence worker failed or produced unsafe output' }
   $out=Import-Clixml -LiteralPath $outputPath -ErrorAction Stop
-  $r.Complete=$out.Complete; $r.Entries=@($out.Entries); $r.FinalVeto=$out.FinalVeto; $r.Error=$out.Error
+  $r.Complete=$out.Complete; $r.Entries=@($out.Entries); $r.FinalVeto=$out.FinalVeto; $r.ReportContext=$out.ReportContext; $r.Error=$out.Error
  } catch {
   $r.Error=$_.Exception.Message
   if($process) { try { if(-not $process.HasExited) { $process.Kill() } } catch { $r.Reasons+='Read-only worker could not be confirmed stopped' } }
@@ -295,6 +301,185 @@ function Get-SmProfileSize {
  $covered=@($Scan.Roots | Where-Object { $_ } | Where-Object { $scanRoot=[IO.Path]::GetFullPath($_).TrimEnd([IO.Path]::DirectorySeparatorChar)+[IO.Path]::DirectorySeparatorChar; $prefix.StartsWith($scanRoot,[StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
  $observed=@($Scan.Files | Where-Object { [IO.Path]::GetFullPath($_.Path).StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase) })
  [pscustomobject]@{LogicalBytes=[int64]($observed | Measure-Object LogicalBytes -Sum).Sum;Partial=(-not $covered -or $Scan.Partial -or @($Scan.Errors).Count -gt 0 -or $Scan.SkippedReparseOrCloud -gt 0)}
+}
+
+# ---- ProfileReport: report-only. Nothing below deletes, writes or changes a setting. ----
+
+# Byte census of one profile from directory metadata only: no file is opened or recalled.
+# Junctions and symlinks are never entered. A non-link (cloud) reparse directory is entered
+# only inside a top-level OneDrive* folder; recall-on-open directories are skipped. A link
+# swapped in mid-walk can only inflate these read-only counts. Hard links count per name.
+# The leading comma returns the lazy enumerator itself, so budgets and guards apply per entry.
+# Like Get-SmScan, the walk stays in this process: local profile metadata reads are not the
+# identity/event-provider calls that need the killable worker, and recall-on-open dirs are skipped.
+$script:SmEnumerate={ param($Dir) ,([IO.DirectoryInfo]::new($Dir)).EnumerateFileSystemInfos() }
+function Get-SmProfileBytes {
+ param([string]$Path,[string]$RecycleRoot,[int]$FileLimit,[double]$Seconds)
+ $b=[ordered]@{ost=[int64]0;pst=[int64]0;oneDriveHydrated=[int64]0;oneDriveOnlineOnly=[int64]0;teamsCache=[int64]0;browserCache=[int64]0;temp=[int64]0;downloads=[int64]0;recycleBin=[int64]0}
+ $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;Errors=@()}
+ $watch=[Diagnostics.Stopwatch]::StartNew(); $nextGuard=0; $lastGuard=-2
+ $queue=New-Object 'Collections.Generic.Queue[object]'; $base=$Path.TrimEnd('\','/')
+ if(Test-SmScanDirectory $base) { $queue.Enqueue(@($base,$false)) } else { $r.Partial=$true; $r.Errors+='Profile root missing, not a directory, or has a reparse ancestor' }
+ if($RecycleRoot -and (Test-Path -LiteralPath $RecycleRoot)) { if(Test-SmScanDirectory $RecycleRoot) { $queue.Enqueue(@($RecycleRoot,$true)) } else { $r.Partial=$true; $r.Errors+='Recycle Bin root unsafe' } }
+ :walk while($queue.Count) {
+  $item=$queue.Dequeue(); $dir=$item[0]; $recycle=$item[1]
+  try {
+   $entries=& $script:SmEnumerate $dir
+   foreach($e in $entries) {
+    if($r.EntriesVisited -ge $nextGuard -or $watch.Elapsed.TotalSeconds-$lastGuard -ge 2) {
+     try { $g=& $script:SmScanGuard; if($null -eq $g -or $g.Light) { $r.Light=$true } } catch { $r.Light=$true }
+     $lastGuard=$watch.Elapsed.TotalSeconds; $nextGuard=$r.EntriesVisited+128
+     if($r.Light) { $r.Partial=$true; break walk }
+    }
+    if($r.EntriesVisited -ge $FileLimit -or $watch.Elapsed.TotalSeconds -ge $Seconds) { $r.Partial=$true; break walk }
+    $r.EntriesVisited++
+    $attr=[int64]$e.Attributes; $rel=if($recycle){''}else{"$($e.FullName)".Substring($base.Length)}
+    $oneDrive=$rel -match '^[\\/]OneDrive[^\\/]*([\\/]|$)'
+    if($attr -band 16) {
+     if(($attr -band (4096 -bor 262144 -bor 4194304)) -or (($attr -band 1024) -and ($recycle -or -not $oneDrive -or $e.LinkType))) { $r.Skipped++; continue }
+     $queue.Enqueue(@($e.FullName,$recycle)); continue
+    }
+    if(($attr -band 1024) -and $e.LinkType) { $r.Skipped++; continue }
+    $len=[int64]$e.Length
+    if($attr -band (4096 -bor 4194304)) { if($oneDrive) { $b.oneDriveOnlineOnly+=$len }; continue }
+    if($recycle) { $b.recycleBin+=$len; continue }
+    $r.TotalBytes+=$len
+    $cat=switch -Regex ($rel) {
+     '\.pst$' { 'pst'; break }
+     '\.ost$' { 'ost'; break }
+     '^[\\/]OneDrive[^\\/]*[\\/]' { 'oneDriveHydrated'; break }
+     '^[\\/]AppData[\\/](Local[\\/]Packages[\\/]MSTeams_[^\\/]+[\\/]LocalCache|Roaming[\\/]Microsoft[\\/]Teams)[\\/]' { 'teamsCache'; break }
+     '^[\\/]AppData[\\/]Local[\\/](Microsoft[\\/]Edge|Google[\\/]Chrome)[\\/]User Data[\\/].*[\\/](Cache|Code Cache|GPUCache|CacheStorage)[\\/]' { 'browserCache'; break }
+     '^[\\/]AppData[\\/]Local[\\/]Temp[\\/]' { 'temp'; break }
+     '^[\\/]Downloads[\\/]' { 'downloads'; break }
+    }
+    if($cat) { $b[$cat]+=$len }
+   }
+  } catch { $r.Partial=$true; if($r.Errors.Count -lt 5) { $r.Errors+=$_.Exception.Message } }
+ }
+ if($r.Skipped) { $r.Partial=$true }
+ [pscustomobject]$r
+}
+
+# Identity context for the report. Runs inside the read-only evidence worker because
+# local-group and event-provider lookups can hang on an unreachable domain.
+function Get-SmReportContext {
+ param($Context,$Profiles,[datetime]$Now)
+ $c=[ordered]@{Log=[pscustomobject]@{Known=$false;OldestUtc=$null;NewestUtc=$null};Admins=[pscustomobject]@{Known=$false;Sids=@()};IntuneUpns=@();LapsNames=@();Upns=@{};LogonCounts=@{};LogonsComplete=$false;Errors=@()}
+ try {
+  $oldest=Get-WinEvent -LogName Security -Oldest -MaxEvents 1 -ErrorAction Stop
+  $newest=Get-WinEvent -LogName Security -MaxEvents 1 -ErrorAction Stop
+  $c.Log=[pscustomobject]@{Known=$true;OldestUtc=$oldest.TimeCreated.ToUniversalTime();NewestUtc=$newest.TimeCreated.ToUniversalTime()}
+ } catch { $c.Errors+=('Security log range: '+$_.Exception.Message) }
+ try { $c.Admins=[pscustomobject]@{Known=$true;Sids=@(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { "$($_.SID)" })} }
+ catch {
+  # Get-LocalGroupMember fails on orphaned or Entra SIDs and in 32-bit hosts; ADSI does not.
+  try {
+   $name=(New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')).Translate([Security.Principal.NTAccount]).Value.Split('\')[-1]
+   $sids=@(([ADSI]('WinNT://./'+$name+',group')).psbase.Invoke('Members') | ForEach-Object { (New-Object Security.Principal.SecurityIdentifier([byte[]]$_.GetType().InvokeMember('objectSid','GetProperty',$null,$_,$null),0)).Value })
+   $c.Admins=[pscustomobject]@{Known=$true;Sids=$sids}
+  } catch { $c.Errors+=('Local Administrators: '+$_.Exception.Message) }
+ }
+ try {
+  $key='HKLM:\SOFTWARE\Microsoft\Enrollments'
+  if(Test-Path -LiteralPath $key) { $c.IntuneUpns=@(Get-ChildItem -LiteralPath $key -ErrorAction Stop | Select-Object -First 64 | ForEach-Object { "$((Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue).UPN)" } | Where-Object { $_ -match '^[^@\s]+@[^@\s]+$' } | Select-Object -Unique) }
+ } catch { $c.Errors+=('Intune enrollment: '+$_.Exception.Message) }
+ foreach($k in @(@('HKLM:\SOFTWARE\Microsoft\Policies\LAPS','AdministratorAccountName'),@('HKLM:\SOFTWARE\Policies\Microsoft\Windows\LAPS','AdministratorAccountName'),@('HKLM:\SOFTWARE\Policies\Microsoft Services\AdmPwd','AdminAccountName'))) {
+  try { $v=(Get-ItemProperty -LiteralPath $k[0] -ErrorAction Stop).($k[1]); if($v) { $c.LapsNames+="$v" } } catch { }
+ }
+ foreach($p in @($Profiles)) {
+  if("$($p.SID)" -match '^S-1-12-1-[\d-]+$') { try { $u=(Get-ItemProperty -LiteralPath ('HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\'+$p.SID+'\IdentityCache\'+$p.SID) -ErrorAction Stop).UserName; if($u) { $c.Upns["$($p.SID)"]="$u" } } catch { } }
+ }
+ # Human logons only: window manager, font driver and built-in RID accounts are not users.
+ foreach($e in @($Context.Events.Recent)) { if($e.Sid -match '^S-1-(5-21-|12-1-)' -and $e.Sid -notmatch '-(500|501|503|504)$') { $c.LogonCounts[$e.Sid]=1+[int]$c.LogonCounts[$e.Sid] } }
+ $c.LogonsComplete=($Context.Events.ProbeComplete -and -not $Context.Events.Truncated)
+ [pscustomobject]$c
+}
+
+# What a delete run would decide. Gates only narrow the age engine's StaleCandidate.
+# Until the OneDrive KFM and pending-upload probe exists, nothing reaches StaleCandidate.
+function Get-SmReportDecision {
+ param([string]$Decision,[string]$Reason,$F)
+ $out={ param($d,$why) [pscustomobject]@{Decision=$d;Reason=$why} }
+ if($Decision -eq 'Protected' -or $Decision -like 'Keep*') { return (& $out $Decision $Reason) }
+ if($F.IsPrimary) { return (& $out 'KeepPrimaryUser' 'Primary user: Intune enrollment, top 4624 logon SID or caller hint') }
+ if($F.IsService) { return (& $out 'Protected' 'Service, technician or LAPS account name') }
+ if($F.IsAdmin) { return (& $out 'Protected' 'Member of local Administrators') }
+ if($Decision -ne 'StaleCandidate') { return (& $out $Decision $Reason) }
+ if(-not $F.Shared) { return (& $out 'KeepNotSharedDevice' 'Stale by age, but this device is not on the shared list; personal devices never delete profiles') }
+ if(-not $F.AdminKnown) { return (& $out 'ReviewAdminUnknown' 'Local Administrators membership could not be read') }
+ if(-not $F.PrimaryKnown) { return (& $out 'ReviewPrimaryUnknown' 'No primary-user source was available') }
+ if($null -eq $F.CoverageDays -or $F.CoverageDays -lt $F.AgeDays) { return (& $out 'ReviewLogCoverage' 'Security log does not cover the threshold window or its clock is inconsistent; age rests on ProfileList only') }
+ if($F.SizePartial -or $null -eq $F.PstBytes -or $F.PstBytes -gt 0) { return (& $out 'ReviewPst' 'PST present, or not ruled out because the size walk was partial') }
+ & $out 'ReviewKfmUnverified' 'Age, identity and log-coverage gates passed; OneDrive KFM and pending uploads are not verified yet'
+}
+
+function Get-SmProfileReport {
+ param($A,$Assessed,$Context,[datetime]$Now,[string]$ComputerName=$env:COMPUTERNAME)
+ $rep=[ordered]@{EventLog=$null;DeviceClass=$null;Profiles=@();Summary=$null;Errors=@()}
+ if(-not $Context) { $rep.Errors+='Report identity context unavailable; candidates require review'; $Context=[pscustomobject]@{Log=$null;Admins=$null;IntuneUpns=@();LapsNames=@();Upns=@{};LogonCounts=@{};LogonsComplete=$false;Errors=@()} }
+ $rep.Errors+=@($Context.Errors | Select-Object -First 5)
+ $iso={ param($d) if($d) { ([datetime]$d).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') } }
+ $lower={ param($s) if("$s") { "$s".ToLowerInvariant() } }
+ # A newest event in the future or a log silent for 2 days means the clock or log is not trustworthy.
+ $log=$Context.Log; $coverage=$null
+ if($log.Known -and $log.NewestUtc -le $Now.AddHours(1) -and $log.NewestUtc -ge $Now.AddDays(-2)) { $coverage=[int][math]::Floor(($Now-$log.OldestUtc).TotalDays) }
+ $counts=$Context.LogonCounts; if(-not $counts) { $counts=@{} }; $total=0; $max=0
+ foreach($k in @($counts.Keys)) { $total+=$counts[$k]; if($counts[$k] -gt $max) { $max=$counts[$k] } }
+ $top=@(if($max) { @($counts.Keys) | Where-Object { $counts[$_] -eq $max } })
+ $distinct=@($counts.Keys).Count
+ $shared=[bool]($ComputerName -and @($A.SharedDevices) -contains $ComputerName)
+ $rep.EventLog=[ordered]@{securityOldestUtc=(& $iso $log.OldestUtc);securityNewestUtc=(& $iso $log.NewestUtc);coverageDays=$coverage;logonsComplete=[bool]$Context.LogonsComplete}
+ $rep.DeviceClass=[ordered]@{distinctInteractiveSids=$distinct;topSidShare=$(if($total){[math]::Round($max/$total,2)}else{$null});suggested=$(switch($distinct){0{'unknown'}1{'personal'}2{'secondary'}default{'shared'}});configuredShared=$shared}
+ $intune=@(foreach($u in @($Context.IntuneUpns)) { & $lower $u; & $lower ("$u" -split '@')[0] }) | Where-Object { $_ }
+ $hint="$($A.PrimaryUserHint)".Trim(); $leaf=($hint -split '\\')[-1]
+ $hinted=@(if($hint) { & $lower $hint; & $lower $leaf; & $lower ($leaf -split '@')[0] }) | Where-Object { $_ }
+ $primaryKnown=[bool]($top.Count -or @($intune).Count -or @($hinted).Count)
+ $adminKnown=[bool]$Context.Admins.Known; $laps=@($Context.LapsNames | ForEach-Object { & $lower $_ })
+ $watch=[Diagnostics.Stopwatch]::StartNew(); $left=@($Assessed).Count; $used=0; $light=$false
+ foreach($p in @($Assessed)) {
+  $sid="$($p.SID)"; $account="$($p.Evidence.Identity.Account)"; $user=($account -split '\\')[-1]; $upn="$($Context.Upns[$sid])"
+  $names=@($sid,$account,$user,$upn,($upn -split '@')[0],("$($p.Path)" -split '[\\/]')[-1] | Where-Object { $_ } | ForEach-Object { & $lower $_ })
+  $source=if(@($names | Where-Object { $intune -contains $_ }).Count) {'intune'} elseif($top -contains $sid) {'logon4624'} elseif(@($names | Where-Object { $hinted -contains $_ }).Count) {'hint'} else {$null}
+  $isAdmin=[bool]($adminKnown -and @($Context.Admins.Sids) -contains $sid)
+  $isService=[bool]($user -match '^(opadmin|admin|svc)' -or $user -match '\$$' -or ($user -and $laps -contains (& $lower $user)))
+  $sizes=$null
+  if(-not $light -and (Test-SmProfilePath $p.Path)) {
+   # Shares the run's MaxFiles/MaxSeconds as a separate budget, split over the profiles left.
+   $volume=[IO.Path]::GetPathRoot("$($p.Path)"); $recycle=if($volume -and $sid -match '^S-1-\d+(-\d+)+$') { Join-Path $volume ('$Recycle.Bin\'+$sid) }
+   $sizes=Get-SmProfileBytes $p.Path $recycle ([int][math]::Floor(($A.MaxFiles-$used)/[math]::Max(1,$left))) (($A.MaxSeconds-$watch.Elapsed.TotalSeconds)/[math]::Max(1,$left))
+   $used+=$sizes.EntriesVisited
+   if($sizes.Light) { $light=$true; $rep.Errors+='Setup or unknown servicing appeared; remaining profile sizes withheld' }
+  }
+  $left--
+  $unload=$p.Evidence.Registry.Unload; $unloadUtc=if($unload.State -eq 'valid') { $unload.TimestampUtc }
+  $last=@($p.Evidence.Events.Recent | Where-Object { $_.Sid -eq $sid } | Sort-Object TimeUtc -Descending | Select-Object -First 1)
+  $flags=@{IsPrimary=[bool]$source;IsService=$isService;IsAdmin=$isAdmin;AdminKnown=$adminKnown;PrimaryKnown=$primaryKnown;CoverageDays=$coverage;AgeDays=$A.ProfileAgeDays;PstBytes=$(if($sizes){$sizes.Bytes.pst});SizePartial=(-not $sizes -or $sizes.Partial);Shared=$shared}
+  $d=Get-SmReportDecision $p.Decision $p.Reason $flags
+  $rep.Profiles+=[pscustomobject][ordered]@{sid=$sid;account=$account;path="$($p.Path)";totalBytes=$(if($sizes){$sizes.TotalBytes});sizePartial=$flags.SizePartial;bytes=$(if($sizes){$sizes.Bytes});lastLogon4624Utc=(& $iso $(if($last.Count){$last[0].TimeUtc}));profileUnloadUtc=(& $iso $unloadUtc);ageDays=$(if($unloadUtc){[int][math]::Floor(($Now-$unloadUtc).TotalDays)});ageSource='ProfileList';isPrimary=$flags.IsPrimary;primarySource=$source;isAdmin=$isAdmin;isService=$isService;kfm=$null;ageDecision=$p.Decision;decision=$d.Decision;reason=$d.Reason}
+ }
+ $all=@($rep.Profiles); $cand=@($all | Where-Object { $_.decision -eq 'StaleCandidate' })
+ $rep.Summary=[ordered]@{profiles=$all.Count;staleByAge=@($all | Where-Object { $_.ageDecision -eq 'StaleCandidate' }).Count;candidates=$cand.Count;candidateBytes=[int64]($cand | Measure-Object totalBytes -Sum).Sum;review=@($all | Where-Object { $_.decision -like 'Review*' }).Count;keep=@($all | Where-Object { $_.decision -like 'Keep*' }).Count;protected=@($all | Where-Object { $_.decision -eq 'Protected' }).Count}
+ [pscustomobject]$rep
+}
+
+# Compact v2 stdout for a NinjaOne custom field. Counts cover every profile; profile
+# entries are ranked (candidates, review, rest by size) and dropped from the tail to fit.
+function ConvertTo-SmProfileReportJson {
+ param($Report,[int]$MaxBytes=9500)
+ $pr=$Report.ProfileReport
+ $clip={ param($Value,[int]$Limit) $text=[string]$Value; if($text.Length -gt $Limit) { return $text.Substring(0,$Limit)+'...' }; $text }
+ $rank={ param($d) if($d -eq 'StaleCandidate') {0} elseif($d -like 'Review*') {1} else {2} }
+ $profiles=@($pr.Profiles | Sort-Object @{Expression={ & $rank $_.decision }},@{Expression={ [int64]$_.totalBytes };Descending=$true} | ForEach-Object {
+  $c=[ordered]@{}; foreach($n in $_.PSObject.Properties.Name) { $c[$n]=$_.$n }
+  $c.account=& $clip $c.account 64; $c.path=& $clip $c.path 96; $c.reason=& $clip $c.reason 140; $c })
+ $doc=[ordered]@{schemaVersion=2;package='storage-maintenance';mode=$Report.Mode;status=$Report.Status;timestamp=$Report.Timestamp;reportPath=(& $clip $Report.ReportPath 200);volumes=@($Report.Before | Select-Object -First 4 | ForEach-Object { [ordered]@{drive=$_.DeviceID;capacityBytes=$_.Size;freeBytes=$_.FreeSpace} });eventLog=$pr.EventLog;deviceClass=$pr.DeviceClass;profiles=$profiles;summary=$pr.Summary;errors=@(@($pr.Errors)+@($Report.Errors) | Select-Object -First 3 | ForEach-Object { & $clip $_ 160 });truncated=$false}
+ $json=$doc | ConvertTo-Json -Depth 6 -Compress
+ while([Text.Encoding]::UTF8.GetByteCount($json) -gt $MaxBytes -and $doc.profiles.Count) {
+  $doc.profiles=@($doc.profiles | Select-Object -First ($doc.profiles.Count-1)); $doc.truncated=$true
+  $json=$doc | ConvertTo-Json -Depth 6 -Compress
+ }
+ $json
 }
 
 $script:SmScanGuard={ & $script:SmGuards }
@@ -977,7 +1162,7 @@ function ConvertTo-SmSummary {
 
 function Invoke-SmMaintenance {
  param($A)
- $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null }
+ $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null }
  $acquired=$false
  try {
   $acquired=& $script:SmAcquire
@@ -997,7 +1182,7 @@ function Invoke-SmMaintenance {
    $r.Evidence['ApplicationCachePolicy']='Per-profile Edge/Chrome/WebView Cache, Code Cache, GPUCache, ShaderCache, CacheStorage, Teams LocalCache and Adobe AcroCef are report-only. Outlook OST, OfficeFileCache, Wef and offline documents are preserved.'
    $evidenceLimit=[double][math]::Min(30,$A.MaxSeconds); $evidenceRemaining=$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds; $assessedUtc=[datetime]::UtcNow
    $evidenceDirectory=Split-Path -Parent $r.ReportPath
-   $collected=& $script:SmCollectProfiles $profiles $A.ProfileAgeDays $assessedUtc $evidenceRemaining $evidenceDirectory 'Full'
+   $collected=& $script:SmCollectProfiles $profiles $A.ProfileAgeDays $assessedUtc $evidenceRemaining $evidenceDirectory $(if($A.ProfileReport){'Report'}else{'Full'})
    $evidenceRemaining-=[double]$collected.ElapsedSeconds
    $evidenceRemaining=[math]::Min($evidenceRemaining,$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds)
    if($evidenceRemaining -le 0) { $collected.Complete=$false; $collected.Error='Aggregate profile evidence deadline exhausted' }
@@ -1020,7 +1205,9 @@ function Invoke-SmMaintenance {
    $cacheFiles=@($scan.Files | Where-Object { $_.Path -match '(?i)\\(Cache|Code Cache|GPUCache|ShaderCache|CacheStorage)\\|\\MSTeams_[^\\]+\\LocalCache\\|\\Adobe\\AcroCef\\' })
    $r.Evidence['ApplicationCaches']=@($cacheFiles | Group-Object { if($_.Path -match '(?i)^(.+?\\(?:Cache|Code Cache|GPUCache|ShaderCache|CacheStorage))\\') { $Matches[1] } else { $_.Root } } | Sort-Object Count -Descending | Select-Object -First 30 | ForEach-Object { @{Path=$_.Name;ObservedLogicalBytes=($_.Group | Measure-Object LogicalBytes -Sum).Sum;Partial=$scan.Partial;Policy='report only; close owning application and review before manual cleanup';ReclaimableBytes=$null} })
    foreach($p in $r.Profiles) { $size=Get-SmProfileSize $scan $p.Path; $p.LogicalBytes=$size.LogicalBytes; $p.SizePartial=$size.Partial }
-   if($A.Mode -eq 'Cleanup') {
+   if($A.ProfileReport) { $r.ProfileReport=Get-SmProfileReport $A $r.Profiles $collected.ReportContext $assessedUtc }
+   # A profile report never enters the mutating branch, whatever else $A says.
+   if($A.Mode -eq 'Cleanup' -and -not $A.ProfileReport) {
     if(-not $g.Safe) { $r.Status='withheld' }
     else {
      $cleanupWatch=[Diagnostics.Stopwatch]::StartNew()
@@ -1088,6 +1275,7 @@ function Invoke-SmMaintenance {
  } catch { $r.Status='failed'; $r.Errors+=$_.Exception.Message }
  finally { if($acquired) { & $script:SmRelease } }
  if($r.Errors.Count -and $r.Status -eq 'complete') { $r.Status='partial' }
+ if($A.ProfileReport -and -not $r.ProfileReport) { $r.ProfileReport=[pscustomobject]@{EventLog=$null;DeviceClass=$null;Profiles=@();Summary=$null;Errors=@('Profile report not collected: scans withheld or run failed')} }
  return [pscustomobject]$r
 }
 
@@ -1114,7 +1302,7 @@ function Complete-SmRun {
   if($script:SmUiOpen) { try { Close-ADTInstallationProgress } catch { $Report.Notifications+=('close failed: '+$_.Exception.Message) } }
   try { & $script:SmSave $Report } catch { $Report.Errors+=('Report file write failed: '+$_.Exception.Message); $Report.Status='failed' }
   Write-Host "Storage maintenance: $($Report.Status); mode $($Report.Mode); actions $($Report.Actions.Count). Free-space delta includes concurrent system activity."
-  ConvertTo-SmSummary $Report $Report.ReportPath
+  if($Report.ProfileReport) { ConvertTo-SmProfileReportJson $Report } else { ConvertTo-SmSummary $Report $Report.ReportPath }
   $script:SmExitCode=if($Report.Status -eq 'failed') {1}else{0}
  } finally { Close-SmSession $script:SmExitCode }
 }
@@ -1124,7 +1312,7 @@ if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { Write-Output '{"Status":"notApplicable","Reason":"Maintenance has no uninstall action"}'; exit 0 }
  try {
-  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds
+  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices
   $r=Invoke-SmMaintenance $a
   Complete-SmRun $r
   exit $script:SmExitCode
