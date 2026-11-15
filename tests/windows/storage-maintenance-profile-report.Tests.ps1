@@ -23,7 +23,7 @@ Throws { Get-SmArguments -SharedDevices "$devA,..\x" } 'computer names'
 Throws { Get-SmArguments -PrimaryUserHint "a`nb" } 'PrimaryUserHint'
 
 # --- Decision gates. Every gate is flipped alone from an all-pass baseline.
-$kfmOk = [pscustomobject]@{state='verified';redirected=3;accounts=1;pendingUploads=0;recentWrites=0;outsideKfmFiles=0;error=$null}
+$kfmOk = [pscustomobject]@{state='verified';redirected=3;accounts=1;localOneDriveFiles=0;outsideKfmFiles=0;error=$null}
 $pass = @{IsPrimary=$false;IsService=$false;IsAdmin=$false;AdminKnown=$true;PrimaryKnown=$true;CoverageDays=120;AgeDays=90;PstBytes=0;PstFiles=0;SizePartial=$false;Shared=$true;Kfm=$kfmOk}
 function Kfm($Change) { $k = [ordered]@{}; foreach ($p in $kfmOk.PSObject.Properties) { $k[$p.Name] = $p.Value }; foreach ($n in $Change.Keys) { $k[$n] = $Change[$n] }; [pscustomobject]$k }
 function Decide($Base, $Change) { $f = $pass.Clone(); foreach ($k in $Change.Keys) { $f[$k] = $Change[$k] }; (Get-SmReportDecision $Base 'age reason' $f).Decision }
@@ -47,10 +47,8 @@ $cases = @(
  @(@{Kfm=(Kfm @{state='notRedirected'})}, 'ReviewKfmNotRedirected'),
  @(@{Kfm=(Kfm @{state='syncRootNotWalked'})}, 'ReviewKfmSyncRootNotWalked'),
  @(@{Kfm=(Kfm @{state='Verified '})}, 'ReviewKfmUnknown'),
- @(@{Kfm=(Kfm @{pendingUploads=1})}, 'ReviewKfmPendingUploads'),
- @(@{Kfm=(Kfm @{pendingUploads=$null})}, 'ReviewKfmPendingUploads'),
- @(@{Kfm=(Kfm @{recentWrites=1})}, 'ReviewKfmPendingUploads'),
- @(@{Kfm=(Kfm @{recentWrites=$null})}, 'ReviewKfmPendingUploads'),
+ @(@{Kfm=(Kfm @{localOneDriveFiles=1})}, 'ReviewKfmUploadUnproven'),
+ @(@{Kfm=(Kfm @{localOneDriveFiles=$null})}, 'ReviewKfmUploadUnproven'),
  @(@{Kfm=(Kfm @{outsideKfmFiles=1})}, 'ReviewOutsideKfm'),
  @(@{Kfm=(Kfm @{outsideKfmFiles=$null})}, 'ReviewOutsideKfm')
 )
@@ -62,7 +60,7 @@ Assert ((Decide 'ReviewFallbackOnly' @{}) -eq 'ReviewFallbackOnly') 'An all-pass
 Assert ((Decide 'ReviewInconsistent' @{IsPrimary=$true}) -eq 'KeepPrimaryUser') 'Primary user is kept even when age evidence needs review'
 # Exhaustive: exactly one combination, every gate passing, yields a candidate.
 $names = @('IsPrimary','IsService','IsAdmin','AdminKnown','PrimaryKnown','SizePartial','Shared')
-$kfms = @($null, $kfmOk, (Kfm @{state='unknown'}), (Kfm @{pendingUploads=2}), (Kfm @{recentWrites=1}), (Kfm @{outsideKfmFiles=1}), (Kfm @{pendingUploads=$null}))
+$kfms = @($null, $kfmOk, (Kfm @{state='unknown'}), (Kfm @{localOneDriveFiles=2}), (Kfm @{outsideKfmFiles=1}), (Kfm @{localOneDriveFiles=$null}))
 $hits = 0
 for ($mask = 0; $mask -lt [math]::Pow(2, $names.Count); $mask++) {
  $change = @{}; for ($i = 0; $i -lt $names.Count; $i++) { $change[$names[$i]] = [bool]($mask -band (1 -shl $i)) }
@@ -78,8 +76,8 @@ $recycleRoot = Join-Path $root 'recycle'; $null = New-Item -ItemType Directory -
 $profileRoot = Join-Path $root 'user'; $null = New-Item -ItemType Directory -Path $profileRoot
 try {
  $D = 16; $RP = 1024; $OFF = 4096; $ROO = 262144; $RDA = 4194304
- $HS = 6; $since = [datetime]::UtcNow.AddDays(-200); $recent = $since.AddHours(3)
- function E($Rel, $Attr, $Len = 0, $Link = $null, $Write = $null) { [pscustomobject]@{FullName=($profileRoot + $Rel); Attributes=$Attr; Length=$Len; LinkType=$Link; LastWriteTimeUtc=$Write} }
+ $HS = 6
+ function E($Rel, $Attr, $Len = 0, $Link = $null) { [pscustomobject]@{FullName=($profileRoot + $Rel); Attributes=$Attr; Length=$Len; LinkType=$Link} }
  $tree = @{}
  $tree[$profileRoot] = @(
   (E '\AppData' $D), (E '\Downloads' $D), (E '\OneDrive - Org' ($D -bor $RP)), (E '\Junction' ($D -bor $RP) 0 'Junction'),
@@ -97,25 +95,23 @@ try {
  $tree[$profileRoot + '\OneDrive - Org'] = @((E '\OneDrive - Org\local.docx' ($RP -bor 32) 80), (E '\OneDrive - Org\cloud.docx' ($RP -bor $RDA) 5000), (E '\OneDrive - Org\offline.docx' ($RP -bor $OFF) 6000),
   (E '\OneDrive - Org\Unpopulated' ($D -bor $RP -bor $ROO)), (E '\OneDrive - Org\Inner' ($D -bor $RP) 0 'Junction'),
   (E '\OneDrive - Org\pending.xlsx' 32 700), (E '\OneDrive - Org\desktop.ini' (32 -bor $HS) 200), (E '\OneDrive - Org\~$pending.xlsx' 32 165),
-  (E '\OneDrive - Org\.849C9593-D756-4E56-8D6E-42412F2A707B' (32 -bor $HS) 0), (E '\OneDrive - Org\edited.docx' ($RP -bor 32) 90 $null $recent))
+  (E '\OneDrive - Org\.849C9593-D756-4E56-8D6E-42412F2A707B' (32 -bor $HS) 0), (E '\OneDrive - Org\edited.docx' ($RP -bor 32) 90))
  $tree[$profileRoot + '\Junction'] = @((E '\Junction\outside.bin' 32 777777))
  $tree[$profileRoot + '\Cloudish'] = @((E '\Cloudish\outside.bin' 32 888888))
  $tree[$recycleRoot] = @([pscustomobject]@{FullName=($recycleRoot + '\$RABC.docx');Attributes=32;Length=90;LinkType=$null}, [pscustomobject]@{FullName=($recycleRoot + '\$RDIR');Attributes=($D -bor $RP);Length=0;LinkType='Junction'})
  $script:enumerated = @()
  $script:SmEnumerate = { param($Dir) $script:enumerated += $Dir; if (-not $tree.ContainsKey($Dir)) { throw "unexpected enumeration of $Dir" }; $tree[$Dir] }
  $script:SmScanGuard = { [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
- $s = Get-SmProfileBytes $profileRoot $recycleRoot 1000 30 $since
+ $s = Get-SmProfileBytes $profileRoot $recycleRoot 1000 30
  Assert ($s.Bytes.ost -eq 1000 -and $s.Bytes.pst -eq 2000 -and $s.PstFiles -eq 1) 'OST and PST measured (extension match is case-insensitive), PST files counted'
  Assert ($s.Bytes.temp -eq 10 -and $s.Bytes.downloads -eq 70 -and $s.Bytes.teamsCache -eq 90 -and $s.Bytes.browserCache -eq 90) 'Temp, Downloads, Teams and browser caches measured'
  Assert ($s.Bytes.oneDriveHydrated -eq 1235 -and $s.Bytes.oneDriveOnlineOnly -eq 11000) 'OneDrive hydrated vs online-only split by attribute'
  Assert ($s.Bytes.recycleBin -eq 90) 'Per-SID Recycle Bin measured'
  Assert ($s.TotalBytes -eq (100+10+1000+2000+30+40+50+60+70+80+400+500+300+700+200+165+90)) "Total counts local bytes only, got $($s.TotalBytes)"
  Assert (-not ($script:enumerated -match 'Junction|Cloudish|Unpopulated|Inner|RDIR|NetHood|My Music|Recent|Offlineish')) ('Never entered a junction, a non-OneDrive reparse dir or a recall-on-open dir: ' + ($script:enumerated -join ';'))
- Assert ($s.Partial -and $s.Skipped -eq 7 -and $s.CompatLinks -eq 2 -and $s.CloudDirs -eq 1) "Unexpected links and cloud dirs outside OneDrive make the size partial; compat junctions and OneDrive cloud dirs do not, skipped=$($s.Skipped)"
- Assert ($s.OneDriveLocalOnly -eq 1) "Only the non-placeholder OneDrive file is pending; desktop.ini, ~`$ owner files and the sync-root marker never upload, got $($s.OneDriveLocalOnly)"
- Assert ($s.OneDriveRecent -eq 1) "A OneDrive file written in the last day of use is counted, got $($s.OneDriveRecent)"
+ Assert ($s.Partial -and $s.Skipped -eq 8 -and $s.CompatLinks -eq 2) "Unexpected links and every unpopulated cloud dir make the size partial; compat junctions do not, skipped=$($s.Skipped)"
+ Assert ($s.OneDriveLocal -eq 3) "Every local OneDrive file counts, placeholder or not (an edit can wait behind a tag); desktop.ini, ~`$ owner files and the sync-root marker never upload, got $($s.OneDriveLocal)"
  Assert ($s.Bytes.outsideKfm -eq 800 -and $s.OutsideKfmFiles -eq 2) "Desktop/Documents files outside OneDrive counted, desktop.ini excluded, got $($s.Bytes.outsideKfm)"
- Assert ($null -eq (Get-SmProfileBytes $profileRoot $recycleRoot 1000 30).OneDriveRecent) 'Without an unload time the recent-write count is unknown, not zero'
  $s = Get-SmProfileBytes $profileRoot $null 3 30
  Assert ($s.Partial -and $s.EntriesVisited -eq 3) 'Entry budget bounds the walk'
  $script:SmScanGuard = { [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('Setup started')} }
@@ -200,12 +196,12 @@ Throws { Get-SmHiveKey $cyc 'Software' } 'cyclic'
 
 # --- KFM state per profile. The hive read is mocked with fixture bytes; paths are generated.
 $kroot = $userRoot + '\' + (& $rand); $od = $kroot + '\OneDrive - Org'; $od2 = $kroot + '\OneDrive - Other'; $odp = $kroot + '\OneDrive'
-$sizesOk = [pscustomobject]@{OneDriveLocalOnly=0;OneDriveRecent=0;OutsideKfmFiles=0}
+$sizesOk = [pscustomobject]@{OneDriveLocal=0;OutsideKfmFiles=0}
 function Folders($Desktop, $Documents, $Pictures) { $f = [ordered]@{'My Music'='%USERPROFILE%\Music'}; if ($null -ne $Desktop) { $f.Desktop = $Desktop }; if ($null -ne $Documents) { $f.Personal = $Documents }; if ($null -ne $Pictures) { $f['My Pictures'] = $Pictures }; $f }
 function KfmOf($Folders, $Accounts, $Root = $kroot) { $script:hiveBytes = New-UserHive $Folders $Accounts; $script:SmReadHive = { param($Path, $Root) $script:hiveReads++; $script:hiveBytes }; Get-SmKfmState $Root $sizesOk }
 $allIn = Folders '%USERPROFILE%\OneDrive - Org\Desktop' ($od + '\Documents') ($od.ToUpperInvariant() + '\Pictures\')
 $k = KfmOf $allIn @{Business1=$od}
-Assert ($k.state -eq 'verified' -and $k.redirected -eq 3 -and $k.accounts -eq 1 -and $k.pendingUploads -eq 0) "All three folders inside the sync root verify (expanded, absolute, case and trailing slash): $($k | ConvertTo-Json -Compress)"
+Assert ($k.state -eq 'verified' -and $k.redirected -eq 3 -and $k.accounts -eq 1 -and $k.localOneDriveFiles -eq 0) "All three folders inside the sync root verify (expanded, absolute, case and trailing slash): $($k | ConvertTo-Json -Compress)"
 Assert ((KfmOf (Folders ($od + '\Desktop') ($od2 + '\Documents') ($odp + '\Pictures')) ([ordered]@{Business1=$od; Business2=$od2; Personal=$odp})).state -eq 'verified') 'Folders split across several OneDrive accounts verify'
 $kfmCases = @(
  @('Pictures not redirected', (Folders ($od + '\Desktop') ($od + '\Documents') '%USERPROFILE%\Pictures'), @{Business1=$od}, 'notRedirected'),
@@ -236,7 +232,7 @@ Assert ($k.state -eq 'unknown' -and $k.error -match 'being used' -and $k.error.L
 $script:SmReadHive = { param($Path, $Root) New-TestHive ([ordered]@{Software=[ordered]@{}}) -Dirty }
 Assert ((Get-SmKfmState $kroot $sizesOk).state -eq 'unknown') 'Dirty hive is unknown'
 $k = Get-SmKfmState $kroot $null
-Assert ($null -eq $k.pendingUploads -and $null -eq $k.outsideKfmFiles) 'No byte walk means upload counts are unknown, not zero'
+Assert ($null -eq $k.localOneDriveFiles -and $null -eq $k.outsideKfmFiles) 'No byte walk means upload counts are unknown, not zero'
 # The real reader: one bounded read of a regular file inside the profile; links and oversize files refused.
 $hroot = Join-Path ([IO.Path]::GetTempPath()) ('profile-hive-' + [guid]::NewGuid().ToString('n')); $null = New-Item -ItemType Directory -Path $hroot
 try {
@@ -297,7 +293,7 @@ function New-Context { [pscustomobject]@{Log=[pscustomobject]@{Known=$true;Oldes
 $realProfilePath = ${function:Test-SmProfilePath}; $realBytes = ${function:Get-SmProfileBytes}
 function Test-SmProfilePath($Path) { $true }
 $script:pending = 0
-function Get-SmProfileBytes { param($Path, $RecycleRoot, $FileLimit, $Seconds, $RecentSinceUtc) $script:recentArg = $RecentSinceUtc; [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$false;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocalOnly=$script:pending;OneDriveRecent=0;OutsideKfmFiles=0} }
+function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$false;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocal=$script:pending;OutsideKfmFiles=0} }
 $script:hiveReads = 0; $script:SmReadHive = { param($Path, $Root) $script:hiveReads++; throw 'locked' }
 $args90 = @{ProfileAgeDays=90;MaxFiles=1000;MaxSeconds=30;SharedDevices=@($sharedPc);PrimaryUserHint=''}
 $assessed = @(
@@ -329,9 +325,8 @@ $lroot = $userRoot + '\leaver'; $lod = $lroot + '\OneDrive - Org'
 $script:SmReadHive = { param($Path, $Root) New-UserHive (Folders ($lod + '\Desktop') ($lod + '\Documents') ($lod + '\Pictures')) @{Business1=$lod} }
 $r = Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc
 Assert ($r.Profiles[0].decision -eq 'StaleCandidate' -and $r.Profiles[0].kfm.state -eq 'verified' -and $r.Summary.candidates -eq 1 -and $r.Summary.candidateBytes -eq 500) 'An all-pass leaver with verified KFM is reported as a candidate'
-Assert ($script:recentArg -eq $now.AddDays(-201)) "Recent writes are counted from one day before the profile unload, got $($script:recentArg)"
 $script:pending = 1
-Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0].decision -eq 'ReviewKfmPendingUploads') 'A pending upload keeps a verified-KFM leaver in review'
+Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0].decision -eq 'ReviewKfmUploadUnproven') 'A local OneDrive file keeps a verified-KFM leaver in review'
 $script:pending = 0
 $script:hiveReads = 0; $script:SmReadHive = { param($Path, $Root) $script:hiveReads++; throw 'locked' }
 $recentProfile = New-Assessed 'S-1-5-21-9-9-9-1109' 'CORP\active' ($userRoot + '\active') 'KeepRecentProfileService'
@@ -356,7 +351,7 @@ $ctx = New-Context; $ctx.IntuneUpns = @(); $ctx.LogonCounts = @{}
 Assert ((Get-SmProfileReport $args90 $leaver $ctx $now $sharedPc).Profiles[0].decision -eq 'ReviewPrimaryUnknown') 'No primary source downgrades to review'
 $r = Get-SmProfileReport $args90 $leaver $null $now $sharedPc
 Assert ($r.Profiles[0].decision -like 'Review*' -and $r.Errors.Count -ge 1) 'Missing worker context fails closed'
-function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$true;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocalOnly=0;OneDriveRecent=0;OutsideKfmFiles=0} }
+function Get-SmProfileBytes { [pscustomobject]@{TotalBytes=500;Bytes=[ordered]@{ost=0;pst=0};Partial=$true;Light=$false;EntriesVisited=1;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0} }
 Assert ((Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0].decision -eq 'ReviewPst') 'Partial size walk cannot rule out a PST'
 function Test-SmProfilePath($Path) { $false }
 $p = (Get-SmProfileReport $args90 $leaver (New-Context) $now $sharedPc).Profiles[0]
@@ -373,8 +368,8 @@ Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 9500) 'Custom-field JSON s
 Assert ($doc.schemaVersion -eq 2 -and $doc.truncated -and $doc.summary.profiles -eq 200 -and $doc.volumes[0].freeBytes -eq 20) 'Schema v2 keeps counts and volumes when profiles are trimmed'
 Assert ($doc.profiles[0].decision -eq 'ReviewKfmUnknown' -and $doc.profiles.Count -le 100) 'Review entries rank first; more than 100 entries can never fit'
 # Detail is dropped before entries: lowest-ranked entries go slim first, and nothing is cut mid-structure.
-$kfmDetail = [ordered]@{state='verified';redirected=3;accounts=1;pendingUploads=0;recentWrites=0;outsideKfmFiles=0;error=$null}
-$some = 1..30 | ForEach-Object { [pscustomobject][ordered]@{sid="S-1-5-21-1-2-3-$_";account="CORP\u$_";path="C:\Users\u$_";totalBytes=1000+$_;bytes=[ordered]@{ost=1;pst=0;oneDriveHydrated=2;oneDriveOnlineOnly=3;teamsCache=4;browserCache=5;temp=6;downloads=7;recycleBin=8;outsideKfm=9};kfm=$kfmDetail;decision=$(if($_ -le 2){'StaleCandidate'}else{'ReviewKfmPendingUploads'});reason=('R' * 100);ageDecision='StaleCandidate'} }
+$kfmDetail = [ordered]@{state='verified';redirected=3;accounts=1;localOneDriveFiles=0;outsideKfmFiles=0;error=$null}
+$some = 1..30 | ForEach-Object { [pscustomobject][ordered]@{sid="S-1-5-21-1-2-3-$_";account="CORP\u$_";path="$userRoot\u$_";totalBytes=1000+$_;bytes=[ordered]@{ost=1;pst=0;oneDriveHydrated=2;oneDriveOnlineOnly=3;teamsCache=4;browserCache=5;temp=6;downloads=7;recycleBin=8;outsideKfm=9};kfm=$kfmDetail;decision=$(if($_ -le 2){'StaleCandidate'}else{'ReviewKfmUploadUnproven'});reason=('R' * 100);ageDecision='StaleCandidate'} }
 $report.ProfileReport.Profiles = $some; $report.ProfileReport.Summary = [ordered]@{profiles=30}
 $json = ConvertTo-SmProfileReportJson $report; $doc = $json | ConvertFrom-Json
 $full = @($doc.profiles | Where-Object { $_.kfm }); $slim = @($doc.profiles | Where-Object { -not $_.kfm })
@@ -435,7 +430,7 @@ try {
  Assert ($script:collectModes -contains 'Report' -and $r.ProfileReport.Profiles[0].ageDecision -eq 'StaleCandidate' -and $r.ProfileReport.Profiles[0].decision -eq 'ReviewKfmUnknown') 'Report collected identity context; deletable-by-age profile without a readable hive reported as review'
  # A full candidate is still only a report line: same run with KFM verified reaches no removal hook.
  $realKfm = ${function:Get-SmKfmState}
- function Get-SmKfmState { [pscustomobject]@{state='verified';redirected=3;accounts=1;pendingUploads=0;recentWrites=0;outsideKfmFiles=0;error=$null} }
+ function Get-SmKfmState { [pscustomobject]@{state='verified';redirected=3;accounts=1;localOneDriveFiles=0;outsideKfmFiles=0;error=$null} }
  $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true -SharedDevices $sharedPc -ProfileAgeDays 90)
  Assert ($r.ProfileReport.Profiles[0].decision -eq 'StaleCandidate' -and $r.ProfileReport.Summary.candidates -eq 1) 'Verified KFM makes the deletable-by-age profile a reported candidate'
  Assert ($script:mutations.Count -eq 0 -and $r.Actions.Count -eq 0 -and (Test-Path -LiteralPath $old) -and (Test-Path -LiteralPath $script:Profile.LocalPath)) ('A reported candidate was acted on: ' + ($script:mutations -join ';'))

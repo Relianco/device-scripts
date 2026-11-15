@@ -309,10 +309,12 @@ function Get-SmProfileSize {
 # Junctions and symlinks are never entered. A non-link (cloud) reparse directory is entered
 # only inside a top-level OneDrive* folder; recall-on-open directories are skipped. A link
 # swapped in mid-walk can only inflate these read-only counts. Hard links count per name.
-# Inside OneDrive, an unpopulated (recall-on-open or offline) cloud directory holds nothing local,
-# so it is counted, not skipped. Windows' own hidden+system compatibility junctions point back
-# into the profile, which is walked by its real paths, so they do not make the size partial.
-# OneDrive files without a reparse tag were never converted to placeholders: not yet uploaded.
+# Windows' own hidden+system compatibility junctions point back into the profile, which is walked
+# by its real paths, so they do not make the size partial. An unpopulated cloud directory is never
+# listed (listing would populate it), so it leaves the size partial wherever it is.
+# A listing cannot prove a local OneDrive file's contents are uploaded: a placeholder keeps its tag
+# while an edit waits for a paused or failing sync. Only online-only content is known to be in the
+# cloud, so every local OneDrive file counts against the upload gate.
 # The leading comma returns the lazy enumerator itself, so budgets and guards apply per entry.
 # Like Get-SmScan, the walk stays in this process: local profile metadata reads are not the
 # identity/event-provider calls that need the killable worker, and recall-on-open dirs are skipped.
@@ -321,9 +323,9 @@ $script:SmCompatJunctions=@('\Application Data','\Cookies','\Local Settings','\M
 # Names OneDrive never uploads (docs: invalid file names and types), plus its sync-root marker.
 $script:SmSyncIgnored='^(desktop\.ini|~\$.*|\.849C9593-D756-4E56-8D6E-42412F2A707B)$'
 function Get-SmProfileBytes {
- param([string]$Path,[string]$RecycleRoot,[int]$FileLimit,[double]$Seconds,$RecentSinceUtc=$null)
+ param([string]$Path,[string]$RecycleRoot,[int]$FileLimit,[double]$Seconds)
  $b=[ordered]@{ost=[int64]0;pst=[int64]0;oneDriveHydrated=[int64]0;oneDriveOnlineOnly=[int64]0;teamsCache=[int64]0;browserCache=[int64]0;temp=[int64]0;downloads=[int64]0;recycleBin=[int64]0;outsideKfm=[int64]0}
- $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;CompatLinks=0;CloudDirs=0;PstFiles=0;OneDriveLocalOnly=0;OneDriveRecent=$(if($RecentSinceUtc){0});OutsideKfmFiles=0;Errors=@()}
+ $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;CompatLinks=0;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0;Errors=@()}
  $watch=[Diagnostics.Stopwatch]::StartNew(); $nextGuard=0; $lastGuard=-2
  $queue=New-Object 'Collections.Generic.Queue[object]'; $base=$Path.TrimEnd('\','/')
  if(Test-SmScanDirectory $base) { $queue.Enqueue(@($base,$false)) } else { $r.Partial=$true; $r.Errors+='Profile root missing, not a directory, or has a reparse ancestor' }
@@ -343,7 +345,6 @@ function Get-SmProfileBytes {
     $attr=[int64]$e.Attributes; $rel=if($recycle){''}else{"$($e.FullName)".Substring($base.Length)}
     $oneDrive=$rel -match '^[\\/]OneDrive[^\\/]*([\\/]|$)'
     if($attr -band 16) {
-     if($oneDrive -and -not $recycle -and -not $e.LinkType -and ($attr -band (4096 -bor 262144 -bor 4194304))) { $r.CloudDirs++; continue }
      if($e.LinkType -eq 'Junction' -and ($attr -band 6) -eq 6 -and $script:SmCompatJunctions -contains $rel) { $r.CompatLinks++; continue }
      if(($attr -band (4096 -bor 262144 -bor 4194304)) -or (($attr -band 1024) -and ($recycle -or -not $oneDrive -or $e.LinkType))) { $r.Skipped++; continue }
      $queue.Enqueue(@($e.FullName,$recycle)); continue
@@ -353,11 +354,7 @@ function Get-SmProfileBytes {
     if($attr -band (4096 -bor 4194304)) { if($oneDrive) { $b.oneDriveOnlineOnly+=$len }; continue }
     if($recycle) { $b.recycleBin+=$len; continue }
     $r.TotalBytes+=$len; $leaf=($rel -split '[\\/]')[-1]
-    if($oneDrive) {
-     if(-not ($attr -band 1024) -and $leaf -notmatch $script:SmSyncIgnored) { $r.OneDriveLocalOnly++ }
-     # A local file written in the last day of the user's session may not have uploaded before sign-out.
-     if($RecentSinceUtc -and $e.LastWriteTimeUtc -ge $RecentSinceUtc) { $r.OneDriveRecent++ }
-    }
+    if($oneDrive) { if($leaf -notmatch $script:SmSyncIgnored) { $r.OneDriveLocal++ } }
     elseif($rel -match '^[\\/](Desktop|Documents|Pictures)[\\/]' -and $leaf -ne 'desktop.ini') { $b.outsideKfm+=$len; $r.OutsideKfmFiles++ }
     $cat=switch -Regex ($rel) {
      '\.pst$' { 'pst'; break }
@@ -498,7 +495,7 @@ $script:SmKfmFolders=@(@('Desktop','{754AC886-DF64-4CBA-86B5-F7FBF4FBCEF5}'),@('
 # a file. Any other state, or any read failure, is unverified.
 function Get-SmKfmState {
  param([string]$ProfilePath,$Sizes)
- $k=[ordered]@{state='unknown';redirected=0;accounts=0;pendingUploads=$Sizes.OneDriveLocalOnly;recentWrites=$Sizes.OneDriveRecent;outsideKfmFiles=$Sizes.OutsideKfmFiles;error=$null}
+ $k=[ordered]@{state='unknown';redirected=0;accounts=0;localOneDriveFiles=$Sizes.OneDriveLocal;outsideKfmFiles=$Sizes.OutsideKfmFiles;error=$null}
  try {
   $root=$ProfilePath.TrimEnd('\')
   $hive=& $script:SmReadHive ($root+'\NTUSER.DAT') $root
@@ -545,9 +542,9 @@ function Get-SmReportDecision {
   $code=switch("$($k.state)") { 'notRedirected' {'ReviewKfmNotRedirected'} 'syncRootNotWalked' {'ReviewKfmSyncRootNotWalked'} default {'ReviewKfmUnknown'} }
   return (& $out $code ('OneDrive KFM not verified for Desktop, Documents and Pictures: '+$(if($k){"$($k.state) $($k.error)".Trim()}else{'not probed'})))
  }
- if($null -eq $k.pendingUploads -or $k.pendingUploads -gt 0 -or $null -eq $k.recentWrites -or $k.recentWrites -gt 0) { return (& $out 'ReviewKfmPendingUploads' 'OneDrive files not yet uploaded, written in the last day of use, or not countable') }
+ if($null -eq $k.localOneDriveFiles -or $k.localOneDriveFiles -gt 0) { return (& $out 'ReviewKfmUploadUnproven' 'Local OneDrive files: a listing cannot prove they are uploaded; only online-only content is') }
  if($null -eq $k.outsideKfmFiles -or $k.outsideKfmFiles -gt 0) { return (& $out 'ReviewOutsideKfm' 'Files remain in the profile''s own Desktop, Documents or Pictures, outside OneDrive') }
- & $out 'StaleCandidate' 'Every gate passed: stale on a shared device, KFM verified, no pending upload, no PST. Report line only; nothing is deleted'
+ & $out 'StaleCandidate' 'Every gate passed: stale on a shared device, KFM verified, OneDrive content online-only, no PST. Report line only; nothing is deleted'
 }
 
 function Get-SmProfileReport {
@@ -584,7 +581,7 @@ function Get-SmProfileReport {
   if(-not $light -and (Test-SmProfilePath $p.Path)) {
    # Shares the run's MaxFiles/MaxSeconds as a separate budget, split over the profiles left.
    $volume=[IO.Path]::GetPathRoot("$($p.Path)"); $recycle=if($volume -and $sid -match '^S-1-\d+(-\d+)+$') { Join-Path $volume ('$Recycle.Bin\'+$sid) }
-   $sizes=Get-SmProfileBytes $p.Path $recycle ([int][math]::Floor(($A.MaxFiles-$used)/[math]::Max(1,$left))) (($A.MaxSeconds-$watch.Elapsed.TotalSeconds)/[math]::Max(1,$left)) $(if($unloadUtc){$unloadUtc.AddDays(-1)})
+   $sizes=Get-SmProfileBytes $p.Path $recycle ([int][math]::Floor(($A.MaxFiles-$used)/[math]::Max(1,$left))) (($A.MaxSeconds-$watch.Elapsed.TotalSeconds)/[math]::Max(1,$left))
    $used+=$sizes.EntriesVisited
    if($sizes.Light) { $light=$true; $rep.Errors+='Setup or unknown servicing appeared; remaining profile sizes withheld' }
   }
