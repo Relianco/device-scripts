@@ -16,7 +16,7 @@ $marker = '{"schemaVersion":2,"package":"storage-maintenance",'
 function New-Report { param([string]$Mode = 'Report', [string]$Pad = '') $marker + '"mode":"' + $Mode + '","note":"' + $Pad + '"}' }
 $report = New-Report
 $runnerBytes = [Text.Encoding]::UTF8.GetBytes('# fake runner ' + [guid]::NewGuid())
-$sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($runnerBytes)).Replace('-', '')
+$sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($runnerBytes)).Replace('-', '').ToLowerInvariant()
 $base = Join-Path ([IO.Path]::GetTempPath()) ('rfld-' + [guid]::NewGuid().ToString('n'))
 [void](New-Item -ItemType Directory -Path $base)
 
@@ -71,7 +71,7 @@ $ranArgs = @($script:ran[0])
 if (($ranArgs[0..3] -join '|') -cne '-PackageUrl|p|-Action|Repair' -or $ranArgs[4] -cne '-ReportOutputPath' -or -not $ranArgs[5].EndsWith('report.json')) { Fail "runner args were [$($ranArgs -join '|')]" }
 if ($r.Out.Count -ne 1 -or $r.Out[0] -cne "report written to custom field '$field'") { Fail "happy printed [$($r.Out -join '|')]" }
 Assert-DirsGone 'happy'
-$null = Invoke-Case -Content $report -Hash $sha.ToLowerInvariant(); if ($script:writes.Count -ne 1) { Fail 'lowercase hash was refused' }
+$r = Invoke-Case -Content $report -Hash $sha.ToUpperInvariant(); if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 'uppercase pin was accepted' }
 
 # Exit code: a failed runner is returned unchanged and nothing is written.
 $r = Invoke-Case -Content $report -Code 3; if ($r.Code -ne 3) { Fail "code was $($r.Code)" }; Assert-NoWrite 'failed run' $r
@@ -105,6 +105,10 @@ foreach ($good in @('A', ('a' * 40))) { $null = Invoke-Case -Content $report -Na
 $r = Invoke-Case -Content $report -Url ('https://' + 'u' + [char]58 + 'p' + [char]64 + 'example.invalid/r.ps1'); if ($r.Code -ne 1 -or $script:ran.Count -ne 0) { Fail 'userinfo URL accepted' }
 $r = Invoke-Case -Content $report -Hash ('ab' * 32); if ($r.Code -ne 1 -or $script:ran.Count -ne 0) { Fail 'hash mismatch ran the runner' }; Assert-DirsGone 'mismatch'
 $r = Invoke-Case -Content $report -Hash ''; if ($r.Code -ne 0 -or $script:downloads -ne 0 -or $script:ran.Count -ne 0 -or $script:dirs.Count -ne 0) { Fail 'empty hash was not a quiet no-op' }
+# An empty hash exits 0 even with a bad field name; an empty forwarded pin is the runner's off switch.
+$r = Invoke-Case -Content $report -Hash '' -Name '1bad'; if ($r.Code -ne 0) { Fail 'empty hash needed a valid field' }
+$r = Invoke-Case -Content $report -Extra @('-PackageUrl', 'p', '-PackageSha256', ''); if ($r.Code -ne 0 -or $script:downloads -ne 0 -or $script:ran.Count -ne 0) { Fail "empty forwarded pin was not a no-op [$($r.Code)]" }
+$r = Invoke-Case -Content $report -Extra @('-CancelPath', ''); if ($script:ran.Count -ne 1) { Fail 'empty CancelPath blocked the run' }
 $r = Invoke-Case -Content $report -Hash 'abc'; if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 'short hash accepted' }
 # Retry: transient failures retry up to three attempts, others stop at once.
 $script:failFirst = 0; $script:failWith = ''

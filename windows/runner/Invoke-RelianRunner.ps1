@@ -610,7 +610,7 @@ function Save-RelianProfileReport {
         $arg['RemoveProfiles'] -cne 'true' -and $arg['ComponentCleanup'] -cne 'true'
     if (-not $reportRun) { return }
     $warn = { param($Why) Write-Host "report file not written: $Why" }
-    $lines = @(([string]$Stdout) -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_.StartsWith($script:RelianReportMarker, [StringComparison]::Ordinal) })
+    $lines = @(([string]$Stdout) -split "`r?`n" | Where-Object { $_.StartsWith($script:RelianReportMarker, [StringComparison]::Ordinal) })
     if ($lines.Count -ne 1) { & $warn "expected one report line, found $($lines.Count)"; return }
     $json = [string]$lines[0]
     if ([Text.Encoding]::UTF8.GetByteCount($json) -gt $script:RelianReportMaxBytes) { & $warn "report over $($script:RelianReportMaxBytes) bytes"; return }

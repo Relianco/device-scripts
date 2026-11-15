@@ -99,12 +99,15 @@ function Get-RelianReportLine {
 function Invoke-RelianReportField {
     param([string]$RunnerUrl, [string]$RunnerSha256, [string]$ReportCustomField, [string[]]$RunnerArguments)
     $field = [string]$ReportCustomField
-    if ($field -notmatch '\A[A-Za-z][A-Za-z0-9]{0,39}\z') { Write-Host 'invalid ReportCustomField'; return 1 }
     if ($RunnerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Write-Host 'refusing a URL that contains userinfo'; return 1 }
     # An empty hash is the off switch, as in the runner: exit 0 before anything is downloaded.
     if ([string]::IsNullOrWhiteSpace($RunnerSha256)) { return 0 }
-    # shortcut: the digest is compared case-insensitively, as the runner does; only the shape is checked here.
-    if ($RunnerSha256.Trim() -notmatch '\A[0-9A-Fa-f]{64}\z') { Write-Host 'RunnerSha256 must be 64 hex characters'; return 1 }
+    # An empty forwarded pin is the runner's off switch, but 5.1 drops an empty native argument: honour it here.
+    for ($i = 0; $i -lt @($RunnerArguments).Count - 1; $i++) {
+        if ($RunnerArguments[$i] -match '\A-(Package|Toolkit|BrandPack)Sha256\z' -and [string]::IsNullOrWhiteSpace($RunnerArguments[$i + 1])) { return 0 }
+    }
+    if ($RunnerSha256 -cnotmatch '\A[0-9a-f]{64}\z') { Write-Host 'RunnerSha256 must be 64 lowercase hex characters'; return 1 }
+    if ($field -notmatch '\A[A-Za-z][A-Za-z0-9]{0,39}\z') { Write-Host 'invalid ReportCustomField'; return 1 }
     if ([string]::IsNullOrWhiteSpace($RunnerUrl)) { Write-Host 'RunnerUrl is required'; return 1 }
     if (@($RunnerArguments | Where-Object { $_ -match '\A-ReportOutputPath\z' }).Count) { Write-Host 'ReportOutputPath is set by this script'; return 1 }
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
@@ -119,7 +122,7 @@ function Invoke-RelianReportField {
             catch { if ($attempt -eq 3 -or -not (Test-RelianRetryable -Exception $_.Exception)) { break }; & $script:RetryDelay (2 * $attempt) }
         }
         if (-not $downloaded) { Write-Host 'runner download failed'; return 1 }
-        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $runnerFile).Hash -ne $RunnerSha256.Trim()) { Write-Host 'hash mismatch for runner'; return 1 }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $runnerFile).Hash -ne $RunnerSha256) { Write-Host 'hash mismatch for runner'; return 1 }
         $started = [datetime]::UtcNow
         $code = [int](& $script:RunRunner $runnerFile (@($RunnerArguments) + @('-ReportOutputPath', $reportFile)))
         if ($code -ne 0) { return $code }

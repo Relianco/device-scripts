@@ -36,11 +36,14 @@ function Assert-NotWritten { param([string]$Label, $Out, [string]$Warning)
 }
 
 # Happy path: the one marker line among other output is written byte for byte.
-$out = Invoke-Publish -Stdout ("Storage maintenance: complete`r`n  $report  `r`ntrailing")
+$out = Invoke-Publish -Stdout ("Storage maintenance: complete`r`n$report`r`ntrailing")
 Assert-Written 'happy' $report
 if (@($out).Count -ne 1 -or $out[0] -cne 'report file written') { Fail "happy printed [$($out -join '|')]" }
 # Mode absent from package arguments means the default, Report.
 $null = Invoke-Publish -Stdout $report -Pairs (New-Pairs @{ ProfileReport = 'true' }); Assert-Written 'default mode' $report
+# Saved byte for byte: trailing space kept; a leading space means the line does not start with the marker.
+$null = Invoke-Publish -Stdout "$report  "; Assert-Written 'trailing space' "$report  "
+$out = Invoke-Publish -Stdout "  $report"; Assert-NotWritten 'leading space' $out 'found 0'
 
 # Size: exactly 9500 UTF-8 bytes is written; one more byte is refused. Multi-byte text counts as bytes.
 $fill = 9500 - [Text.Encoding]::UTF8.GetByteCount((New-Report))
@@ -76,10 +79,9 @@ $out = Invoke-Publish -Stdout $report -WriteThrows $true; Assert-NotWritten 'wri
 
 # Field name guard in the runner entry point.
 $script:calls = [System.Collections.Generic.List[object]]::new()
-# Uppercase on purpose: the runner compares pins with OrdinalIgnoreCase, and the run below reaches the package stub.
 $sha = { param($Bytes) $s = [Security.Cryptography.SHA256]::Create(); try { [BitConverter]::ToString($s.ComputeHash($Bytes)).Replace('-', '') } finally { $s.Dispose() } }
 $bytes = [Text.Encoding]::UTF8.GetBytes('x')
-$hash = & $sha $bytes
+$hash = (& $sha $bytes).ToLowerInvariant()
 $script:DownloadFile = { param($Url, $Destination) [IO.File]::WriteAllBytes($Destination, [byte[]][Text.Encoding]::UTF8.GetBytes('x')) }
 $script:ExpandArchive = { param($Path, $Destination) }
 $script:RetryDelay = { param($Seconds) }
