@@ -152,7 +152,9 @@ try {
         $steps = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p))
         Assert (@($steps | Where-Object { $_.Status -ne 'withheld' }).Count -eq 0 -and -not $script:doCalled) 'Unsafe guard withholds every category'
 
-        $script:SmGuards = { [pscustomobject]@{ Safe = $true; Light = $false; Reasons = @() } }
+        # The guard's own verdict on the attempt marker, from the real verdict function.
+        $script:fuBuild = 26100; $script:fuBoot = [datetime]::UtcNow.AddDays(-1)
+        $script:SmGuards = { [pscustomobject]@{ Safe = $true; Light = $false; Reasons = @(); OwnUpgradeState = (Get-SmOwnUpgradeState ([IO.File]::ReadAllText((Join-Path $fu 'state.json')) | ConvertFrom-Json) $script:fuBuild $script:fuBoot) } }
         $steps = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p))
         Assert ($script:doCalled) 'Delivery Optimization cache cleared through its cmdlet'
         Assert (Test-Path (Join-Path $fu 'abc.iso')) 'The ISO of a running upgrade attempt is kept'
@@ -163,6 +165,31 @@ try {
         $null = Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p)
         if ($canAge) { Assert (-not (Test-Path (Join-Path $fu 'abc.iso'))) 'The ISO of an aged failed attempt is deleted' }
         Assert (Test-Path (Join-Path $fu 'state.json')) 'The attempt state file is kept'
+
+        # Finished upgrade whose state stayed 'staged' (Setup held the ISO at staging): the target build now
+        # runs after a reboot, so only the ISO goes. Pilot case: build 26300 running, ISO build 26300.
+        $staged30 = [datetime]::UtcNow.AddDays(-30).ToString('o')
+        New-File (Join-Path $fu 'abc.iso') 30; New-File (Join-Path $fu 'abc.iso.part') 30; New-File (Join-Path $fu 'setup.log') 30
+        ('{"status":"staged","isoBuild":26300,"time":"' + $staged30 + '"}') | Set-Content (Join-Path $fu 'state.json')
+        $script:fuBuild = 26100; $script:fuBoot = [datetime]::UtcNow.AddDays(-40)
+        $null = Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p)
+        Assert (Test-Path (Join-Path $fu 'abc.iso')) 'A staged upgrade not yet installed keeps its ISO'
+        $script:fuBuild = 26300; $script:fuBoot = [datetime]::UtcNow.AddDays(-1)
+        $iso = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p) | Where-Object { $_.Name -eq 'FeatureUpgradeIso' })[0]
+        if ($canAge) {
+            Assert (-not (Test-Path (Join-Path $fu 'abc.iso')) -and -not (Test-Path (Join-Path $fu 'abc.iso.part')) -and $iso.Files -eq 2) 'A staged upgrade whose target build runs is finished: its ISO is deleted'
+        }
+        Assert ((Test-Path (Join-Path $fu 'setup.log')) -and (Test-Path (Join-Path $fu 'state.json'))) 'Only the ISO goes; the log and state file stay'
+        foreach ($st in @('started', 'running')) {
+            New-File (Join-Path $fu 'abc.iso') 30
+            ('{"status":"' + $st + '","isoBuild":26300,"time":"' + $staged30 + '"}') | Set-Content (Join-Path $fu 'state.json')
+            $script:fuBoot = [datetime]::UtcNow.AddDays(-40)
+            $null = Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p)
+            Assert (Test-Path (Join-Path $fu 'abc.iso')) "A $st attempt with no reboot since keeps its ISO"
+            $script:fuBoot = [datetime]::UtcNow.AddDays(-1)
+            $null = Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p)
+            if ($canAge) { Assert (-not (Test-Path (Join-Path $fu 'abc.iso'))) "A $st attempt whose target build runs after a reboot is finished: its ISO is deleted" }
+        }
 
         $script:SmCleanmgr = { param($Prev, $Seconds) $script:cleanPrev = $Prev; @{ Handlers = @('Temporary Files'); State = 'exited'; ExitCode = 0 } }
         $script:SmShadowShrink = { 'alreadyAtOrBelow5Percent' }
