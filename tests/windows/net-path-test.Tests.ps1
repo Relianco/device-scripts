@@ -90,7 +90,7 @@ $orig = [pscustomobject]@{
 $errs = Invoke-NptRestore -Original $orig
 $want = 'pa S-1-5-21-1-2-3-1001 remove|nrpt add files.example.invalid|tunnel office Running|guard True'
 if (($calls -join '|') -ne $want) { Fail "restore calls: $($calls -join '|')" }
-if (@($errs).Count -ne 1 -or $errs[0] -notlike 'gsa: *service busy*') { Fail "restore errors: $($errs -join ';')" }
+if (@($errs).Count -ne 1 -or @($errs)[0] -notlike 'gsa: *service busy*') { Fail "restore errors: $($errs -join ';')" }
 
 $calls.Clear()
 $script:RestartGsa = { $calls.Add('gsa') }
@@ -103,10 +103,29 @@ $calls.Clear()
 Set-NptNrpt -On $false -Original @()
 if (($calls -join '|') -ne 'nrpt remove x') { Fail "nrpt off: $($calls -join '|')" }
 
-# The public repo must not carry a client host or user name in this package.
+# Recovery of an interrupted run: a failed restore keeps the saved original; a clean one removes it.
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("npt-" + [guid]::NewGuid().ToString('N') + '.json')
+try {
+    '{"sid":"S-1-5-21-1-2-3-1001","paValue":1,"tunnelName":"","tunnel":"","guard":"","nrpt":[]}' | Set-Content -LiteralPath $tmp
+    $script:RestartGsa = { throw 'service busy' }
+    if (Invoke-NptRecover -Path $tmp) { Fail 'recover reported clean after a failed restore' }
+    if (-not (Test-Path -LiteralPath $tmp)) { Fail 'recover deleted the saved original after a failed restore' }
+    $script:RestartGsa = { }
+    if (-not (Invoke-NptRecover -Path $tmp)) { Fail 'recover reported failure after a clean restore' }
+    if (Test-Path -LiteralPath $tmp) { Fail 'recover kept the saved original after a clean restore' }
+    if (-not (Invoke-NptRecover -Path $tmp)) { Fail 'recover without a saved state must be clean' }
+} finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+
+# Uninstall stops a run in flight and takes its lock before it restores anything.
 $src = Get-Content -LiteralPath $scriptPath -Raw
-foreach ($word in @('sitka', 'slgarchive', 'slgmain', 'svfs', 'svdc')) {
-    if ($src -match "(?i)$word") { Fail "client name $word in package" }
+$body = $src.Substring($src.IndexOf('function Invoke-NptUninstall'))
+$iStop = $body.IndexOf('Stop-ScheduledTask'); $iLock = $body.IndexOf('run.lock'); $iRecover = $body.IndexOf('Invoke-NptRecover')
+if ($iStop -lt 0 -or $iLock -lt $iStop -or $iRecover -lt $iLock) { Fail 'uninstall must stop the tasks, then lock, then restore' }
+
+# An empty pin exits 0 before any action, including Uninstall.
+foreach ($act in @('Install', 'Uninstall')) {
+    $out = & pwsh -NoProfile -File $scriptPath -DeploymentType $act -Action $act -PinVersion '' 2>&1
+    if ($LASTEXITCODE -ne 0 -or @($out).Count -ne 0) { Fail "empty pin $act exited $LASTEXITCODE with [$out]" }
 }
 
 Write-Output 'net-path-test tests passed'

@@ -277,7 +277,19 @@ function Invoke-NptRestore {
     foreach ($step in $steps) {
         try { & $step[1] } catch { $errors.Add("$($step[0]): $($_.Exception.Message)") }
     }
-    return , $errors.ToArray()
+    return $errors.ToArray()
+}
+
+# Restores the state an interrupted run saved. The file is deleted only after a clean restore,
+# so a failed restore keeps the true original for the next attempt. Returns $true when clean.
+function Invoke-NptRecover {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $true }
+    $errors = @(Invoke-NptRestore -Original (Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json))
+    Write-NptLog "restore of saved state: errors=[$($errors -join '; ')]"
+    if ($errors.Count) { return $false }
+    Remove-Item -LiteralPath $Path -Force
+    return $true
 }
 
 # ---------- device helpers ----------
@@ -562,12 +574,7 @@ function Invoke-NptRun {
     try { $lock = [System.IO.File]::Open((Join-Path $script:NptRoot 'run.lock'), 'OpenOrCreate', 'ReadWrite', 'None') } catch { Write-NptLog 'another run holds the lock'; return 0 }
     try {
         $origPath = Join-Path $script:NptRoot 'original-state.json'
-        if (Test-Path -LiteralPath $origPath) {
-            $old = Get-Content -LiteralPath $origPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $e = Invoke-NptRestore -Original $old
-            Write-NptLog "restored state left by an interrupted run; errors=[$($e -join '; ')]"
-            Remove-Item -LiteralPath $origPath -Force
-        }
+        if (-not (Invoke-NptRecover -Path $origPath)) { return 0 }
         $sid = ([System.Security.Principal.NTAccount]$user).Translate([System.Security.Principal.SecurityIdentifier]).Value
         $id = Get-Date -Format 'yyyyMMdd-HHmmss'
         $orig = [ordered]@{
@@ -601,7 +608,7 @@ function Invoke-NptRun {
                 $results.scenarios += [pscustomobject]$entry
             }
         } finally {
-            $errors = Invoke-NptRestore -Original ([pscustomobject]$orig)
+            $errors = @(Invoke-NptRestore -Original ([pscustomobject]$orig))
             $verified = $null
             # The tray re-reads the restored value; DNS shows whether Private Access is back as it was.
             try {
@@ -650,13 +657,24 @@ function Invoke-NptInstall {
 }
 
 function Invoke-NptUninstall {
-    $restored = @()
-    $origPath = Join-Path $script:NptRoot 'original-state.json'
-    if (Test-Path -LiteralPath $origPath) {
-        $restored = Invoke-NptRestore -Original (Get-Content -LiteralPath $origPath -Raw -Encoding UTF8 | ConvertFrom-Json)
-        if (@($restored).Count -eq 0) { Remove-Item -LiteralPath $origPath -Force }
+    if (-not (Test-Path -LiteralPath $script:NptRoot)) { Remove-NptTasks; Write-Output '{"disarmed":true,"restoreErrors":[],"resultsKept":0}'; return 0 }
+    # Stop a run in flight first (its finally block then does not run), and wait for its lock,
+    # so the restore below is the last writer.
+    foreach ($n in @($script:NptRunTask, $script:NptMeasureTask)) {
+        Stop-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $n -ErrorAction SilentlyContinue
     }
+    $lock = $null
+    $deadline = (Get-Date).AddSeconds(60)
+    while ($null -eq $lock -and (Get-Date) -lt $deadline) {
+        try { $lock = [System.IO.File]::Open((Join-Path $script:NptRoot 'run.lock'), 'OpenOrCreate', 'ReadWrite', 'None') } catch { Start-Sleep -Seconds 2 }
+    }
+    if ($null -eq $lock) { [Console]::Error.WriteLine('a run still holds the lock; nothing changed'); return 1 }
+    try {
+        $origPath = Join-Path $script:NptRoot 'original-state.json'
+        $clean = Invoke-NptRecover -Path $origPath
+    } finally { $lock.Dispose() }
     Remove-NptTasks
+    $restored = if ($clean) { @() } else { @('restore failed; original-state.json kept, see run.log') }
     foreach ($f in @('Invoke-NetPathTest.ps1', 'settings.json', 'run.lock')) { Remove-Item -LiteralPath (Join-Path $script:NptRoot $f) -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath (Join-Path $script:NptRoot 'work') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Output (@{ disarmed = $true; restoreErrors = @($restored); resultsKept = @(Get-ChildItem -LiteralPath $script:NptRoot -Filter 'results-*.json' -ErrorAction SilentlyContinue).Count } | ConvertTo-Json -Compress)
@@ -702,6 +720,8 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
         exit 1
     }
 }
+# An empty pin is a no-op, as with every runner package.
+if ([string]::IsNullOrWhiteSpace($PinVersion)) { exit 0 }
 if ($Mode -eq 'Report') {
     $n = 0
     if (-not [int]::TryParse($Page, [ref]$n)) { exit 1 }
