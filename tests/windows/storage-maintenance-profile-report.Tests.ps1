@@ -52,7 +52,7 @@ for ($mask = 0; $mask -lt [math]::Pow(2, $names.Count); $mask++) {
 }
 
 # --- Byte census. A mocked enumerator stands in for NTFS attributes Linux cannot create.
-$root = Join-Path ([IO.Path]::GetTempPath()) ('m4pc2-profile-' + [guid]::NewGuid().ToString('n'))
+$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-report-' + [guid]::NewGuid().ToString('n'))
 $null = New-Item -ItemType Directory -Path $root
 $recycleRoot = Join-Path $root 'recycle'; $null = New-Item -ItemType Directory -Path $recycleRoot
 $profileRoot = Join-Path $root 'user'; $null = New-Item -ItemType Directory -Path $profileRoot
@@ -230,7 +230,7 @@ foreach ($fn in $reportFunctions) {
  Assert ($text -notmatch 'SmDelete|SmRemoveProfile|SmComponent|SmSave|Remove-CimInstance|\.Delete\(|DeleteKey|SetValue') "$fn references a removal or write hook"
 }
 # 2. Dynamic: a full run with a deletable profile and an old temp file, every removal hook counted.
-$root = Join-Path ([IO.Path]::GetTempPath()) ('m4pc2-run-' + [guid]::NewGuid().ToString('n'))
+$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-report-run-' + [guid]::NewGuid().ToString('n'))
 $null = New-Item -ItemType Directory -Path $root
 try {
  $old = Join-Path $root 'old.tmp'; Set-Content -LiteralPath $old -Value 'old'; (Get-Item -LiteralPath $old).LastWriteTimeUtc = [datetime]::UtcNow.AddDays(-30)
