@@ -351,6 +351,8 @@ function Get-SmProfileBytes {
     }
     if(($attr -band 1024) -and $e.LinkType) { $r.Skipped++; continue }
     $len=[int64]$e.Length
+    # A PST counts as present wherever it is, online-only included: any PST file means review.
+    if(-not $recycle -and $rel -match '\.pst$') { $r.PstFiles++ }
     if($attr -band (4096 -bor 4194304)) { if($oneDrive) { $b.oneDriveOnlineOnly+=$len }; continue }
     if($recycle) { $b.recycleBin+=$len; continue }
     $r.TotalBytes+=$len; $leaf=($rel -split '[\\/]')[-1]
@@ -365,7 +367,7 @@ function Get-SmProfileBytes {
      '^[\\/]AppData[\\/]Local[\\/]Temp[\\/]' { 'temp'; break }
      '^[\\/]Downloads[\\/]' { 'downloads'; break }
     }
-    if($cat) { $b[$cat]+=$len; if($cat -eq 'pst') { $r.PstFiles++ } }
+    if($cat) { $b[$cat]+=$len }
    }
   } catch { $r.Partial=$true; if($r.Errors.Count -lt 5) { $r.Errors+=$_.Exception.Message } }
  }

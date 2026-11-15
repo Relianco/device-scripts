@@ -92,7 +92,7 @@ try {
   (E '\AppData\Local\Google\Chrome\User Data\Profile 1\Code Cache\js\f' 32 50))
  $tree[$profileRoot + '\AppData\Roaming'] = @((E '\AppData\Roaming\Microsoft\Teams\x' 32 60))
  $tree[$profileRoot + '\Downloads'] = @((E '\Downloads\setup.exe' 32 70))
- $tree[$profileRoot + '\OneDrive - Org'] = @((E '\OneDrive - Org\local.docx' ($RP -bor 32) 80), (E '\OneDrive - Org\cloud.docx' ($RP -bor $RDA) 5000), (E '\OneDrive - Org\offline.docx' ($RP -bor $OFF) 6000),
+ $tree[$profileRoot + '\OneDrive - Org'] = @((E '\OneDrive - Org\local.docx' ($RP -bor 32) 80), (E '\OneDrive - Org\cloud.docx' ($RP -bor $RDA) 5000), (E '\OneDrive - Org\archive.pst' ($RP -bor $RDA) 4000), (E '\OneDrive - Org\offline.docx' ($RP -bor $OFF) 6000),
   (E '\OneDrive - Org\Unpopulated' ($D -bor $RP -bor $ROO)), (E '\OneDrive - Org\Inner' ($D -bor $RP) 0 'Junction'),
   (E '\OneDrive - Org\pending.xlsx' 32 700), (E '\OneDrive - Org\desktop.ini' (32 -bor $HS) 200), (E '\OneDrive - Org\~$pending.xlsx' 32 165),
   (E '\OneDrive - Org\.849C9593-D756-4E56-8D6E-42412F2A707B' (32 -bor $HS) 0), (E '\OneDrive - Org\edited.docx' ($RP -bor 32) 90))
@@ -103,9 +103,9 @@ try {
  $script:SmEnumerate = { param($Dir) $script:enumerated += $Dir; if (-not $tree.ContainsKey($Dir)) { throw "unexpected enumeration of $Dir" }; $tree[$Dir] }
  $script:SmScanGuard = { [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
  $s = Get-SmProfileBytes $profileRoot $recycleRoot 1000 30
- Assert ($s.Bytes.ost -eq 1000 -and $s.Bytes.pst -eq 2000 -and $s.PstFiles -eq 1) 'OST and PST measured (extension match is case-insensitive), PST files counted'
+ Assert ($s.Bytes.ost -eq 1000 -and $s.Bytes.pst -eq 2000 -and $s.PstFiles -eq 2) 'OST and PST measured (extension match is case-insensitive); an online-only PST still counts as a PST file'
  Assert ($s.Bytes.temp -eq 10 -and $s.Bytes.downloads -eq 70 -and $s.Bytes.teamsCache -eq 90 -and $s.Bytes.browserCache -eq 90) 'Temp, Downloads, Teams and browser caches measured'
- Assert ($s.Bytes.oneDriveHydrated -eq 1235 -and $s.Bytes.oneDriveOnlineOnly -eq 11000) 'OneDrive hydrated vs online-only split by attribute'
+ Assert ($s.Bytes.oneDriveHydrated -eq 1235 -and $s.Bytes.oneDriveOnlineOnly -eq 15000) 'OneDrive hydrated vs online-only split by attribute'
  Assert ($s.Bytes.recycleBin -eq 90) 'Per-SID Recycle Bin measured'
  Assert ($s.TotalBytes -eq (100+10+1000+2000+30+40+50+60+70+80+400+500+300+700+200+165+90)) "Total counts local bytes only, got $($s.TotalBytes)"
  Assert (-not ($script:enumerated -match 'Junction|Cloudish|Unpopulated|Inner|RDIR|NetHood|My Music|Recent|Offlineish')) ('Never entered a junction, a non-OneDrive reparse dir or a recall-on-open dir: ' + ($script:enumerated -join ';'))
