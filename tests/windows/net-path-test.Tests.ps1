@@ -121,7 +121,7 @@ $src = Get-Content -LiteralPath $scriptPath -Raw
 $body = $src.Substring($src.IndexOf('function Invoke-NptUninstall'))
 $iStop = $body.IndexOf('Stop-ScheduledTask'); $iLock = $body.IndexOf('run.lock'); $iRecover = $body.IndexOf('Invoke-NptRecover')
 if ($iStop -lt 0 -or $iLock -lt $iStop -or $iRecover -lt $iLock) { Fail 'uninstall must stop the tasks, then lock, then restore' }
-$iKeep = $body.IndexOf('if (-not $clean) {'); $iRemove = $body.IndexOf('Remove-NptTasks')
+$iKeep = $body.IndexOf('if (-not $clean) {'); $iRemove = $body.IndexOf('Remove-NptTasks', [math]::Max($iKeep, 0))
 if ($iKeep -lt $iRecover -or $iRemove -lt $iKeep -or $body.Substring($iKeep, $iRemove - $iKeep) -notmatch 'return 1') { Fail 'a failed restore must exit 1 before uninstall removes anything' }
 
 # Review fixes that need a device to exercise, held in place by source checks.
