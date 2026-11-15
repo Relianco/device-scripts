@@ -501,7 +501,8 @@ function Invoke-NptMeasure {
     }
     $aliasByIp = @{}
     foreach ($a in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue)) { $aliasByIp[[string]$a.IPAddress] = [string]$a.InterfaceAlias }
-    $m.interfaces = @(Get-NetIPConfiguration | Where-Object { $_.NetAdapter.Status -eq 'Up' } | ForEach-Object { '{0} ip={1} gw={2}' -f $_.InterfaceAlias, ($_.IPv4Address.IPAddress -join ','), ($_.IPv4DefaultGateway.NextHop -join ',') })
+    $m.interfaces = @($aliasByIp.Keys | Where-Object { $_ -notlike '127.*' -and $_ -notlike '169.254.*' } | ForEach-Object { '{0} ip={1}' -f $aliasByIp[$_], $_ })
+    $m.defaultRoutes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object { '{0} gw={1} metric={2}' -f $_.InterfaceAlias, $_.NextHop, ($_.RouteMetric + $_.InterfaceMetric) })
     $m.dns = @(foreach ($n in $names) {
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $ans = @(try { [System.Net.Dns]::GetHostAddresses($n) | ForEach-Object { $_.ToString() } } catch { 'error' })
@@ -602,7 +603,8 @@ function Invoke-NptRun {
                     $entry.gsaRestart = try { & $script:RestartGsa; 'ok' } catch { "error: $($_.Exception.Message)" }
                     Start-Sleep -Seconds 15
                     $entry.measure = Invoke-NptUserTask -User $user -Name $s.Name -Id $id -Expect $s.ExpectGsa
-                    if ($null -ne $entry.measure.metered) { $results.metered = $entry.measure.metered }
+                    if ($entry.measure.PSObject.Properties['error']) { $entry.error = "measure: $($entry.measure.error)"; $entry.measure = $null }
+                    if ($null -ne $entry.measure -and $null -ne $entry.measure.metered) { $results.metered = $entry.measure.metered }
                 } catch { $entry.error = $_.Exception.Message }
                 Write-NptLog "scenario $($s.Name) error=[$($entry.error)]"
                 $results.scenarios += [pscustomobject]$entry
@@ -616,6 +618,7 @@ function Invoke-NptRun {
                 $v = Invoke-NptUserTask -User $user -Name 'restore' -Id $id -Expect ($null -eq $orig.paValue -or [int]$orig.paValue -eq 0) -TimeoutSeconds 300
                 $verified = $v.settled
             } catch { $errors += "verify: $($_.Exception.Message)" }
+            if ($verified -eq $false) { $errors += 'verify: DNS did not return to the original Private Access path' }
             $now = [ordered]@{ paValue = (& $script:GetPaValue -Sid $sid); tunnel = (& $script:GetTunnelStatus -Name $settings.TunnelName); guard = (& $script:GetGuardState); nrptCount = @(& $script:GetNrpt).Count }
             $results.restore = [ordered]@{ errors = @($errors); verified = $verified; after = $now }
             if (@($errors).Count -eq 0) { Remove-Item -LiteralPath $origPath -Force -ErrorAction SilentlyContinue }
@@ -673,8 +676,10 @@ function Invoke-NptUninstall {
         $origPath = Join-Path $script:NptRoot 'original-state.json'
         $clean = Invoke-NptRecover -Path $origPath
     } finally { $lock.Dispose() }
+    # Keep the tasks, script and saved state: the next run retries the restore before anything else.
+    if (-not $clean) { [Console]::Error.WriteLine('restore failed; original-state.json, tasks and script kept, see run.log'); return 1 }
     Remove-NptTasks
-    $restored = if ($clean) { @() } else { @('restore failed; original-state.json kept, see run.log') }
+    $restored = @()
     foreach ($f in @('Invoke-NetPathTest.ps1', 'settings.json', 'run.lock')) { Remove-Item -LiteralPath (Join-Path $script:NptRoot $f) -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath (Join-Path $script:NptRoot 'work') -Recurse -Force -ErrorAction SilentlyContinue
     Write-Output (@{ disarmed = $true; restoreErrors = @($restored); resultsKept = @(Get-ChildItem -LiteralPath $script:NptRoot -Filter 'results-*.json' -ErrorAction SilentlyContinue).Count } | ConvertTo-Json -Compress)
@@ -711,7 +716,12 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
 if ($Mode -eq 'Run') { exit (Invoke-NptRun) }
 if ($Mode -eq 'Measure') {
     if ($Scenario -notmatch '^[a-z]{1,16}$' -or $RunId -notmatch '^\d{8}-\d{6}$') { exit 1 }
-    Invoke-NptMeasure -Settings (Read-NptSettings) -Name $Scenario -Id $RunId -Expect ($ExpectGsa -eq 'true')
+    try { Invoke-NptMeasure -Settings (Read-NptSettings) -Name $Scenario -Id $RunId -Expect ($ExpectGsa -eq 'true') }
+    catch {
+        # The orchestrator waits for this file; an error file ends the wait at once.
+        Write-NptJson -Path (Join-Path $script:NptRoot "work\$RunId-$Scenario.json") -Object @{ scenario = $Scenario; error = $_.Exception.Message; settled = $null; metered = $null }
+        exit 1
+    }
     exit 0
 }
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {

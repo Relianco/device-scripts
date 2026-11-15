@@ -121,8 +121,16 @@ $src = Get-Content -LiteralPath $scriptPath -Raw
 $body = $src.Substring($src.IndexOf('function Invoke-NptUninstall'))
 $iStop = $body.IndexOf('Stop-ScheduledTask'); $iLock = $body.IndexOf('run.lock'); $iRecover = $body.IndexOf('Invoke-NptRecover')
 if ($iStop -lt 0 -or $iLock -lt $iStop -or $iRecover -lt $iLock) { Fail 'uninstall must stop the tasks, then lock, then restore' }
+$iKeep = $body.IndexOf('if (-not $clean) {'); $iRemove = $body.IndexOf('Remove-NptTasks')
+if ($iKeep -lt $iRecover -or $iRemove -lt $iKeep -or $body.Substring($iKeep, $iRemove - $iKeep) -notmatch 'return 1') { Fail 'a failed restore must exit 1 before uninstall removes anything' }
 
-# An empty pin exits 0 before any action, including Uninstall.
+# Review fixes that need a device to exercise, held in place by source checks.
+if ($src.Contains('IPv4DefaultGateway.NextHop')) { Fail 'a gateway-less adapter would throw under StrictMode' }
+if (-not $src.Contains('if ($verified -eq $false) { $errors +=')) { Fail 'a failed restore verification must keep the saved state' }
+if (-not $src.Contains('an error file ends the wait')) { Fail 'a failed measurement must write an error file' }
+
+# An empty pin exits 0 before any action, including Uninstall. The child runs the real entry point.
+$env:RELIAN_DEPLOY_TEST = $null
 foreach ($act in @('Install', 'Uninstall')) {
     $out = & pwsh -NoProfile -File $scriptPath -DeploymentType $act -Action $act -PinVersion '' 2>&1
     if ($LASTEXITCODE -ne 0 -or @($out).Count -ne 0) { Fail "empty pin $act exited $LASTEXITCODE with [$out]" }
