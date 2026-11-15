@@ -66,7 +66,7 @@ $arguments = @(
 $arguments -join ' '
 ```
 
-For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and the chosen `ProfileAgeDays`; optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until the report's candidates and evidence are reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks. It never uses ResetBase.
+For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and every gate in [Profile removal](#profile-removal-off-by-default); optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until two report runs have been reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks. It never uses ResetBase.
 
 ### Profile report (report only)
 
@@ -84,8 +84,44 @@ The age engine's `StaleCandidate` only narrows from there. A primary user (Intun
 - `ReviewKfmSyncRootNotWalked`: the folders are in a sync root that is not a top-level `OneDrive*` folder of the profile, so the listing did not cover it.
 - `ReviewKfmUploadUnproven`: a `OneDrive*` folder still holds local files (`desktop.ini`, `~$` owner files and the sync-root marker are ignored). A listing cannot prove a local file is uploaded, since a placeholder keeps its tag while an edit waits for sync. Only online-only content counts as in the cloud, so a candidate needs its OneDrive files dehydrated (Storage Sense dehydration does this for old profiles).
 - `ReviewOutsideKfm`: files remain in the profile's own Desktop, Documents or Pictures.
+- `ReviewUserFoldersNotEmpty`: a file (other than `desktop.ini`) is in the profile's own Downloads, Videos or Music folder. This is an owner gate held in one switch, `$script:SmMediaFolderGate` in the package; setting it to `$false` drops this gate and nothing else.
 
-A profile that passes every gate is `StaleCandidate`. That is still only a report line: a `ProfileReport` run never enters the cleanup branch, and nothing in this version acts on a candidate. Downloads, Videos, Music and other profile folders are reported (Downloads by size) but do not gate the decision.
+A profile that passes every gate is `StaleCandidate`. In a `ProfileReport` run that is only a report line: a report run never enters the cleanup branch. Each report run also writes its decisions to the audit log and prints the hash of its sealing line as `audit.reportHash`; that hash is what the owner approves (see below).
+
+### Profile removal (off by default)
+
+Removal happens only in `Mode='Cleanup'` with `RemoveProfiles='true'`, which nothing in this repository sets. A profile is removed only when all of these hold:
+
+1. The device's computer name is in `SharedDevices`. The list is a parameter, never a constant in the package.
+2. The gate matrix above, evaluated from fresh evidence in the same run, gives `StaleCandidate`.
+3. The same SID at the same profile path was a `StaleCandidate` in both report runs named by `ReviewedReports`. Those two runs must be on this device's audit chain, at least 7 days apart and not dated after the device clock. A profile that was a candidate in only one of them is not approved.
+4. The audit chain verifies, and no earlier removal intent is left without an outcome.
+5. The cooldown allows: no removal run in the last `RemovalCooldownDays` (default 1), and the cooldown marker agrees with the chain.
+6. Fewer than 5 removals have been attempted in this run. The cap is fixed in the package (`$script:SmProfileRemovalCap`).
+
+Immediately before each removal the run reads the profile again: the same SID and path in `Win32_UserProfile`, unloaded, no session and no loaded hive, the same ProfileList load/unload pair, the gate matrix again from fresh evidence, and the same newest 4624 logon for the SID. A change skips that profile and is recorded as `vetoed`. A removal that fails, or an audit write that fails, stops every further removal in the run. A profile path with a link or junction in it, or a profile whose size walk met an unexpected link, never becomes a candidate; no link is followed.
+
+The run's `ProfileRemoval` summary gives the plan code (`Ready`, or the first gate that refused: `NotSharedDevice`, `ReviewedReportsMissing`, `ReviewedReportNotInChain`, `ReviewedReportsTooClose`, `ClockSkew`, `UnresolvedIntent`, `CooldownActive`, `CooldownMarkerMissing`, `CooldownMarkerMalformed`, `CooldownMarkerMismatch`, an `Audit*` code, or `NoApprovedCandidate`), the number of candidates, attempts and removals.
+
+**What the owner sets to enable removal** (on the shared-device policy only, never fleet-wide):
+
+- `Mode='Cleanup'`, `RemoveProfiles='true'`, `ProfileAgeDays='90'`.
+- `SharedDevices`: the shared PCs' computer names, comma-separated.
+- `ReviewedReports`: the two `audit.reportHash` values, comma-separated, from two `ProfileReport` runs on that device that were reviewed and are at least 7 days apart. Only profiles listed as `StaleCandidate` in both are approved, so a new stale profile needs two new reviewed reports.
+- Optional `RemovalCooldownDays` (1 to 365).
+- Each removal walks the profile again inside the run's `MaxSeconds`; when that budget runs out, the remaining candidates wait for a later run. Size `MaxSeconds` and the RMM timeout for up to five walks.
+
+Clearing `ReviewedReports` or setting `RemoveProfiles='false'` stops removal.
+
+### Profile audit log
+
+`ProgramData\RelianMaintenance\Profiles\audit.jsonl` (SYSTEM and Administrators only) gets one JSON line per decision in a report or removal run, a `report` line sealing each report run, and `removalRun`, `intent`, `removed`, `failed`, `vetoed` and `reconciled` lines for removals. A line holds the time, run id, SID, a 16-hex hash of the lower-cased profile path, decision and reason codes, a byte count and the previous line's hash; never a name, account, UPN or path. Its `hash` is SHA-256 over a fixed-order canonical form of those fields, so the chain does not depend on the JSON serializer.
+
+`audit.head` holds the last line's sequence number and hash, and `audit.lock` is held, unshared, while a run verifies and appends. The verifier refuses an edited, deleted, inserted, duplicated or reordered line, a torn last line, a missing or changed head, a cut tail and an extra field. A head exactly one line behind is accepted: that is a crash between appending a line and updating the head. At 1 MB the file is renamed `audit-<first seq>.jsonl` and the chain continues in a new `audit.jsonl`; archives are never pruned, because a missing archive breaks the chain. After 100 files the package refuses to write; move the directory aside by hand.
+
+An `intent` line is written before each removal and `removed` or `failed` after it. If a run stops between the two, the next removal run records `reconciled` (`StillPresent` or `Absent`) for that SID and removes nothing in that run. `cooldown.json` is replaced atomically (temp file, then rename). A missing, malformed or disagreeing marker allows no removal in that run and is rewritten from the chain; report runs also seed a missing marker.
+
+The chain makes tampering visible; it does not prevent it. An administrator can rewrite the whole directory, chain and head together. The copy that leaves the device (the run's printed `audit` block, and the planned `relianProfileAudit` custom field) is the anchor. To start over after a broken chain, move the `Profiles` directory aside after reviewing it; the new chain then needs two new reviewed reports before any removal.
 
 The normal scan budget is 20,000 entries and 30 seconds. `MaxFiles` and `MaxSeconds` allow a longer explicitly requested scan; partial coverage remains visible. Long scans belong after the upgrade, and the RMM job timeout must allow the requested budget plus diagnostics and cleanup.
 

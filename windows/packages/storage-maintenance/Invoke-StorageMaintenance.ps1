@@ -6,23 +6,28 @@ Logical bytes are observations, not guaranteed reclaimable physical space.
 param([string]$DeploymentType, [string]$Action, [string]$PinVersion,
  [string]$Mode='Report', [string]$TempAgeDays='7', [string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false', [string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
- [string]$MaxFiles='20000', [string]$MaxSeconds='30', [string]$ProfileReport='false', [string]$PrimaryUserHint='', [string]$SharedDevices='')
+ [string]$MaxFiles='20000', [string]$MaxSeconds='30', [string]$ProfileReport='false', [string]$PrimaryUserHint='', [string]$SharedDevices='',
+ [string]$ReviewedReports='', [string]$RemovalCooldownDays='1')
 
 $script:SmPackagePath=$PSCommandPath
 
 function Get-SmArguments {
  param([string]$Mode='Report',[string]$TempAgeDays='7',[string]$ProfileAgeDays='60',
  [string]$RemoveProfiles='false',[string]$ExcludeProfiles='', [string]$ComponentCleanup='false',
- [string]$MaxFiles='20000',[string]$MaxSeconds='30',[string]$ProfileReport='false',[string]$PrimaryUserHint='',[string]$SharedDevices='')
+ [string]$MaxFiles='20000',[string]$MaxSeconds='30',[string]$ProfileReport='false',[string]$PrimaryUserHint='',[string]$SharedDevices='',
+ [string]$ReviewedReports='',[string]$RemovalCooldownDays='1')
  if ($Mode -cnotin @('Report','Cleanup')) { throw 'Mode must be Report or Cleanup' }
  $a=@{ Mode=$Mode; ExcludeProfiles=@($ExcludeProfiles.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
  if ($PrimaryUserHint.Length -gt 256 -or $PrimaryUserHint -match '[\x00-\x1f]') { throw 'Invalid PrimaryUserHint' }; $a.PrimaryUserHint=$PrimaryUserHint.Trim()
  $a.SharedDevices=@($SharedDevices.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
  if ($a.SharedDevices.Count -gt 100 -or @($a.SharedDevices | Where-Object { $_ -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$' }).Count) { throw 'SharedDevices must be a comma-separated list of computer names' }
+ # The audit hashes of the two report runs the owner reviewed; see docs/maintenance.md.
+ $a.ReviewedReports=@($ReviewedReports.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+ if ($a.ReviewedReports.Count -notin @(0,2) -or @($a.ReviewedReports | Where-Object { $_ -notmatch '^[0-9a-f]{64}$' }).Count -or ($a.ReviewedReports.Count -eq 2 -and $a.ReviewedReports[0] -eq $a.ReviewedReports[1])) { throw 'ReviewedReports must be empty or two distinct report hashes' }
  foreach($b in @(@('RemoveProfiles',$RemoveProfiles),@('ComponentCleanup',$ComponentCleanup),@('ProfileReport',$ProfileReport))) {
   if ($b[1] -cnotin @('true','false')) { throw "$($b[0]) must be true or false" }; $a[$b[0]]=$b[1] -ceq 'true'
  }
- foreach($n in @(@('TempAgeDays',$TempAgeDays,1,365),@('ProfileAgeDays',$ProfileAgeDays,30,3650),@('MaxFiles',$MaxFiles,1,2000000),@('MaxSeconds',$MaxSeconds,1,1800))) {
+ foreach($n in @(@('TempAgeDays',$TempAgeDays,1,365),@('ProfileAgeDays',$ProfileAgeDays,30,3650),@('MaxFiles',$MaxFiles,1,2000000),@('MaxSeconds',$MaxSeconds,1,1800),@('RemovalCooldownDays',$RemovalCooldownDays,1,365))) {
   if ($n[1] -notmatch '^\d{1,7}$' -or [int]$n[1] -lt $n[2] -or [int]$n[1] -gt $n[3]) { throw "Invalid $($n[0])" }; $a[$n[0]]=[int]$n[1]
  }
  if ($a.ProfileReport -and ($a.Mode -ne 'Report' -or $a.RemoveProfiles -or $a.ComponentCleanup)) { throw 'ProfileReport is report-only: Mode must be Report and RemoveProfiles and ComponentCleanup false' }
@@ -325,7 +330,7 @@ $script:SmSyncIgnored='^(desktop\.ini|~\$.*|\.849C9593-D756-4E56-8D6E-42412F2A70
 function Get-SmProfileBytes {
  param([string]$Path,[string]$RecycleRoot,[int]$FileLimit,[double]$Seconds)
  $b=[ordered]@{ost=[int64]0;pst=[int64]0;oneDriveHydrated=[int64]0;oneDriveOnlineOnly=[int64]0;teamsCache=[int64]0;browserCache=[int64]0;temp=[int64]0;downloads=[int64]0;recycleBin=[int64]0;outsideKfm=[int64]0}
- $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;CompatLinks=0;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0;Errors=@()}
+ $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;CompatLinks=0;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0;MediaFiles=0;Errors=@()}
  $watch=[Diagnostics.Stopwatch]::StartNew(); $nextGuard=0; $lastGuard=-2
  $queue=New-Object 'Collections.Generic.Queue[object]'; $base=$Path.TrimEnd('\','/')
  if(Test-SmScanDirectory $base) { $queue.Enqueue(@($base,$false)) } else { $r.Partial=$true; $r.Errors+='Profile root missing, not a directory, or has a reparse ancestor' }
@@ -358,6 +363,7 @@ function Get-SmProfileBytes {
     $r.TotalBytes+=$len; $leaf=($rel -split '[\\/]')[-1]
     if($oneDrive) { if($leaf -notmatch $script:SmSyncIgnored) { $r.OneDriveLocal++ } }
     elseif($rel -match '^[\\/](Desktop|Documents|Pictures)[\\/]' -and $leaf -ne 'desktop.ini') { $b.outsideKfm+=$len; $r.OutsideKfmFiles++ }
+    if($rel -match '^[\\/](Downloads|Videos|Music)[\\/]' -and $leaf -ne 'desktop.ini') { $r.MediaFiles++ }
     $cat=switch -Regex ($rel) {
      '\.pst$' { 'pst'; break }
      '\.ost$' { 'ost'; break }
@@ -524,6 +530,10 @@ function Get-SmKfmState {
  [pscustomobject]$k
 }
 
+# Owner gate (one line to drop it): a file in the profile's own Downloads, Videos or Music folder
+# blocks candidacy with ReviewUserFoldersNotEmpty. Set to $false to remove this gate.
+$script:SmMediaFolderGate=$true
+
 # What a delete run would decide. Gates only narrow the age engine's StaleCandidate, and a
 # StaleCandidate here is still only a report line: nothing in this package acts on it.
 function Get-SmReportDecision {
@@ -546,7 +556,8 @@ function Get-SmReportDecision {
  }
  if($null -eq $k.localOneDriveFiles -or $k.localOneDriveFiles -gt 0) { return (& $out 'ReviewKfmUploadUnproven' 'Local OneDrive files: a listing cannot prove they are uploaded; only online-only content is') }
  if($null -eq $k.outsideKfmFiles -or $k.outsideKfmFiles -gt 0) { return (& $out 'ReviewOutsideKfm' 'Files remain in the profile''s own Desktop, Documents or Pictures, outside OneDrive') }
- & $out 'StaleCandidate' 'Every gate passed: stale on a shared device, KFM verified, OneDrive content online-only, no PST. Report line only; nothing is deleted'
+ if($script:SmMediaFolderGate -and ($null -eq $F.MediaFiles -or $F.MediaFiles -gt 0)) { return (& $out 'ReviewUserFoldersNotEmpty' 'Files remain in the profile''s own Downloads, Videos or Music folder') }
+ & $out 'StaleCandidate' 'Every gate passed: stale on a shared device, KFM verified, OneDrive content online-only, no PST, no user media files. Removal still needs the reviewed-report, cooldown and cap gates'
 }
 
 function Get-SmProfileReport {
@@ -591,9 +602,9 @@ function Get-SmProfileReport {
   # The hive is read only for a profile the age engine found unloaded and stale.
   if($sizes -and -not $light -and $p.Decision -eq 'StaleCandidate') { $kfm=Get-SmKfmState $p.Path $sizes }
   $last=@($p.Evidence.Events.Recent | Where-Object { $_.Sid -eq $sid } | Sort-Object TimeUtc -Descending | Select-Object -First 1)
-  $flags=@{IsPrimary=[bool]$source;IsService=$isService;IsAdmin=$isAdmin;AdminKnown=$adminKnown;PrimaryKnown=$primaryKnown;CoverageDays=$coverage;AgeDays=$A.ProfileAgeDays;PstBytes=$(if($sizes){$sizes.Bytes.pst});PstFiles=$(if($sizes){$sizes.PstFiles});Kfm=$kfm;SizePartial=(-not $sizes -or $sizes.Partial);Shared=$shared}
+  $flags=@{IsPrimary=[bool]$source;IsService=$isService;IsAdmin=$isAdmin;AdminKnown=$adminKnown;PrimaryKnown=$primaryKnown;CoverageDays=$coverage;AgeDays=$A.ProfileAgeDays;PstBytes=$(if($sizes){$sizes.Bytes.pst});PstFiles=$(if($sizes){$sizes.PstFiles});MediaFiles=$(if($sizes){$sizes.MediaFiles});Kfm=$kfm;SizePartial=(-not $sizes -or $sizes.Partial);Shared=$shared}
   $d=Get-SmReportDecision $p.Decision $p.Reason $flags
-  $rep.Profiles+=[pscustomobject][ordered]@{sid=$sid;account=$account;path="$($p.Path)";totalBytes=$(if($sizes){$sizes.TotalBytes});sizePartial=$flags.SizePartial;bytes=$(if($sizes){$sizes.Bytes});lastLogon4624Utc=(& $iso $(if($last.Count){$last[0].TimeUtc}));profileUnloadUtc=(& $iso $unloadUtc);ageDays=$(if($unloadUtc){[int][math]::Floor(($Now-$unloadUtc).TotalDays)});ageSource='ProfileList';isPrimary=$flags.IsPrimary;primarySource=$source;isAdmin=$isAdmin;isService=$isService;kfm=$kfm;ageDecision=$p.Decision;decision=$d.Decision;reason=$d.Reason}
+  $rep.Profiles+=[pscustomobject][ordered]@{sid=$sid;account=$account;path="$($p.Path)";totalBytes=$(if($sizes){$sizes.TotalBytes});sizePartial=$flags.SizePartial;bytes=$(if($sizes){$sizes.Bytes});lastLogon4624Utc=(& $iso $(if($last.Count){$last[0].TimeUtc}));profileUnloadUtc=(& $iso $unloadUtc);ageDays=$(if($unloadUtc){[int][math]::Floor(($Now-$unloadUtc).TotalDays)});ageSource='ProfileList';isPrimary=$flags.IsPrimary;primarySource=$source;isAdmin=$isAdmin;isService=$isService;kfm=$kfm;mediaFiles=$flags.MediaFiles;ageDecision=$p.Decision;decision=$d.Decision;reason=$d.Reason}
  }
  $all=@($rep.Profiles); $cand=@($all | Where-Object { $_.decision -eq 'StaleCandidate' })
  $rep.Summary=[ordered]@{profiles=$all.Count;staleByAge=@($all | Where-Object { $_.ageDecision -eq 'StaleCandidate' }).Count;candidates=$cand.Count;candidateBytes=[int64]($cand | Measure-Object totalBytes -Sum).Sum;review=@($all | Where-Object { $_.decision -like 'Review*' }).Count;keep=@($all | Where-Object { $_.decision -like 'Keep*' }).Count;protected=@($all | Where-Object { $_.decision -eq 'Protected' }).Count}
@@ -610,7 +621,7 @@ function ConvertTo-SmProfileReportJson {
  $profiles=@($pr.Profiles | Sort-Object @{Expression={ & $rank $_.decision }},@{Expression={ [int64]$_.totalBytes };Descending=$true} | ForEach-Object {
   $c=[ordered]@{}; foreach($n in $_.PSObject.Properties.Name) { $c[$n]=$_.$n }
   $c.account=& $clip $c.account 64; $c.path=& $clip $c.path 96; $c.reason=& $clip $c.reason 140; $c })
- $doc=[ordered]@{schemaVersion=2;package='storage-maintenance';mode=$Report.Mode;status=$Report.Status;timestamp=$Report.Timestamp;reportPath=(& $clip $Report.ReportPath 200);volumes=@($Report.Before | Select-Object -First 4 | ForEach-Object { [ordered]@{drive=$_.DeviceID;capacityBytes=$_.Size;freeBytes=$_.FreeSpace} });eventLog=$pr.EventLog;deviceClass=$pr.DeviceClass;profiles=$profiles;summary=$pr.Summary;errors=@(@($pr.Errors)+@($Report.Errors) | Select-Object -First 3 | ForEach-Object { & $clip $_ 160 });truncated=$false}
+ $doc=[ordered]@{schemaVersion=2;package='storage-maintenance';mode=$Report.Mode;status=$Report.Status;timestamp=$Report.Timestamp;reportPath=(& $clip $Report.ReportPath 200);volumes=@($Report.Before | Select-Object -First 4 | ForEach-Object { [ordered]@{drive=$_.DeviceID;capacityBytes=$_.Size;freeBytes=$_.FreeSpace} });eventLog=$pr.EventLog;deviceClass=$pr.DeviceClass;profiles=$profiles;summary=$pr.Summary;audit=$Report.Audit;errors=@(@($pr.Errors)+@($Report.Errors) | Select-Object -First 3 | ForEach-Object { & $clip $_ 160 });truncated=$false}
  # A slim entry is about 90 bytes, so more than 100 can never fit; counts stay in the summary.
  if($doc.profiles.Count -gt 100) { $doc.profiles=@($doc.profiles | Select-Object -First 100); $doc.truncated=$true }
  $json=$doc | ConvertTo-Json -Depth 6 -Compress
@@ -622,6 +633,210 @@ function ConvertTo-SmProfileReportJson {
   $doc.truncated=$true; $json=$doc | ConvertTo-Json -Depth 6 -Compress
  }
  $json
+}
+
+# ---- Profile removal safeguards: hash-chained audit, cooldown marker, reviewed reports, cap. ----
+# Each audit line holds a SID, a hash of the profile path, codes and sizes: never a name or path.
+# Its hash covers a canonical form of its fields plus the previous line's hash, so an edited,
+# deleted or reordered line breaks the chain, and audit.head (seq and hash of the last line)
+# exposes a cut tail. Anyone with admin rights can rewrite the whole chain; the copy the run
+# prints to the RMM is the off-device anchor. Archives are never pruned, so the chain is whole.
+$script:SmAuditFields=@('v','seq','ts','runId','kind','sid','pathHash','decision','reason','bytes','prev')
+$script:SmAuditKinds=@('decision','report','removalRun','intent','removed','failed','vetoed','reconciled')
+$script:SmAuditMaxBytes=1048576
+$script:SmAuditMaxFiles=100
+$script:SmProfileRemovalCap=5
+$script:SmReviewGapDays=7
+$script:SmAuditGenesis='0'*64
+$script:SmAuditTimeFormat="yyyyMMdd'T'HHmmss'Z'"
+
+function Get-SmSha256 {
+ param([string]$Text)
+ $sha=[Security.Cryptography.SHA256]::Create()
+ try { -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+}
+function Get-SmPathHash { param([string]$Path) (Get-SmSha256 $Path.TrimEnd('\').ToLowerInvariant()).Substring(0,16) }
+function ConvertFrom-SmAuditTime { param([string]$Text) [datetime]::ParseExact($Text,$script:SmAuditTimeFormat,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal) }
+
+# Fixed field order and a restricted alphabet: the hash never depends on which PowerShell
+# version's JSON serializer wrote or reads the line, and no free text can enter it.
+function Get-SmAuditCanonical {
+ param($Entry)
+ @(foreach($n in $script:SmAuditFields) {
+  $v=$Entry.$n
+  if($null -ne $v -and "$v" -notmatch '^[A-Za-z0-9:._-]{1,128}$') { throw "Audit field $n is outside the canonical alphabet" }
+  "$n=$v"
+ }) -join '|'
+}
+
+function New-SmAuditEntry {
+ param([int64]$Seq,[string]$Prev,[string]$RunId,[string]$Kind,[datetime]$Now,[hashtable]$Fields=@{})
+ if($Kind -notin $script:SmAuditKinds) { throw 'Unknown audit kind' }
+ $e=[ordered]@{v=1;seq=$Seq;ts=$Now.ToUniversalTime().ToString($script:SmAuditTimeFormat,[Globalization.CultureInfo]::InvariantCulture);runId=$RunId;kind=$Kind;sid=$null;pathHash=$null;decision=$null;reason=$null;bytes=$null;prev=$Prev}
+ foreach($k in @($Fields.Keys)) { if($k -notin @('sid','pathHash','decision','reason','bytes')) { throw "Audit field $k not allowed" }; $e[$k]=$Fields[$k] }
+ foreach($k in @('sid','pathHash','decision','reason')) { if("$($e[$k])" -eq '') { $e[$k]=$null } }
+ if($null -ne $e.bytes) { $e.bytes=[int64]$e.bytes }
+ if($null -ne $e.sid -and $e.sid -notmatch '^S-1-\d+(-\d+)+$') { throw 'Audit SID malformed' }
+ $e.hash=Get-SmSha256 (Get-SmAuditCanonical $e)
+ [pscustomobject]$e
+}
+
+function Get-SmAuditFiles {
+ param([string]$Directory)
+ $archives=@(Get-ChildItem -LiteralPath $Directory -File -Force -ErrorAction Stop | Where-Object { $_.Name -match '^audit-\d{10}\.jsonl$' } | Sort-Object Name | ForEach-Object { $_.FullName })
+ $current=Join-Path $Directory 'audit.jsonl'
+ @($archives)+@(if(Test-Path -LiteralPath $current) { $current })
+}
+
+# Detects an edited, deleted, inserted or reordered line (hash, prev, seq), a missing archive
+# (seq gap, including the first), a torn last line and a cut tail (audit.head). A head one line
+# behind the chain is the crash window between appending a line and updating the head.
+function Test-SmAuditChain {
+ param([string]$Directory)
+ $res=[ordered]@{Valid=$false;Code='AuditUnreadable';Entries=@();LastSeq=[int64]0;LastHash=$script:SmAuditGenesis;CurrentFirstSeq=$null;Files=0;HeadLag=$false;Unresolved=@()}
+ $fail={ param($c) $res.Code=$c; [pscustomobject]$res }
+ $expected=@($script:SmAuditFields)+@('hash')
+ try {
+  $files=@(Get-SmAuditFiles $Directory); $res.Files=$files.Count
+  if($files.Count -gt $script:SmAuditMaxFiles) { return (& $fail 'AuditTooManyFiles') }
+  $entries=New-Object Collections.Generic.List[object]; $prev=$script:SmAuditGenesis; $seq=[int64]0
+  foreach($f in $files) {
+   $item=Get-Item -LiteralPath $f -Force -ErrorAction Stop
+   if(([int64]$item.Attributes -band 1024) -ne 0) { return (& $fail 'AuditFileUnsafe') }
+   $text=Read-SmBoundedText $f (2*$script:SmAuditMaxBytes)
+   if($text.Length -and -not $text.EndsWith("`n")) { return (& $fail 'AuditTornLine') }
+   $lines=@($text.Split("`n") | Where-Object { $_ })
+   if(-not $lines.Count) { return (& $fail 'AuditEmptyFile') }
+   $first=$true
+   foreach($line in $lines) {
+    try {
+     $o=$line | ConvertFrom-Json -ErrorAction Stop
+     $names=@($o.PSObject.Properties.Name)
+     if($names.Count -ne $expected.Count -or @($names | Where-Object { $_ -cnotin $expected }).Count -or $o.kind -cnotin $script:SmAuditKinds) { throw 'shape' }
+     $lineSeq=[int64]$o.seq; $null=ConvertFrom-SmAuditTime $o.ts; $canonical=Get-SmAuditCanonical $o
+    } catch { return (& $fail 'AuditLineMalformed') }
+    if((Get-SmSha256 $canonical) -ne $o.hash) { return (& $fail 'AuditEntryEdited') }
+    if($o.prev -ne $prev) { return (& $fail 'AuditChainBroken') }
+    if($lineSeq -ne $seq+1) { return (& $fail 'AuditSequenceBroken') }
+    if($first -and $f -match 'audit-(\d{10})\.jsonl$' -and [int64]$Matches[1] -ne $lineSeq) { return (& $fail 'AuditArchiveMisnamed') }
+    if($first -and $f -notmatch 'audit-\d{10}\.jsonl$') { $res.CurrentFirstSeq=$lineSeq }
+    $first=$false; $prev="$($o.hash)"; $seq=$lineSeq; $entries.Add($o)
+   }
+  }
+  $headPath=Join-Path $Directory 'audit.head'
+  if(Test-Path -LiteralPath $headPath) {
+   try { $h=Read-SmBoundedText $headPath 512 | ConvertFrom-Json -ErrorAction Stop; $headSeq=[int64]$h.seq } catch { return (& $fail 'AuditHeadMalformed') }
+   if($headSeq -eq $seq -and "$($h.hash)" -eq $prev) { }
+   elseif($headSeq -eq $seq-1 -and $seq -ge 1 -and "$($h.hash)" -eq $(if($seq -ge 2){"$($entries[$entries.Count-2].hash)"}else{$script:SmAuditGenesis})) { $res.HeadLag=$true }
+   elseif($headSeq -gt $seq) { return (& $fail 'AuditTruncated') }
+   else { return (& $fail 'AuditHeadMismatch') }
+  } elseif($seq -gt 0) { return (& $fail 'AuditHeadMissing') }
+  $all=$entries.ToArray()
+  $res.Unresolved=@(foreach($i in @($all | Where-Object { $_.kind -eq 'intent' })) { if(-not @($all | Where-Object { [int64]$_.seq -gt [int64]$i.seq -and $_.sid -eq $i.sid -and $_.kind -in @('removed','failed','reconciled') }).Count) { $i } })
+  $res.Entries=$all; $res.LastSeq=$seq; $res.LastHash=$prev; $res.Valid=$true; $res.Code='AuditChainVerified'
+ } catch { $res.Code='AuditUnreadable' }
+ [pscustomobject]$res
+}
+
+# Temp file in the same directory, flushed through, then renamed over the target: a reader sees
+# the old or the new content, never a partial one. A crash leaves only an ignored *.tmp file.
+function Write-SmAtomicFile {
+ param([string]$Path,[string]$Text)
+ $tmp=$Path+'.'+[guid]::NewGuid().ToString('n')+'.tmp'
+ $bytes=(New-Object Text.UTF8Encoding($false)).GetBytes($Text)
+ $fs=New-Object IO.FileStream($tmp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None,4096,[IO.FileOptions]::WriteThrough)
+ try { $fs.Write($bytes,0,$bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+ if(Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp,$Path,[NullString]::Value) } else { [IO.File]::Move($tmp,$Path) }
+}
+
+# The lock file is held, unshared, from verification to the last append: a concurrent run
+# cannot interleave lines or verify a chain that is being written.
+function Open-SmAudit {
+ param([string]$Directory)
+ $lock=$null
+ for($i=0;-not $lock;$i++) {
+  try { $lock=[IO.File]::Open((Join-Path $Directory 'audit.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+  catch { if($i -ge 19) { throw 'Audit lock is held by another run' }; Start-Sleep -Milliseconds 100 }
+ }
+ $chain=Test-SmAuditChain $Directory
+ [pscustomobject]@{Directory=$Directory;Lock=$lock;Chain=$chain;Seq=$chain.LastSeq;Prev=$chain.LastHash;CurrentFirstSeq=$chain.CurrentFirstSeq;Files=$chain.Files}
+}
+function Close-SmAudit { param($Audit) if($Audit -and $Audit.Lock) { $Audit.Lock.Dispose(); $Audit.Lock=$null } }
+
+function Add-SmAuditEntry {
+ param($Audit,[string]$RunId,[string]$Kind,[hashtable]$Fields=@{},[datetime]$Now=[datetime]::UtcNow)
+ if(-not $Audit -or -not $Audit.Lock -or -not $Audit.Chain.Valid) { throw 'Audit chain unavailable or invalid' }
+ $e=New-SmAuditEntry ($Audit.Seq+1) $Audit.Prev $RunId $Kind $Now $Fields
+ $bytes=[Text.Encoding]::UTF8.GetBytes(($e | ConvertTo-Json -Compress)+"`n")
+ $current=Join-Path $Audit.Directory 'audit.jsonl'
+ # Rotation renames the full file by its first seq; the next line still links to its last hash.
+ if($null -ne $Audit.CurrentFirstSeq -and (Get-Item -LiteralPath $current -Force -ErrorAction Stop).Length+$bytes.Length -gt $script:SmAuditMaxBytes) {
+  [IO.File]::Move($current,(Join-Path $Audit.Directory ('audit-{0:D10}.jsonl' -f [int64]$Audit.CurrentFirstSeq))); $Audit.CurrentFirstSeq=$null
+ }
+ if($null -eq $Audit.CurrentFirstSeq) { if($Audit.Files -ge $script:SmAuditMaxFiles) { throw 'Audit file limit reached; archive the audit directory by hand' }; $Audit.Files++; $Audit.CurrentFirstSeq=$e.seq }
+ $fs=New-Object IO.FileStream($current,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::Read,4096,[IO.FileOptions]::WriteThrough)
+ try { $fs.Write($bytes,0,$bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+ $Audit.Seq=$e.seq; $Audit.Prev=$e.hash
+ Write-SmAtomicFile (Join-Path $Audit.Directory 'audit.head') ([ordered]@{seq=$e.seq;hash=$e.hash} | ConvertTo-Json -Compress)
+ $e
+}
+
+# Cooldown: the chain's last removalRun line is the truth; cooldown.json must agree with it.
+# A missing, malformed or disagreeing marker, or a clock behind the chain, allows no removal in
+# this run; the caller then rewrites the marker from the verified chain for the next run.
+function Get-SmCooldownState {
+ param($MarkerText,$Chain,[datetime]$Now,[int]$Days)
+ $runs=@($Chain.Entries | Where-Object { $_.kind -eq 'removalRun' })
+ $last=if($runs.Count) { $runs[-1] }
+ $seed=[ordered]@{v=1;lastRemovalRunUtc=$(if($last){"$($last.ts)"});lastRemovalRunHash=$(if($last){"$($last.hash)"})}
+ $s=[ordered]@{Allowed=$false;Code='CooldownClear';Seed=$seed;Rewrite=$false}
+ $out={ param($c,[bool]$rewrite) $s.Code=$c; $s.Rewrite=$rewrite; [pscustomobject]$s }
+ if(@($Chain.Entries | Where-Object { (ConvertFrom-SmAuditTime $_.ts) -gt $Now.AddMinutes(5) }).Count) { return (& $out 'ClockSkew' $false) }
+ if($null -eq $MarkerText) { return (& $out 'CooldownMarkerMissing' $true) }
+ try { $m=$MarkerText | ConvertFrom-Json -ErrorAction Stop } catch { return (& $out 'CooldownMarkerMalformed' $true) }
+ if($null -eq $m -or $m.v -ne 1 -or "$($m.lastRemovalRunUtc)" -ne "$($seed.lastRemovalRunUtc)" -or "$($m.lastRemovalRunHash)" -ne "$($seed.lastRemovalRunHash)") { return (& $out 'CooldownMarkerMismatch' $true) }
+ if($last -and ($Now-(ConvertFrom-SmAuditTime $last.ts)).TotalDays -lt $Days) { return (& $out 'CooldownActive' $false) }
+ $s.Allowed=$true; [pscustomobject]$s
+}
+
+function Sync-SmCooldownMarker {
+ param($Audit,[datetime]$Now,[int]$Days)
+ $path=Join-Path $Audit.Directory 'cooldown.json'
+ $text=if(Test-Path -LiteralPath $path) { Read-SmBoundedText $path 4096 }
+ $cool=Get-SmCooldownState $text $Audit.Chain $Now $Days
+ if($cool.Rewrite) { Write-SmAtomicFile $path ($cool.Seed | ConvertTo-Json -Compress) }
+ $cool
+}
+
+# The owner approves two report runs by their 'report' line hashes. Only a profile that was a
+# StaleCandidate, at the same path, in both of those runs is approved for removal.
+function Get-SmReviewedCandidates {
+ param($Chain,[string[]]$Hashes,[datetime]$Now)
+ $no={ param($c) [pscustomobject]@{Valid=$false;Code=$c;Keys=@()} }
+ if(@($Hashes).Count -ne 2 -or $Hashes[0] -eq $Hashes[1]) { return (& $no 'ReviewedReportsMissing') }
+ $reports=@(foreach($h in $Hashes) { $Chain.Entries | Where-Object { $_.hash -eq $h -and $_.kind -eq 'report' } })
+ if($reports.Count -ne 2 -or $reports[0].runId -eq $reports[1].runId) { return (& $no 'ReviewedReportNotInChain') }
+ $times=@($reports | ForEach-Object { ConvertFrom-SmAuditTime $_.ts })
+ if(@($times | Where-Object { $_ -gt $Now.AddMinutes(5) }).Count) { return (& $no 'ClockSkew') }
+ if([math]::Abs(($times[0]-$times[1]).TotalDays) -lt $script:SmReviewGapDays) { return (& $no 'ReviewedReportsTooClose') }
+ $sets=@(foreach($rep in $reports) { ,@($Chain.Entries | Where-Object { $_.runId -eq $rep.runId -and $_.kind -eq 'decision' -and $_.decision -eq 'StaleCandidate' -and [int64]$_.seq -lt [int64]$rep.seq } | ForEach-Object { "$($_.sid)|$($_.pathHash)" }) })
+ [pscustomobject]@{Valid=$true;Code='ReviewedReportsVerified';Keys=@($sets[0] | Where-Object { $sets[1] -contains $_ })}
+}
+
+# Every removal gate except the per-run cap, which the removal loop counts. Candidates are
+# this run's fresh gate-matrix StaleCandidates that the two reviewed reports also approved.
+function Get-SmRemovalPlan {
+ param($A,$Report,$Audit,$Cooldown,[datetime]$Now,[string]$ComputerName)
+ $plan={ param($c,$list) [pscustomobject]@{Allowed=[bool]@($list).Count;Code=$c;Candidates=@($list)} }
+ if($A.Mode -ne 'Cleanup' -or -not $A.RemoveProfiles -or $A.ProfileReport) { return (& $plan 'RemoveProfilesOff' @()) }
+ if(-not ($ComputerName -and @($A.SharedDevices) -contains $ComputerName)) { return (& $plan 'NotSharedDevice' @()) }
+ if(-not $Audit -or -not $Audit.Chain.Valid) { return (& $plan $(if($Audit){$Audit.Chain.Code}else{'AuditUnavailable'}) @()) }
+ if(@($Audit.Chain.Unresolved).Count) { return (& $plan 'UnresolvedIntent' @()) }
+ $reviewed=Get-SmReviewedCandidates $Audit.Chain $A.ReviewedReports $Now
+ if(-not $reviewed.Valid) { return (& $plan $reviewed.Code @()) }
+ if(-not $Cooldown -or -not $Cooldown.Allowed) { return (& $plan $(if($Cooldown){$Cooldown.Code}else{'CooldownUnknown'}) @()) }
+ $list=@($Report.Profiles | Where-Object { $_.decision -eq 'StaleCandidate' -and $reviewed.Keys -contains ("$($_.sid)|"+(Get-SmPathHash "$($_.path)")) })
+ & $plan $(if($list.Count){'Ready'}else{'NoApprovedCandidate'}) $list
 }
 
 $script:SmScanGuard={ & $script:SmGuards }
@@ -910,6 +1125,10 @@ $script:SmProfiles={ @(Get-CimInstance Win32_UserProfile -OperationTimeoutSec 5 
 $script:SmRoots={ @(Join-Path $env:windir 'Temp') }
 $script:SmDelete={ param($Path) Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
 $script:SmRemoveProfile={ param($Profile) $Profile | Remove-CimInstance -ErrorAction Stop }
+$script:SmAuditDirectory={ Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance\Profiles') }
+$script:SmRemovalPlan={ param($A,$Report,$Audit,$Cooldown,$Now,$ComputerName) Get-SmRemovalPlan $A $Report $Audit $Cooldown $Now $ComputerName }
+# The full gate matrix for one profile, evaluated again from fresh evidence right before removal.
+$script:SmRecheckGate={ param($A,$Assessed,$Context,$Now) @((Get-SmProfileReport $A @($Assessed) $Context $Now).Profiles)[0] }
 $script:SmProfileHiveLoaded={ param($Sid) (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid) -ErrorAction Stop) -or (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid+'_Classes') -ErrorAction Stop) }
 $script:SmDiagnosticRoots={ @($env:ProgramData,$env:ProgramFiles,${env:ProgramFiles(x86)},$env:windir) | Where-Object { $_ } }
 $script:SmComponent={
@@ -1293,7 +1512,7 @@ function ConvertTo-SmSummary {
  # fallback make truncation explicit without losing measured volume evidence.
  $clip={ param($Value,[int]$Limit=180) $text=[string]$Value; if($text.Length -gt $Limit) { return $text.Substring(0,$Limit)+'...' }; $text }
  $volumes={ param($Items) @($Items | Select-Object -First 4 | ForEach-Object { @{DeviceID=(& $clip $_.DeviceID 20);Size=$_.Size;FreeSpace=$_.FreeSpace} }) }
- $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true)}
+ $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true);ProfileRemoval=$Report.RemovalPlan;Audit=$(if($Report.Audit){[ordered]@{code=$Report.Audit.code;headSeq=$Report.Audit.headSeq;error=$Report.Audit.error}})}
  $json=$summary | ConvertTo-Json -Depth 6 -Compress
  if([Text.Encoding]::UTF8.GetByteCount($json) -gt 8000) {
   $summary.GuardReasons=@($summary.GuardReasons | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.Notifications=@(); $summary.Errors=@($summary.Errors | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.FreeSpaceDelta=@(); $summary.TopFolders=@($summary.TopFolders | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TopFiles=@($summary.TopFiles | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TempOpportunities=@($summary.TempOpportunities | Select-Object -First 1 | ForEach-Object { $_.Root=& $clip $_.Root 80; $_ }); $summary.Truncation='Byte cap reached; volume measurements, one consumer/category, first error and decision counts retained. See full local report.'
@@ -1304,8 +1523,10 @@ function ConvertTo-SmSummary {
 
 function Invoke-SmMaintenance {
  param($A)
- $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null }
- $acquired=$false
+ $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only; no application cache reset.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null; Audit=$null; RemovalPlan=$null }
+ $acquired=$false; $audit=$null
+ # A removal run evaluates the same gate matrix as a report run, freshly, in this run.
+ $removal=($A.Mode -eq 'Cleanup' -and $A.RemoveProfiles -and -not $A.ProfileReport)
  try {
   $acquired=& $script:SmAcquire
   if(-not $acquired) { $r.Status='busy'; return [pscustomobject]$r }
@@ -1324,7 +1545,7 @@ function Invoke-SmMaintenance {
    $r.Evidence['ApplicationCachePolicy']='Per-profile Edge/Chrome/WebView Cache, Code Cache, GPUCache, ShaderCache, CacheStorage, Teams LocalCache and Adobe AcroCef are report-only. Outlook OST, OfficeFileCache, Wef and offline documents are preserved.'
    $evidenceLimit=[double][math]::Min(30,$A.MaxSeconds); $evidenceRemaining=$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds; $assessedUtc=[datetime]::UtcNow
    $evidenceDirectory=Split-Path -Parent $r.ReportPath
-   $collected=& $script:SmCollectProfiles $profiles $A.ProfileAgeDays $assessedUtc $evidenceRemaining $evidenceDirectory $(if($A.ProfileReport){'Report'}else{'Full'})
+   $collected=& $script:SmCollectProfiles $profiles $A.ProfileAgeDays $assessedUtc $evidenceRemaining $evidenceDirectory $(if($A.ProfileReport -or $removal){'Report'}else{'Full'})
    $evidenceRemaining-=[double]$collected.ElapsedSeconds
    $evidenceRemaining=[math]::Min($evidenceRemaining,$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds)
    if($evidenceRemaining -le 0) { $collected.Complete=$false; $collected.Error='Aggregate profile evidence deadline exhausted' }
@@ -1347,7 +1568,26 @@ function Invoke-SmMaintenance {
    $cacheFiles=@($scan.Files | Where-Object { $_.Path -match '(?i)\\(Cache|Code Cache|GPUCache|ShaderCache|CacheStorage)\\|\\MSTeams_[^\\]+\\LocalCache\\|\\Adobe\\AcroCef\\' })
    $r.Evidence['ApplicationCaches']=@($cacheFiles | Group-Object { if($_.Path -match '(?i)^(.+?\\(?:Cache|Code Cache|GPUCache|ShaderCache|CacheStorage))\\') { $Matches[1] } else { $_.Root } } | Sort-Object Count -Descending | Select-Object -First 30 | ForEach-Object { @{Path=$_.Name;ObservedLogicalBytes=($_.Group | Measure-Object LogicalBytes -Sum).Sum;Partial=$scan.Partial;Policy='report only; close owning application and review before manual cleanup';ReclaimableBytes=$null} })
    foreach($p in $r.Profiles) { $size=Get-SmProfileSize $scan $p.Path; $p.LogicalBytes=$size.LogicalBytes; $p.SizePartial=$size.Partial }
-   if($A.ProfileReport) { $r.ProfileReport=Get-SmProfileReport $A $r.Profiles $collected.ReportContext $assessedUtc }
+   $gateReport=$null
+   if($A.ProfileReport -or $removal) {
+    $gateReport=Get-SmProfileReport $A $r.Profiles $collected.ReportContext $assessedUtc
+    if($A.ProfileReport) { $r.ProfileReport=$gateReport }
+    # Every decision is on the chain before any removal; a report run seals its decisions with a
+    # 'report' line whose hash is what the owner approves (ReviewedReports).
+    $runId=[guid]::NewGuid().ToString('n'); $r.Audit=[ordered]@{runId=$runId;code=$null;reportHash=$null;headSeq=$null;error=$null}
+    try {
+     $audit=Open-SmAudit (& $script:SmAuditDirectory); $r.Audit.code=$audit.Chain.Code
+     if($audit.Chain.Valid) {
+      foreach($p in @($gateReport.Profiles)) { $null=Add-SmAuditEntry $audit $runId 'decision' @{sid=$(if("$($p.sid)" -match '^S-1-\d+(-\d+)+$'){"$($p.sid)"});pathHash=(Get-SmPathHash "$($p.path)");decision="$($p.decision)";reason="$($p.ageDecision)";bytes=$p.totalBytes} $assessedUtc }
+      if($A.ProfileReport) {
+       $r.Audit.reportHash=(Add-SmAuditEntry $audit $runId 'report' @{decision='ProfileReport';reason=('candidates'+[int]$gateReport.Summary.candidates);bytes=$gateReport.Summary.candidateBytes} $assessedUtc).hash
+       # Seeds a missing cooldown marker, so a first removal run is not refused for lack of one.
+       $null=Sync-SmCooldownMarker $audit $assessedUtc $A.RemovalCooldownDays
+      }
+     } else { $r.Errors+=('Audit chain not verified: '+$audit.Chain.Code) }
+     $r.Audit.headSeq=$audit.Seq
+    } catch { $r.Audit.error=([string]$_.Exception.Message).Substring(0,[math]::Min(160,([string]$_.Exception.Message).Length)); $r.Errors+=('Audit: '+$r.Audit.error) }
+   }
    # A profile report never enters the mutating branch, whatever else $A says.
    if($A.Mode -eq 'Cleanup' -and -not $A.ProfileReport) {
     if(-not $g.Safe) { $r.Status='withheld' }
@@ -1367,10 +1607,27 @@ function Invoke-SmMaintenance {
       if($step.Error -like 'Servicing guard changed*') { break }
      }
      if($A.RemoveProfiles) {
-      foreach($candidate in @($r.Profiles | Where-Object { $_.Eligible })) {
+      $cool=$null
+      if($audit -and $audit.Chain.Valid) {
+       try {
+        $cool=Sync-SmCooldownMarker $audit $assessedUtc $A.RemovalCooldownDays
+        # An intent with no outcome is a crash between the audit write and the removal: record
+        # what is there now. The plan below still refuses this run (UnresolvedIntent).
+        foreach($u in @($audit.Chain.Unresolved)) { $null=Add-SmAuditEntry $audit $runId 'reconciled' @{sid="$($u.sid)";pathHash="$($u.pathHash)";decision=$(if(@($profiles | Where-Object { $_.SID -eq $u.sid }).Count){'StillPresent'}else{'Absent'})} }
+       } catch { $cool=$null; $r.Errors+=('Profile removal state: '+$_.Exception.Message) }
+      }
+      $plan=& $script:SmRemovalPlan $A $gateReport $audit $cool $assessedUtc $env:COMPUTERNAME
+      $r.RemovalPlan=[ordered]@{Code=$plan.Code;Candidates=@($plan.Candidates).Count;Attempted=0;Removed=0;Cap=$script:SmProfileRemovalCap}
+      $runLine=$null
+      foreach($entry in @($plan.Candidates)) {
+       $candidate=@($r.Profiles | Where-Object { $_.SID -eq "$($entry.sid)" -and $_.Path -eq "$($entry.path)" -and $_.Eligible }) | Select-Object -First 1
+       if(-not $candidate) { continue }
+       if($r.RemovalPlan.Attempted -ge $script:SmProfileRemovalCap) { $r.Omissions+=('Per-run profile removal cap of '+$script:SmProfileRemovalCap+' reached; remaining candidates wait for a later run.'); break }
        if($cleanupWatch.Elapsed.TotalSeconds -ge $A.MaxSeconds) { $r.Status='partial'; $r.Omissions+='Profile cleanup time budget exhausted.'; break }
        $remainingAtStepStart=$evidenceRemaining; $profileStepWatch=[Diagnostics.Stopwatch]::StartNew()
        $step=[ordered]@{Kind='profile';Path=$candidate.Path;Status='withheld';Error=$null}
+       $auditFields=@{sid="$($candidate.SID)";pathHash=(Get-SmPathHash "$($candidate.Path)")}
+       $phase='check'
        try {
         if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed' }
         $fresh=@(& $script:SmProfiles | Where-Object { $_.SID -eq $candidate.SID })
@@ -1379,7 +1636,7 @@ function Invoke-SmMaintenance {
         $evidenceRemaining=[math]::Min($evidenceRemaining,$remainingAtStepStart-$profileStepWatch.Elapsed.TotalSeconds)
         if($evidenceRemaining -le 0) { throw 'Aggregate profile evidence budget exhausted' }
         $recheckUtc=[datetime]::UtcNow
-        $recollected=& $script:SmCollectProfiles $fresh $A.ProfileAgeDays $recheckUtc $evidenceRemaining $evidenceDirectory 'Full'
+        $recollected=& $script:SmCollectProfiles $fresh $A.ProfileAgeDays $recheckUtc $evidenceRemaining $evidenceDirectory 'Report'
         $evidenceRemaining-=[double]$recollected.ElapsedSeconds
         if(-not $recollected.Complete -or $recollected.TimedOut -or $recollected.GuardChanged -or $evidenceRemaining -le 0) { throw 'Profile revalidation failed: evidence deadline or servicing transition' }
         $found=@($recollected.Entries | Where-Object { $_.SID -eq $candidate.SID -and $_.Path -eq $candidate.Path })
@@ -1387,6 +1644,11 @@ function Invoke-SmMaintenance {
         $recheck=Test-SmProfile $fresh[0] $A.ProfileAgeDays $A.ExcludeProfiles $recheckUtc $found[0].Evidence
         $step['Revalidation']=$recheck
         if(-not $recheck.Eligible -or $recheck.AgeEvidenceFingerprint -ne $candidate.AgeEvidenceFingerprint) { throw ('Profile revalidation failed: '+$recheck.Reason) }
+        # Still a StaleCandidate under every gate (shared, primary, admin, coverage, PST, KFM, user
+        # folders), and the newest 4624 logon for the SID is the one the plan saw.
+        $gate=& $script:SmRecheckGate $A $recheck $recollected.ReportContext $recheckUtc
+        if("$($gate.decision)" -ne 'StaleCandidate') { throw ('Profile revalidation failed: gate matrix now '+$gate.decision) }
+        if("$($gate.lastLogon4624Utc)" -ne "$($entry.lastLogon4624Utc)") { throw 'Profile revalidation failed: logon evidence changed' }
         # Profile root and all ancestors must be ordinary directories.
         if(-not (Test-SmSafePath $candidate.Path ([IO.Path]::GetPathRoot($candidate.Path)))) { throw 'Unsafe profile path' }
         # Refresh cheap session/CIM/hive vetoes AFTER expensive age/event work.
@@ -1397,10 +1659,22 @@ function Invoke-SmMaintenance {
         if($evidenceRemaining -le 0 -or $cleanupWatch.Elapsed.TotalSeconds -ge $A.MaxSeconds) { throw 'Profile cleanup/evidence deadline exhausted before removal' }
         if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed immediately before profile removal' }
         if($evidenceRemaining -le 0 -or $profileStepWatch.Elapsed.TotalSeconds -ge $remainingAtStepStart -or $cleanupWatch.Elapsed.TotalSeconds -ge $A.MaxSeconds -or (& $script:SmProfileHiveLoaded $candidate.SID)) { throw 'Final profile deadline or loaded hive veto' }
-        & $script:SmRemoveProfile $fresh[0]; $step.Status='removedByCim'
+        # The run line and cooldown marker precede the first removal, the intent precedes each.
+        $phase='audit'
+        if(-not $runLine) { $runLine=Add-SmAuditEntry $audit $runId 'removalRun'; Write-SmAtomicFile (Join-Path $audit.Directory 'cooldown.json') ([ordered]@{v=1;lastRemovalRunUtc=$runLine.ts;lastRemovalRunHash=$runLine.hash} | ConvertTo-Json -Compress) }
+        $null=Add-SmAuditEntry $audit $runId 'intent' ($auditFields+@{decision='StaleCandidate';bytes=$entry.totalBytes})
+        $r.RemovalPlan.Attempted++
+        $phase='removing'; & $script:SmRemoveProfile $fresh[0]; $step.Status='removedByCim'
+        $phase='recording'; $null=Add-SmAuditEntry $audit $runId 'removed' ($auditFields+@{decision='Removed';bytes=$entry.totalBytes}); $r.RemovalPlan.Removed++
        } catch { $step.Error=$_.Exception.Message; $r.Status='partial' }
        $evidenceRemaining=[math]::Min($evidenceRemaining,$remainingAtStepStart-$profileStepWatch.Elapsed.TotalSeconds)
        $r.Actions+=[pscustomobject]$step
+       # Fail closed: a removal error or any audit write failure stops every further removal.
+       if($step.Error) {
+        $stop=($phase -ne 'check')
+        if($phase -in @('check','removing')) { try { $null=Add-SmAuditEntry $audit $runId $(if($phase -eq 'removing'){'failed'}else{'vetoed'}) ($auditFields+@{reason=$(if($phase -eq 'removing'){'RemoveError'}else{'RecheckVeto'})}) } catch { $stop=$true; $step.Error+='; audit write failed' } }
+        if($stop) { $r.Omissions+='Profile removal stopped: a removal or its audit record failed.'; break }
+       }
       }
      }
      if($A.ComponentCleanup) {
@@ -1415,7 +1689,7 @@ function Invoke-SmMaintenance {
   try { $r.Notifications+=& $script:SmUi ('Storage inspection '+$r.Status+'. Checking final free-space measurements.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
   try { $r.After=@(& $script:SmVolumes); $r.FreeSpaceDelta=@($r.After | ForEach-Object { $after=$_; $before=@($r.Before | Where-Object {$_.DeviceID -eq $after.DeviceID}); if($before.Count -eq 1) { @{DeviceID=$after.DeviceID;Bytes=([int64]$after.FreeSpace-[int64]$before[0].FreeSpace);IncludesConcurrentActivity=$true} } }) } catch { $r.Errors+=$_.Exception.Message }
  } catch { $r.Status='failed'; $r.Errors+=$_.Exception.Message }
- finally { if($acquired) { & $script:SmRelease } }
+ finally { Close-SmAudit $audit; if($acquired) { & $script:SmRelease } }
  if($r.Errors.Count -and $r.Status -eq 'complete') { $r.Status='partial' }
  if($A.ProfileReport -and -not $r.ProfileReport) { $r.ProfileReport=[pscustomobject]@{EventLog=$null;DeviceClass=$null;Profiles=@();Summary=$null;Errors=@('Profile report not collected: scans withheld or run failed')} }
  return [pscustomobject]$r
@@ -1454,7 +1728,7 @@ if($env:RELIAN_DEPLOY_TEST -ne '1') {
  $r=$null
  if($Action -eq 'Uninstall' -or $DeploymentType -eq 'Uninstall') { Write-Output '{"Status":"notApplicable","Reason":"Maintenance has no uninstall action"}'; exit 0 }
  try {
-  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices
+  $a=Get-SmArguments -Mode $Mode -TempAgeDays $TempAgeDays -ProfileAgeDays $ProfileAgeDays -RemoveProfiles $RemoveProfiles -ExcludeProfiles $ExcludeProfiles -ComponentCleanup $ComponentCleanup -MaxFiles $MaxFiles -MaxSeconds $MaxSeconds -ProfileReport $ProfileReport -PrimaryUserHint $PrimaryUserHint -SharedDevices $SharedDevices -ReviewedReports $ReviewedReports -RemovalCooldownDays $RemovalCooldownDays
   $r=Invoke-SmMaintenance $a
   Complete-SmRun $r
   exit $script:SmExitCode
