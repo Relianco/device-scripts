@@ -309,14 +309,23 @@ function Get-SmProfileSize {
 # Junctions and symlinks are never entered. A non-link (cloud) reparse directory is entered
 # only inside a top-level OneDrive* folder; recall-on-open directories are skipped. A link
 # swapped in mid-walk can only inflate these read-only counts. Hard links count per name.
+# Windows' own hidden+system compatibility junctions point back into the profile, which is walked
+# by its real paths, so they do not make the size partial. An unpopulated cloud directory is never
+# listed (listing would populate it), so it leaves the size partial wherever it is.
+# A listing cannot prove a local OneDrive file's contents are uploaded: a placeholder keeps its tag
+# while an edit waits for a paused or failing sync. Only online-only content is known to be in the
+# cloud, so every local OneDrive file counts against the upload gate.
 # The leading comma returns the lazy enumerator itself, so budgets and guards apply per entry.
 # Like Get-SmScan, the walk stays in this process: local profile metadata reads are not the
 # identity/event-provider calls that need the killable worker, and recall-on-open dirs are skipped.
 $script:SmEnumerate={ param($Dir) ,([IO.DirectoryInfo]::new($Dir)).EnumerateFileSystemInfos() }
+$script:SmCompatJunctions=@('\Application Data','\Cookies','\Local Settings','\My Documents','\NetHood','\PrintHood','\Recent','\SendTo','\Start Menu','\Templates','\AppData\Local\Application Data','\AppData\Local\History','\AppData\Local\Temporary Internet Files','\Documents\My Music','\Documents\My Pictures','\Documents\My Videos')
+# Names OneDrive never uploads (docs: invalid file names and types), plus its sync-root marker.
+$script:SmSyncIgnored='^(desktop\.ini|~\$.*|\.849C9593-D756-4E56-8D6E-42412F2A707B)$'
 function Get-SmProfileBytes {
  param([string]$Path,[string]$RecycleRoot,[int]$FileLimit,[double]$Seconds)
- $b=[ordered]@{ost=[int64]0;pst=[int64]0;oneDriveHydrated=[int64]0;oneDriveOnlineOnly=[int64]0;teamsCache=[int64]0;browserCache=[int64]0;temp=[int64]0;downloads=[int64]0;recycleBin=[int64]0}
- $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;Errors=@()}
+ $b=[ordered]@{ost=[int64]0;pst=[int64]0;oneDriveHydrated=[int64]0;oneDriveOnlineOnly=[int64]0;teamsCache=[int64]0;browserCache=[int64]0;temp=[int64]0;downloads=[int64]0;recycleBin=[int64]0;outsideKfm=[int64]0}
+ $r=[ordered]@{TotalBytes=[int64]0;Bytes=$b;Partial=$false;Light=$false;EntriesVisited=0;Skipped=0;CompatLinks=0;PstFiles=0;OneDriveLocal=0;OutsideKfmFiles=0;Errors=@()}
  $watch=[Diagnostics.Stopwatch]::StartNew(); $nextGuard=0; $lastGuard=-2
  $queue=New-Object 'Collections.Generic.Queue[object]'; $base=$Path.TrimEnd('\','/')
  if(Test-SmScanDirectory $base) { $queue.Enqueue(@($base,$false)) } else { $r.Partial=$true; $r.Errors+='Profile root missing, not a directory, or has a reparse ancestor' }
@@ -336,14 +345,19 @@ function Get-SmProfileBytes {
     $attr=[int64]$e.Attributes; $rel=if($recycle){''}else{"$($e.FullName)".Substring($base.Length)}
     $oneDrive=$rel -match '^[\\/]OneDrive[^\\/]*([\\/]|$)'
     if($attr -band 16) {
+     if($e.LinkType -eq 'Junction' -and ($attr -band 6) -eq 6 -and $script:SmCompatJunctions -contains $rel) { $r.CompatLinks++; continue }
      if(($attr -band (4096 -bor 262144 -bor 4194304)) -or (($attr -band 1024) -and ($recycle -or -not $oneDrive -or $e.LinkType))) { $r.Skipped++; continue }
      $queue.Enqueue(@($e.FullName,$recycle)); continue
     }
     if(($attr -band 1024) -and $e.LinkType) { $r.Skipped++; continue }
     $len=[int64]$e.Length
+    # A PST counts as present wherever it is, online-only included: any PST file means review.
+    if(-not $recycle -and $rel -match '\.pst$') { $r.PstFiles++ }
     if($attr -band (4096 -bor 4194304)) { if($oneDrive) { $b.oneDriveOnlineOnly+=$len }; continue }
     if($recycle) { $b.recycleBin+=$len; continue }
-    $r.TotalBytes+=$len
+    $r.TotalBytes+=$len; $leaf=($rel -split '[\\/]')[-1]
+    if($oneDrive) { if($leaf -notmatch $script:SmSyncIgnored) { $r.OneDriveLocal++ } }
+    elseif($rel -match '^[\\/](Desktop|Documents|Pictures)[\\/]' -and $leaf -ne 'desktop.ini') { $b.outsideKfm+=$len; $r.OutsideKfmFiles++ }
     $cat=switch -Regex ($rel) {
      '\.pst$' { 'pst'; break }
      '\.ost$' { 'ost'; break }
@@ -396,8 +410,122 @@ function Get-SmReportContext {
  [pscustomobject]$c
 }
 
-# What a delete run would decide. Gates only narrow the age engine's StaleCandidate.
-# Until the OneDrive KFM and pending-upload probe exists, nothing reaches StaleCandidate.
+# Offline read of an unloaded NTUSER.DAT (regf format). The hive is never loaded or mounted:
+# loading replays its logs into the file and holds it against the user's next logon. A dirty
+# hive (base-block sequence numbers differ) needs those logs, so it is unreadable, never guessed.
+# Returns $null for an absent key, else its subkey names and its string values by lower-case
+# name (a non-string value is present with a $null value). Malformed structure throws.
+function Get-SmHiveKey {
+ param([byte[]]$Hive,[string]$Path)
+ $h=$Hive
+ $u32={ param([int64]$o) if($o -lt 0 -or $o+4 -gt $h.Length) { throw 'Hive offset out of range' }; [int64][BitConverter]::ToUInt32($h,[int]$o) }
+ $u16={ param([int64]$o) if($o -lt 0 -or $o+2 -gt $h.Length) { throw 'Hive offset out of range' }; [int][BitConverter]::ToUInt16($h,[int]$o) }
+ $cell={ param([int64]$off) $o=4096+$off+4; if($off -lt 0 -or $o+4 -gt $h.Length) { throw 'Hive cell out of range' }; $o }
+ $is={ param([int64]$o,[string]$sig) [Text.Encoding]::ASCII.GetString($h,[int]$o,2) -ceq $sig }
+ $text={ param([int64]$o,[int64]$len,[bool]$latin1) if($o+$len -gt $h.Length) { throw 'Hive data out of range' }; if($latin1) { [Text.Encoding]::GetEncoding(28591).GetString($h,[int]$o,[int]$len) } else { [Text.Encoding]::Unicode.GetString($h,[int]$o,[int]$len) } }
+ $keyName={ param([int64]$nk) & $text ($nk+0x4C) (& $u16 ($nk+0x48)) ([bool]((& $u16 ($nk+2)) -band 0x20)) }
+ $children={ param([int64]$nk)
+  $out=New-Object Collections.Generic.List[int64]
+  if(-not (& $u32 ($nk+0x14))) { return ,$out }
+  $lists=New-Object Collections.Generic.Queue[int64]; $lists.Enqueue((& $cell (& $u32 ($nk+0x1C)))); $seen=0
+  while($lists.Count) {
+   $l=$lists.Dequeue(); if(++$seen -gt 4096) { throw 'Hive subkey index too large or cyclic' }
+   $n=& $u16 ($l+2)
+   if(& $is $l 'ri') { for($i=0;$i -lt $n;$i++) { $lists.Enqueue((& $cell (& $u32 ($l+4+4*$i)))) } }
+   elseif((& $is $l 'lf') -or (& $is $l 'lh')) { for($i=0;$i -lt $n;$i++) { $out.Add((& $cell (& $u32 ($l+4+8*$i)))) } }
+   elseif(& $is $l 'li') { for($i=0;$i -lt $n;$i++) { $out.Add((& $cell (& $u32 ($l+4+4*$i)))) } }
+   else { throw 'Unknown hive subkey list' }
+  }
+  ,$out
+ }
+ if($h.Length -lt 8192 -or [Text.Encoding]::ASCII.GetString($h,0,4) -cne 'regf') { throw 'Not a registry hive' }
+ if((& $u32 4) -ne (& $u32 8)) { throw 'Hive is dirty: its transaction logs would be needed' }
+ $nk=& $cell (& $u32 0x24)
+ foreach($part in @($Path.Split('\') | Where-Object { $_ })) {
+  if(-not (& $is $nk 'nk')) { throw 'Malformed hive key' }
+  $next=$null
+  foreach($c in (& $children $nk)) { if(-not (& $is $c 'nk')) { throw 'Malformed hive key' }; if([string]::Equals((& $keyName $c),$part,[StringComparison]::OrdinalIgnoreCase)) { $next=$c; break } }
+  if($null -eq $next) { return $null }; $nk=$next
+ }
+ if(-not (& $is $nk 'nk')) { throw 'Malformed hive key' }
+ $values=@{}; $count=& $u32 ($nk+0x24)
+ if($count -gt 65536) { throw 'Hive value list too large' }
+ if($count) {
+  $list=& $cell (& $u32 ($nk+0x28))
+  for($i=0;$i -lt $count;$i++) {
+   $vk=& $cell (& $u32 ($list+4*$i)); if(-not (& $is $vk 'vk')) { throw 'Malformed hive value' }
+   $nameLength=& $u16 ($vk+2); $name=if($nameLength) { & $text ($vk+0x14) $nameLength ([bool]((& $u16 ($vk+0x10)) -band 1)) } else { '' }
+   $size=& $u32 ($vk+4); $length=$size -band 2147483647; $data=$null
+   if((& $u32 ($vk+0xC)) -in @(1,2) -and $length -le 16344) {
+    $at=if($size -band 2147483648) { if($length -gt 4) { throw 'Malformed inline hive value' }; $vk+8 } else { & $cell (& $u32 ($vk+8)) }
+    $data=(& $text $at $length $false).Split([char]0)[0]
+   }
+   $values[$name.ToLowerInvariant()]=$data
+  }
+ }
+ [pscustomobject]@{Values=$values;Subkeys=@(foreach($c in (& $children $nk)) { & $keyName $c })}
+}
+
+# One bounded read, closed at once. Read/write/delete sharing never blocks another handle, but a
+# logon needing the file exclusively in those milliseconds would fail, so only profiles the age
+# engine already found unloaded and stale are read.
+$script:SmReadHive={ param([string]$Path,[string]$Root)
+ if(-not (Test-SmSafePath $Path $Root)) { throw 'NTUSER.DAT missing, outside the profile or behind a reparse point' }
+ $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]'ReadWrite, Delete')
+ try {
+  if($stream.Length -gt 67108864) { throw 'NTUSER.DAT is larger than 64 MB' }
+  $buffer=New-Object byte[] ([int]$stream.Length); $read=0
+  while($read -lt $buffer.Length) { $n=$stream.Read($buffer,$read,$buffer.Length-$read); if($n -le 0) { throw 'NTUSER.DAT short read' }; $read+=$n }
+  ,$buffer
+ } finally { $stream.Dispose() }
+}
+
+# Strictly below, compared as literal Windows paths: no relative, empty, dot or trailing-dot/space
+# segment, no device, UNC or alternate-stream form, so a crafted value cannot alias another folder.
+function Test-SmUnderPath {
+ param([string]$Child,[string]$Parent)
+ $c=$Child.TrimEnd('\'); $p=$Parent.TrimEnd('\')
+ foreach($x in @($c,$p)) { if($x -notmatch '^[A-Za-z]:(\\[^\\/:*?"<>|\x00-\x1f]+)+$' -or $x -match '\\\.{1,2}(\\|$)|[. ](\\|$)') { return $false } }
+ $c.StartsWith($p+'\',[StringComparison]::OrdinalIgnoreCase)
+}
+
+# Desktop, Documents and Pictures, each by its legacy User Shell Folders name and its known-folder GUID.
+$script:SmKfmFolders=@(@('Desktop','{754AC886-DF64-4CBA-86B5-F7FBF4FBCEF5}'),@('Personal','{F42EE2D3-909F-4907-8871-4C22FC0BF756}'),@('My Pictures','{0DDD015D-B06C-45D5-8C4C-F59713854639}'))
+# KFM is verified only when all three folders (both names, where the GUID one exists) resolve
+# strictly inside a OneDrive account's sync root that is a top-level OneDrive* folder of this
+# profile, so the byte walk has listed it. Upload state comes from that listing, never by opening
+# a file. Any other state, or any read failure, is unverified.
+function Get-SmKfmState {
+ param([string]$ProfilePath,$Sizes)
+ $k=[ordered]@{state='unknown';redirected=0;accounts=0;localOneDriveFiles=$Sizes.OneDriveLocal;outsideKfmFiles=$Sizes.OutsideKfmFiles;error=$null}
+ try {
+  $root=$ProfilePath.TrimEnd('\')
+  $hive=& $script:SmReadHive ($root+'\NTUSER.DAT') $root
+  $folders=Get-SmHiveKey $hive 'Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders'
+  $accounts=Get-SmHiveKey $hive 'Software\Microsoft\OneDrive\Accounts'
+  $syncRoots=@(foreach($n in @($accounts.Subkeys | Where-Object { $_ -match '^(Business\d{1,3}|Personal)$' })) { "$((Get-SmHiveKey $hive ('Software\Microsoft\OneDrive\Accounts\'+$n)).Values['userfolder'])".TrimEnd('\') | Where-Object { $_ } })
+  $k.accounts=$syncRoots.Count
+  $walked=@($syncRoots | Where-Object { (Test-SmUnderPath $_ $root) -and $_.Substring($root.Length+1) -match '^OneDrive[^\\]*$' })
+  $state='verified'
+  foreach($f in $script:SmKfmFolders) {
+   # The legacy value must exist; the GUID value counts only where present.
+   $targets=@(foreach($n in $f) {
+    $key=$n.ToLowerInvariant()
+    if($folders -and $folders.Values.ContainsKey($key)) { $v="$($folders.Values[$key])"; if($v -match '^%USERPROFILE%(\\.*)?$') { $root+$Matches[1] } else { $v } }
+    elseif($n -eq $f[0]) { '' }
+   })
+   $inWalked=@($targets | Where-Object { $t=$_; $t -notmatch '%' -and @($walked | Where-Object { Test-SmUnderPath $t $_ }).Count })
+   if($inWalked.Count -eq $targets.Count) { $k.redirected++; continue }
+   $inAny=@($targets | Where-Object { $t=$_; $t -notmatch '%' -and @($syncRoots | Where-Object { Test-SmUnderPath $t $_ }).Count })
+   if($state -eq 'verified') { $state=if($inAny.Count -eq $targets.Count) {'syncRootNotWalked'} else {'notRedirected'} }
+  }
+  $k.state=$state
+ } catch { $k.state='unknown'; $k.error=([string]$_.Exception.Message).Substring(0,[math]::Min(80,([string]$_.Exception.Message).Length)) }
+ [pscustomobject]$k
+}
+
+# What a delete run would decide. Gates only narrow the age engine's StaleCandidate, and a
+# StaleCandidate here is still only a report line: nothing in this package acts on it.
 function Get-SmReportDecision {
  param([string]$Decision,[string]$Reason,$F)
  $out={ param($d,$why) [pscustomobject]@{Decision=$d;Reason=$why} }
@@ -410,8 +538,15 @@ function Get-SmReportDecision {
  if(-not $F.AdminKnown) { return (& $out 'ReviewAdminUnknown' 'Local Administrators membership could not be read') }
  if(-not $F.PrimaryKnown) { return (& $out 'ReviewPrimaryUnknown' 'No primary-user source was available') }
  if($null -eq $F.CoverageDays -or $F.CoverageDays -lt $F.AgeDays) { return (& $out 'ReviewLogCoverage' 'Security log does not cover the threshold window or its clock is inconsistent; age rests on ProfileList only') }
- if($F.SizePartial -or $null -eq $F.PstBytes -or $F.PstBytes -gt 0) { return (& $out 'ReviewPst' 'PST present, or not ruled out because the size walk was partial') }
- & $out 'ReviewKfmUnverified' 'Age, identity and log-coverage gates passed; OneDrive KFM and pending uploads are not verified yet'
+ if($F.SizePartial -or $null -eq $F.PstBytes -or $F.PstBytes -gt 0 -or $null -eq $F.PstFiles -or $F.PstFiles -gt 0) { return (& $out 'ReviewPst' 'PST present (an OST alone re-downloads), or not ruled out because the size walk was partial') }
+ $k=$F.Kfm
+ if(-not $k -or $k.state -ne 'verified') {
+  $code=switch("$($k.state)") { 'notRedirected' {'ReviewKfmNotRedirected'} 'syncRootNotWalked' {'ReviewKfmSyncRootNotWalked'} default {'ReviewKfmUnknown'} }
+  return (& $out $code ('OneDrive KFM not verified for Desktop, Documents and Pictures: '+$(if($k){"$($k.state) $($k.error)".Trim()}else{'not probed'})))
+ }
+ if($null -eq $k.localOneDriveFiles -or $k.localOneDriveFiles -gt 0) { return (& $out 'ReviewKfmUploadUnproven' 'Local OneDrive files: a listing cannot prove they are uploaded; only online-only content is') }
+ if($null -eq $k.outsideKfmFiles -or $k.outsideKfmFiles -gt 0) { return (& $out 'ReviewOutsideKfm' 'Files remain in the profile''s own Desktop, Documents or Pictures, outside OneDrive') }
+ & $out 'StaleCandidate' 'Every gate passed: stale on a shared device, KFM verified, OneDrive content online-only, no PST. Report line only; nothing is deleted'
 }
 
 function Get-SmProfileReport {
@@ -443,7 +578,8 @@ function Get-SmProfileReport {
   $source=if(@($names | Where-Object { $intune -contains $_ }).Count) {'intune'} elseif($top -contains $sid) {'logon4624'} elseif(@($names | Where-Object { $hinted -contains $_ }).Count) {'hint'} else {$null}
   $isAdmin=[bool]($adminKnown -and @($Context.Admins.Sids) -contains $sid)
   $isService=[bool]($user -match '^(opadmin|admin|svc)' -or $user -match '\$$' -or ($user -and $laps -contains (& $lower $user)))
-  $sizes=$null
+  $unload=$p.Evidence.Registry.Unload; $unloadUtc=if($unload.State -eq 'valid') { $unload.TimestampUtc }
+  $sizes=$null; $kfm=$null
   if(-not $light -and (Test-SmProfilePath $p.Path)) {
    # Shares the run's MaxFiles/MaxSeconds as a separate budget, split over the profiles left.
    $volume=[IO.Path]::GetPathRoot("$($p.Path)"); $recycle=if($volume -and $sid -match '^S-1-\d+(-\d+)+$') { Join-Path $volume ('$Recycle.Bin\'+$sid) }
@@ -452,11 +588,12 @@ function Get-SmProfileReport {
    if($sizes.Light) { $light=$true; $rep.Errors+='Setup or unknown servicing appeared; remaining profile sizes withheld' }
   }
   $left--
-  $unload=$p.Evidence.Registry.Unload; $unloadUtc=if($unload.State -eq 'valid') { $unload.TimestampUtc }
+  # The hive is read only for a profile the age engine found unloaded and stale.
+  if($sizes -and -not $light -and $p.Decision -eq 'StaleCandidate') { $kfm=Get-SmKfmState $p.Path $sizes }
   $last=@($p.Evidence.Events.Recent | Where-Object { $_.Sid -eq $sid } | Sort-Object TimeUtc -Descending | Select-Object -First 1)
-  $flags=@{IsPrimary=[bool]$source;IsService=$isService;IsAdmin=$isAdmin;AdminKnown=$adminKnown;PrimaryKnown=$primaryKnown;CoverageDays=$coverage;AgeDays=$A.ProfileAgeDays;PstBytes=$(if($sizes){$sizes.Bytes.pst});SizePartial=(-not $sizes -or $sizes.Partial);Shared=$shared}
+  $flags=@{IsPrimary=[bool]$source;IsService=$isService;IsAdmin=$isAdmin;AdminKnown=$adminKnown;PrimaryKnown=$primaryKnown;CoverageDays=$coverage;AgeDays=$A.ProfileAgeDays;PstBytes=$(if($sizes){$sizes.Bytes.pst});PstFiles=$(if($sizes){$sizes.PstFiles});Kfm=$kfm;SizePartial=(-not $sizes -or $sizes.Partial);Shared=$shared}
   $d=Get-SmReportDecision $p.Decision $p.Reason $flags
-  $rep.Profiles+=[pscustomobject][ordered]@{sid=$sid;account=$account;path="$($p.Path)";totalBytes=$(if($sizes){$sizes.TotalBytes});sizePartial=$flags.SizePartial;bytes=$(if($sizes){$sizes.Bytes});lastLogon4624Utc=(& $iso $(if($last.Count){$last[0].TimeUtc}));profileUnloadUtc=(& $iso $unloadUtc);ageDays=$(if($unloadUtc){[int][math]::Floor(($Now-$unloadUtc).TotalDays)});ageSource='ProfileList';isPrimary=$flags.IsPrimary;primarySource=$source;isAdmin=$isAdmin;isService=$isService;kfm=$null;ageDecision=$p.Decision;decision=$d.Decision;reason=$d.Reason}
+  $rep.Profiles+=[pscustomobject][ordered]@{sid=$sid;account=$account;path="$($p.Path)";totalBytes=$(if($sizes){$sizes.TotalBytes});sizePartial=$flags.SizePartial;bytes=$(if($sizes){$sizes.Bytes});lastLogon4624Utc=(& $iso $(if($last.Count){$last[0].TimeUtc}));profileUnloadUtc=(& $iso $unloadUtc);ageDays=$(if($unloadUtc){[int][math]::Floor(($Now-$unloadUtc).TotalDays)});ageSource='ProfileList';isPrimary=$flags.IsPrimary;primarySource=$source;isAdmin=$isAdmin;isService=$isService;kfm=$kfm;ageDecision=$p.Decision;decision=$d.Decision;reason=$d.Reason}
  }
  $all=@($rep.Profiles); $cand=@($all | Where-Object { $_.decision -eq 'StaleCandidate' })
  $rep.Summary=[ordered]@{profiles=$all.Count;staleByAge=@($all | Where-Object { $_.ageDecision -eq 'StaleCandidate' }).Count;candidates=$cand.Count;candidateBytes=[int64]($cand | Measure-Object totalBytes -Sum).Sum;review=@($all | Where-Object { $_.decision -like 'Review*' }).Count;keep=@($all | Where-Object { $_.decision -like 'Keep*' }).Count;protected=@($all | Where-Object { $_.decision -eq 'Protected' }).Count}
@@ -474,10 +611,15 @@ function ConvertTo-SmProfileReportJson {
   $c=[ordered]@{}; foreach($n in $_.PSObject.Properties.Name) { $c[$n]=$_.$n }
   $c.account=& $clip $c.account 64; $c.path=& $clip $c.path 96; $c.reason=& $clip $c.reason 140; $c })
  $doc=[ordered]@{schemaVersion=2;package='storage-maintenance';mode=$Report.Mode;status=$Report.Status;timestamp=$Report.Timestamp;reportPath=(& $clip $Report.ReportPath 200);volumes=@($Report.Before | Select-Object -First 4 | ForEach-Object { [ordered]@{drive=$_.DeviceID;capacityBytes=$_.Size;freeBytes=$_.FreeSpace} });eventLog=$pr.EventLog;deviceClass=$pr.DeviceClass;profiles=$profiles;summary=$pr.Summary;errors=@(@($pr.Errors)+@($Report.Errors) | Select-Object -First 3 | ForEach-Object { & $clip $_ 160 });truncated=$false}
+ # A slim entry is about 90 bytes, so more than 100 can never fit; counts stay in the summary.
+ if($doc.profiles.Count -gt 100) { $doc.profiles=@($doc.profiles | Select-Object -First 100); $doc.truncated=$true }
  $json=$doc | ConvertTo-Json -Depth 6 -Compress
+ # Degrade whole objects only: detail goes first, lowest rank up; whole entries go after every entry is slim.
+ $slim=$doc.profiles.Count-1
  while([Text.Encoding]::UTF8.GetByteCount($json) -gt $MaxBytes -and $doc.profiles.Count) {
-  $doc.profiles=@($doc.profiles | Select-Object -First ($doc.profiles.Count-1)); $doc.truncated=$true
-  $json=$doc | ConvertTo-Json -Depth 6 -Compress
+  if($slim -ge 0) { $p=$doc.profiles[$slim]; $doc.profiles[$slim]=[ordered]@{sid=$p.sid;decision=$p.decision;ageDays=$p.ageDays;totalBytes=$p.totalBytes}; $slim-- }
+  else { $doc.profiles=@($doc.profiles | Select-Object -First ($doc.profiles.Count-1)) }
+  $doc.truncated=$true; $json=$doc | ConvertTo-Json -Depth 6 -Compress
  }
  $json
 }
