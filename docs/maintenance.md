@@ -66,7 +66,7 @@ $arguments = @(
 $arguments -join ' '
 ```
 
-For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and every gate in [Profile removal](#profile-removal-off-by-default); optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until two report runs have been reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks. It never uses ResetBase.
+For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and every gate in [Profile removal](#profile-removal-off-by-default); optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until two report runs have been reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks. It never uses ResetBase. To free disk space, add `Tier='Safe'`; see [Free disk space: cleanup tiers](#free-disk-space-cleanup-tiers).
 
 ### Profile report (report only)
 
@@ -157,6 +157,111 @@ A retained marker requires administrator reconciliation; packages do not clear o
 4. Run Report again. Active Setup, staged upgrade, pending reboot or unknown state must still defer work. Review that fresh report before explicitly requesting Repair or Cleanup.
 
 This is a deliberate recovery boundary: a timed-out operation is not proof of completion or success. Automatic PID-only cleanup would discard evidence while servicing may still be active.
+
+## Free disk space: cleanup tiers
+
+Use this when a PC runs low on disk space. It frees space from caches, old temporary files and Windows leftovers. It never deletes user files or user profiles.
+
+### When it runs
+
+- **Automatic:** the NinjaOne low-space condition on the workstation policy (C: free at or below 10 %) runs the Safe tier. See [Low-space trigger](#low-space-trigger).
+- **By hand:** a technician runs it from NinjaOne. See [Run it by hand](#run-it-by-hand).
+
+### What each tier deletes
+
+A tier needs `Mode='Cleanup'`. `Tier='None'` (the default) adds nothing to the existing temp cleanup.
+
+Each file category deletes only files older than `TempAgeDays` (default 7 days). A file counts as old only when both its write time and its creation time are old. Two steps have no age filter: the Delivery Optimization cache (Windows downloads it again on demand) and Disk Cleanup in the Aggressive tier, which applies its own rules per handler.
+
+**Safe** (`Tier='Safe'`):
+
+- **Temp:** `Windows\Temp` and each profile's `AppData\Local\Temp`.
+- **AppCache:** cache folders of Edge, Chrome and Teams (new and classic). Only folders named `Cache`, `Code Cache`, `GPUCache`, `CacheStorage`, `ShaderCache`, `GrShaderCache` and the `Dawn*Cache` folders. Cookies, logins, history, IndexedDB and Local Storage are not caches and stay.
+- **WindowsUpdateDownload:** `Windows\SoftwareDistribution\Download`.
+- **DeliveryOptimization:** Windows' own `Delete-DeliveryOptimizationCache`.
+- **CrashDumps:** minidumps, `MEMORY.DMP`, live kernel reports, Windows Error Reporting queues and each profile's `AppData\Local\CrashDumps`.
+- **ServicingLogs:** rotated logs in `Windows\Logs\CBS` and `Windows\Logs\DISM`. The live `CBS.log` and `dism.log` stay.
+- **RecycleBin:** items deleted more than `TempAgeDays` ago. The age is the deletion date, not the file's own date.
+- **FeatureUpgradeIso:** the ISO that the `feature-upgrade` package leaves after a failed, rolled-back or already-current attempt older than `TempAgeDays`. A running or staged attempt keeps its ISO. A finished attempt removes its own ISO.
+- **Component cleanup:** `DISM /StartComponentCleanup`, the same step as `ComponentCleanup='true'`. Never `/ResetBase`.
+
+**Aggressive** (`Tier='Aggressive'`) does everything in Safe, then:
+
+- **Cleanmgr:** Disk Cleanup with a fixed handler list (sageset 77). The list never includes Downloads, the Recycle Bin or File History. Each run rewrites the list, so a handler added by hand is removed again.
+- **Windows.old:** included in Cleanmgr only when both `Windows.old` and the upgrade are older than the rollback window. The window is the device's `UninstallWindow` setting, at least 10 days. An unknown date or window keeps `Windows.old`. Removing it removes the option to go back to the previous Windows version.
+- **ShadowStorage:** shrinks the restore-point space on C: to 5 % when its limit is higher. Windows deletes the oldest restore points to fit.
+
+### What it never touches
+
+- User profiles. Profile removal stays a separate opt-in. See [Profile removal](#profile-removal-off-by-default).
+- Documents, Desktop, Downloads, Pictures, OneDrive folders, Outlook data (OST and PST).
+- `hiberfil.sys`, `pagefile.sys` and `swapfile.sys`.
+- Upgrade files while an upgrade is running or staged: `$WINDOWS.~BT`, `$WINDOWS.~WS`, `C:\ESD`, the feature-upgrade ISO.
+- Any folder reached through a junction or symbolic link, and any OneDrive online-only file.
+
+### Safety checks
+
+- The whole tier is withheld when the servicing checks are not clear. That covers a running Setup, DISM or TrustedInstaller, a staged upgrade, a pending restart or pending file renames.
+- The checks run again before each category. A category that starts while Setup appears is withheld.
+- The path and each parent folder are checked for junctions right before each delete.
+- `CleanupSeconds` (60 to 3600, default 600) bounds the tier. Component cleanup waits up to five more minutes.
+- A second run straight after the first deletes nothing new.
+
+### Reading the result
+
+The stdout JSON has a `Categories` list. Each entry has:
+
+- **Name:** the category.
+- **Status:** `done`, `partial` or `withheld`. `partial` means some files could not be deleted (often because they are in use), the time budget ran out, or a root was refused. The reason is in **Error**.
+- **Files:** files deleted.
+- **FreedBytes:** C: free space after the category minus before it. Other activity on the PC can change it.
+
+The full report, with logical bytes per category, stays under `ProgramData\RelianMaintenance\Storage`.
+
+### Run it by hand
+
+Build the Parameters string as in [Build a pinned runner invocation](#build-a-pinned-runner-invocation), with these options:
+
+```powershell
+$options = @{
+    Mode = 'Cleanup'
+    Tier = 'Safe'
+    TempAgeDays = '7'
+    CleanupSeconds = '600'
+}
+```
+
+Then, in NinjaOne:
+
+1. Open the device.
+2. Choose **Run** and pick the script **Invoke-RelianRunner**.
+3. Run as **System**. Paste the Parameters string.
+4. Read the result in the device's **Activities**.
+
+Use `Tier='Aggressive'` only for a single PC, after you read a Safe result.
+
+### Low-space trigger
+
+NinjaOne's API cannot edit a policy's conditions, so make these changes in the NinjaOne web console:
+
+1. Go to **Administration**, then **Policies**, and open the Windows workstation policy.
+2. Open **Conditions** and edit the existing **Disk Free Space** condition for C: (at or below 10 % for 15 minutes).
+3. Under **Automations**, add **Invoke-RelianRunner**, run as **System**, with the Safe-tier Parameters string.
+4. Remove the automations that the Safe tier replaces: **Delete Temporary Files**, **Run Windows Cleanup**, **Empty Recycle Bin** and **Empty Downloads Older 6 Months**. Keep **Clear-MdmCache**, the two OneDrive online-only scripts and the alert.
+5. Set the condition's **Reset threshold** so it fires again only after recovery, and set **Auto-reset** to 24 hours. That limits it to about one run a day.
+6. Keep the condition's **Severity** and **Notification** so a technician hears about it.
+7. Save.
+
+The old Run Windows Cleanup automation started Disk Cleanup without checking for a running upgrade. Disk Cleanup can delete `$WINDOWS.~BT` while Setup uses it. The Safe tier waits instead.
+
+### If the disk is still full
+
+- **Upgrade in progress:** a feature upgrade needs 20 to 30 GB while it runs. Let it finish and restart, then run the Safe tier again.
+- **OneDrive:** check the user's OneDrive folder size. Files the user opened are kept on the PC. Turn on Storage Sense with "make online-only after 60 days", or run the NinjaOne OneDrive online-only script for that user.
+- **User data:** ask the user to move or delete large files in Downloads, Desktop or Documents. Never delete them for the user.
+- **Large mailbox:** a large OST is Outlook's offline copy. Reduce the offline period in Outlook.
+- **Old Windows:** after the 10-day rollback period, run the Aggressive tier once.
+- **Hardware:** a 256 GB disk with less than 15 % free after cleanup needs a bigger disk or a replacement PC.
 
 ## Retrieve stored evidence
 
