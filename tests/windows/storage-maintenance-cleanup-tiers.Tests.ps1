@@ -78,7 +78,8 @@ try {
     # Category roots never include user data folders, and cover the agreed Safe categories.
     $cats = @(Get-SmCleanupCategories @($p) (Join-Path $root 'Windows') (Join-Path $root 'ProgramData'))
     Assert (@($cats | Where-Object { $_.Root -match '(?i)[\\/](Documents|Desktop|Downloads|OneDrive[^\\/]*|Outlook|Favorites|Pictures)([\\/]|$)' }).Count -eq 0) 'No category root is a user data folder'
-    foreach ($n in @('Temp', 'WindowsUpdateDownload', 'CrashDumps', 'ServicingLogs', 'AppCache')) { Assert (@($cats | Where-Object { $_.Name -eq $n }).Count -gt 0) "Category present: $n" }
+    Assert (@($cats | Where-Object { $_.Name -eq 'AppCache' -and $_.Prune }).Count -eq 0) 'Cache subfolders are never pruned while a browser may use them'
+    foreach ($n in @('Temp','WindowsUpdateDownload', 'CrashDumps', 'ServicingLogs', 'AppCache')) { Assert (@($cats | Where-Object { $_.Name -eq $n }).Count -gt 0) "Category present: $n" }
     Assert (@($cats | Where-Object { $_.Root -match '(?i)\$WINDOWS\.~(BT|WS)|Windows\.old|[\\/]ESD$|FeatureUpgrade|hiberfil|pagefile' }).Count -eq 0) 'Upgrade staging, rollback and the upgrade ISO folder are never generic roots'
 
     # Recycle Bin: aged by the $I deletion record; recent items stay.

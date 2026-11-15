@@ -1606,7 +1606,8 @@ function Get-SmCleanupCategories {
  foreach($p in @($ProfilePaths | Where-Object { $_ })) {
   $c+=@{Name='Temp';Root=(Join-Path $p 'AppData\Local\Temp');Prune=$true}
   $c+=@{Name='CrashDumps';Root=(Join-Path $p 'AppData\Local\CrashDumps')}
-  foreach($cache in @(Get-SmAppCacheRoots $p)) { $c+=@{Name='AppCache';Root=$cache;Prune=$true} }
+  # No folder pruning in caches: a running browser expects its cache subfolders to exist.
+  foreach($cache in @(Get-SmAppCacheRoots $p)) { $c+=@{Name='AppCache';Root=$cache} }
  }
  $c
 }
