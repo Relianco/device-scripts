@@ -66,7 +66,7 @@ $arguments = @(
 $arguments -join ' '
 ```
 
-For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and every gate in [Profile removal](#profile-removal-off-by-default); optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until two report runs have been reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks. It never uses ResetBase. To free disk space, add `Tier='Safe'`; see [Free disk space: cleanup tiers](#free-disk-space-cleanup-tiers).
+For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires `RemoveProfiles='true'` and every gate in [Profile removal](#profile-removal-off-by-default); optional `ExcludeProfiles` is a comma-separated exact SID/full-profile-path list. Keep profile removal off until two report runs have been reviewed. Optional `ComponentCleanup='true'` asks Windows to perform supported component cleanup after safety checks and waits up to `CleanupSeconds` for it. It never uses ResetBase. A tier never turns it on. To free disk space, add `Tier='Safe'`; see [Free disk space: cleanup tiers](#free-disk-space-cleanup-tiers).
 
 ### Profile report (report only)
 
@@ -149,14 +149,22 @@ Native servicing logs use OS file handles owned by the child, with inheritance r
 Maintenance owns `ProgramData\RelianMaintenance` directly: storage reports/logs are under `Storage`, update run directories under `Update`, and the shared native marker is `native-active.json` at that root. A pre-existing untrusted owned root is refused. Initialization does not inspect or change the unrelated `ProgramData\Relian` ACL. Legacy `Relian\Maintenance\native-active.json` remains read-only fail-closed guard evidence, and the existing `Relian\FeatureUpgrade\state.json` is still read for upgrade safety. Do not delete an old marker to bypass a deferred result; reconcile its exact process identity first. The default pilot remains Report with a 60-day profile threshold and profile removal disabled.
 
 
-A retained marker requires administrator reconciliation; packages do not clear one automatically. A missing PID is insufficient evidence that servicing and descendants finished. For a deferred `native-active marker present` result:
+### Leftover servicing marker
 
-1. Read the marker without changing it. Retain its PID, UTC creation time, executable, phase, start time and log paths with the maintenance report. Compare all three identity fields with the running process; a reused PID is a different process. If identity cannot be queried, keep the marker and defer.
-2. If the recorded process is still running, wait for completion. Inspect its stdout/stderr and Windows servicing logs; do not kill servicing to unblock maintenance. Confirm that Setup and servicing workers have finished. If that cannot be established, keep the marker. An administrator may instead arrange a separately authorized restart, then verify that the current boot is later than the marker and review servicing/reboot state again.
-3. In an exclusive maintenance window with no concurrent runner, retain the completed marker as evidence outside either active marker filename, within the trusted maintenance evidence directory. Archive only after completion is established and no active or unknown servicing remains. Apply the same review to a legacy marker; do not change unrelated directory ACLs to clear it. Record who reconciled it and the completion evidence.
-4. Run Report again. Active Setup, staged upgrade, pending reboot or unknown state must still defer work. Review that fresh report before explicitly requesting Repair or Cleanup.
+A servicing command that outlives its wait keeps `RelianMaintenance\native-active.json`. Each storage run checks that marker first, while it holds the maintenance mutex:
 
-This is a deliberate recovery boundary: a timed-out operation is not proof of completion or success. Automatic PID-only cleanup would discard evidence while servicing may still be active.
+- **The marker's command still runs:** a process with the marker's image name runs (`dism.exe` or its `DismHost.exe` worker, or `sfc.exe`). The marker stays. The run reports `NativeMarker: running` and status `nativeMarkerPresent`, and exits 2.
+- **The marker can't be checked:** the marker is unreadable, names another program, or the process list is unavailable. The marker stays. The run reports `NativeMarker: unverified` and status `nativeMarkerPresent`, and exits 2.
+- **The command has ended:** no such process runs. The run moves the marker to `RelianMaintenance\Storage\native-stale-<UTC time>.json` as evidence and reports `NativeMarker: clearedStale`. Then it continues as usual. Setup, a staged upgrade or a pending restart still defer work.
+
+No process is killed. A PID alone is never trusted: the check is by image name, so a reused PID can't clear a marker.
+
+The legacy `Relian\Maintenance\native-active.json` is never moved. For it, or for a `nativeMarkerPresent` result that does not clear by itself:
+
+1. Read the marker without changing it. Keep its PID, creation time, executable, phase, start time and log paths with the report.
+2. If the process still runs, let it finish. Read its stdout and stderr and the Windows servicing logs. Do not kill servicing to unblock maintenance.
+3. After it has finished, move the marker into the maintenance evidence directory under another name. Record who did it and why.
+4. Run Report again and review it before you request Repair or Cleanup.
 
 ## Free disk space: cleanup tiers
 
@@ -183,7 +191,8 @@ Each file category deletes only files older than `TempAgeDays` (default 7 days).
 - **ServicingLogs:** rotated logs in `Windows\Logs\CBS` and `Windows\Logs\DISM`. The live `CBS.log` and `dism.log` stay.
 - **RecycleBin:** items deleted more than `TempAgeDays` ago. The age is the deletion date, not the file's own date.
 - **FeatureUpgradeIso:** the ISO that the `feature-upgrade` package leaves after a failed, rolled-back or already-current attempt older than `TempAgeDays`. A running or staged attempt keeps its ISO. A finished attempt removes its own ISO.
-- **Component cleanup:** `DISM /StartComponentCleanup`, the same step as `ComponentCleanup='true'`. Never `/ResetBase`.
+
+Neither tier runs component cleanup (`DISM /StartComponentCleanup`). Add `ComponentCleanup='true'` to run it after the tier. It can run long, so the automatic low-space run leaves it off.
 
 **Aggressive** (`Tier='Aggressive'`) does everything in Safe, then:
 
@@ -204,12 +213,24 @@ Each file category deletes only files older than `TempAgeDays` (default 7 days).
 - The whole tier is withheld when the servicing checks are not clear. That covers a running Setup, DISM or TrustedInstaller, a staged upgrade, a pending restart or pending file renames.
 - The checks run again before each category. A category that starts while Setup appears is withheld.
 - The path and each parent folder are checked for junctions right before each delete.
-- `CleanupSeconds` (60 to 3600, default 600) bounds the tier. Component cleanup waits up to five more minutes.
+- `CleanupSeconds` (60 to 3600, default 600) bounds the tier. Component cleanup, when requested, waits up to `CleanupSeconds` more. Set the NinjaOne script timeout above twice `CleanupSeconds` plus the scan.
 - A second run straight after the first deletes nothing new.
 
 ### Reading the result
 
-The stdout JSON has a `Categories` list. Each entry has:
+The stdout JSON's `Status` describes the cleanup actions:
+
+- `complete`: every action finished.
+- `partial`: an action did not finish, failed or ran out of time. The reason is in the action's **Error**.
+- `withheld`: a safety check stopped the cleanup.
+- `nativeMarkerPresent`: a servicing marker blocks maintenance. See `NativeMarker` and [Leftover servicing marker](#leftover-servicing-marker). The run exits 2, so NinjaOne shows it as failed and can alert.
+- `failed`: the run itself failed. It exits 1.
+
+`PartialScan: true` means the size scan stopped at its cap (20,000 entries or 30 seconds) or skipped entries. That limits the size report only. It does not change `Status`.
+
+`ComponentCleanup` is `null` when the step did not run. Otherwise it has **Status** (`commandCompleted`, `failed`, `nativeStillRunning` or `withheld`), DISM's **ExitCode** and **Error**.
+
+The stdout JSON also has a `Categories` list. Each entry has:
 
 - **Name:** the category.
 - **Status:** `done`, `partial` or `withheld`. `partial` means some files could not be deleted (often because they are in use), the time budget ran out, or a root was refused. The reason is in **Error**.
@@ -230,6 +251,8 @@ $options = @{
     CleanupSeconds = '600'
 }
 ```
+
+The low-space condition uses these same options. To add component cleanup on one PC, add `ComponentCleanup = 'true'`.
 
 Then, in NinjaOne:
 

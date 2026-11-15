@@ -243,6 +243,7 @@ try {
  $s=Get-SmScan @($root) 100 30 7
  Assert ($s.Files.Count -eq 2) 'file scan'
  $script:SmGuards={ [pscustomobject]@{ Safe=$true; Light=$false; Reasons=@() } }
+ $script:SmNativeMarker={ 'absent' }
  $script:SmPrepareReport={ 'test-report.json' }; $script:SmAcquire={ $true }; $script:SmRelease={}; $script:SmVolumes={ @() }; $script:SmEvidence={ @{} }
  $script:SmCollectProfiles={ param($Profiles,$Days,$Now,$Seconds,$Directory,$Mode)
   if($Mode -eq 'Final') { return [pscustomobject]@{Complete=$true;TimedOut=$false;GuardChanged=$false;FinalVeto=[pscustomobject]@{Clear=$true};Entries=@();ElapsedSeconds=0.01;Error=$null} }
@@ -259,7 +260,7 @@ try {
  Set-Content -LiteralPath $old -Value 'old'; (Get-Item $old).LastWriteTimeUtc=$now.AddDays(-10)
  $script:SmGuards={ [pscustomobject]@{ Safe=$false; Light=$true; Reasons=@('setup') } }
  $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)
- Assert ($r.Scan.Partial -and (Test-Path $old)) 'setup light and no mutation'
+ Assert ($r.Scan.Partial -and $r.Status -eq 'withheld' -and (Test-Path $old)) 'setup light and no mutation; a Cleanup run reports withheld'
  $script:SmGuards={ [pscustomobject]@{ Safe=$true; Light=$false; Reasons=@() } }
  $script:SmDelete={ throw 'locked file' }
  $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)
@@ -273,6 +274,60 @@ try {
  $script:SmGuards={ [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
  $r=Invoke-SmMaintenance (Get-SmArguments)
  Assert ($r.Notifications[0] -match 'failed:') 'UI failure distinct from report success'
+ # Run status reflects cleanup actions; a capped scan is reported as PartialScan, not as a partial run.
+ $realScanFn=${function:Get-SmScan}
+ function Get-SmScan { [pscustomobject]@{Roots=@();Files=@();TopFiles=@();TopFolders=@();Partial=$true;Light=$false;EntriesVisited=20000;SkippedReparseOrCloud=0;Errors=@();Seconds=30} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)
+ $summary=ConvertTo-SmSummary $r 'r.json' | ConvertFrom-Json
+ Assert ($r.Status -eq 'complete' -and $summary.PartialScan -and $null -eq $summary.ComponentCleanup) 'A capped scan alone leaves the run complete and reports PartialScan'
+ # Incomplete profile evidence only matters to a run that reports or removes profiles.
+ $realCollect=$script:SmCollectProfiles
+ $script:SmCollectProfiles={ [pscustomobject]@{Complete=$false;TimedOut=$true;GuardChanged=$false;Reasons=@();Entries=@();ElapsedSeconds=0.01;Error='provider timeout'} }
+ Assert ((Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)).Status -eq 'complete') 'Profile evidence timeout does not make a temp cleanup partial'
+ Assert ((Invoke-SmMaintenance (Get-SmArguments)).Status -eq 'partial') 'Profile evidence timeout still makes a report partial'
+ $script:SmCollectProfiles=$realCollect
+ # Component cleanup waits CleanupSeconds; its outcome is in the summary; DISM outliving the wait is alertable.
+ $script:SmComponent={ param($Seconds) $script:componentWait=$Seconds; [pscustomobject]@{Status='commandCompleted';ExitCode=3010} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -ComponentCleanup true -CleanupSeconds 900)
+ $summary=ConvertTo-SmSummary $r 'r.json' | ConvertFrom-Json
+ Assert ($script:componentWait -eq 900 -and $r.Status -eq 'complete' -and $summary.ComponentCleanup.Status -eq 'commandCompleted' -and $summary.ComponentCleanup.ExitCode -eq 3010) 'Component cleanup waits CleanupSeconds and reports its exit code'
+ $script:SmComponent={ param($Seconds) [pscustomobject]@{Status='failed';ExitCode=5} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -ComponentCleanup true)
+ Assert ($r.Status -eq 'partial' -and (ConvertTo-SmSummary $r 'r.json' | ConvertFrom-Json).ComponentCleanup.Error -match 'exit 5') 'A DISM failure is partial with its exit code'
+ $script:SmComponent={ param($Seconds) [pscustomobject]@{Status='nativeStillRunning';ExitCode=$null} }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup -ComponentCleanup true)
+ Assert ($r.Status -eq 'nativeMarkerPresent' -and (ConvertTo-SmSummary $r 'r.json' | ConvertFrom-Json).ComponentCleanup.Status -eq 'nativeStillRunning') 'DISM outliving the wait is the alertable status'
+ $script:SmNativeMarker={ 'running' }
+ $r=Invoke-SmMaintenance (Get-SmArguments -Mode Cleanup)
+ Assert ($r.Status -eq 'nativeMarkerPresent' -and (ConvertTo-SmSummary $r 'r.json' | ConvertFrom-Json).NativeMarker -eq 'running') 'A live leftover marker is the alertable status'
+ $realSave=$script:SmSave; $script:SmSave={ param($Report) }
+ $null=Complete-SmRun $r
+ Assert ($script:SmExitCode -eq 2) 'nativeMarkerPresent exits 2 so Ninja can alert'
+ $script:SmSave=$realSave; $script:SmNativeMarker={ 'absent' }
+ ${function:Get-SmScan}=$realScanFn
+ # A stale marker (its servicing image no longer runs) is archived, not left to defer every run.
+ & {
+  $priorData=$env:ProgramData; $env:ProgramData=Join-Path $root 'pd'
+  $archive=Join-Path $root 'archive'; $null=New-Item -ItemType Directory -Force (Join-Path $env:ProgramData 'RelianMaintenance'),$archive
+  $marker=@(Get-SmNativeMarkerPaths)[0]
+  function Initialize-SmSecureDirectory { param($Path) $archive }
+  try {
+   Assert ((Resolve-SmNativeMarker) -eq 'absent') 'No marker is absent'
+   '{"pid":4242,"executable":"C:\\Windows\\System32\\dism.exe","phase":"componentCleanup"}' | Set-Content -LiteralPath $marker
+   $script:procs=@([pscustomobject]@{Name='DismHost.exe'})
+   function Get-CimInstance { $script:procs }
+   Assert ((Resolve-SmNativeMarker) -eq 'running' -and (Test-Path -LiteralPath $marker)) 'A running DISM worker keeps the marker'
+   function Get-CimInstance { throw 'WMI unavailable' }
+   Assert ((Resolve-SmNativeMarker) -eq 'unverified' -and (Test-Path -LiteralPath $marker)) 'An unavailable process list keeps the marker'
+   $script:procs=@([pscustomobject]@{Name='notepad.exe'})
+   function Get-CimInstance { $script:procs }
+   Assert ((Resolve-SmNativeMarker) -eq 'clearedStale' -and -not (Test-Path -LiteralPath $marker) -and @(Get-ChildItem -LiteralPath $archive -Filter 'native-stale-*.json').Count -eq 1) 'A stale marker is archived as evidence'
+   '{"pid":null,"executable":"C:\\Tools\\other.exe"}' | Set-Content -LiteralPath $marker
+   Assert ((Resolve-SmNativeMarker) -eq 'unverified' -and (Test-Path -LiteralPath $marker)) 'An unknown executable keeps the marker'
+   '{broken' | Set-Content -LiteralPath $marker
+   Assert ((Resolve-SmNativeMarker) -eq 'unverified' -and (Test-Path -LiteralPath $marker)) 'A malformed marker keeps the marker'
+  } finally { $env:ProgramData=$priorData }
+ }
  $link=Join-Path $root 'link'
  $null=New-Item -ItemType SymbolicLink -Path $link -Target ([IO.Path]::GetTempPath())
  Assert (-not (Test-SmSafePath (Join-Path $link 'anything') $root)) 'symlink ancestor blocked'

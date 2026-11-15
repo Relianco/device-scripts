@@ -33,8 +33,9 @@ function Get-SmArguments {
   if ($n[1] -notmatch '^\d{1,7}$' -or [int]$n[1] -lt $n[2] -or [int]$n[1] -gt $n[3]) { throw "Invalid $($n[0])" }; $a[$n[0]]=[int]$n[1]
  }
  if ($a.ProfileReport -and ($a.Mode -ne 'Report' -or $a.RemoveProfiles -or $a.ComponentCleanup)) { throw 'ProfileReport is report-only: Mode must be Report and RemoveProfiles and ComponentCleanup false' }
- # Both tiers include supported component cleanup (never ResetBase). A tier never removes profiles.
- $a.Tier=$Tier; if ($Tier -ne 'None') { $a.ComponentCleanup=$true }
+ # Component cleanup is its own opt-in, never implied by a tier (the low-space condition runs Safe
+ # unattended). A tier never removes profiles.
+ $a.Tier=$Tier
  return $a
 }
 
@@ -1137,7 +1138,7 @@ $script:SmRemovalPlan={ param($A,$Report,$Audit,$Cooldown,$Now,$ComputerName) Ge
 $script:SmRecheckGate={ param($A,$Assessed,$Context,$Now) @((Get-SmProfileReport $A @($Assessed) $Context $Now).Profiles)[0] }
 $script:SmProfileHiveLoaded={ param($Sid) (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid) -ErrorAction Stop) -or (Test-Path -LiteralPath ('Registry::HKEY_USERS\'+$Sid+'_Classes') -ErrorAction Stop) }
 $script:SmDiagnosticRoots={ @($env:ProgramData,$env:ProgramFiles,${env:ProgramFiles(x86)},$env:windir) | Where-Object { $_ } }
-$script:SmComponent={
+$script:SmComponent={ param([int]$Seconds)
  $logDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance\Storage')
  $id=[guid]::NewGuid().ToString('n')
  $markerDir=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance')
@@ -1148,11 +1149,28 @@ $script:SmComponent={
  $p=Start-SmDurableProcess (Join-Path $env:windir 'System32\dism.exe') '/Online /Cleanup-Image /StartComponentCleanup /NoRestart' $native.stdoutPath $native.stderrPath
  $native.pid=$p.Id; $native.creationTimeUtc=$p.StartTime.ToUniversalTime().ToString('o'); $native.phase='componentCleanup'
  $native | ConvertTo-Json -Compress | Set-Content -LiteralPath $markerPath -Encoding UTF8 -ErrorAction Stop
- if(-not $p.WaitForExit(300000)) { throw 'Component cleanup still running after five minutes; not terminated; do not start another maintenance job.' }
+ # Not terminated on timeout: the marker stays and later runs report nativeMarkerPresent until DISM exits.
+ if(-not $p.WaitForExit($Seconds*1000)) { return [pscustomobject]@{Status='nativeStillRunning';ExitCode=$null} }
  # This exact Process instance has exited; never clear a marker on PID lookup alone.
  Remove-Item -LiteralPath $markerPath -Force -ErrorAction Stop
- if($p.ExitCode -notin @(0,3010)) { throw "DISM exit $($p.ExitCode)" }; $p.ExitCode
+ [pscustomobject]@{Status=$(if($p.ExitCode -in @(0,3010)){'commandCompleted'}else{'failed'});ExitCode=$p.ExitCode}
 }
+# A marker left by a timed-out DISM or SFC (this package or update-maintenance) would defer every later
+# run. Once no process of its image runs (nor DISM's DismHost worker), the work has ended: archive the
+# marker beside the storage reports as evidence. Anything unreadable or unknown keeps it (fail closed).
+function Resolve-SmNativeMarker {
+ $path=@(Get-SmNativeMarkerPaths)[0]
+ if(-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return 'absent' }
+ try {
+  $m=Read-SmBoundedText $path 65536 | ConvertFrom-Json -ErrorAction Stop
+  $names=if([string]$m.executable -match '\\dism\.exe$'){@('dism.exe','DismHost.exe')}elseif([string]$m.executable -match '\\sfc\.exe$'){@('sfc.exe')}else{return 'unverified'}
+  if(@(Get-CimInstance Win32_Process -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -in $names }).Count) { return 'running' }
+  $archive=Initialize-SmSecureDirectory (Join-Path $env:ProgramData 'RelianMaintenance\Storage')
+  Move-Item -LiteralPath $path -Destination (Join-Path $archive ('native-stale-'+[datetime]::UtcNow.ToString('yyyyMMddTHHmmssfff')+'.json')) -ErrorAction Stop
+  'clearedStale'
+ } catch { 'unverified' }
+}
+$script:SmNativeMarker={ Resolve-SmNativeMarker }
 $script:SmEvidence={
  $e=[ordered]@{}
  foreach($class in @('Win32_DiskDrive','Win32_PageFileUsage','Win32_ShadowStorage','Win32_Volume')) {
@@ -1788,7 +1806,7 @@ function ConvertTo-SmSummary {
  # fallback make truncation explicit without losing measured volume evidence.
  $clip={ param($Value,[int]$Limit=180) $text=[string]$Value; if($text.Length -gt $Limit) { return $text.Substring(0,$Limit)+'...' }; $text }
  $volumes={ param($Items) @($Items | Select-Object -First 4 | ForEach-Object { @{DeviceID=(& $clip $_.DeviceID 20);Size=$_.Size;FreeSpace=$_.FreeSpace} }) }
- $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true);Categories=@($Report.Actions | Where-Object { $_.Kind -eq 'category' } | Select-Object -First 12 | ForEach-Object { [ordered]@{Name=$_.Name;Status=$_.Status;Files=$_.Files;FreedBytes=$_.FreedBytes;Detail=(& $clip $_.Detail 80);Error=(& $clip $_.Error 80)} });ProfileRemoval=$Report.RemovalPlan;Audit=$(if($Report.Audit){[ordered]@{code=$Report.Audit.code;headSeq=$Report.Audit.headSeq;error=$Report.Audit.error}})}
+ $summary=[ordered]@{SchemaVersion=1;Status=$Report.Status;Mode=$Report.Mode;ReportPath=(& $clip $ReportPath 300);ActionCount=$Report.Actions.Count;GuardReasons=@($Report.Guards.Reasons | Select-Object -First 5 | ForEach-Object { & $clip $_ });PartialScan=if($Report.Scan){$Report.Scan.Partial}else{$true};Before=@(& $volumes $Report.Before);After=@(& $volumes $Report.After);FreeSpaceDelta=@($Report.FreeSpaceDelta | Select-Object -First 4);TopFiles=@($Report.Scan.TopFiles | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);LogicalBytes=$_.LogicalBytes} });TopFolders=@($Report.Scan.TopFolders | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Path=(& $clip $_.Path);DirectFileLogicalBytes=$_.DirectFileLogicalBytes} });TempOpportunities=@($Report.Scan.TempCategories | Where-Object { $null -ne $_ } | Select-Object -First 3 | ForEach-Object { @{Root=(& $clip $_.Root);LogicalBytes=$_.LogicalBytes;AgeQualifiedLogicalBytes=$_.AgeQualifiedLogicalBytes;ReclaimableBytes=$null} });ProfileDecisions=@($Report.Profiles | Group-Object Decision | Select-Object -First 8 | ForEach-Object { @{Decision=(& $clip $_.Name 60);Count=$_.Count} });OpportunityCount=@($Report.Evidence.Opportunities | Where-Object { $null -ne $_ }).Count;ProfileCount=@($Report.Profiles).Count;Notifications=@($Report.Notifications | Select-Object -First 3 | ForEach-Object { & $clip $_ });Errors=@($Report.Errors | Select-Object -First 3 | ForEach-Object { & $clip $_ });Truncated=$true;Truncation='Summary limits: 4 volumes, 3 consumers/category, 8 profile decisions; strings clipped. Full evidence in ReportPath.';ScanWithheld=($Report.Guards.Light -eq $true);Categories=@($Report.Actions | Where-Object { $_.Kind -eq 'category' } | Select-Object -First 12 | ForEach-Object { [ordered]@{Name=$_.Name;Status=$_.Status;Files=$_.Files;FreedBytes=$_.FreedBytes;Detail=(& $clip $_.Detail 80);Error=(& $clip $_.Error 80)} });ProfileRemoval=$Report.RemovalPlan;NativeMarker=$Report.NativeMarker;ComponentCleanup=$(@($Report.Actions | Where-Object { $_.Kind -eq 'componentCleanup' } | Select-Object -First 1 | ForEach-Object { [ordered]@{Status=$_.Status;ExitCode=$_.ExitCode;Error=(& $clip $_.Error 80)} }) | Select-Object -First 1);Audit=$(if($Report.Audit){[ordered]@{code=$Report.Audit.code;headSeq=$Report.Audit.headSeq;error=$Report.Audit.error}})}
  $json=$summary | ConvertTo-Json -Depth 6 -Compress
  if([Text.Encoding]::UTF8.GetByteCount($json) -gt 8000) {
   $summary.GuardReasons=@($summary.GuardReasons | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.Notifications=@(); $summary.Errors=@($summary.Errors | Select-Object -First 1 | ForEach-Object { & $clip $_ 80 }); $summary.FreeSpaceDelta=@(); $summary.TopFolders=@($summary.TopFolders | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TopFiles=@($summary.TopFiles | Select-Object -First 1 | ForEach-Object { $_.Path=& $clip $_.Path 80; $_ }); $summary.TempOpportunities=@($summary.TempOpportunities | Select-Object -First 1 | ForEach-Object { $_.Root=& $clip $_.Root 80; $_ }); $summary.Truncation='Byte cap reached; volume measurements, one consumer/category, first error and decision counts retained. See full local report.'
@@ -1799,25 +1817,26 @@ function ConvertTo-SmSummary {
 
 function Invoke-SmMaintenance {
  param($A)
- $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only unless Tier is Safe or Aggressive, which delete cache-folder files older than TempAgeDays.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null; Audit=$null; RemovalPlan=$null }
+ $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only unless Tier is Safe or Aggressive, which delete cache-folder files older than TempAgeDays.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null; Audit=$null; RemovalPlan=$null; NativeMarker=$null }
  $acquired=$false; $audit=$null
  # A removal run evaluates the same gate matrix as a report run, freshly, in this run.
  $removal=($A.Mode -eq 'Cleanup' -and $A.RemoveProfiles -and -not $A.ProfileReport)
  try {
   $acquired=& $script:SmAcquire
   if(-not $acquired) { $r.Status='busy'; return [pscustomobject]$r }
+  try { $r.NativeMarker=& $script:SmNativeMarker } catch { $r.NativeMarker='unverified' }
   $g=& $script:SmGuards; $r.Guards=$g
   $r.ReportPath=& $script:SmPrepareReport
   try { $r.Notifications+=& $script:SmUi 'Checking free space and upgrade safety before storage inspection.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
   try { $r.Before=@(& $script:SmVolumes) } catch { $r.Errors+=$_.Exception.Message }
   if($g.Light) {
-   $r.Status='partial'; $r.Scan=[pscustomobject]@{Partial=$true;Files=@();Reason='Upgrade active or guard unknown: light volume summary only'}
+   $r.Status=$(if($A.Mode -eq 'Cleanup'){'withheld'}else{'partial'}); $r.Scan=[pscustomobject]@{Partial=$true;Files=@();Reason='Upgrade active or guard unknown: light volume summary only'}
    $r.Omissions+='Profile, cache, health and recursive scans withheld to avoid competing with Setup.'
   } else {
    try { $r.Evidence=& $script:SmEvidence } catch { $r.Errors+=$_.Exception.Message }
    $initialEvidenceWatch=[Diagnostics.Stopwatch]::StartNew()
    $profiles=@(); try { $profiles=@(& $script:SmProfiles) } catch { $r.Errors+=$_.Exception.Message }
-   if($profiles.Count -gt 200) { $r.Status='partial'; $r.Omissions+='Profile list capped at 200.'; $profiles=@($profiles | Select-Object -First 200) }
+   if($profiles.Count -gt 200) { if($A.Mode -ne 'Cleanup' -or $removal) { $r.Status='partial' }; $r.Omissions+='Profile list capped at 200.'; $profiles=@($profiles | Select-Object -First 200) }
    $r.Evidence['ApplicationCachePolicy']='Per-profile Edge/Chrome/WebView Cache, Code Cache, GPUCache, ShaderCache, CacheStorage, Teams LocalCache and Adobe AcroCef are report-only. Outlook OST, OfficeFileCache, Wef and offline documents are preserved.'
    $evidenceLimit=[double][math]::Min(30,$A.MaxSeconds); $evidenceRemaining=$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds; $assessedUtc=[datetime]::UtcNow
    $evidenceDirectory=Split-Path -Parent $r.ReportPath
@@ -1825,7 +1844,7 @@ function Invoke-SmMaintenance {
    $evidenceRemaining-=[double]$collected.ElapsedSeconds
    $evidenceRemaining=[math]::Min($evidenceRemaining,$evidenceLimit-$initialEvidenceWatch.Elapsed.TotalSeconds)
    if($evidenceRemaining -le 0) { $collected.Complete=$false; $collected.Error='Aggregate profile evidence deadline exhausted' }
-   if(-not $collected.Complete) { $r.Status='partial'; $r.Omissions+=('Profile evidence incomplete: '+$collected.Error) }
+   if(-not $collected.Complete) { if($A.Mode -ne 'Cleanup' -or $removal) { $r.Status='partial' }; $r.Omissions+=('Profile evidence incomplete: '+$collected.Error) }
    if($collected.GuardChanged) { $g=[pscustomobject]@{Safe=$false;Light=$true;Reasons=@($collected.Reasons)}; $r.Guards=$g }
    $r.Profiles=@($profiles | ForEach-Object {
     $profile=$_; $found=@($collected.Entries | Where-Object { $_.SID -eq $profile.SID -and $_.Path -eq $profile.LocalPath })
@@ -1840,7 +1859,7 @@ function Invoke-SmMaintenance {
    $scan=if($collected.GuardChanged){[pscustomobject]@{Roots=@();Files=@();TopFiles=@();TopFolders=@();Partial=$true;Light=$true;GuardReasons=@($collected.Reasons);EntriesVisited=0;SkippedReparseOrCloud=0;Errors=@();Seconds=0}}else{Get-SmScan $scanRoots $A.MaxFiles $A.MaxSeconds $A.TempAgeDays}; $r.Scan=$scan
    if($scan.Light) { $g=[pscustomobject]@{Safe=$false;Light=$true;Reasons=@($scan.GuardReasons)}; $r.Guards=$g; $r.Omissions+='Traversal abandoned because Setup/unknown servicing state appeared during scan.' }
    foreach($f in $scan.Files) { $f | Add-Member -NotePropertyName CleanupRoot -NotePropertyValue $null; foreach($tempRoot in $roots) { if($f.Path.StartsWith($tempRoot.TrimEnd('\')+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) { $f.CleanupRoot=$tempRoot; break } } }
-   if($scan.Partial -or $scan.Errors.Count) { $r.Status='partial' }
+   # A capped or partly unreadable scan is evidence quality, reported as PartialScan, not a cleanup outcome.
    $cacheFiles=@($scan.Files | Where-Object { $_.Path -match '(?i)\\(Cache|Code Cache|GPUCache|ShaderCache|CacheStorage)\\|\\MSTeams_[^\\]+\\LocalCache\\|\\Adobe\\AcroCef\\' })
    $r.Evidence['ApplicationCaches']=@($cacheFiles | Group-Object { if($_.Path -match '(?i)^(.+?\\(?:Cache|Code Cache|GPUCache|ShaderCache|CacheStorage))\\') { $Matches[1] } else { $_.Root } } | Sort-Object Count -Descending | Select-Object -First 30 | ForEach-Object { @{Path=$_.Name;ObservedLogicalBytes=($_.Group | Measure-Object LogicalBytes -Sum).Sum;Partial=$scan.Partial;Policy='report only; close owning application and review before manual cleanup';ReclaimableBytes=$null} })
    foreach($p in $r.Profiles) { $size=Get-SmProfileSize $scan $p.Path; $p.LogicalBytes=$size.LogicalBytes; $p.SizePartial=$size.Partial }
@@ -1964,8 +1983,14 @@ function Invoke-SmMaintenance {
       if(@($tierSteps | Where-Object { $_.Status -ne 'done' }).Count) { $r.Status='partial' }
      }
      if($A.ComponentCleanup) {
-      $step=[ordered]@{Kind='componentCleanup';Status='withheld';Error=$null}
-      try { if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed' }; $step['ExitCode']=& $script:SmComponent; $step.Status='commandCompleted' } catch { $step.Error=$_.Exception.Message; $r.Status='partial' }; $r.Actions+=[pscustomobject]$step
+      $step=[ordered]@{Kind='componentCleanup';Status='withheld';ExitCode=$null;Error=$null}
+      try {
+       if(-not (& $script:SmGuards).Safe) { throw 'Servicing guard changed' }
+       $c=& $script:SmComponent $A.CleanupSeconds; $step.Status=$c.Status; $step.ExitCode=$c.ExitCode
+       if($c.Status -eq 'failed') { $step.Error='DISM exit '+$c.ExitCode }
+      } catch { $step.Error=$_.Exception.Message }
+      if($step.Status -ne 'commandCompleted') { $r.Status='partial' }
+      $r.Actions+=[pscustomobject]$step
      }
     }
    }
@@ -1977,6 +2002,8 @@ function Invoke-SmMaintenance {
  } catch { $r.Status='failed'; $r.Errors+=$_.Exception.Message }
  finally { Close-SmAudit $audit; if($acquired) { & $script:SmRelease } }
  if($r.Errors.Count -and $r.Status -eq 'complete') { $r.Status='partial' }
+ # One alertable status (exit 2) while a servicing marker defers maintenance: a person should look.
+ if($r.Status -ne 'failed' -and ($r.NativeMarker -in @('running','unverified') -or @($r.Actions | Where-Object { $_.Status -eq 'nativeStillRunning' }).Count)) { $r.Status='nativeMarkerPresent' }
  if($A.ProfileReport -and -not $r.ProfileReport) { $r.ProfileReport=[pscustomobject]@{EventLog=$null;DeviceClass=$null;Profiles=@();Summary=$null;Errors=@('Profile report not collected: scans withheld or run failed')} }
  return [pscustomobject]$r
 }
@@ -2005,7 +2032,7 @@ function Complete-SmRun {
   try { & $script:SmSave $Report } catch { $Report.Errors+=('Report file write failed: '+$_.Exception.Message); $Report.Status='failed' }
   Write-Host "Storage maintenance: $($Report.Status); mode $($Report.Mode); actions $($Report.Actions.Count). Free-space delta includes concurrent system activity."
   if($Report.ProfileReport) { ConvertTo-SmProfileReportJson $Report } else { ConvertTo-SmSummary $Report $Report.ReportPath }
-  $script:SmExitCode=if($Report.Status -eq 'failed') {1}else{0}
+  $script:SmExitCode=if($Report.Status -eq 'failed') {1}elseif($Report.Status -eq 'nativeMarkerPresent') {2}else{0}
  } finally { Close-SmSession $script:SmExitCode }
 }
 
