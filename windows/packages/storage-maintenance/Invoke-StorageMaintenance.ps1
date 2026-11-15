@@ -1572,7 +1572,7 @@ function Remove-SmAgedFiles {
 
 # Browser and Teams cache folders only: never profile data, cookies, logins or IndexedDB.
 function Get-SmAppCacheRoots {
- param([string]$ProfilePath)
+ param([string]$ProfilePath,[datetime]$DeadlineUtc=[datetime]::MaxValue)
  $bases=@('AppData\Local\Microsoft\Edge\User Data','AppData\Local\Google\Chrome\User Data','AppData\Local\Packages\MSTeams_8wekyb3d8bbwe\LocalCache\Microsoft\MSTeams\EBWebView','AppData\Roaming\Microsoft\Teams')
  foreach($b in $bases) {
   $base=Join-Path $ProfilePath $b
@@ -1581,18 +1581,19 @@ function Get-SmAppCacheRoots {
   $queue=New-Object Collections.Generic.Queue[object]; $queue.Enqueue(@($base,0))
   while($queue.Count) {
    $item=$queue.Dequeue()
-   try { $children=@([IO.DirectoryInfo]::new($item[0]).EnumerateDirectories()) } catch { continue }
-   foreach($c in $children) {
+   # Streamed, with the deadline checked per entry: discovery shares the tier's time budget.
+   try { foreach($c in [IO.DirectoryInfo]::new($item[0]).EnumerateDirectories()) {
+    if([datetime]::UtcNow -ge $DeadlineUtc) { return }
     if(([int64]$c.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
     if($c.Name -match $script:SmCacheNames) { $c.FullName } elseif($item[1] -lt 2) { $queue.Enqueue(@($c.FullName,($item[1]+1))) }
-   }
+   } } catch { }
   }
  }
 }
 
 # Fixed category roots for one run. Pure apart from Get-SmAppCacheRoots, so the roots are testable.
 function Get-SmCleanupCategories {
- param([string[]]$ProfilePaths,[string]$WinDir,[string]$ProgramData)
+ param([string[]]$ProfilePaths,[string]$WinDir,[string]$ProgramData,[datetime]$DeadlineUtc=[datetime]::MaxValue)
  $wer=Join-Path $ProgramData 'Microsoft\Windows\WER'
  $c=@(
   @{Name='Temp';Root=(Join-Path $WinDir 'Temp');Prune=$true}
@@ -1610,7 +1611,7 @@ function Get-SmCleanupCategories {
   $c+=@{Name='Temp';Root=(Join-Path $p 'AppData\Local\Temp');Prune=$true}
   $c+=@{Name='CrashDumps';Root=(Join-Path $p 'AppData\Local\CrashDumps')}
   # No folder pruning in caches: a running browser expects its cache subfolders to exist.
-  foreach($cache in @(Get-SmAppCacheRoots $p)) { $c+=@{Name='AppCache';Root=$cache} }
+  foreach($cache in @(Get-SmAppCacheRoots $p $DeadlineUtc)) { $c+=@{Name='AppCache';Root=$cache} }
  }
  $c
 }
@@ -1743,7 +1744,7 @@ function Invoke-SmCleanupTier {
   try { if($null -ne $step.FreeBefore) { $step.FreeAfter=& $script:SmFreeBytes; $step.FreedBytes=$step.FreeAfter-$step.FreeBefore } } catch { }
   [pscustomobject]$step
  }
- $categories=@(Get-SmCleanupCategories $ProfilePaths $env:windir $env:ProgramData)
+ $categories=@(Get-SmCleanupCategories $ProfilePaths $env:windir $env:ProgramData $deadline)
  foreach($name in @($categories | ForEach-Object { $_.Name } | Select-Object -Unique)) {
   $mine=@($categories | Where-Object { $_.Name -eq $name })
   $steps+=& $measure $name { foreach($c in $mine) { $opt=@{}; foreach($k in 'Include','Exclude') { if($c[$k]) { $opt[$k]=$c[$k] } }; Remove-SmAgedFiles $c.Root $cutoff $deadline @opt -NoRecurse:([bool]$c.NoRecurse) -RemoveEmptyDirs:([bool]$c.Prune) } }

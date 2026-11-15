@@ -78,6 +78,7 @@ try {
         Assert (@($caches | Where-Object { $_.EndsWith($want) }).Count -eq 1) "Cache root found: $want"
     }
     Assert (@($caches | Where-Object { $_ -match 'Extensions' }).Count -eq 0) 'Cache discovery stops at depth 3'
+    Assert (@(Get-SmAppCacheRoots $p ([datetime]::UtcNow.AddSeconds(-1))).Count -eq 0) 'Cache discovery stops at the deadline'
     Assert (@($caches | Where-Object { $_ -match 'IndexedDB|Local Storage|^Documents|^Downloads|^OneDrive' }).Count -eq 0) 'No data, Documents, Downloads or OneDrive folder is a cache root'
 
     # Category roots never include user data folders, and cover the agreed Safe categories.
