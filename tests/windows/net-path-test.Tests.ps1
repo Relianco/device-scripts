@@ -124,6 +124,15 @@ if ($iStop -lt 0 -or $iLock -lt $iStop -or $iRecover -lt $iLock) { Fail 'uninsta
 $iKeep = $body.IndexOf('if (-not $clean) {'); $iRemove = $body.IndexOf('Remove-NptTasks', [math]::Max($iKeep, 0))
 if ($iKeep -lt $iRecover -or $iRemove -lt $iKeep -or $body.Substring($iKeep, $iRemove - $iKeep) -notmatch 'return 1') { Fail 'a failed restore must exit 1 before uninstall removes anything' }
 
+# No statement keyword was swallowed as a command argument (two statements joined on one line).
+$tokens = $null; $parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { Fail "parse errors: $($parseErrors[0].Message)" }
+$keywords = @('if', 'else', 'foreach', 'while', 'try', 'catch', 'return', 'throw')
+$joined = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | Where-Object {
+        @($_.CommandElements | Select-Object -Skip 1 | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $_.StringConstantType -eq 'BareWord' -and $keywords -contains $_.Value }).Count })
+if ($joined.Count) { Fail "keyword passed as an argument at line $($joined[0].Extent.StartLineNumber)" }
+
 # Review fixes that need a device to exercise, held in place by source checks.
 if ($src.Contains('IPv4DefaultGateway.NextHop')) { Fail 'a gateway-less adapter would throw under StrictMode' }
 if (-not $src.Contains('if ($verified -eq $false) { $errors +=')) { Fail 'a failed restore verification must keep the saved state' }

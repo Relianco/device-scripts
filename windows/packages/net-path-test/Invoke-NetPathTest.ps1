@@ -492,7 +492,7 @@ function Invoke-NptMeasure {
         $m.settled = ($m.gsaDns -eq $Expect); $m.settleSeconds = [int]$sw.Elapsed.TotalSeconds
     }
     $m.paValue = (Get-ItemProperty -LiteralPath "HKCU:\$($script:NptGsaKey)" -Name $script:NptGsaValue -ErrorAction SilentlyContinue | ForEach-Object { $_.($script:NptGsaValue) })
-    $m.tunnel = if ($Settings.TunnelName) { [string](Get-Service -Name "WireGuardTunnel`$$($Settings.TunnelName)" -ErrorAction SilentlyContinue).Status } else { '' }
+    $m.tunnel = if ($Settings.TunnelName) { @(Get-Service -Name "WireGuardTunnel`$$($Settings.TunnelName)" -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.Status }) -join '' } else { '' }
     $m.gsaServices = @(Get-Service -Name 'GlobalSecureAccess*' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)=$($_.Status)" })
     if ($Name -eq 'restore') {
         $m.end = (Get-Date -Format o)
@@ -555,7 +555,7 @@ function Invoke-NptMeasureEntry {
 
 $script:StartMeasure = {
     param([string]$User, [string]$Arguments)
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 20) -MultipleInstances IgnoreNew
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew
     $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
     Register-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask -Action (New-ScheduledTaskAction -Execute (Get-NptPowerShell) -Argument $Arguments) -Principal $principal -Settings $settings -Force | Out-Null
     Start-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptMeasureTask | Out-Null
@@ -571,7 +571,7 @@ $script:StopMeasure = {
 # Returns the measurement. Throws on a timeout (after stopping the task, so the next scenario
 # never changes the network under a measurement still running) or when Measure wrote an error file.
 function Invoke-NptUserTask {
-    param([string]$User, [string]$Name, [string]$Id, [bool]$Expect, [int]$TimeoutSeconds = 900, [int]$PollSeconds = 5)
+    param([string]$User, [string]$Name, [string]$Id, [bool]$Expect, [int]$TimeoutSeconds = 1500, [int]$PollSeconds = 5)
     $work = Join-Path $script:NptRoot 'work'
     $out = Join-Path $work "$Id-$Name.json"
     Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
@@ -634,7 +634,8 @@ function Invoke-NptRun {
                     # A failed restart is recorded; the settle check in Measure shows whether the value took.
                     $entry.gsaRestart = try { & $script:RestartGsa; 'ok' } catch { "error: $($_.Exception.Message)" }
                     Start-Sleep -Seconds 15
-                    $entry.measure = Invoke-NptUserTask -User $user -Name $s.Name -Id $id -Expect $s.ExpectGsa                    if ($null -ne $entry.measure -and $null -ne $entry.measure.metered) { $results.metered = $entry.measure.metered }
+                    $entry.measure = Invoke-NptUserTask -User $user -Name $s.Name -Id $id -Expect $s.ExpectGsa
+                    if ($null -ne $entry.measure -and $null -ne $entry.measure.metered) { $results.metered = $entry.measure.metered }
                 } catch { $entry.error = $_.Exception.Message }
                 Write-NptLog "scenario $($s.Name) error=[$($entry.error)]"
                 $results.scenarios += [pscustomobject]$entry
@@ -682,7 +683,7 @@ function Invoke-NptInstall {
     $user = Get-NptConsoleUser
     if ($user) { $triggers += New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes([math]::Max($delay, 1)) }
     $arg = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Mode Run' -f $target
-    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
     Register-ScheduledTask -TaskPath $script:NptTaskPath -TaskName $script:NptRunTask -Action (New-ScheduledTaskAction -Execute (Get-NptPowerShell) -Argument $arg) -Trigger $triggers -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) -Settings $taskSettings -Force | Out-Null
     Write-NptLog "armed: delay=$delay userNow=$user"
     [Console]::Out.WriteLine((@{ armed = $true; task = "$($script:NptTaskPath)$($script:NptRunTask)"; delayMinutes = $delay; signedInNow = $user; root = $script:NptRoot; version = $script:NptVersion } | ConvertTo-Json -Compress))
