@@ -212,7 +212,7 @@ Every category deletes only files older than `TempAgeDays` (default 7 days). A f
 The stdout JSON has a `Categories` list. Each entry has:
 
 - **Name:** the category.
-- **Status:** `done`, `partial` (time budget ran out) or `withheld` (with the reason in **Error**).
+- **Status:** `done`, `partial` or `withheld`. `partial` means some files could not be deleted (often because they are in use), the time budget ran out, or a root was refused. The reason is in **Error**.
 - **Files:** files deleted.
 - **FreedBytes:** C: free space after the category minus before it. Other activity on the PC can change it.
 

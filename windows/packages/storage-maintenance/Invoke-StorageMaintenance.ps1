@@ -1581,7 +1581,7 @@ function Get-SmAppCacheRoots {
    try { $children=@([IO.DirectoryInfo]::new($item[0]).EnumerateDirectories()) } catch { continue }
    foreach($c in $children) {
     if(([int64]$c.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
-    if($c.Name -match $script:SmCacheNames) { $c.FullName } elseif($item[1] -lt 2) { $queue.Enqueue(@($c.FullName,$item[1]+1)) }
+    if($c.Name -match $script:SmCacheNames) { $c.FullName } elseif($item[1] -lt 2) { $queue.Enqueue(@($c.FullName,($item[1]+1))) }
    }
   }
  }
@@ -1721,10 +1721,11 @@ function Invoke-SmCleanupTier {
    $step.FreeBefore=& $script:SmFreeBytes
    $out=& $Work
    foreach($o in @($out | Where-Object { $_ -is [Collections.IDictionary] -or $_.PSObject.Properties['Files'] })) {
-    if($null -ne $o.Files) { $step.Files+=$o.Files; $step.LogicalBytes+=$o.LogicalBytes; $step.Failed+=$o.Failed; if($o.TimedOut) { $step.Error='Cleanup time budget exhausted' } }
+    if($null -ne $o.Files) { $step.Files+=$o.Files; $step.LogicalBytes+=$o.LogicalBytes; $step.Failed+=$o.Failed; if($o.TimedOut) { $step.Error='Cleanup time budget exhausted' } elseif($o.Error -and -not $step.Error) { $step.Error=$o.Error } }
     if($o.Detail) { $step.Detail=$o.Detail }
    }
-   $step.Status=if($step.Error){'partial'}else{'done'}
+   # A refused root or files that could not be deleted (often in use) make the category partial.
+   $step.Status=if($step.Error -or $step.Failed){'partial'}else{'done'}
   } catch { $step.Error=$_.Exception.Message }
   try { if($null -ne $step.FreeBefore) { $step.FreeAfter=& $script:SmFreeBytes; $step.FreedBytes=$step.FreeAfter-$step.FreeBefore } } catch { }
   [pscustomobject]$step
@@ -1935,7 +1936,7 @@ function Invoke-SmMaintenance {
       try { $r.Notifications+=& $script:SmUi ('Freeing disk space: '+$A.Tier+' cleanup of caches and old temporary files.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
       $tierSteps=@(Invoke-SmCleanupTier $A @($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' -and $_.Special -eq $false } | ForEach-Object { $_.LocalPath }))
       $r.Actions+=$tierSteps
-      if(@($tierSteps | Where-Object { $_.Error }).Count) { $r.Status='partial' }
+      if(@($tierSteps | Where-Object { $_.Status -ne 'done' }).Count) { $r.Status='partial' }
      }
      if($A.ComponentCleanup) {
       $step=[ordered]@{Kind='componentCleanup';Status='withheld';Error=$null}

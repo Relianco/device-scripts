@@ -68,11 +68,12 @@ try {
             'AppData/Local/Microsoft/Edge/User Data/Default/Service Worker/CacheStorage', 'AppData/Local/Microsoft/Edge/User Data/Default/IndexedDB',
             'AppData/Local/Microsoft/Edge/User Data/Default/Local Storage', 'AppData/Local/Microsoft/Edge/User Data/ShaderCache',
             'AppData/Local/Google/Chrome/User Data/Profile 1/GPUCache', 'AppData/Local/Packages/MSTeams_8wekyb3d8bbwe/LocalCache/Microsoft/MSTeams/EBWebView/Default/Cache',
-            'AppData/Roaming/Microsoft/Teams/Cache', 'Documents/Cache', 'Downloads/Cache', 'OneDrive - Org/Cache')) { $null = New-Item -ItemType Directory -Force (Join-Path $p $d) }
+            'AppData/Roaming/Microsoft/Teams/Cache', 'AppData/Local/Microsoft/Edge/User Data/Default/Extensions/ext/1.0/Cache', 'Documents/Cache', 'Downloads/Cache', 'OneDrive - Org/Cache')) { $null = New-Item -ItemType Directory -Force (Join-Path $p $d) }
     $caches = @(Get-SmAppCacheRoots $p | ForEach-Object { $_.Substring($p.Length + 1).Replace('\', '/') })
     foreach ($want in @('User Data/Default/Cache', 'Default/Code Cache', 'Service Worker/CacheStorage', 'User Data/ShaderCache', 'Profile 1/GPUCache', 'EBWebView/Default/Cache', 'Teams/Cache')) {
         Assert (@($caches | Where-Object { $_.EndsWith($want) }).Count -eq 1) "Cache root found: $want"
     }
+    Assert (@($caches | Where-Object { $_ -match 'Extensions' }).Count -eq 0) 'Cache discovery stops at depth 3'
     Assert (@($caches | Where-Object { $_ -match 'IndexedDB|Local Storage|^Documents|^Downloads|^OneDrive' }).Count -eq 0) 'No data, Documents, Downloads or OneDrive folder is a cache root'
 
     # Category roots never include user data folders, and cover the agreed Safe categories.
@@ -120,7 +121,7 @@ try {
     Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $now.AddDays(-3) 10 $now)) 'A recent upgrade keeps an old Windows.old folder'
     Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $null 10 $now)) 'Unknown upgrade date keeps Windows.old'
     Assert (-not (Test-SmWindowsOldEligible $now.AddDays(-40) $now.AddDays(-40) $null $now)) 'Unknown rollback window keeps Windows.old'
-    Assert (-not (Test-SmWindowsOldEligible $null $now $now)) 'No Windows.old, nothing to do'
+    Assert (-not (Test-SmWindowsOldEligible $null $now 10 $now)) 'No Windows.old, nothing to do'
     Assert (Test-SmShadowShrink ([uint64]::MaxValue) 1000) 'Unbounded shadow storage is shrunk'
     Assert (-not (Test-SmShadowShrink 50 1000)) 'Shadow storage at 5 percent is left alone'
 
@@ -156,6 +157,16 @@ try {
         $steps = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Aggressive) @($p))
         Assert ($script:cleanPrev -eq $false) 'A recent Windows.old keeps the rollback option'
         Assert (@($steps | Where-Object { $_.Name -eq 'ShadowStorage' -and $_.Status -eq 'done' }).Count -eq 1) 'Aggressive tier reviews shadow storage'
+
+        # A refused root (a junction or symlink) makes its category partial with the reason.
+        if ($linked) {
+            $null = New-Item -ItemType Directory -Force $env:windir
+            $null = New-Item -ItemType SymbolicLink -Path (Join-Path $env:windir 'Minidump') -Target $outside
+            $refused = @(Invoke-SmCleanupTier (Get-SmArguments -Mode Cleanup -Tier Safe) @($p) | Where-Object { $_.Name -eq 'CrashDumps' })[0]
+            Assert ($refused.Status -eq 'partial' -and $refused.Error -match 'reparse') 'A refused root is reported, not marked done'
+            Assert (Test-Path (Join-Path $outside 'keep.doc')) 'Nothing behind the refused root is deleted'
+            Remove-Item -LiteralPath (Join-Path $env:windir 'Minidump') -Force
+        }
 
         $report = [pscustomobject]@{ Status = 'complete'; Mode = 'Cleanup'; Actions = $steps; Guards = @{ Reasons = @() }; Scan = $null; Before = @(); After = @(); FreeSpaceDelta = @(); Profiles = @(); Notifications = @(); Errors = @(); Evidence = @{ Opportunities = @() }; RemovalPlan = $null; Audit = $null }
         $summary = ConvertTo-SmSummary $report 'r.json' | ConvertFrom-Json
