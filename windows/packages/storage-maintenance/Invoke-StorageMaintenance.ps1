@@ -1620,9 +1620,11 @@ function Remove-SmRecycleBin {
  param([string]$Root,[datetime]$CutoffUtc,[datetime]$DeadlineUtc)
  $res=[ordered]@{Root=$Root;Files=0;LogicalBytes=[int64]0;Failed=0;TimedOut=$false;Error=$null}
  if(-not [IO.Directory]::Exists($Root) -or -not (Test-SmPlainChain $Root)) { return [pscustomobject]$res }
- foreach($sidDir in @([IO.DirectoryInfo]::new($Root).EnumerateDirectories())) {
+ # Streamed listings: the deadline is checked as each entry is read, not after a full listing.
+ foreach($sidDir in [IO.DirectoryInfo]::new($Root).EnumerateDirectories()) {
+  if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
   if(([int64]$sidDir.Attributes -band $script:SmSkipAttributes) -ne 0) { continue }
-  foreach($info in @($sidDir.EnumerateFiles('$I*'))) {
+  foreach($info in $sidDir.EnumerateFiles('$I*')) {
    if([datetime]::UtcNow -ge $DeadlineUtc) { $res.TimedOut=$true; return [pscustomobject]$res }
    $deleted=$null
    try { if(Test-SmPlainChain $info.FullName) { $deleted=ConvertFrom-SmRecycleRecord ([IO.File]::ReadAllBytes($info.FullName)) } } catch { }

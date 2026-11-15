@@ -110,6 +110,8 @@ try {
     foreach ($k in 'D4', 'E5', 'F6') { Assert (Test-Path (Join-Path $bin ('$R' + $k + '.txt'))) "Invalid record $k keeps the item" }
     Assert ($rb.Files -eq 2) 'Recycle Bin counts deleted data files'
     Assert ($null -eq (ConvertFrom-SmRecycleRecord ([byte[]](1, 2, 3)))) 'A short record is unreadable'
+    $null = New-Item -ItemType Directory -Force (Join-Path $root 'bin2/S-1-5-21-2')
+    Assert ((Remove-SmRecycleBin (Join-Path $root 'bin2') $cutoff ([datetime]::UtcNow.AddSeconds(-1))).TimedOut) 'The Recycle Bin walk checks the deadline per folder'
 
     # cleanmgr: never Downloads, Recycle Bin or File History; Windows.old only when allowed.
     $available = @('DownloadsFolder', 'Recycle Bin', 'User file versions', 'BranchCache', 'Previous Installations', 'Temporary Files', 'Update Cleanup', 'Windows Upgrade Log Files')
