@@ -10,7 +10,8 @@
 
     Package arguments (base64 JSON in -PackageArguments):
       Sections        "all" (default) or a comma list of Start, Outlook, Edge,
-                      Session, Cis, Apps, Intune
+                      Session, Cis, Apps, Intune, Edition, Taskbar, DefaultApps,
+                      QuietWindows, Notifications, Acrobat, EdgeExtras, OneDrive, Drives
       AppRegex        uninstall DisplayName and Intune log lines to report (Apps, Intune)
       ShortcutRegex   .lnk/.rdp/.appref-ms names on desktops and Start Menus (Apps)
       ClickOnceRegex  ClickOnce folders under each user's AppData\Local\Apps\2.0 (Apps)
@@ -20,6 +21,8 @@
     their profile folders. No hive is loaded. Each section is one Get-Ee<Name>
     function that returns a hashtable; add a section by adding one function.
     Nothing is changed: no registry, file, service, policy refresh or custom field.
+    Files are read by name only, except a local DefaultAssociations XML (hashed
+    and counted) and Network Shortcuts target.lnk files (icon location only).
 #>
 [CmdletBinding()]
 param(
@@ -34,7 +37,9 @@ param(
 )
 $ProgressPreference = 'SilentlyContinue'
 
-$script:EeSectionNames = @('Start', 'Outlook', 'Edge', 'Session', 'Cis', 'Apps', 'Intune')
+$script:EeSectionNames = @('Start', 'Outlook', 'Edge', 'Session', 'Cis', 'Apps', 'Intune', 'Edition', 'Taskbar', 'DefaultApps',
+    'QuietWindows', 'Notifications', 'Acrobat', 'EdgeExtras', 'OneDrive', 'Drives')
+$script:EeWatchedTypes = @('.pdf', 'http', 'https', 'mailto')
 $script:EeProgramData = $env:ProgramData
 $script:EePublic = $env:PUBLIC
 $script:EeBudgetSeconds = 90
@@ -105,6 +110,8 @@ function Get-EeUsers {
 }
 
 function Test-EeDir { param([string]$Path) return ($Path -and [IO.Directory]::Exists($Path)) }
+# Not a UNC path in any slash form (\\server, //server, \/server, \\?\UNC).
+function Test-EeLocalPath { param([string]$Path) return ($Path -and $Path -notmatch '^[\\/]{2}') }
 
 function Get-EeFileNames {
     param([string]$Dir, [string]$Regex, [switch]$Recurse)
@@ -355,6 +362,266 @@ function Get-EeIntune {
     return $r
 }
 
+# Policy values without the PolicyManager bookkeeping names (X_ProviderSet, X_WinningProvider, X_LastWrite).
+function Get-EePolicy {
+    param([string]$Path, [string[]]$Names)
+    $values = Get-EeValues $Path
+    $r = [ordered]@{}
+    foreach ($n in @($values.Keys)) {
+        if ($n -match '_(ProviderSet|WinningProvider|LastWrite|ADMXInstanceData)$') { continue }
+        if ($Names -and $Names -notcontains $n) { continue }
+        $r[$n] = ConvertTo-EeValue $values[$n]
+    }
+    return $r
+}
+
+function Get-EeEdition {
+    $v = Get-EeValues "$HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+    return [ordered]@{ editionId = $v['EditionID']; installationType = $v['InstallationType']; displayVersion = $v['DisplayVersion']; build = $v['CurrentBuildNumber']; ubr = $v['UBR'] }
+}
+
+# Taskbar part of a StartLayout XML: placement, PinGeneration and pin names (link leaf or AUMID).
+function ConvertFrom-EeTaskbarLayout {
+    param([AllowEmptyString()][string]$Xml)
+    if (-not $Xml) { return $null }
+    $r = [ordered]@{ length = $Xml.Length; taskbar = ($Xml -match '(?i)TaskbarPinList'); pinListPlacement = $null; pinGeneration = $null; pins = @() }
+    if ($Xml -match '(?i)PinListPlacement\s*=\s*"([^"]*)"') { $r.pinListPlacement = $Matches[1] }
+    if ($Xml -match '(?i)PinGeneration\s*=\s*"([^"]*)"') { $r.pinGeneration = $Matches[1] }
+    foreach ($m in [regex]::Matches($Xml, '(?i)(DesktopApplicationLinkPath|DesktopApplicationID|AppUserModelID)\s*=\s*"([^"]*)"')) {
+        $r.pins += Protect-EeText ($m.Groups[2].Value -replace '^.*\\', '') -Max 60
+    }
+    return $r
+}
+
+function Get-EeTaskbar {
+    $pm = "$HKLM\SOFTWARE\Microsoft\PolicyManager\current"
+    $r = [ordered]@{
+        devicePolicy = ConvertFrom-EeTaskbarLayout ([string](Get-EeValue "$pm\device\Start" 'StartLayout'))
+        gpoPolicy = Get-EePolicy "$HKLM\SOFTWARE\Policies\Microsoft\Windows\Explorer" @('LockedStartLayout', 'StartLayoutFile')
+        hideTaskViewButton = Get-EeValue "$pm\device\Start" 'HideTaskViewButton'
+        users = @()
+    }
+    foreach ($u in @(Get-EeUsers)) {
+        $row = [ordered]@{ user = $u.Name; policy = ConvertFrom-EeTaskbarLayout ([string](Get-EeValue "$pm\$($u.Sid)\Start" 'StartLayout')); pinned = @() }
+        if ($u.Profile) { $row.pinned = @(Get-EeFileNames (Join-Path $u.Profile 'AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar') '.' | ForEach-Object { Protect-EeText $_ -Max 60 }) }
+        $r.users += $row
+    }
+    return $r
+}
+
+# DefaultAssociationsConfiguration: the MDM value is base64 XML, the GPO value is a file path.
+function ConvertFrom-EeAssociations {
+    param([byte[]]$Bytes)
+    $text = [Text.Encoding]::UTF8.GetString($Bytes)
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) { $text = [Text.Encoding]::Unicode.GetString($Bytes) }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $hash = -join ($sha.ComputeHash($Bytes)[0..7] | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+    $r = [ordered]@{ sha256Prefix = $hash; count = 0; suggested = 0; watched = [ordered]@{} }
+    foreach ($m in [regex]::Matches($text, '(?i)<Association\b[^>]*>')) {
+        $r.count++
+        $tag = $m.Value
+        if ($tag -match '(?i)\bSuggested\s*=\s*"true"') { $r.suggested++ }
+        if ($tag -match '(?i)\bIdentifier\s*=\s*"([^"]*)"' -and $script:EeWatchedTypes -contains $Matches[1].ToLowerInvariant()) {
+            $id = $Matches[1].ToLowerInvariant()
+            if ($tag -match '(?i)\bProgId\s*=\s*"([^"]*)"') { $r.watched[$id] = Protect-EeText $Matches[1] -Max 60 }
+        }
+    }
+    return $r
+}
+
+function Get-EeDefaultApps {
+    $r = [ordered]@{ mdmPolicy = $null; gpoPolicy = $null; users = @() }
+    $b64 = [string](Get-EeValue "$HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\ApplicationDefaults" 'DefaultAssociationsConfiguration')
+    if ($b64) {
+        try { $r.mdmPolicy = ConvertFrom-EeAssociations ([Convert]::FromBase64String($b64)) } catch { $r.mdmPolicy = [ordered]@{ status = 'invalidBase64'; length = $b64.Length } }
+    }
+    $file = [string](Get-EeValue "$HKLM\SOFTWARE\Policies\Microsoft\Windows\System" 'DefaultAssociationsConfiguration')
+    if ($file) {
+        $r.gpoPolicy = [ordered]@{ path = Protect-EeText $file -Max 120; readable = $false }
+        # A UNC path (\\, // or mixed) can stall under SYSTEM, so only a local file is read.
+        if ((Test-EeLocalPath $file) -and [IO.File]::Exists($file) -and [IO.FileInfo]::new($file).Length -lt 1MB) {
+            $r.gpoPolicy = ConvertFrom-EeAssociations ([IO.File]::ReadAllBytes($file))
+            $r.gpoPolicy.path = Protect-EeText $file -Max 120
+        }
+    }
+    foreach ($u in @(Get-EeUsers)) {
+        $row = [ordered]@{ user = $u.Name }
+        foreach ($t in $script:EeWatchedTypes) {
+            $base = "$($u.Hive)\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$t"
+            if ($t.StartsWith('.')) { $base = "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\$t" }
+            $progId = Get-EeValue "$base\UserChoice" 'ProgId'
+            # Newer builds also write UserChoiceLatest; report it when UserChoice has none.
+            if (-not $progId) { $latest = Get-EeTree "$base\UserChoiceLatest" -Max 6; foreach ($k in @($latest.Keys)) { if ($k -match '(^|\\)ProgId$' -and $latest[$k]) { $progId = $latest[$k] } } }
+            $row[$t] = $progId
+        }
+        $r.users += $row
+    }
+    return $r
+}
+
+function Get-EeQuietWindows {
+    $pm = "$HKLM\SOFTWARE\Microsoft\PolicyManager\current"
+    $r = [ordered]@{
+        experiencePolicy = Get-EePolicy "$pm\device\Experience"
+        cloudContentGpo = Get-EePolicy "$HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+        startPolicy = Get-EePolicy "$pm\device\Start" @('HideRecommendedPersonalizedSites', 'HideRecommendedSection')
+        users = @()
+    }
+    foreach ($u in @(Get-EeUsers)) {
+        $cdm = [ordered]@{}
+        $values = Get-EeValues "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        foreach ($n in @($values.Keys | Where-Object { $_ -match '(Enabled|Allowed)$' } | Sort-Object)) { $cdm[$n] = ConvertTo-EeValue $values[$n] }
+        $r.users += [ordered]@{
+            user = $u.Name
+            contentDelivery = $cdm
+            engagement = Get-EePolicy "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement"
+            experiencePolicy = Get-EePolicy "$pm\$($u.Sid)\Experience"
+            cloudContentGpo = Get-EePolicy "$($u.Hive)\Software\Policies\Microsoft\Windows\CloudContent"
+        }
+    }
+    return $r
+}
+
+function Get-EeNotifications {
+    $users = @()
+    foreach ($u in @(Get-EeUsers)) {
+        $apps = [ordered]@{}
+        $settings = "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings"
+        # Only apps with an explicit Enabled value; an absent value means on.
+        foreach ($k in @(Get-EeSubKeys $settings)) { $e = Get-EeValue "$settings\$k" 'Enabled'; if ($null -ne $e) { $apps[(Protect-EeText $k -Max 80)] = $e } }
+        $users += [ordered]@{ user = $u.Name; toastEnabled = Get-EeValue "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\PushNotifications" 'ToastEnabled'; apps = $apps }
+    }
+    return [ordered]@{ users = $users }
+}
+
+function Get-EeAcrobat {
+    $r = [ordered]@{}
+    foreach ($product in @('Adobe Acrobat', 'Acrobat Reader')) {
+        foreach ($root in @('SOFTWARE', 'SOFTWARE\WOW6432Node')) {
+            $p = "$HKLM\$root\Policies\Adobe\$product\DC\FeatureLockDown"
+            $t = Get-EeTree $p -Max 30
+            $label = $product; if ($root -like '*WOW6432Node') { $label += ' (wow64)' }
+            if ($t.Count) { $r[$label] = $t }
+        }
+    }
+    return $r
+}
+
+$script:EeEdgeExtraNames = @('ShowPDFDefaultRecommendationsEnabled', 'ShowRecommendationsEnabled', 'DefaultBrowserSettingsCampaignEnabled', 'ShowMicrosoftRewards',
+    'EdgeShoppingAssistantEnabled', 'NewTabPageContentEnabled', 'SpotlightExperiencesAndRecommendationsEnabled', 'WhatsNewPageForEntraProfilesEnabled',
+    'DefaultPopupsSetting', 'ForceSync', 'SyncDisabled', 'BrowserSignin', 'OrganizationalBrandingOnWorkProfileUIEnabled', 'OrganizationLogoOverlayOnAppIconEnabled')
+
+function Get-EeEdgeScope {
+    param([string]$Path)
+    $r = Get-EePolicy $Path $script:EeEdgeExtraNames
+    # List policies keep one numbered value per entry in a subkey of the same name.
+    foreach ($list in @('SyncTypesListDisabled', 'PopupsAllowedForUrls', 'PopupsBlockedForUrls')) {
+        $v = Get-EeValues "$Path\$list"
+        if ($v.Count) { $r[$list] = @($v.Values | ForEach-Object { [string]$_ }) }
+    }
+    $fav = [string](Get-EeValue $Path 'ManagedFavorites')
+    if ($fav) {
+        # Names only: favourites URLs are firm links, so only the count and folder name are shown.
+        try {
+            # Assigned first: Windows PowerShell 5.1 emits a JSON array as one pipeline item.
+            $parsed = $fav | ConvertFrom-Json
+            $items = @($parsed)
+            $top = @($items | Where-Object { $_.PSObject.Properties['toplevel_name'] } | ForEach-Object { [string]$_.toplevel_name })
+            $r['ManagedFavorites'] = [ordered]@{ count = @($items | Where-Object { $_.PSObject.Properties['url'] -or $_.PSObject.Properties['children'] }).Count; topLevelName = $null }
+            if ($top.Count) { $r['ManagedFavorites'].topLevelName = Protect-EeText $top[0] -Max 60 }
+        } catch { $r['ManagedFavorites'] = [ordered]@{ status = 'invalidJson'; length = $fav.Length } }
+    }
+    return $r
+}
+
+function Get-EeEdgeExtras {
+    $r = [ordered]@{ device = Get-EeEdgeScope "$HKLM\SOFTWARE\Policies\Microsoft\Edge"; users = @() }
+    foreach ($u in @(Get-EeUsers)) {
+        $p = Get-EeEdgeScope "$($u.Hive)\Software\Policies\Microsoft\Edge"
+        if ($p.Count) { $r.users += [ordered]@{ user = $u.Name; policy = $p } }
+    }
+    return $r
+}
+
+function Get-EeOneDrive {
+    $r = [ordered]@{ devicePolicy = Get-EeTree "$HKLM\SOFTWARE\Policies\Microsoft\OneDrive" -Max 30; users = @() }
+    foreach ($u in @(Get-EeUsers)) {
+        $accounts = "$($u.Hive)\Software\Microsoft\OneDrive\Accounts"
+        $business = @()
+        foreach ($k in @(Get-EeSubKeys $accounts | Where-Object { $_ -match '^Business\d+$' })) {
+            $v = Get-EeValues "$accounts\$k"
+            # The account e-mail and folder path are personal, so only their presence is shown.
+            $row = [ordered]@{ account = $k; tenantId = $v['ConfiguredTenantId']; signedIn = [bool]$v['UserEmail']; hasFolder = [bool]$v['UserFolder'] }
+            foreach ($n in @($v.Keys | Where-Object { $_ -match '^(Kfm|FilesOnDemand|Timerautomount)' })) { $row[$n] = ConvertTo-EeValue $v[$n] }
+            $business += $row
+        }
+        $folders = [ordered]@{}
+        $shell = Get-EeValues "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        foreach ($pair in @(@('desktop', 'Desktop'), @('documents', 'Personal'), @('pictures', 'My Pictures'))) {
+            $where = $null
+            if ($shell.Contains($pair[1])) { $where = 'local'; if ([string]$shell[$pair[1]] -match '(?i)\\OneDrive') { $where = 'oneDrive' } }
+            $folders[$pair[0]] = $where
+        }
+        $r.users += [ordered]@{ user = $u.Name; policy = Get-EeTree "$($u.Hive)\Software\Policies\Microsoft\OneDrive" -Max 20; business = $business; knownFolders = $folders }
+    }
+    return $r
+}
+
+# IconLocation from a .lnk (MS-SHLLINK StringData), read without COM. $null when the link has none.
+function Get-EeLnkIcon {
+    param([string]$Path)
+    $b = [IO.File]::ReadAllBytes($Path)
+    if ($b.Length -lt 0x4C -or [BitConverter]::ToUInt32($b, 0) -ne 0x4C) { return 'invalidLink' }
+    $flags = [BitConverter]::ToUInt32($b, 0x14)
+    $pos = 0x4C
+    if ($flags -band 0x1) { $pos += 2 + [BitConverter]::ToUInt16($b, $pos) }
+    if ($flags -band 0x2) { $pos += [BitConverter]::ToUInt32($b, $pos) }
+    $unicode = [bool]($flags -band 0x80)
+    $index = [BitConverter]::ToInt32($b, 0x38)
+    # StringData order: name 0x4, relative path 0x8, working dir 0x10, arguments 0x20, icon 0x40.
+    foreach ($bit in @(0x4, 0x8, 0x10, 0x20, 0x40)) {
+        if (-not ($flags -band $bit)) { continue }
+        if ($pos + 2 -gt $b.Length) { return 'invalidLink' }
+        $chars = [BitConverter]::ToUInt16($b, $pos); $pos += 2
+        $len = $chars; if ($unicode) { $len = $chars * 2 }
+        if ($pos + $len -gt $b.Length) { return 'invalidLink' }
+        if ($bit -eq 0x40) {
+            $text = if ($unicode) { [Text.Encoding]::Unicode.GetString($b, $pos, $len) } else { [Text.Encoding]::Default.GetString($b, $pos, $len) }
+            return (Protect-EeText "$text,$index" -Max 160)
+        }
+        $pos += $len
+    }
+    return $null
+}
+
+function Get-EeDrives {
+    $icons = [ordered]@{}
+    $di = "$HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons"
+    foreach ($l in @(Get-EeSubKeys $di)) {
+        $icons[$l] = [ordered]@{ icon = ConvertTo-EeValue (Get-EeValue "$di\$l\DefaultIcon" ''); label = ConvertTo-EeValue (Get-EeValue "$di\$l\DefaultLabel" '') }
+    }
+    $users = @()
+    foreach ($u in @(Get-EeUsers)) {
+        $mapped = [ordered]@{}
+        foreach ($l in @(Get-EeSubKeys "$($u.Hive)\Network")) { $mapped[$l] = ConvertTo-EeValue (Get-EeValue "$($u.Hive)\Network\$l" 'RemotePath') }
+        $userIcons = [ordered]@{}
+        $ud = "$($u.Hive)\Software\Classes\Applications\Explorer.exe\Drives"
+        foreach ($l in @(Get-EeSubKeys $ud)) { $userIcons[$l] = ConvertTo-EeValue (Get-EeValue "$ud\$l\DefaultIcon" '') }
+        $places = @()
+        $ns = if ($u.Profile) { Join-Path $u.Profile 'AppData\Roaming\Microsoft\Windows\Network Shortcuts' } else { $null }
+        if (Test-EeDir $ns) {
+            foreach ($d in @(Get-ChildItem -LiteralPath $ns -Directory -ErrorAction SilentlyContinue)) {
+                $lnk = Join-Path $d.FullName 'target.lnk'
+                $icon = $null
+                if ([IO.File]::Exists($lnk)) { try { $icon = Get-EeLnkIcon $lnk } catch { $icon = 'unreadable' } }
+                $places += [ordered]@{ name = Protect-EeText $d.Name -Max 80; targetLnk = [IO.File]::Exists($lnk); desktopIni = [IO.File]::Exists((Join-Path $d.FullName 'desktop.ini')); icon = $icon }
+            }
+        }
+        $users += [ordered]@{ user = $u.Name; mapped = $mapped; driveIcons = $userIcons; networkPlaces = $places }
+    }
+    return [ordered]@{ driveIcons = $icons; users = $users }
+}
+
 function Find-EeLargestArray {
     param($Value)
     $best = $null
@@ -406,7 +673,7 @@ function Invoke-EndpointEvidence {
     if (-not $wanted.Count -or ($wanted.Count -eq 1 -and $wanted[0] -eq 'all')) { $wanted = $script:EeSectionNames }
     foreach ($s in $wanted) { if ($script:EeSectionNames -notcontains $s) { throw "Unknown section $s." } }
     foreach ($rx in @($AppRegex, $ShortcutRegex, $ClickOnceRegex)) { [void][regex]::new($rx) }
-    $report = [ordered]@{ version = '1'; timestamp = [datetime]::UtcNow.ToString('o'); status = 'collected'; users = @(Get-EeUsers | ForEach-Object Name) }
+    $report = [ordered]@{ version = '2'; timestamp = [datetime]::UtcNow.ToString('o'); status = 'collected'; users = @(Get-EeUsers | ForEach-Object Name) }
     foreach ($s in $script:EeSectionNames) {
         if ($wanted -notcontains $s) { continue }
         $key = $s.ToLowerInvariant()
