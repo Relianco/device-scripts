@@ -38,6 +38,7 @@ Rules for code the diff adds or changes:
 - An empty hash exits 0 for every action, including Uninstall, and downloads nothing.
 - The four entry points (windows/runner/Invoke-RelianRunner.ps1, windows/runner/Invoke-RelianJob.ps1, linux/runner/relian-runner.sh, macos/runner/relian-runner.sh) refuse a URL with userinfo first and exit 1, even when the hash is empty. Then an empty hash exits 0.
 - Inside a package, an empty pin exits 0 before the installer URL is read, including when that URL contains userinfo. Do not require that rejection in a package when the hash is empty.
+- Exception: windows/runner/Invoke-RelianReadJob.ps1 has no hash parameter and no off switch. Its hashes are a built-in table, and an empty, missing or malformed table hash must exit 1 and must not download. Do not ask for an empty-hash exit 0 there.
 - Uninstall does not download. A present hash with a userinfo URL does not block uninstall.
 - The Linux and macOS shell runners each download their one package script for every action, including Uninstall. That download is not the retained-action uninstall rule.
 - An MSI install path must be one quoted argument so a path that contains spaces is not split.
