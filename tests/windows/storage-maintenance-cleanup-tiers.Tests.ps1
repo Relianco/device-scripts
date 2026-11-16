@@ -4,11 +4,13 @@ $env:RELIAN_DEPLOY_TEST = '1'
 function Assert($Condition, $Message) { if (-not $Condition) { throw $Message } }
 function Throws($Code) { try { & $Code; return $false } catch { return $true } }
 
-# Arguments: a tier needs Cleanup, implies component cleanup, and never implies profile removal.
+# Arguments: a tier needs Cleanup and implies neither component cleanup nor profile removal.
 $a = Get-SmArguments
 Assert ($a.Tier -eq 'None' -and -not $a.ComponentCleanup -and $a.CleanupSeconds -eq 600) 'Default is no tier'
 $a = Get-SmArguments -Mode Cleanup -Tier Safe
-Assert ($a.Tier -eq 'Safe' -and $a.ComponentCleanup -and -not $a.RemoveProfiles) 'Safe tier adds component cleanup and no profile removal'
+Assert ($a.Tier -eq 'Safe' -and -not $a.ComponentCleanup -and -not $a.RemoveProfiles) 'Safe tier runs no component cleanup and no profile removal by default'
+Assert ((Get-SmArguments -Mode Cleanup -Tier Aggressive).ComponentCleanup -eq $false) 'Aggressive tier does not imply component cleanup either'
+Assert ((Get-SmArguments -Mode Cleanup -Tier Safe -ComponentCleanup true).ComponentCleanup) 'Component cleanup stays available on demand with a tier'
 Assert (Throws { Get-SmArguments -Mode Report -Tier Safe }) 'A tier in Report mode is refused'
 Assert (Throws { Get-SmArguments -Mode Cleanup -Tier safe }) 'Tier is case-sensitive'
 Assert (Throws { Get-SmArguments -Mode Cleanup -Tier Safe -CleanupSeconds 10 }) 'CleanupSeconds below 60 is refused'

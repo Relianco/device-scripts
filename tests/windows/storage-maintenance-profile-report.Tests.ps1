@@ -412,9 +412,10 @@ try {
  $script:mutations = New-Object Collections.Generic.List[string]
  $script:SmDelete = { param($Path) $script:mutations.Add('delete ' + $Path) }
  $script:SmRemoveProfile = { param($Profile) $script:mutations.Add('removeProfile ' + $Profile.SID) }
- $script:SmComponent = { $script:mutations.Add('componentCleanup'); 0 }
+ $script:SmComponent = { $script:mutations.Add('componentCleanup'); [pscustomobject]@{Status='commandCompleted';ExitCode=0} }
  $script:SmGuards = { [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
  $script:SmScanGuard = { [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }
+ $script:SmNativeMarker={ 'absent' }
  $script:SmPrepareReport = { 'report.json' }; $script:SmAcquire = { $true }; $script:SmRelease = {}; $script:SmVolumes = { @() }; $script:SmEvidence = { @{} }
  $script:SmProfiles = { @($script:Profile) }; $script:SmRoots = { @($root) }; $script:SmDiagnosticRoots = { @() }; $script:SmUi = { param($Step) 'noUser' }
  $script:SmProfileHiveLoaded = { $false }

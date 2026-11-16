@@ -193,6 +193,7 @@ $suite = {
  $u = New-AgePair ($now.AddDays(-300)); $l = New-AgePair ($now.AddDays(-301))
  $script:Evidence = [pscustomobject]@{Registry=[pscustomobject]@{ReadState='ok';IdentityMatches=$true;Load=(ConvertFrom-SmFileTimePair $l.Low $l.High);Unload=(ConvertFrom-SmFileTimePair $u.Low $u.High);Cleanup=(ConvertFrom-SmFileTimePair $null $null)};Identity=[pscustomobject]@{Resolved=$true;Account='CORP\leaver'};Sessions=[pscustomobject]@{Known=$true;Sids=@();CurrentSid='S-1-5-18'};Hives=[pscustomobject]@{Known=$true;Loaded=$false;ClassesLoaded=$false};NtUser=[pscustomobject]@{DatUtc=$null;ManUtc=$null;Errors=@()};Events=[pscustomobject]@{ProbeComplete=$true;Recent=@();Truncated=$false};Errors=@()}
  $script:SmGuards = { [pscustomobject]@{Safe=$true;Light=$false;Reasons=@()} }; $script:SmScanGuard = $script:SmGuards
+ $script:SmNativeMarker={ 'absent' }
  $script:SmPrepareReport = { 'report.json' }; $script:SmAcquire = { $true }; $script:SmRelease = {}; $script:SmVolumes = { @() }; $script:SmEvidence = { @{} }
  $script:SmRoots = { @() }; $script:SmDiagnosticRoots = { @() }; $script:SmUi = { param($Step) 'noUser' }; $script:SmProfileHiveLoaded = { $false }
  $script:SmProfiles = { @($script:Profiles) }
