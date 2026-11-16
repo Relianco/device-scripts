@@ -70,7 +70,7 @@ For storage cleanup, use `Mode='Cleanup'`. Profile removal additionally requires
 
 ### Profile report (report only)
 
-`ProfileReport='true'` adds a per-profile census and prints a compact schema-v2 JSON (under 9.5 KB) for a device custom field instead of the v1 summary. When it would not fit, the lowest-ranked entries lose their detail first (keeping SID, decision, age and size), then whole entries drop; the summary still counts every profile. It requires `Mode='Report'` with `RemoveProfiles` and `ComponentCleanup` false; the package refuses any other combination, and a report run never enters the cleanup branch. Pass `ProfileAgeDays='90'` for the shared-device threshold.
+`ProfileReport='true'` adds a per-profile census and prints a compact schema-v2 JSON (under 9.5 KB) for a device custom field instead of the v1 summary. When it would not fit, the lowest-ranked entries lose their detail first (keeping SID, decision, age and size), then whole entries drop; the summary still counts every profile. It requires `Mode='Report'` with `RemoveProfiles` and `ComponentCleanup` false; the package refuses any other combination, and a report run never enters the cleanup branch. Pass `ProfileAgeDays='90'` for the shared-device threshold. A ProfileReport run never shows a PSADT dialog, even to a signed-in user.
 
 #### Write the report to a NinjaOne custom field
 
