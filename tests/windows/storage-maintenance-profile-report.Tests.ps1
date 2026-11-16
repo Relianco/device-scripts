@@ -471,6 +471,13 @@ try {
  $script:SmGuards = { [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('Setup')} }
  $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true)
  Assert ($script:mutations.Count -eq 0 -and $r.ProfileReport.Errors[0] -match 'not collected') 'Light guard yields an explained empty profile report'
+ # The field must say which guard withheld the scan, not only "withheld or run failed".
+ $script:SmGuards = { [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('setup/servicing process','pending file rename','MoSetup state active or unknown')} }
+ $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true)
+ Assert ($r.ProfileReport.Errors[0] -ceq 'Profile report not collected: servicing guard withheld the scan (setup/servicing process; pending file rename; MoSetup state active or unknown)') ('Withheld report names the guard reasons: ' + $r.ProfileReport.Errors[0])
+ $script:SmSave = { param($Report) }
+ $out = (Complete-SmRun $r 6>$null | Select-Object -Last 1) | ConvertFrom-Json
+ Assert ($out.errors[0] -match 'servicing guard withheld the scan \(setup/servicing process;') 'v2 output carries the guard reasons'
  ${function:Test-SmProfilePath} = $realProfilePath; ${function:Test-SmSafePath} = $realSafePath
 } finally { Remove-Item -LiteralPath $root -Recurse -Force }
 

@@ -10,6 +10,19 @@ $env:RELIAN_DEPLOY_TEST = '1'
 . (Join-Path $repoRoot 'windows/collectors/runner-report-field.ps1') -RunnerUrl 'x' -RunnerSha256 'x' -ReportCustomField 'x' -PackageUrl 'p' -Action 'Repair'
 if (($RunnerArguments -join '|') -cne '-PackageUrl|p|-Action|Repair') { Fail "runner arguments were [$($RunnerArguments -join '|')]" }
 
+# The real write seam pipes the JSON: on 5.1 a native argument loses its embedded double quotes,
+# and the field read back as {schemaVersion:2,package:storage-maintenance,...}.
+$script:viaArg = $null; $script:viaPipe = $null
+function Ninja-Property-Set { param($Name, $Value) $script:viaArg = $Value }
+function Ninja-Property-Set-Piped { param([Parameter(Position = 0)]$Name, [Parameter(ValueFromPipeline = $true)]$Value) process { $script:viaPipe = @($Name, $Value) } }
+$json = '{"schemaVersion":2,"errors":["a b"]}'
+& $script:SetCustomField 'rfSeam' $json
+if ($null -ne $script:viaArg -or $null -eq $script:viaPipe -or $script:viaPipe[0] -cne 'rfSeam' -or $script:viaPipe[1] -cne $json) { Fail 'the field write must pipe the JSON to Ninja-Property-Set-Piped' }
+if (-not (& $script:TestCustomFieldCmd)) { Fail 'cmdlet check must find Ninja-Property-Set-Piped' }
+Remove-Item -LiteralPath Function:\Ninja-Property-Set-Piped
+if (& $script:TestCustomFieldCmd) { Fail 'cmdlet check must require Ninja-Property-Set-Piped' }
+Remove-Item -LiteralPath Function:\Ninja-Property-Set
+
 # Random names: nothing here resembles a real field, host or person.
 $field = 'rf' + [guid]::NewGuid().ToString('n').Substring(0, 10)
 $marker = '{"schemaVersion":2,"package":"storage-maintenance",'

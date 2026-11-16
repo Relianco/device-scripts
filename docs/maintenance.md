@@ -87,7 +87,7 @@ How it stays safe:
 - The runner saves the report only after exit 0, only when the package arguments are exactly `ProfileReport` `true` with `Mode` `Report` (or no `Mode`) and no `RemoveProfiles` or `ComponentCleanup`, and not for `Uninstall`. For any other run it parses and saves nothing.
 - Marker contract: the package output must hold exactly one line that starts with `{"schemaVersion":2,"package":"storage-maintenance",`. It is saved unchanged, never re-serialised or cut.
 - The script reads the saved file only if it was written after the run started, is not a link, is one line of at most 9,500 UTF-8 bytes with that marker and mode `Report`. It then writes the field and deletes the file. The folder is readable by SYSTEM and Administrators only and is removed after every run.
-- A missing `Ninja-Property-Set` cmdlet or a failed write prints one line naming only the field. The exit code and output are unchanged.
+- The line is piped to `Ninja-Property-Set-Piped` (a 5.1 native argument loses its double quotes). A missing cmdlet or a failed write prints one line naming only the field. The exit code and output are unchanged.
 
 - `SharedDevices`: comma-separated computer names that are shared or loaner PCs. A device not on the list reports a stale profile as `KeepNotSharedDevice`; personal devices never delete profiles.
 - `PrimaryUserHint`: optional account name or UPN of the RMM's last-logged-on user.
