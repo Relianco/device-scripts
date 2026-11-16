@@ -330,6 +330,25 @@ function Select-EeLogLines {
     return @($out | Select-Object -Last $Max)
 }
 
+# IME state codes (source: msendpointmgr.com "Win32 app state messages demystified", from the IME source). Unlisted codes keep their number.
+$script:EeEnforcementStates = @{ 1000 = 'Success'; 1003 = 'SuccessFastNotify'; 2000 = 'InProgress'; 2008 = 'InProgressPendingReboot'; 3000 = 'RequirementsNotMet'; 4000 = 'Unknown'
+    5000 = 'Error'; 5003 = 'ErrorDownloadingContent'; 5006 = 'ErrorConflictsPreventInstallation'; 5999 = 'ErrorWithImmediateRetry'; 6000 = 'NotAttempted'; 6002 = 'NotAttemptedPendingReboot' }
+$script:EeComplianceStates = @{ 1 = 'Installed'; 2 = 'NotInstalled'; 4 = 'Error'; 5 = 'Unknown'; 100 = 'Cleanup' }
+function Get-EeWin32StateName {
+    param([hashtable]$Map, $Code)
+    if ($null -eq $Code) { return 'noStateMessage' }
+    if ($Map.ContainsKey([int]$Code)) { return $Map[[int]$Code] }
+    return "code$([int]$Code)"
+}
+# The message is a value inside a subkey of the same name; older builds may put it on the app key itself.
+function Read-EeWin32Message {
+    param([string]$AppKey, [string]$Name)
+    $raw = Get-EeValue "$AppKey\$Name" $Name
+    if ($null -eq $raw) { $raw = Get-EeValue $AppKey $Name }
+    if (-not $raw) { return $null }
+    try { return ([string]$raw | ConvertFrom-Json) } catch { return $null }
+}
+
 function Get-EeIntune {
     param([string]$AppRegex)
     $logs = Join-Path $script:EeProgramData 'Microsoft\IntuneManagementExtension\Logs'
@@ -338,16 +357,30 @@ function Get-EeIntune {
         $f = Join-Path $logs $pair[1]
         if ([IO.File]::Exists($f)) { $r[$pair[0]] = [IO.File]::GetLastWriteTimeUtc($f).ToString('o') }
     }
-    # Win32Apps\<user Entra object id, or the zero GUID for device>\<appId>_<revision> holds EnforcementStateMessage JSON.
+    # Win32Apps\<user Entra object id, or the zero GUID for device>\<appId>_<revision>\ holds one SUBKEY per message,
+    # EnforcementStateMessage and ComplianceStateMessage, each with a value of the same name holding JSON. GRS\ is a schedule, not an app.
+    # Code meanings come from the IME source as listed by Ben Whitmore, "Win32 app state messages demystified"
+    # (https://msendpointmgr.com/2023/08/28/win32-app-state-messages-demystified/).
     $w = "$HKLM\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps"
+    $rows = @()
+    foreach ($scope in @(Get-EeSubKeys $w | Where-Object { $_ -match '^(S-1-[\d-]+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$' })) {
+        foreach ($app in @(Get-EeSubKeys "$w\$scope" | Where-Object { $_ -match '^[0-9a-f]{8}-[0-9a-f-]{27}_\d+$' })) {
+            $enf = Read-EeWin32Message "$w\$scope\$app" 'EnforcementStateMessage'
+            $cmp = Read-EeWin32Message "$w\$scope\$app" 'ComplianceStateMessage'
+            $code = $null; $stateName = 'noStateMessage'
+            if ($enf) { $stateName = Get-EeWin32StateName $script:EeEnforcementStates $enf.EnforcementState; $code = $enf.ErrorCode }
+            $failed = [bool]($enf -and (([int]$enf.EnforcementState -ge 5000 -and [int]$enf.EnforcementState -lt 6000) -or ($null -ne $code -and [int64]$code -ne 0)))
+            $rows += [pscustomobject]@{ App = ($app -split '_')[0]; Rev = [int]($app -split '_')[1]; Scope = $scope; State = $stateName; Code = $code; Failed = $failed
+                Compliance = $(if ($cmp) { Get-EeWin32StateName $script:EeComplianceStates $cmp.ComplianceState } else { $null }) }
+        }
+    }
+    # One row per app: the newest revision (a failed row wins a tie); userScopes counts the user/device scopes that hold the app.
     $states = @{}
-    foreach ($sid in @(Get-EeSubKeys $w | Where-Object { $_ -match '^(S-1-[\d-]+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$' })) {
-        foreach ($app in @(Get-EeSubKeys "$w\$sid" | Where-Object { $_ -match '^[0-9a-f-]{36}_\d+$' })) {
-            $msg = [string](Get-EeValue "$w\$sid\$app" 'EnforcementStateMessage')
-            $state = 'unknown'; $code = $null
-            try { $j = $msg | ConvertFrom-Json; $state = [string]$j.EnforcementState; $code = $j.ErrorCode } catch { }
-            $states[$state] = 1 + [int]$states[$state]
-            if ($state -ne '1000' -and $state -ne 'unknown') { $r.failed += [ordered]@{ app = ($app -split '_')[0]; state = $state; errorCode = $code } }
+    foreach ($g in @($rows | Group-Object App)) {
+        $top = @($g.Group | Sort-Object @{ Expression = 'Rev'; Descending = $true }, @{ Expression = 'Failed'; Descending = $true })[0]
+        $states[$top.State] = 1 + [int]$states[$top.State]
+        if ($top.Failed) {
+            $r.failed += [ordered]@{ app = $top.App; revision = $top.Rev; state = $top.State; errorCode = $top.Code; compliance = $top.Compliance; userScopes = @($g.Group | Select-Object -ExpandProperty Scope -Unique).Count }
         }
     }
     foreach ($k in @($states.Keys | Sort-Object)) { $r.win32Apps[$k] = $states[$k] }
@@ -674,6 +707,7 @@ function Invoke-EndpointEvidence {
     foreach ($s in $wanted) { if ($script:EeSectionNames -notcontains $s) { throw "Unknown section $s." } }
     foreach ($rx in @($AppRegex, $ShortcutRegex, $ClickOnceRegex)) { [void][regex]::new($rx) }
     $report = [ordered]@{ version = '2'; timestamp = [datetime]::UtcNow.ToString('o'); status = 'collected'; users = @(Get-EeUsers | ForEach-Object Name) }
+    if (-not @($report.users).Count) { $report.noUserHivesLoaded = $true }
     foreach ($s in $script:EeSectionNames) {
         if ($wanted -notcontains $s) { continue }
         $key = $s.ToLowerInvariant()
