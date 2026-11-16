@@ -85,8 +85,8 @@ $script:Jobs = @{
         }
     }
     'gpo-evidence'             = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/f9f486091b479616a186f5923bf9571e4b00de44/windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1'
-        Sha256 = 'e36b4694e297f1ee0336790f8d41c08b2ab03dfcc8e5039bc0e0ce4dbb608971'
+        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/adf27694140a903dccab255db2cef5034b824f80/windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1'
+        Sha256 = '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8'
         Keys   = @{
             Section = @{ Enum = @('Summary', 'Gpos', 'Policy', 'Rsop', 'Gpo') }
             # A GUID only: a GPO name is free text that reaches Get-GPO -Name.
