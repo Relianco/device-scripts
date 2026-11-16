@@ -86,6 +86,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/scansnap-update-prompts.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Read-only evidence: real registry on a Windows host, then Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/endpoint-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/endpoint-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # Windows PowerShell 5.1 is the host on Server 2016 guests.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/comet-vss-provider.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
