@@ -2016,7 +2016,7 @@ function Invoke-SmMaintenance {
  if($r.Errors.Count -and $r.Status -eq 'complete') { $r.Status='partial' }
  # One alertable status (exit 2) while a servicing marker defers maintenance: a person should look.
  if($r.Status -ne 'failed' -and ($r.NativeMarker -in @('running','unverified') -or @($r.Actions | Where-Object { $_.Status -eq 'nativeStillRunning' }).Count)) { $r.Status='nativeMarkerPresent' }
- if($A.ProfileReport -and -not $r.ProfileReport) { $r.ProfileReport=[pscustomobject]@{EventLog=$null;DeviceClass=$null;Profiles=@();Summary=$null;Errors=@('Profile report not collected: scans withheld or run failed')} }
+ if($A.ProfileReport -and -not $r.ProfileReport) { $r.ProfileReport=[pscustomobject]@{EventLog=$null;DeviceClass=$null;Profiles=@();Summary=$null;Errors=@($(if($r.Guards.Light){'Profile report not collected: servicing guard withheld the scan ('+(@($r.Guards.Reasons) -join '; ')+')'}else{'Profile report not collected: run failed'}))} }
  return [pscustomobject]$r
 }
 

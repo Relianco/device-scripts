@@ -6,7 +6,7 @@
     Paste this one file into NinjaOne and run it as SYSTEM instead of Invoke-RelianRunner.ps1. It downloads
     the runner from RunnerUrl, checks RunnerSha256, runs it as a child with the runner arguments you pass,
     and adds -ReportOutputPath. After a run that exited 0 it reads the saved report line, applies the
-    guards below and writes it with Ninja-Property-Set. The runner and the packages call no NinjaOne API.
+    guards below and pipes it to Ninja-Property-Set-Piped. The runner and the packages call no NinjaOne API.
 
     Guards: field name ^[A-Za-z][A-Za-z0-9]{0,39}$; the file must be fresh (written after this run
     started), a single line of at most 9500 UTF-8 bytes that starts with the schema-v2 marker and has mode
@@ -66,8 +66,9 @@ $script:RunRunner = {
     & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerFile @Arguments | Out-Host
     return [int]$LASTEXITCODE
 }
-$script:SetCustomField = { param($Name, $Value) Ninja-Property-Set $Name $Value }
-$script:TestCustomFieldCmd = { [bool](Get-Command -Name 'Ninja-Property-Set' -ErrorAction SilentlyContinue) }
+# Piped, not an argument: 5.1 passes a native argument without escaping its double quotes, so the JSON was stored with bare keys.
+$script:SetCustomField = { param($Name, $Value) $Value | Ninja-Property-Set-Piped $Name }
+$script:TestCustomFieldCmd = { [bool](Get-Command -Name 'Ninja-Property-Set-Piped' -ErrorAction SilentlyContinue) }
 
 # Timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504: the runner's retry classes.
 function Test-RelianRetryable {
