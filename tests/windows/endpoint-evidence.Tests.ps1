@@ -158,20 +158,35 @@ try {
     '<![LOG[[Win32App] unrelated line]LOG]!><time="10:01:03.000+300" date="11-15-2026" component="AppWorkload" context="" type="1" thread="1" file="">' + "`r`n" +
     '<![LOG[[Win32App] Vendor Client detection' + "`n" + ' result: installed]LOG]!><time="10:02:00.000+300" date="11-15-2026" component="AppWorkload" context="" type="1" thread="1" file="">'
     [IO.File]::WriteAllText((Join-Path $logs 'AppWorkload.log'), $log)
+    $W = "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps"
+    $zero = '00000000-0000-0000-0000-000000000000'
+    function Add-App($Scope, $App, $Enf, $Cmp) {
+        if ($Enf) { Add-Reg "$W\$Scope\$App\EnforcementStateMessage" @{ EnforcementStateMessage = $Enf } }
+        if ($Cmp) { Add-Reg "$W\$Scope\$App\ComplianceStateMessage" @{ ComplianceStateMessage = $Cmp } }
+    }
+    $okCmp = '{"Applicability":0,"ComplianceState":1,"DesiredState":2,"ErrorCode":null}'
     $appId = [guid]::NewGuid().ToString()
-    Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$sid\${appId}_1" @{ EnforcementStateMessage = '{"EnforcementState":1000,"ErrorCode":0}' }
+    Add-App $sid "${appId}_1" '{"EnforcementState":1000,"ErrorCode":0}' $okCmp
     $failId = [guid]::NewGuid().ToString()
-    Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\00000000-0000-0000-0000-000000000000\${failId}_2" @{ EnforcementStateMessage = '{"EnforcementState":5000,"ErrorCode":-2147024894}' }
-    Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$sid\GRS\x" @{ a = 1 }
-    # Review: user-scoped apps sit under the user's Entra object id, not a SID.
-    $userFail = [guid]::NewGuid().ToString()
-    Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$([guid]::NewGuid())\${userFail}_3" @{ EnforcementStateMessage = '{"EnforcementState":5000,"ErrorCode":1603}' }
+    Add-App $zero "${failId}_2" '{"EnforcementState":5000,"ErrorCode":-2147024894}' '{"Applicability":0,"ComplianceState":4,"DesiredState":2,"ErrorCode":null}'
+    Add-Reg "$W\$sid\GRS\x" @{ a = 1 }
+    # User-scoped apps sit under the user's Entra object id, not a SID; two users hold the same failing app, the newer revision wins.
+    $userFail = [guid]::NewGuid().ToString(); $u1 = [guid]::NewGuid().ToString(); $u2 = [guid]::NewGuid().ToString()
+    Add-App $u1 "${userFail}_3" '{"EnforcementState":5000,"ErrorCode":1603}' $okCmp
+    Add-App $u2 "${userFail}_4" '{"EnforcementState":5000,"ErrorCode":1603}' $okCmp
+    # An app only in progress, and one with a compliance message but no enforcement message, are not failures.
+    Add-App $u1 "$([guid]::NewGuid())_1" '{"EnforcementState":2000,"ErrorCode":null}' $null
+    Add-App $u1 "$([guid]::NewGuid())_1" $null '{"Applicability":1,"ComplianceState":2,"DesiredState":2,"ErrorCode":null}'
     $ime = Get-EeIntune -AppRegex 'Vendor Client'
     Assert ($ime.appWorkloadLastWrite -and $null -eq $ime.imeLogLastWrite) 'log last write times'
-    Assert ($ime.win32Apps['1000'] -eq 1 -and $ime.win32Apps['5000'] -eq 2) 'enforcement state counts'
-    Assert (@($ime.failed).Count -eq 2 -and @($ime.failed | Where-Object { $_.app -eq $failId -and $_.errorCode -eq -2147024894 }).Count -eq 1) 'failed device app listed'
-    Assert (@($ime.failed | Where-Object { $_.app -eq $userFail -and $_.errorCode -eq 1603 }).Count -eq 1) 'failed user-scoped app listed'
+    Assert ($ime.win32Apps['Success'] -eq 1 -and $ime.win32Apps['Error'] -eq 2 -and $ime.win32Apps['InProgress'] -eq 1 -and $ime.win32Apps['noStateMessage'] -eq 1 -and -not $ime.win32Apps.Contains('')) 'readable enforcement state counts, one per app'
+    Assert (@($ime.failed).Count -eq 2 -and @($ime.failed | Where-Object { $_.app -eq $failId -and $_.errorCode -eq -2147024894 -and $_.compliance -eq 'Error' }).Count -eq 1) 'failed device app listed'
+    $uf = @($ime.failed | Where-Object { $_.app -eq $userFail })
+    Assert ($uf.Count -eq 1 -and $uf[0].errorCode -eq 1603 -and $uf[0].revision -eq 4 -and $uf[0].userScopes -eq 2) 'failed user app once, latest revision, two scopes'
     Assert (@($ime.logMatches).Count -eq 2 -and $ime.logMatches[0] -like '11-15-2026 10:01:02 *Vendor Client*' -and $ime.logMatches[1] -like '*detection  result: installed') 'matching CMTrace lines (multi-line message)'
+
+    $full = Invoke-EndpointEvidence -Sections 'Session' | ConvertFrom-Json
+    Assert (-not $full.PSObject.Properties['noUserHivesLoaded']) 'users present: no noUserHivesLoaded'
 
     # Edition
     Add-Reg "$L\SOFTWARE\Microsoft\Windows NT\CurrentVersion" @{ EditionID = 'Professional'; CurrentBuildNumber = '26100'; UBR = 4061; DisplayVersion = '24H2'; InstallationType = 'Client' }
@@ -336,6 +351,11 @@ try {
     $script:EeBudgetSeconds = -1
     $late = Invoke-EndpointEvidence -Sections 'Cis' | ConvertFrom-Json
     Assert ($late.cis.status -eq 'skipped') 'time budget skips sections'
+    # Nobody signed in: the report says why the per-user sections are empty.
+    function Get-EeUsers { @() }
+    $script:EeBudgetSeconds = 90
+    $nobody = Invoke-EndpointEvidence -Sections 'Session' | ConvertFrom-Json
+    Assert ($nobody.noUserHivesLoaded -eq $true -and @($nobody.users).Count -eq 0) 'noUserHivesLoaded when no hive is loaded'
 } finally {
     [IO.Directory]::Delete($tmp, $true)
 }
