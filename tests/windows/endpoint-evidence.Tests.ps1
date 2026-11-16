@@ -21,7 +21,7 @@ Assert ($source -notmatch '(?i)PSAppDeployToolkit|Show-ADT|Open-ADT|Start-ADT') 
 
 # Review: an empty pin exits 0 for every action and collects nothing.
 foreach ($act in @('Install', 'Bogus')) {
-    $out = & pwsh -NoProfile -File $path -Action $act -PinVersion '' 2>&1
+    $out = & pwsh -NoProfile -File $path -Action $act 2>&1
     Assert ($LASTEXITCODE -eq 0 -and (($out | Out-String).Trim()) -eq '{"status":"emptyPin"}') "empty pin exits 0 for $act"
 }
 
@@ -82,7 +82,7 @@ try {
     # Outlook
     Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\Office\16.0\Outlook\AutoDiscover" @{ ZeroConfigExchange = 1 }
     Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\Office\16.0\Outlook\Options\General" @{ HideNewOutlookToggle = 1; DisableOutlookMobileHyperlink = 1 }
-    Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\Office\16.0\Common\General" @{ ShownFirstRunOptin = 1; ApiToken = 'abc' }
+    Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\Office\16.0\Common\General" @{ ShownFirstRunOptin = 1; ApiToken = [guid]::NewGuid().ToString('n') }
     $ol = Get-EeOutlook
     Assert ($ol.users[0].outlookPolicy['AutoDiscover\ZeroConfigExchange'] -eq 1) 'nested outlook policy read'
     Assert ($ol.users[0].outlookPolicy['Options\General\HideNewOutlookToggle'] -eq 1) 'hide new outlook toggle policy'
@@ -155,10 +155,14 @@ try {
     $failId = [guid]::NewGuid().ToString()
     Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\00000000-0000-0000-0000-000000000000\${failId}_2" @{ EnforcementStateMessage = '{"EnforcementState":5000,"ErrorCode":-2147024894}' }
     Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$sid\GRS\x" @{ a = 1 }
+    # Review: user-scoped apps sit under the user's Entra object id, not a SID.
+    $userFail = [guid]::NewGuid().ToString()
+    Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$([guid]::NewGuid())\${userFail}_3" @{ EnforcementStateMessage = '{"EnforcementState":5000,"ErrorCode":1603}' }
     $ime = Get-EeIntune -AppRegex 'Vendor Client'
     Assert ($ime.appWorkloadLastWrite -and $null -eq $ime.imeLogLastWrite) 'log last write times'
-    Assert ($ime.win32Apps['1000'] -eq 1 -and $ime.win32Apps['5000'] -eq 1) 'enforcement state counts'
-    Assert (@($ime.failed).Count -eq 1 -and $ime.failed[0].app -eq $failId -and $ime.failed[0].errorCode -eq -2147024894) 'failed app listed'
+    Assert ($ime.win32Apps['1000'] -eq 1 -and $ime.win32Apps['5000'] -eq 2) 'enforcement state counts'
+    Assert (@($ime.failed).Count -eq 2 -and @($ime.failed | Where-Object { $_.app -eq $failId -and $_.errorCode -eq -2147024894 }).Count -eq 1) 'failed device app listed'
+    Assert (@($ime.failed | Where-Object { $_.app -eq $userFail -and $_.errorCode -eq 1603 }).Count -eq 1) 'failed user-scoped app listed'
     Assert (@($ime.logMatches).Count -eq 2 -and $ime.logMatches[0] -like '11-15-2026 10:01:02 *Vendor Client*' -and $ime.logMatches[1] -like '*detection  result: installed') 'matching CMTrace lines (multi-line message)'
 
     # Whole report: one compact line, bounded, section selection, failures isolated.

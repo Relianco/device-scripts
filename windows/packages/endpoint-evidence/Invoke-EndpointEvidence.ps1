@@ -331,10 +331,10 @@ function Get-EeIntune {
         $f = Join-Path $logs $pair[1]
         if ([IO.File]::Exists($f)) { $r[$pair[0]] = [IO.File]::GetLastWriteTimeUtc($f).ToString('o') }
     }
-    # Win32Apps\<user SID or zero SID>\<appId>_<revision> holds EnforcementStateMessage JSON.
+    # Win32Apps\<user Entra object id, or the zero GUID for device>\<appId>_<revision> holds EnforcementStateMessage JSON.
     $w = "$HKLM\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps"
     $states = @{}
-    foreach ($sid in @(Get-EeSubKeys $w | Where-Object { $_ -match '^(S-1-|0{8}-)' })) {
+    foreach ($sid in @(Get-EeSubKeys $w | Where-Object { $_ -match '^(S-1-[\d-]+|[0-9a-fA-F]{8}-[0-9a-fA-F-]{27})$' })) {
         foreach ($app in @(Get-EeSubKeys "$w\$sid" | Where-Object { $_ -match '^[0-9a-f-]{36}_\d+$' })) {
             $msg = [string](Get-EeValue "$w\$sid\$app" 'EnforcementStateMessage')
             $state = 'unknown'; $code = $null
