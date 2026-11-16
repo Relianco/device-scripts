@@ -16,6 +16,7 @@ People confuse these. Each one does a different job.
 
 - **Install, repair or diagnose on Windows:** paste `windows/runner/Invoke-RelianRunner.ps1`. It runs one package.
 - **A recurring fix on a schedule, on Windows:** paste `windows/runner/Invoke-RelianJob.ps1`. It runs one job module.
+- **Read-only evidence from a device, on Windows:** paste `windows/runner/Invoke-RelianReadJob.ps1` as its own script. It runs one built-in evidence package and writes the answer to a custom field.
 - **Inventory on Windows:** paste `windows/bootstrap.ps1`. It runs one collector. It is not an installer.
 - **Linux:** paste `linux/runner/relian-runner.sh`.
 - **macOS:** paste `macos/runner/relian-runner.sh`.
@@ -122,6 +123,34 @@ Drop `-ReportOnly` to let the job fix the drift.
 - NinjaOne does not replay a schedule missed while a device is off. The startup and login rows narrow the gap.
 - A row set to Current user is skipped and reported as success. Do not use one.
 - A failing job shows as FAILURE in activity rows and raises no alert.
+
+### Read-only evidence jobs: Invoke-RelianReadJob
+
+**When:** something must ask a device for evidence and must not be able to change it. This loader has no URL or hash parameter. Its job names, the commit-pinned URL and SHA256 of each package, and the arguments each job accepts are a table inside the script.
+
+**Paste** as a **new** NinjaOne library script (do not replace `Invoke-RelianJob`). Set **Run As** to System.
+
+**Parameters:**
+
+- `-Job`: `diagnose-feature-upgrade`, `maintenance-evidence` or `gpo-evidence`.
+- `-JobArguments`: base64 of flat JSON, for example `{"Section":"Summary"}`. Empty means none. Each key has an enum or an anchored regex with a length cap (`gpo-evidence` takes a GUID, never a name). Free text is refused.
+- `-RequestId`: 32 lowercase hex characters, echoed in the result.
+
+**Refused, exit 1:** an unknown job or key, a value that fails its rule, nested or non-base64 arguments, a table hash that is empty or not 64 lowercase hex, a hash mismatch, a cache with the wrong owner or ACL. There is no empty-hash off switch.
+
+**Run:** the package is cached like `Invoke-RelianJob` does (SYSTEM-only, owner, ACL and hash re-checked on every run), then runs in a child `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File` with only the validated arguments, without the toolkit. The child is killed after 120 seconds.
+
+**Result:** NinjaOne cuts a script run's activity text to about 40 characters, so the loader prints one JSON line and writes the same line to the device custom field `relianJobResult` (Multi-line text, script Read/Write, API Read-only) with `Ninja-Property-Set-Piped`:
+
+```
+{"schemaVersion":1,"requestId":"<32 hex>","job":"<name>","loaderSha256":"<hash or null>","exitCode":0,"result":{...},"error":null}
+```
+
+The line is at most 8000 UTF-8 bytes; a larger result is dropped and `error` is `result too large`. `exitCode` is -1 when the package did not run or did not finish. `error` is a fixed string. The field holds only the latest line, so run **one job at a time per device** and match `requestId` before you trust a line. A refusal writes its line too, so an old result never answers a new request (an invalid `-Job` is refused at parameter binding, before any line). If the field or the cmdlet is missing, the loader prints one line naming only the field and exits 1.
+
+**Change a job:** commit the package change, take its SHA256 at a commit already on `main`, edit that job's URL and hash in the table in a new pull request, and paste the file again. Review it like any script that runs as SYSTEM.
+
+**Tests:** `tests/windows/read-job.Tests.ps1`: refusals, the table rules, an AST scan that lists the only write commands (the cache and the one field write), the piped field write, the 8000-byte cap, and a real child killed at the timeout.
 
 ### Inventory: bootstrap.ps1 and collectors
 
@@ -274,7 +303,7 @@ Pin records are in `macos/releases/<name>.json`.
 
 For a security reviewer. This is what a pasted script can and cannot do.
 
-- **The two PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. They check each SHA256 before they run anything.
+- **The PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. `Invoke-RelianReadJob` downloads only the three packages in its built-in table. They check each SHA256 before they run anything.
 - **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
 - **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
 - **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. `autoelevate` takes its license key only from the `AE_LICENSE_KEY` environment variable. No package reads `relian_git_deploy_token`.

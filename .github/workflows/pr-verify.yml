@@ -98,3 +98,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-group-member.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The read-only job loader: a real child killed at the timeout, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/read-job.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/read-job.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
