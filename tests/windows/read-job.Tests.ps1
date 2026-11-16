@@ -185,7 +185,7 @@ $realJobs['gpo-evidence'].Keys['Offset'] = $script:Jobs['gpo-evidence'].Keys['Of
 $r = Invoke-Case -JobArguments (ConvertTo-B64 '{"Offset":-1}'); Assert-Refused 'negative int' $r 'bad argument value'
 $r = Invoke-Case -JobArguments (ConvertTo-B64 '{"Offset":1.5}'); Assert-Refused 'float' $r 'bad argument value'
 $r = Invoke-Case -Job 'diagnose-feature-upgrade' -JobArguments (ConvertTo-B64 '{"Offset":"1"}'); Assert-Refused 'key of another job' $r 'unknown argument key'
-# Table hash: empty, missing (spaces), malformed, uppercase.
+# Table hash: empty, missing (spaces), malformed, uppercase. All exit non-zero by design: this loader has no empty-hash off switch, so an empty hash is never a quiet success.
 foreach ($bad in @('', ' ', 'abc', $fakeSha.ToUpperInvariant(), ($fakeSha + "`n"))) {
     $r = Invoke-Case -TableHash $bad; Assert-Refused "table hash [$bad]" $r 'table hash missing or malformed'
 }

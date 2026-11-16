@@ -340,6 +340,7 @@ function Invoke-RelianReadJob {
         return Complete-RelianReadJob -RequestId $RequestId -JobName $null -ExitCode -1 -ResultJson $null -ErrorText 'unknown job'
     }
     $entry = $script:Jobs[$Job]
+    # Deliberately not a no-op: unlike Invoke-RelianJob, an empty or missing table hash is an error (exit 1). This loader has no off switch (design 3.1); a silent success would hide an unpinned job.
     if ([string]$entry.Sha256 -cnotmatch '\A[0-9a-f]{64}\z') {
         return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'table hash missing or malformed'
     }
