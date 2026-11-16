@@ -294,7 +294,7 @@ try {
 
     # Write to NinjaOne custom field
     try {
-        Ninja-Property-Set relian_hardware_inventory $json
+        $json | Ninja-Property-Set-Piped relian_hardware_inventory
         Write-Status "Hardware inventory written to relian_hardware_inventory custom field"
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"
