@@ -190,7 +190,7 @@ Each file category deletes only files older than `TempAgeDays` (default 7 days).
 - **CrashDumps:** minidumps, `MEMORY.DMP`, live kernel reports, Windows Error Reporting queues and each profile's `AppData\Local\CrashDumps`.
 - **ServicingLogs:** rotated logs in `Windows\Logs\CBS` and `Windows\Logs\DISM`. The live `CBS.log` and `dism.log` stay.
 - **RecycleBin:** items deleted more than `TempAgeDays` ago. The age is the deletion date, not the file's own date.
-- **FeatureUpgradeIso:** the ISO that the `feature-upgrade` package leaves after a failed, rolled-back or already-current attempt older than `TempAgeDays`. A running or staged attempt keeps its ISO. A finished attempt removes its own ISO.
+- **FeatureUpgradeIso:** the ISO (`*.iso`, `*.iso.part`) that the `feature-upgrade` package leaves in `ProgramData\Relian\FeatureUpgrade`. It goes when the attempt is older than `TempAgeDays` and has ended: failed, rolled back, already current, or finished. A finished attempt can still say `staged`, `started` or `running` in `state.json`; it counts as finished when its target build is now the running build and the PC has restarted since. An attempt still waiting for its restart keeps its ISO. `state.json` and the logs stay.
 
 Neither tier runs component cleanup (`DISM /StartComponentCleanup`). Add `ComponentCleanup='true'` to run it after the tier. It can run long, so the automatic low-space run leaves it off.
 

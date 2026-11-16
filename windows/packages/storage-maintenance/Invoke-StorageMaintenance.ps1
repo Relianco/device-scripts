@@ -950,12 +950,18 @@ function Get-SmMoSetupState {
 }
 function Get-SmOwnUpgradeState {
  param($State,[int]$CurrentBuild,[datetime]$BootUtc)
- if($State.status -eq 'staged') {
+ if($State.status -in @('staged','started','running')) {
   try {
    if($CurrentBuild -lt 10240) { return 'unknown' }
    if([string]$State.isoBuild -notmatch '^\d{5,6}$' -or [int]$State.isoBuild -lt 10240 -or -not $State.time) { return 'unknown' }
    $staged=[datetime]::Parse([string]$State.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
    if($staged -gt [datetime]::UtcNow) { return 'unknown' }
+   if($State.status -ne 'staged') {
+    # feature-upgrade writes started/running only below the ISO's build, so its build running after a
+    # later boot means the attempt finished and its worker is gone (feature-upgrade itself says 'interrupted').
+    if($CurrentBuild -ge [int]$State.isoBuild -and $BootUtc -gt $staged) { return 'residual' }
+    return 'unknown'
+   }
    if($CurrentBuild -ge [int]$State.isoBuild -or $BootUtc -gt $staged) { return 'residual' }
    return 'staged'
   } catch { return 'unknown' }
@@ -969,7 +975,7 @@ function Get-SmNativeMarkerPaths {
  Join-Path $env:ProgramData 'Relian\Maintenance\native-active.json'
 }
 function Get-SmGuards {
- $reasons=New-Object Collections.Generic.List[string]; $light=$false; $historical=$false; $observations=@(); $historicalEvidence=$null
+ $reasons=New-Object Collections.Generic.List[string]; $light=$false; $historical=$false; $observations=@(); $historicalEvidence=$null; $ownUpgrade=$null
  try {
   if (@(Get-CimInstance Win32_Process -Filter "Name='setup.exe' OR Name='setuphost.exe' OR Name='setupprep.exe' OR Name='dism.exe' OR Name='sfc.exe' OR Name='TiWorker.exe' OR Name='TrustedInstaller.exe' OR Name='msiexec.exe'" -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -match '^(setup|setuphost|setupprep|dism|sfc|TiWorker|TrustedInstaller|msiexec)\.exe$' }).Count) { $reasons.Add('setup/servicing process'); $light=$true }
   foreach($nativeMarker in @(Get-SmNativeMarkerPaths)) {
@@ -1013,9 +1019,10 @@ function Get-SmGuards {
    if($historical) { $historicalEvidence=[pscustomobject]@{MarkerAbsent=(-not $hasState); MatchingSource=@($sourceEntries | Where-Object { [string]$_.CurrentBuild -eq [string]$values.DownlevelBuildNumber }); CurrentBuild=[int]$os.CurrentBuild; DownlevelBuildNumber=[int]$values.DownlevelBuildNumber; SourceBuilds=$prior; InstalledUtc=$installed; BootUtc=$boot; LegacyTime=$s.time; SetupHostResult=$values.SetupHostResult; SetupHostError=$values.SetupHostError; SetupPhase=$values.SetupPhase; InstallScenario=$values.InstallScenario}; $observations=@('INFERENCE: corroborated historical upgrade residue; marker absence or exact legacy target, image states, chronology and downlevel build agree; not proof of repair or update currency') }
   }
   if($hasMo -and -not $historical -and (Get-SmMoSetupState $values $completed) -ne 'residual') { $reasons.Add('MoSetup state active or unknown'); $light=$true }
-  if($hasState -and -not $historical -and (Get-SmOwnUpgradeState $s ([int]$os.CurrentBuild) $boot) -ne 'residual') { $reasons.Add('feature upgrade staged or unknown'); $light=$true }
- } catch { $reasons.Add('unknown guard: evidence unavailable'); $light=$true }
- [pscustomobject]@{ Safe=($reasons.Count -eq 0); Light=$light; Reasons=@($reasons.ToArray()); HistoricalUpgradeInference=$historical; HistoricalUpgradeEvidence=$historicalEvidence; Observations=$observations }
+  if($hasState) { $ownUpgrade=Get-SmOwnUpgradeState $s ([int]$os.CurrentBuild) $boot }
+  if($hasState -and -not $historical -and $ownUpgrade -ne 'residual') { $reasons.Add('feature upgrade staged or unknown'); $light=$true }
+ } catch { $reasons.Add('unknown guard: evidence unavailable'); $light=$true; $ownUpgrade=$null }
+ [pscustomobject]@{ Safe=($reasons.Count -eq 0); Light=$light; Reasons=@($reasons.ToArray()); HistoricalUpgradeInference=$historical; OwnUpgradeState=$ownUpgrade; HistoricalUpgradeEvidence=$historicalEvidence; Observations=$observations }
 }
 
 # Protect the local evidence directory before any cleanup is authorized.
@@ -1773,13 +1780,15 @@ function Invoke-SmCleanupTier {
  # Not age-filtered, by design: the DO cache only holds update content that Windows downloads
  # again on demand, and its cmdlet has no age option. Requested for the Safe tier explicitly.
  $steps+=& $measure 'DeliveryOptimization' { $null=& $script:SmDeliveryOptimization; @{Detail='Delete-DeliveryOptimizationCache'} }
- # The feature-upgrade package removes its ISO itself after success; a failed or rolled-back
- # attempt leaves it. Only a terminal, aged attempt qualifies; a running or staged one never does.
+ # A failed or rolled-back attempt leaves its ISO, and so does a successful one when Setup still held
+ # it at staging (state.json then stays 'staged'). The guard's verdict on the attempt decides: terminal,
+ # or its target build now running after a reboot. A live or unproven attempt keeps its ISO.
  $steps+=& $measure 'FeatureUpgradeIso' {
   $dir=Join-Path $env:ProgramData 'Relian\FeatureUpgrade'; $statePath=Join-Path $dir 'state.json'
   if(-not [IO.File]::Exists($statePath)) { return @{Detail='no attempt state'} }
   $state=Read-SmBoundedText $statePath 65536 | ConvertFrom-Json -ErrorAction Stop
-  if("$($state.status)" -notin @('failed','rolledBack','alreadyCurrent')) { return @{Detail=('attempt '+$state.status+'; ISO kept')} }
+  $g=& $script:SmGuards
+  if(-not ($g.OwnUpgradeState -eq 'residual' -or $g.HistoricalUpgradeInference)) { return @{Detail=('attempt '+$state.status+'; ISO kept')} }
   $stamp=[datetime]::Parse([string]$state.time,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
   if($stamp -ge $cutoff) { return @{Detail='attempt newer than TempAgeDays; ISO kept'} }
   Remove-SmAgedFiles $dir $cutoff $deadline -Include '\.iso(\.part)?$' -NoRecurse

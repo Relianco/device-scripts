@@ -131,6 +131,13 @@ Assert ((Get-SmOwnUpgradeState $own 26200 $install) -eq 'residual') 'target buil
 Assert ((Get-SmOwnUpgradeState $own 26100 $install.AddDays(3)) -eq 'residual') 'boot after own stage makes marker residual'
 Assert ((Get-SmOwnUpgradeState $own 26100 $install) -eq 'staged') 'unbuilt own stage before reboot blocks'
 $own.time='bad'; Assert ((Get-SmOwnUpgradeState $own 26200 $install) -eq 'unknown') 'malformed own stage unknown even when target build reached'
+# A started or running marker is finished only when its target build runs after a later boot.
+foreach($st in @('started','running')) {
+ $attempt=[pscustomobject]@{status=$st;isoBuild=26200;time='2026-10-02T12:00:00Z'}
+ Assert ((Get-SmOwnUpgradeState $attempt 26200 $install.AddDays(3)) -eq 'residual') "$st marker on the running target build after a reboot is finished"
+ Assert ((Get-SmOwnUpgradeState $attempt 26200 $install) -eq 'unknown') "$st marker with no reboot since stays unknown"
+ Assert ((Get-SmOwnUpgradeState $attempt 26100 $install.AddDays(3)) -eq 'unknown') "$st marker below the target build stays unknown"
+}
 # Read-only evidence workers have an absolute parent-side timeout and Setup veto.
 $script:workerKilled=$false
 $fakeWorker=[pscustomobject]@{}
