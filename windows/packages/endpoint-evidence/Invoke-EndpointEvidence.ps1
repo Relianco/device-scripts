@@ -381,7 +381,18 @@ function ConvertTo-EeBoundedJson {
     while ([Text.Encoding]::UTF8.GetByteCount($json) -gt $MaxBytes) {
         $Report['truncated'] = $true
         $largest = Find-EeLargestArray $Report
-        if (-not $largest) { throw 'Report exceeds the output budget.' }
+        if (-not $largest) {
+            # No list left to cut: a large dictionary (paths, policy trees) remains, so drop the biggest section.
+            $big = $null; $bigSize = 0
+            foreach ($k in @($script:EeSectionNames | ForEach-Object { $_.ToLowerInvariant() } | Where-Object { $Report.Contains($_) })) {
+                $size = ($Report[$k] | ConvertTo-Json -Depth 8 -Compress).Length
+                if ($size -gt $bigSize) { $big = $k; $bigSize = $size }
+            }
+            if (-not $big) { throw 'Report exceeds the output budget.' }
+            $Report[$big] = [ordered]@{ status = 'omitted'; reason = 'outputBudget'; bytes = $bigSize }
+            $json = $Report | ConvertTo-Json -Depth 8 -Compress
+            continue
+        }
         $keep = $largest.Count - [Math]::Max(1, [int][Math]::Ceiling($largest.Count / 8))
         $largest.Container[$largest.Key] = @($largest.Container[$largest.Key] | Select-Object -First $keep)
         $json = $Report | ConvertTo-Json -Depth 8 -Compress
@@ -413,6 +424,7 @@ function Invoke-EndpointEvidence {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
+# No empty-pin exit here: the runner's PinVersion is Mandatory (an empty value never arrives), and this package installs nothing.
 if ($Action -eq 'Uninstall') { Write-Output '{"status":"nothingToUninstall"}'; exit 0 }
 if (@('Install', 'Update', 'Repair', 'Reinstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
 try { Write-Output (Invoke-EndpointEvidence -Sections $Sections -AppRegex $AppRegex -ShortcutRegex $ShortcutRegex -ClickOnceRegex $ClickOnceRegex -Paths $Paths); exit 0 }

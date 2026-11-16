@@ -27,7 +27,7 @@ if ($env:OS -eq 'Windows_NT') {
     foreach ($k in @('start', 'outlook', 'edge', 'session', 'cis', 'apps', 'intune')) {
         Assert (-not $ro.$k.PSObject.Properties['status']) "real run section $k collected"
     }
-    Assert (@($ro.apps.installed).Count -gt 0 -and $ro.apps.paths.PSObject.Properties.Count -eq 1) 'real run reads the uninstall registry'
+    Assert (@($ro.apps.installed).Count -gt 0 -and @($ro.apps.paths.PSObject.Properties).Count -eq 1) 'real run reads the uninstall registry'
 }
 
 # In-memory registry: path -> values. Subkeys are the direct children of stored paths.
@@ -176,6 +176,12 @@ try {
     for ($i = 0; $i -lt 400; $i++) { Add-Reg "$L\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\n$i" @{ DisplayName = "Vendor Bulk Package Number $i"; DisplayVersion = '1.0.0.0' } }
     $big = Invoke-EndpointEvidence -Sections 'Apps' -AppRegex 'Vendor'
     Assert ([Text.Encoding]::UTF8.GetByteCount($big) -le 8000 -and ($big | ConvertFrom-Json).truncated) 'bounded to 8000 bytes with truncated flag'
+
+    # Review: a dictionary too large for the budget, with no list to cut, drops that section instead of failing.
+    $manyPaths = (0..300 | ForEach-Object { Join-Path $tmp "no-such-path-number-$_" }) -join '|'
+    $dict = Invoke-EndpointEvidence -Sections 'Apps,Cis' -Paths $manyPaths
+    $do = $dict | ConvertFrom-Json
+    Assert ([Text.Encoding]::UTF8.GetByteCount($dict) -le 8000 -and $do.truncated -and $do.apps.status -eq 'omitted' -and $do.cis.legalNotice.textLength -eq 300) 'oversized dictionary section omitted, others kept'
 
     # Time budget: sections after the budget are skipped, not run.
     $script:EeBudgetSeconds = -1
