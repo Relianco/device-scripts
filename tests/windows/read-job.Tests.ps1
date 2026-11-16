@@ -53,6 +53,8 @@ if ((@($script:Jobs.Keys | Sort-Object) -join '|') -cne (@($jobNames | Sort-Obje
 $cmd = Get-Command -Name $loaderPath
 $vs = @($cmd.Parameters['Job'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })
 if ($vs.Count -ne 1 -or (@($vs[0].ValidValues | Sort-Object) -join '|') -cne (@($jobNames | Sort-Object) -join '|')) { Fail 'ValidateSet of -Job must equal the table keys' }
+$gpoPin = $script:Jobs['gpo-evidence']
+if ($gpoPin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts/adf27694140a903dccab255db2cef5034b824f80/windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1' -or $gpoPin.Sha256 -cne '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8') { Fail 'gpo-evidence pin is not the site-link-read commit' }
 foreach ($name in $jobNames) {
     $j = $script:Jobs[$name]
     if ($j.Sha256 -cnotmatch '\A[0-9a-f]{64}\z') { Fail "$name table hash is not 64 lowercase hex" }
