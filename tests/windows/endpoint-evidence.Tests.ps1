@@ -25,15 +25,23 @@ foreach ($act in @('Install', 'Bogus')) {
     Assert ($LASTEXITCODE -eq 0 -and (($out | Out-String).Trim()) -eq '{"status":"emptyPin"}') "empty pin exits 0 for $act"
 }
 
-# On Windows, one real run first: the real registry primitives, every section, no failures.
+# On Windows, real runs first: the real registry primitives, every section, no failures.
+# Two runs, as a fleet run would, so neither has to drop a section to fit 8,000 bytes.
 if ($env:OS -eq 'Windows_NT') {
-    $real = Invoke-EndpointEvidence -Sections 'all' -AppRegex 'Microsoft' -ShortcutRegex '.' -ClickOnceRegex '.' -Paths $env:SystemRoot
+    $real = Invoke-EndpointEvidence -Sections 'Start,Outlook,Edge,Session,Cis,Apps,Intune' -AppRegex 'Microsoft' -ShortcutRegex '.' -ClickOnceRegex '.' -Paths $env:SystemRoot
     $ro = $real | ConvertFrom-Json
     Assert ([Text.Encoding]::UTF8.GetByteCount($real) -le 8000 -and $ro.status -eq 'collected') 'real run bounded'
     foreach ($k in @('start', 'outlook', 'edge', 'session', 'cis', 'apps', 'intune')) {
         Assert (-not $ro.$k.PSObject.Properties['status']) "real run section $k collected"
     }
     Assert (@($ro.apps.installed).Count -gt 0 -and @($ro.apps.paths.PSObject.Properties).Count -eq 1) 'real run reads the uninstall registry'
+    $managed = Invoke-EndpointEvidence -Sections 'Edition,Taskbar,DefaultApps,QuietWindows,Notifications,Acrobat,EdgeExtras,OneDrive,Drives'
+    $mo = $managed | ConvertFrom-Json
+    Assert ([Text.Encoding]::UTF8.GetByteCount($managed) -le 8000 -and $mo.status -eq 'collected') 'real managed run bounded'
+    foreach ($k in @('edition', 'taskbar', 'defaultapps', 'quietwindows', 'notifications', 'acrobat', 'edgeextras', 'onedrive', 'drives')) {
+        Assert ($mo.PSObject.Properties[$k] -and -not $mo.$k.PSObject.Properties["status"]) "real run section $k collected"
+    }
+    Assert ($mo.edition.editionId -and $mo.edition.build) 'real run reads the edition'
 }
 
 # In-memory registry: path -> values. Subkeys are the direct children of stored paths.
@@ -165,11 +173,137 @@ try {
     Assert (@($ime.failed | Where-Object { $_.app -eq $userFail -and $_.errorCode -eq 1603 }).Count -eq 1) 'failed user-scoped app listed'
     Assert (@($ime.logMatches).Count -eq 2 -and $ime.logMatches[0] -like '11-15-2026 10:01:02 *Vendor Client*' -and $ime.logMatches[1] -like '*detection  result: installed') 'matching CMTrace lines (multi-line message)'
 
+    # Edition
+    Add-Reg "$L\SOFTWARE\Microsoft\Windows NT\CurrentVersion" @{ EditionID = 'Professional'; CurrentBuildNumber = '26100'; UBR = 4061; DisplayVersion = '24H2'; InstallationType = 'Client' }
+    $ed = Get-EeEdition
+    Assert ($ed.editionId -eq 'Professional' -and $ed.build -eq '26100' -and $ed.ubr -eq 4061) 'edition and build'
+
+    # Taskbar
+    $layout = '<LayoutModificationTemplate><CustomTaskbarLayoutCollection PinListPlacement="Replace"><defaultlayout:TaskbarLayout><taskbar:TaskbarPinList PinGeneration="1"><taskbar:DesktopApp DesktopApplicationID="Microsoft.Windows.Explorer"/><taskbar:DesktopApp DesktopApplicationLinkPath="%APPDATA%\Microsoft\Windows\Start Menu\Programs\Outlook (classic).lnk"/><taskbar:UWA AppUserModelID="MSTeams_8wekyb3d8bbwe!MSTeams"/></taskbar:TaskbarPinList></defaultlayout:TaskbarLayout></CustomTaskbarLayoutCollection></LayoutModificationTemplate>'
+    Add-Reg "$L\SOFTWARE\Microsoft\PolicyManager\current\device\Start" @{ ConfigureStartPins = $script:Reg["$L\SOFTWARE\Microsoft\PolicyManager\current\device\Start"]['ConfigureStartPins']; StartLayout = $layout; HideTaskViewButton = 1; HideRecommendedPersonalizedSites = 1; HideRecommendedPersonalizedSites_ProviderSet = 1 }
+    New-File (Join-Path $profileDir 'AppData/Roaming/Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar/File Explorer.lnk')
+    New-File (Join-Path $profileDir 'AppData/Roaming/Microsoft/Internet Explorer/Quick Launch/User Pinned/TaskBar/desktop.ini')
+    $tb = Get-EeTaskbar
+    Assert ($tb.devicePolicy.taskbar -and $tb.devicePolicy.pinListPlacement -eq 'Replace' -and $tb.devicePolicy.pinGeneration -eq '1') 'taskbar placement and PinGeneration'
+    Assert (($tb.devicePolicy.pins -join ',') -eq 'Microsoft.Windows.Explorer,Outlook (classic).lnk,MSTeams_8wekyb3d8bbwe!MSTeams') 'taskbar pins by leaf name or AUMID'
+    Assert ($tb.hideTaskViewButton -eq 1 -and $null -eq $tb.users[0].policy) 'task view policy, no user layout'
+    Assert ((@($tb.users[0].pinned) -join ',') -eq 'File Explorer.lnk') 'user taskbar pins are shortcut names only'
+
+    # DefaultApps: MDM base64 XML and the user's UserChoice.
+    $assoc = '<?xml version="1.0" encoding="UTF-8"?><DefaultAssociations><Association Identifier=".pdf" ProgId="Acrobat.Document.DC" ApplicationName="Adobe Acrobat" /><Association ApplicationName="Edge" ProgId="MSEdgeHTM" Identifier="https" /><Association Identifier=".htm" ProgId="MSEdgeHTM" ApplicationName="Edge" Suggested="true" /></DefaultAssociations>'
+    $assocBytes = [Text.Encoding]::UTF8.GetBytes($assoc)
+    Add-Reg "$L\SOFTWARE\Microsoft\PolicyManager\current\device\ApplicationDefaults" @{ DefaultAssociationsConfiguration = [Convert]::ToBase64String($assocBytes) }
+    $gpoXml = Join-Path $tmp 'assoc.xml'
+    [IO.File]::WriteAllBytes($gpoXml, [Text.Encoding]::Unicode.GetPreamble() + [Text.Encoding]::Unicode.GetBytes($assoc))
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\Windows\System" @{ DefaultAssociationsConfiguration = $gpoXml }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.pdf\UserChoice" @{ ProgId = 'MSEdgePDF'; Hash = 'abc' }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoiceLatest\ProgId" @{ ProgId = 'MSEdgeHTM' }
+    $da = Get-EeDefaultApps
+    $sha = [Security.Cryptography.SHA256]::Create(); $want = -join ($sha.ComputeHash($assocBytes)[0..7] | ForEach-Object { $_.ToString('x2') })
+    Assert ($da.mdmPolicy.sha256Prefix -eq $want -and $da.mdmPolicy.count -eq 3 -and $da.mdmPolicy.suggested -eq 1) 'default apps policy hash and counts'
+    Assert ($da.mdmPolicy.watched['.pdf'] -eq 'Acrobat.Document.DC' -and $da.mdmPolicy.watched['https'] -eq 'MSEdgeHTM' -and -not $da.mdmPolicy.watched.Contains('.htm')) 'watched ProgIds in any attribute order'
+    Assert ($da.gpoPolicy.count -eq 3 -and $da.gpoPolicy.path -eq $gpoXml -and $da.gpoPolicy.watched['.pdf'] -eq 'Acrobat.Document.DC') 'GPO file read as UTF-16'
+    Assert ($da.users[0]['.pdf'] -eq 'MSEdgePDF' -and $da.users[0]['http'] -eq 'MSEdgeHTM' -and $null -eq $da.users[0]['mailto']) 'user choice and UserChoiceLatest'
+    $script:Reg["$L\SOFTWARE\Microsoft\PolicyManager\current\device\ApplicationDefaults"] = @{ DefaultAssociationsConfiguration = '%%%' }
+    $script:Reg["$L\SOFTWARE\Policies\Microsoft\Windows\System"] = @{ DefaultAssociationsConfiguration = '\\server\share\assoc.xml' }
+    $da = Get-EeDefaultApps
+    Assert ($da.mdmPolicy.status -eq 'invalidBase64' -and $da.gpoPolicy.readable -eq $false) 'bad base64 reported; UNC policy file not read'
+
+    # QuietWindows
+    Add-Reg "$L\SOFTWARE\Microsoft\PolicyManager\current\device\Experience" @{ AllowWindowsConsumerFeatures = 0; AllowWindowsConsumerFeatures_WinningProvider = 'x' }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" @{ 'SubscribedContent-338389Enabled' = 0; SystemPaneSuggestionsEnabled = 1; ContentDeliveryAllowed = 1; LastRun = 5 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" @{ ScoobeSystemSettingEnabled = 0 }
+    $qw = Get-EeQuietWindows
+    Assert ($qw.experiencePolicy['AllowWindowsConsumerFeatures'] -eq 0 -and -not $qw.experiencePolicy.Contains('AllowWindowsConsumerFeatures_WinningProvider')) 'experience policy without bookkeeping values'
+    Assert ($qw.startPolicy['HideRecommendedPersonalizedSites'] -eq 1 -and $qw.startPolicy.Count -eq 1) 'recommended section policy only'
+    $cd = $qw.users[0].contentDelivery
+    Assert ($cd['SubscribedContent-338389Enabled'] -eq 0 -and $cd['ContentDeliveryAllowed'] -eq 1 -and -not $cd.Contains('LastRun')) 'content delivery switches only'
+    Assert ($qw.users[0].engagement['ScoobeSystemSettingEnabled'] -eq 0) 'finish-setup switch'
+
+    # Notifications
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\PushNotifications" @{ ToastEnabled = 1 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\Microsoft.SkyDrive.Desktop" @{ Enabled = 0 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\MSTeams_8wekyb3d8bbwe!MSTeams" @{ ShowInActionCenter = 1 }
+    $nt = Get-EeNotifications
+    Assert ($nt.users[0].toastEnabled -eq 1 -and $nt.users[0].apps['Microsoft.SkyDrive.Desktop'] -eq 0 -and $nt.users[0].apps.Count -eq 1) 'notification switches set explicitly'
+
+    # Acrobat
+    Add-Reg "$L\SOFTWARE\Policies\Adobe\Adobe Acrobat\DC\FeatureLockDown" @{ bToggleFTE = 1; bAcroSuppressUpsell = 1 }
+    Add-Reg "$L\SOFTWARE\Policies\Adobe\Adobe Acrobat\DC\FeatureLockDown\cServices" @{ bToggleAdobeDocumentServices = 1 }
+    Add-Reg "$L\SOFTWARE\WOW6432Node\Policies\Adobe\Acrobat Reader\DC\FeatureLockDown" @{ bWhatsNewExp = 1 }
+    $ac = Get-EeAcrobat
+    Assert ($ac['Adobe Acrobat']['bToggleFTE'] -eq 1 -and $ac['Adobe Acrobat']['cServices\bToggleAdobeDocumentServices'] -eq 1) 'acrobat lockdown tree'
+    Assert ($ac['Acrobat Reader (wow64)']['bWhatsNewExp'] -eq 1 -and $ac.Count -eq 2) 'reader 32-bit policy labelled'
+
+    # EdgeExtras
+    $favJson = '[{"toplevel_name":"Firm links"},{"name":"Court","url":"https://example.org"},{"name":"Folder","children":[{"name":"a","url":"https://example.net"}]}]'
+    $script:Reg["$L\SOFTWARE\Policies\Microsoft\Edge"]['ShowMicrosoftRewards'] = 0
+    $script:Reg["$L\SOFTWARE\Policies\Microsoft\Edge"]['ForceSync'] = 1
+    $script:Reg["$L\SOFTWARE\Policies\Microsoft\Edge"]['ManagedFavorites'] = $favJson
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\Edge\SyncTypesListDisabled" @{ '1' = 'passwords' }
+    Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\Edge" @{ ShowRecommendationsEnabled = 0 }
+    $ex = Get-EeEdgeExtras
+    Assert ($ex.device['ShowMicrosoftRewards'] -eq 0 -and $ex.device['ForceSync'] -eq 1 -and -not $ex.device.Contains('HideFirstRunExperience')) 'edge extra values only'
+    Assert ((@($ex.device['SyncTypesListDisabled']) -join ',') -eq 'passwords') 'sync types list'
+    Assert ($ex.device['ManagedFavorites'].count -eq 2 -and $ex.device['ManagedFavorites'].topLevelName -eq 'Firm links') 'managed favorites count and folder'
+    Assert (-not (($ex | ConvertTo-Json -Depth 6) -match 'example\.org')) 'favourite URLs not printed'
+    Assert ($ex.users[0].policy['ShowRecommendationsEnabled'] -eq 0) 'user-scope edge policy'
+
+    # OneDrive
+    $tenant = [guid]::NewGuid().ToString()
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive" @{ SilentAccountConfig = 1; KFMSilentOptIn = $tenant; FilesOnDemandEnabled = 1 }
+    Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\OneDrive" @{ DisableTutorial = 1 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive\Accounts\Business1" @{ ConfiguredTenantId = $tenant; UserEmail = 'alex@example.com'; UserFolder = 'C:\Users\alex\OneDrive - Example'; KfmFoldersProtectedNow = 3584 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive\Accounts\Personal" @{ UserEmail = 'x@example.net' }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" @{ Desktop = '%USERPROFILE%\OneDrive - Example\Desktop'; Personal = '%USERPROFILE%\Documents' }
+    $od = Get-EeOneDrive
+    Assert ($od.devicePolicy['KFMSilentOptIn'] -eq $tenant -and $od.users[0].policy['DisableTutorial'] -eq 1) 'onedrive policies'
+    $b1 = $od.users[0].business[0]
+    Assert (@($od.users[0].business).Count -eq 1 -and $b1.tenantId -eq $tenant -and $b1.signedIn -and $b1.hasFolder -and $b1.KfmFoldersProtectedNow -eq 3584) 'business account state'
+    Assert (-not (($od | ConvertTo-Json -Depth 6) -match '@example')) 'account e-mail not printed'
+    Assert ($od.users[0].knownFolders.desktop -eq 'oneDrive' -and $od.users[0].knownFolders.documents -eq 'local' -and $null -eq $od.users[0].knownFolders.pictures) 'known folder redirection'
+
+    # Drives: mapped drives, drive icons and a network place's target.lnk icon.
+    Add-Reg "HKEY_USERS\$sid\Network\F" @{ RemotePath = '\\fs01\files'; ProviderName = 'Microsoft Windows Network' }
+    Add-Reg "$L\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\F\DefaultIcon" @{ '' = 'C:\ProgramData\Icons\f.ico' }
+    Add-Reg "$L\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\DriveIcons\F\DefaultLabel" @{ '' = 'Files' }
+    Add-Reg "HKEY_USERS\$sid\Software\Classes\Applications\Explorer.exe\Drives\Z\DefaultIcon" @{ '' = 'C:\ProgramData\Icons\z.ico,0' }
+    # Minimal MS-SHLLINK: header, an ID list, then Unicode name and icon strings; icon index 3.
+    function New-Lnk {
+        param([string]$Name, [string]$Icon)
+        $h = [byte[]]::new(0x4C)
+        [BitConverter]::GetBytes([uint32]0x4C).CopyTo($h, 0)
+        [BitConverter]::GetBytes([uint32](0x1 -bor 0x4 -bor 0x40 -bor 0x80)).CopyTo($h, 0x14)
+        [BitConverter]::GetBytes([int32]3).CopyTo($h, 0x38)
+        $out = [Collections.Generic.List[byte]]::new($h)
+        $out.AddRange([byte[]](4, 0, 9, 9, 9, 9))
+        foreach ($s in @($Name, $Icon)) { $out.AddRange([BitConverter]::GetBytes([uint16]$s.Length)); $out.AddRange([Text.Encoding]::Unicode.GetBytes($s)) }
+        return $out.ToArray()
+    }
+    $place = Join-Path $profileDir 'AppData/Roaming/Microsoft/Windows/Network Shortcuts/Files (fs01)'
+    New-File (Join-Path $place 'desktop.ini')
+    [IO.File]::WriteAllBytes((Join-Path $place 'target.lnk'), (New-Lnk 'Files' '%ProgramData%\Icons\f.ico'))
+    $bare = Join-Path $profileDir 'AppData/Roaming/Microsoft/Windows/Network Shortcuts/Old'
+    New-File (Join-Path $bare 'target.lnk')
+    $dr = Get-EeDrives
+    Assert ($dr.driveIcons['F'].icon -eq 'C:\ProgramData\Icons\f.ico' -and $dr.driveIcons['F'].label -eq 'Files') 'machine drive icon and label'
+    Assert ($dr.users[0].mapped['F'] -eq '\\fs01\files' -and $dr.users[0].driveIcons['Z'] -eq 'C:\ProgramData\Icons\z.ico,0') 'mapped drive and user drive icon'
+    $np = @{}; foreach ($p in $dr.users[0].networkPlaces) { $np[$p.name] = $p }
+    Assert ($np['Files (fs01)'].icon -eq '%ProgramData%\Icons\f.ico,3' -and $np['Files (fs01)'].desktopIni -and $np['Files (fs01)'].targetLnk) 'network place icon from target.lnk'
+    Assert ($np['Old'].icon -eq 'invalidLink' -and -not $np['Old'].desktopIni) 'non-link target reported, not thrown'
+    if ($env:OS -eq 'Windows_NT') {
+        # A shortcut written by the Windows shell, so the parser is checked against the real format.
+        $real = Join-Path $tmp 'real.lnk'
+        $ws = New-Object -ComObject WScript.Shell
+        $sc = $ws.CreateShortcut($real); $sc.TargetPath = $env:SystemRoot; $sc.IconLocation = 'C:\Windows\System32\imageres.dll,137'; $sc.Save()
+        Assert ((Get-EeLnkIcon $real) -eq 'C:\Windows\System32\imageres.dll,137') 'shell-written lnk icon'
+    }
+
     # Whole report: one compact line, bounded, section selection, failures isolated.
     $json = Invoke-EndpointEvidence -Sections 'all' -AppRegex 'Vendor' -ShortcutRegex 'vendor' -ClickOnceRegex 'vend' -Paths $marker
     Assert (-not $json.Contains("`n")) 'single line'
     $o = $json | ConvertFrom-Json
-    foreach ($k in @('start', 'outlook', 'edge', 'session', 'cis', 'apps', 'intune')) { Assert ($o.PSObject.Properties[$k]) "section $k present" }
+    foreach ($k in @($script:EeSectionNames | ForEach-Object { $_.ToLowerInvariant() })) { Assert ($o.PSObject.Properties[$k]) "section $k present" }
     Assert ($o.status -eq 'collected' -and @($o.users) -contains 'alex') 'report header'
     $only = Invoke-EndpointEvidence -Sections 'Cis,Session' | ConvertFrom-Json
     Assert ($only.PSObject.Properties['cis'] -and $only.PSObject.Properties['session'] -and -not $only.PSObject.Properties['edge']) 'section selection'
