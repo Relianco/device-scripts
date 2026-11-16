@@ -142,8 +142,7 @@ try {
     $logs = New-Dir (Join-Path $script:EeProgramData 'Microsoft/IntuneManagementExtension/Logs')
     $log = '<![LOG[[Win32App] Processing app Vendor Client, applicability ok]LOG]!><time="10:01:02.123+300" date="11-15-2026" component="AppWorkload" context="" type="1" thread="1" file="">' + "`r`n" +
     '<![LOG[[Win32App] unrelated line]LOG]!><time="10:01:03.000+300" date="11-15-2026" component="AppWorkload" context="" type="1" thread="1" file="">' + "`r`n" +
-    '<![LOG[[Win32App] Vendor Client detection
- result: installed]LOG]!><time="10:02:00.000+300" date="11-15-2026" component="AppWorkload" context="" type="1" thread="1" file="">'
+    '<![LOG[[Win32App] Vendor Client detection' + "`n" + ' result: installed]LOG]!><time="10:02:00.000+300" date="11-15-2026" component="AppWorkload" context="" type="1" thread="1" file="">'
     [IO.File]::WriteAllText((Join-Path $logs 'AppWorkload.log'), $log)
     $appId = [guid]::NewGuid().ToString()
     Add-Reg "$L\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps\$sid\${appId}_1" @{ EnforcementStateMessage = '{"EnforcementState":1000,"ErrorCode":0}' }
