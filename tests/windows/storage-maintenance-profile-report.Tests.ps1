@@ -459,6 +459,14 @@ try {
  $script:SmSave = { param($Report) }
  $out = Complete-SmRun $r 6>$null | Select-Object -Last 1
  Assert (($out | ConvertFrom-Json).schemaVersion -eq 2) 'ProfileReport run prints the v2 JSON'
+ # A ProfileReport run never reaches the dialog; a plain Report run still does.
+ $script:uiCalls = New-Object Collections.Generic.List[string]
+ $script:SmUi = { param($Step) $script:uiCalls.Add($Step); 'shown' }
+ $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true -SharedDevices $sharedPc -ProfileAgeDays 90)
+ Assert ($script:uiCalls.Count -eq 0 -and -not $script:SmUiOpen -and ($r.Notifications -contains 'suppressed')) ('ProfileReport run reached the UI: ' + ($script:uiCalls -join ';'))
+ $r = Invoke-SmMaintenance (Get-SmArguments -Mode Report)
+ Assert ($script:uiCalls.Count -ge 1 -and ($r.Notifications -contains 'shown')) 'Report run without ProfileReport still shows the UI'
+ $script:SmUi = { param($Step) 'noUser' }
  # Guard light at start: no profile work, but the v2 output still says why.
  $script:SmGuards = { [pscustomobject]@{Safe=$false;Light=$true;Reasons=@('Setup')} }
  $r = Invoke-SmMaintenance (Get-SmArguments -ProfileReport true)

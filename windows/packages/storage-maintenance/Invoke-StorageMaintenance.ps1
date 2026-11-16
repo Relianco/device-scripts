@@ -1828,6 +1828,8 @@ function Invoke-SmMaintenance {
  param($A)
  $r=[ordered]@{ SchemaVersion=1; Timestamp=[datetime]::UtcNow.ToString('o'); Mode=$A.Mode; Status='complete'; ReportPath=$null; Guards=$null; Before=@(); After=@(); FreeSpaceDelta=@(); Profiles=@(); Scan=$null; Actions=@(); Notifications=@(); Errors=@(); Omissions=@('User documents/downloads, rollback/recovery, installer cache and Windows components are never deleted.','Logical sizes exclude unreadable/reparse/cloud entries; hardlinks, compression and sparse files make reclaimable bytes uncertain.','App caches are reported as opportunities only unless Tier is Safe or Aggressive, which delete cache-folder files older than TempAgeDays.','Directory ranking counts direct files, not recursively accumulated subtree sizes; categories may overlap.','Upgrade staging/Windows.old are preserved. Historical staging needs independent Source OS, install and boot completion evidence; unestablished status stays light/withheld.'); Evidence=$null; ProfileReport=$null; Audit=$null; RemovalPlan=$null; NativeMarker=$null }
  $acquired=$false; $audit=$null
+ # A ProfileReport run on a shared PC must not show a dialog to a signed-in user.
+ $ui={ param($Step) if($A.ProfileReport) { 'suppressed' } else { & $script:SmUi $Step } }
  # A removal run evaluates the same gate matrix as a report run, freshly, in this run.
  $removal=($A.Mode -eq 'Cleanup' -and $A.RemoveProfiles -and -not $A.ProfileReport)
  try {
@@ -1836,7 +1838,7 @@ function Invoke-SmMaintenance {
   try { $r.NativeMarker=& $script:SmNativeMarker } catch { $r.NativeMarker='unverified' }
   $g=& $script:SmGuards; $r.Guards=$g
   $r.ReportPath=& $script:SmPrepareReport
-  try { $r.Notifications+=& $script:SmUi 'Checking free space and upgrade safety before storage inspection.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
+  try { $r.Notifications+=& $ui 'Checking free space and upgrade safety before storage inspection.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
   try { $r.Before=@(& $script:SmVolumes) } catch { $r.Errors+=$_.Exception.Message }
   if($g.Light) {
    $r.Status=$(if($A.Mode -eq 'Cleanup'){'withheld'}else{'partial'}); $r.Scan=[pscustomobject]@{Partial=$true;Files=@();Reason='Upgrade active or guard unknown: light volume summary only'}
@@ -1862,7 +1864,7 @@ function Invoke-SmMaintenance {
    })
    # One globally bounded scan: safe temps plus profile trees (diagnostic only).
    $roots=@(& $script:SmRoots); $roots+=@($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' -and $_.Special -eq $false } | ForEach-Object { $_.LocalPath.TrimEnd('\')+'\AppData\Local\Temp' }); $scanRoots=@(& $script:SmRoots)+@($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' } | ForEach-Object { $_.LocalPath })
-   try { $r.Notifications+=& $script:SmUi 'Measuring bounded folders and old temporary files; cloud placeholders are skipped.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
+   try { $r.Notifications+=& $ui 'Measuring bounded folders and old temporary files; cloud placeholders are skipped.' } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
    $scanRoots+=@(& $script:SmDiagnosticRoots)
    $scanRoots+=@($r.Before | Where-Object { $_.DeviceID -match '^[A-Za-z]:$' } | ForEach-Object { $_.DeviceID+'\' })
    $scan=if($collected.GuardChanged){[pscustomobject]@{Roots=@();Files=@();TopFiles=@();TopFolders=@();Partial=$true;Light=$true;GuardReasons=@($collected.Reasons);EntriesVisited=0;SkippedReparseOrCloud=0;Errors=@();Seconds=0}}else{Get-SmScan $scanRoots $A.MaxFiles $A.MaxSeconds $A.TempAgeDays}; $r.Scan=$scan
@@ -1987,7 +1989,7 @@ function Invoke-SmMaintenance {
       }
      }
      if($A.Tier -ne 'None') {
-      try { $r.Notifications+=& $script:SmUi ('Freeing disk space: '+$A.Tier+' cleanup of caches and old temporary files.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
+      try { $r.Notifications+=& $ui ('Freeing disk space: '+$A.Tier+' cleanup of caches and old temporary files.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
       $tierSteps=@(Invoke-SmCleanupTier $A @($profiles | Where-Object { $_.LocalPath -match '^[A-Za-z]:\\Users\\[^\\]+$' -and $_.Special -eq $false } | ForEach-Object { $_.LocalPath }))
       $r.Actions+=$tierSteps
       if(@($tierSteps | Where-Object { $_.Status -ne 'done' }).Count) { $r.Status='partial' }
@@ -2007,7 +2009,7 @@ function Invoke-SmMaintenance {
    # Full file list is internal only; output bounded top lists and category totals.
    $r.Scan=[pscustomobject]@{Partial=$scan.Partial;Light=$scan.Light;GuardReasons=$scan.GuardReasons;EntriesVisited=$scan.EntriesVisited;Seconds=$scan.Seconds;SkippedReparseOrCloud=$scan.SkippedReparseOrCloud;Errors=$scan.Errors;TopFiles=$scan.TopFiles;TopFolders=$scan.TopFolders;TempCategories=@($roots | ForEach-Object { $root=$_; $fs=@($scan.Files | Where-Object {$_.CleanupRoot -eq $root}); @{Root=$root;LogicalBytes=($fs | Measure-Object LogicalBytes -Sum).Sum;AgeQualifiedLogicalBytes=($fs | Where-Object {$_.Old} | Measure-Object LogicalBytes -Sum).Sum;ReclaimableBytes=$null} })}
   }
-  try { $r.Notifications+=& $script:SmUi ('Storage inspection '+$r.Status+'. Checking final free-space measurements.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
+  try { $r.Notifications+=& $ui ('Storage inspection '+$r.Status+'. Checking final free-space measurements.') } catch { $r.Notifications+=('failed: '+$_.Exception.Message) }
   try { $r.After=@(& $script:SmVolumes); $r.FreeSpaceDelta=@($r.After | ForEach-Object { $after=$_; $before=@($r.Before | Where-Object {$_.DeviceID -eq $after.DeviceID}); if($before.Count -eq 1) { @{DeviceID=$after.DeviceID;Bytes=([int64]$after.FreeSpace-[int64]$before[0].FreeSpace);IncludesConcurrentActivity=$true} } }) } catch { $r.Errors+=$_.Exception.Message }
  } catch { $r.Status='failed'; $r.Errors+=$_.Exception.Message }
  finally { Close-SmAudit $audit; if($acquired) { & $script:SmRelease } }
