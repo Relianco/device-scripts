@@ -253,7 +253,7 @@ try {
     $tenant = [guid]::NewGuid().ToString()
     Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive" @{ SilentAccountConfig = 1; KFMSilentOptIn = $tenant; FilesOnDemandEnabled = 1 }
     Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\OneDrive" @{ DisableTutorial = 1 }
-    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive\Accounts\Business1" @{ ConfiguredTenantId = $tenant; UserEmail = 'alex@example.com'; UserFolder = 'C:\Users\alex\OneDrive - Example'; KfmFoldersProtectedNow = 3584 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive\Accounts\Business1" @{ ConfiguredTenantId = $tenant; UserEmail = 'alex@example.com'; UserFolder = (Join-Path $profileDir 'OneDrive - Example'); KfmFoldersProtectedNow = 3584 }
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive\Accounts\Personal" @{ UserEmail = 'x@example.net' }
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" @{ Desktop = '%USERPROFILE%\OneDrive - Example\Desktop'; Personal = '%USERPROFILE%\Documents' }
     $od = Get-EeOneDrive
