@@ -19,6 +19,12 @@ foreach ($c in @('reg', 'reg.exe', 'msg', 'Ninja-Property-Set')) { Assert ($comm
 $source = [IO.File]::ReadAllText($path)
 Assert ($source -notmatch '(?i)PSAppDeployToolkit|Show-ADT|Open-ADT|Start-ADT') 'silent: no toolkit session or dialog'
 
+# Review: an empty pin exits 0 for every action and collects nothing.
+foreach ($act in @('Install', 'Bogus')) {
+    $out = & pwsh -NoProfile -File $path -Action $act -PinVersion '' 2>&1
+    Assert ($LASTEXITCODE -eq 0 -and (($out | Out-String).Trim()) -eq '{"status":"emptyPin"}') "empty pin exits 0 for $act"
+}
+
 # On Windows, one real run first: the real registry primitives, every section, no failures.
 if ($env:OS -eq 'Windows_NT') {
     $real = Invoke-EndpointEvidence -Sections 'all' -AppRegex 'Microsoft' -ShortcutRegex '.' -ClickOnceRegex '.' -Paths $env:SystemRoot

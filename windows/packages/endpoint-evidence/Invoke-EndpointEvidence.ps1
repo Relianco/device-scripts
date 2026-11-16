@@ -424,7 +424,8 @@ function Invoke-EndpointEvidence {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-# No empty-pin exit here: the runner's PinVersion is Mandatory (an empty value never arrives), and this package installs nothing.
+# Repo rule: an empty pin exits 0 for every action before any work.
+if ([string]::IsNullOrWhiteSpace($PinVersion)) { Write-Output '{"status":"emptyPin"}'; exit 0 }
 if ($Action -eq 'Uninstall') { Write-Output '{"status":"nothingToUninstall"}'; exit 0 }
 if (@('Install', 'Update', 'Repair', 'Reinstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
 try { Write-Output (Invoke-EndpointEvidence -Sections $Sections -AppRegex $AppRegex -ShortcutRegex $ShortcutRegex -ClickOnceRegex $ClickOnceRegex -Paths $Paths); exit 0 }
