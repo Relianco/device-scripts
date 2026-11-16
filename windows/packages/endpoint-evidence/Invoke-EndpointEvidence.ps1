@@ -110,6 +110,8 @@ function Get-EeUsers {
 }
 
 function Test-EeDir { param([string]$Path) return ($Path -and [IO.Directory]::Exists($Path)) }
+# Not a UNC path in any slash form (\\server, //server, \/server, \\?\UNC).
+function Test-EeLocalPath { param([string]$Path) return ($Path -and $Path -notmatch '^[\\/]{2}') }
 
 function Get-EeFileNames {
     param([string]$Dir, [string]$Regex, [switch]$Recurse)
@@ -436,8 +438,8 @@ function Get-EeDefaultApps {
     $file = [string](Get-EeValue "$HKLM\SOFTWARE\Policies\Microsoft\Windows\System" 'DefaultAssociationsConfiguration')
     if ($file) {
         $r.gpoPolicy = [ordered]@{ path = Protect-EeText $file -Max 120; readable = $false }
-        # A UNC path can stall under SYSTEM, so only a local file is read.
-        if ($file -notmatch '^\\\\' -and [IO.File]::Exists($file) -and [IO.FileInfo]::new($file).Length -lt 1MB) {
+        # A UNC path (\\, // or mixed) can stall under SYSTEM, so only a local file is read.
+        if ((Test-EeLocalPath $file) -and [IO.File]::Exists($file) -and [IO.FileInfo]::new($file).Length -lt 1MB) {
             $r.gpoPolicy = ConvertFrom-EeAssociations ([IO.File]::ReadAllBytes($file))
             $r.gpoPolicy.path = Protect-EeText $file -Max 120
         }
@@ -507,13 +509,16 @@ function Get-EeAcrobat {
 
 $script:EeEdgeExtraNames = @('ShowPDFDefaultRecommendationsEnabled', 'ShowRecommendationsEnabled', 'DefaultBrowserSettingsCampaignEnabled', 'ShowMicrosoftRewards',
     'EdgeShoppingAssistantEnabled', 'NewTabPageContentEnabled', 'SpotlightExperiencesAndRecommendationsEnabled', 'WhatsNewPageForEntraProfilesEnabled',
-    'PopupsAllowedForUrls', 'DefaultPopupsSetting', 'ForceSync', 'SyncDisabled', 'BrowserSignin', 'OrganizationalBrandingOnWorkProfileUIEnabled', 'OrganizationLogoOverlayOnAppIconEnabled')
+    'DefaultPopupsSetting', 'ForceSync', 'SyncDisabled', 'BrowserSignin', 'OrganizationalBrandingOnWorkProfileUIEnabled', 'OrganizationLogoOverlayOnAppIconEnabled')
 
 function Get-EeEdgeScope {
     param([string]$Path)
     $r = Get-EePolicy $Path $script:EeEdgeExtraNames
-    $sync = Get-EeValues "$Path\SyncTypesListDisabled"
-    if ($sync.Count) { $r['SyncTypesListDisabled'] = @($sync.Values | ForEach-Object { [string]$_ }) }
+    # List policies keep one numbered value per entry in a subkey of the same name.
+    foreach ($list in @('SyncTypesListDisabled', 'PopupsAllowedForUrls', 'PopupsBlockedForUrls')) {
+        $v = Get-EeValues "$Path\$list"
+        if ($v.Count) { $r[$list] = @($v.Values | ForEach-Object { [string]$_ }) }
+    }
     $fav = [string](Get-EeValue $Path 'ManagedFavorites')
     if ($fav) {
         # Names only: favourites URLs are firm links, so only the count and folder name are shown.

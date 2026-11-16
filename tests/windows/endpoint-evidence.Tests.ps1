@@ -208,6 +208,9 @@ try {
     $script:Reg["$L\SOFTWARE\Policies\Microsoft\Windows\System"] = @{ DefaultAssociationsConfiguration = '\\server\share\assoc.xml' }
     $da = Get-EeDefaultApps
     Assert ($da.mdmPolicy.status -eq 'invalidBase64' -and $da.gpoPolicy.readable -eq $false) 'bad base64 reported; UNC policy file not read'
+    # Review: forward-slash and mixed UNC paths are not local either.
+    foreach ($unc in @('\\server\s\a.xml', '//server/s/a.xml', '/\server\s\a.xml', '\\?\UNC\server\s\a.xml')) { Assert (-not (Test-EeLocalPath $unc)) "UNC path refused: $unc" }
+    Assert ((Test-EeLocalPath $gpoXml) -and (Test-EeLocalPath 'C:\Windows\assoc.xml')) 'local paths allowed'
 
     # QuietWindows
     Add-Reg "$L\SOFTWARE\Microsoft\PolicyManager\current\device\Experience" @{ AllowWindowsConsumerFeatures = 0; AllowWindowsConsumerFeatures_WinningProvider = 'x' }
@@ -241,10 +244,13 @@ try {
     $script:Reg["$L\SOFTWARE\Policies\Microsoft\Edge"]['ForceSync'] = 1
     $script:Reg["$L\SOFTWARE\Policies\Microsoft\Edge"]['ManagedFavorites'] = $favJson
     Add-Reg "$L\SOFTWARE\Policies\Microsoft\Edge\SyncTypesListDisabled" @{ '1' = 'passwords' }
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\Edge\PopupsAllowedForUrls" @{ '1' = '[*.]example.com' }
     Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\Edge" @{ ShowRecommendationsEnabled = 0 }
     $ex = Get-EeEdgeExtras
     Assert ($ex.device['ShowMicrosoftRewards'] -eq 0 -and $ex.device['ForceSync'] -eq 1 -and -not $ex.device.Contains('HideFirstRunExperience')) 'edge extra values only'
     Assert ((@($ex.device['SyncTypesListDisabled']) -join ',') -eq 'passwords') 'sync types list'
+    # Review: list policies live in a subkey, not a value on the Edge key.
+    Assert ((@($ex.device['PopupsAllowedForUrls']) -join ',') -eq '[*.]example.com') 'popup exceptions list'
     Assert ($ex.device['ManagedFavorites'].count -eq 2 -and $ex.device['ManagedFavorites'].topLevelName -eq 'Firm links') 'managed favorites count and folder'
     Assert (-not (($ex | ConvertTo-Json -Depth 6) -match 'example\.org')) 'favourite URLs not printed'
     Assert ($ex.users[0].policy['ShowRecommendationsEnabled'] -eq 0) 'user-scope edge policy'
