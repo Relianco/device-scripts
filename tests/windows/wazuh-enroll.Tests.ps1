@@ -209,8 +209,14 @@ $code = Invoke-EnrollCase
 if ($code -ne 1 -or $script:MsiCalls.Count -ne 0 -or $script:AuthdWrites.Count -ne 0 -or $script:ServiceStarts.Count -ne 0) { Fail 'hash mismatch did not abort' }
 if (-not (($script:WazuhErrorLog -join ';').Contains('hash mismatch'))) { Fail 'hash mismatch was not reported' }
 Assert-NoSecretLeak -Label 'hash mismatch'
-Reset-EnrollCase
-if ((Invoke-EnrollCase -Sha256 '') -ne 1 -or $script:DownloadCount -ne 0) { Fail 'an empty hash did not refuse' }
+# An empty hash is the repo-wide off switch: exit 0 and touch nothing, for every action and state.
+foreach ($emptyCase in @(@('Install', '', 0), @('Install', '4.14.9', 0), @('Uninstall', '4.14.9', 0))) {
+    Reset-EnrollCase -Installed $emptyCase[1] -Keys $emptyCase[2]
+    $code = Invoke-EnrollCase -Action $emptyCase[0] -Sha256 ''
+    if ($code -ne 0 -or $script:DownloadCount -ne 0 -or $script:MsiCalls.Count -ne 0 -or $script:AuthdWrites.Count -ne 0 -or $script:ServiceStarts.Count -ne 0) {
+        Fail "empty hash with $($emptyCase[0]) at '$($emptyCase[1])' was not a no-op"
+    }
+}
 
 # Failures after the install: a missing service, and a start that throws a message carrying the secret.
 Reset-EnrollCase -Service ''
@@ -224,7 +230,7 @@ Assert-NoSecretLeak -Label 'service failure'
 Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST' -ErrorAction SilentlyContinue
 Reset-EnrollCase
 $env:RELIAN_WAZUH_MANAGER = '%wazuhmanager%'
-$childOutput = (& pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Install -PinVersion $pin -FloorVersion $floor -Enroll -InstallerUrl 'https://example.invalid/wazuh.msi' 2>&1 | Out-String)
+$childOutput = (& pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Install -PinVersion $pin -FloorVersion $floor -Enroll -InstallerUrl 'https://example.invalid/wazuh.msi' -InstallerSha256 $script:GoodSha 2>&1 | Out-String)
 $childExit = $LASTEXITCODE
 $env:RELIAN_DEPLOY_TEST = '1'
 if ($childExit -ne 1) { Fail "script run exit $childExit" }

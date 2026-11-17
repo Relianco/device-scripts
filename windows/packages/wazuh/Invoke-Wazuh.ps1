@@ -525,7 +525,8 @@ function Get-WazuhMsiArgumentList {
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
-    return @('/i', $InstallerPath, '/qn', '/norestart') + @($Properties)
+    # Start-Process joins the list with spaces, so the path is quoted to stay one argument.
+    return @('/i', ('"' + $InstallerPath + '"'), '/qn', '/norestart') + @($Properties)
 }
 
 function Test-WazuhMsiSucceeded {
@@ -826,6 +827,10 @@ function Invoke-WazuhEnrollAction {
         [string]$CancelPath
     )
 
+    # An empty hash is the repo-wide off switch: exit 0 and touch nothing.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+        return 0
+    }
     if ($Action -ne 'Install') {
         Add-WazuhError -Message 'enroll mode only supports Install'
         return 1
@@ -876,10 +881,6 @@ function Invoke-WazuhEnrollAction {
     }
 
     if ($null -ne $properties) {
-        if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
-            Add-WazuhError -Message 'missing hash for installer'
-            return 1
-        }
         if (Test-WazuhCancelled -CancelPath $CancelPath) {
             return 130
         }
