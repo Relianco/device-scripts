@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian __BROWSER__ extension __EXTENSION_ID__",
+  "publisher": "Relian",
+  "setupFile": "Invoke-BrowserExtension.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-BrowserExtension.ps1 -DeploymentType Install -Action Install -Browser \"{env:BROWSER}\" -ExtensionId \"{env:EXTENSION_ID}\"",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-BrowserExtension.ps1 -DeploymentType Uninstall -Action Uninstall -Browser \"{env:BROWSER}\" -ExtensionId \"{env:EXTENSION_ID}\"",
+  "detectionScript": "Detect-BrowserExtension.ps1",
+  "detectReplace": ["__BROWSER__", "__EXTENSION_ID__"]
+}

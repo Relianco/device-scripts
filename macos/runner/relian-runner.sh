@@ -298,14 +298,15 @@ relian_runner_main() {
       ;;
   esac
 
-  # Empty or whitespace hash returns before the URL is inspected.
-  if relian_is_blank "$package_sha256"; then
-    return 0
-  fi
-
+  # Userinfo is refused even when the hash is empty: the credential is already in the job's
+  # parameters, which the RMM keeps in its activity history. Then an empty hash is the off switch.
   if relian_url_has_userinfo "$package_url"; then
     relian_error "refusing a URL that contains userinfo"
     return 1
+  fi
+
+  if relian_is_blank "$package_sha256"; then
+    return 0
   fi
 
   local root=""

@@ -1,0 +1,6 @@
+{
+  "name": "WireGuard Network Guard",
+  "kind": "service-guard",
+  "installsSoftware": false,
+  "packageArguments": "Base64-encoded UTF-8 JSON object for Install/Update/Repair/Reinstall/Check. Pass {\"TrustedGateways\":\"192.0.2.25,192.0.2.1\",\"TrustedGatewayMacs\":\"00-53-00-11-22-33\"} or inline {\"TrustedGateways\":\"192.0.2.25=00-53-00-11-22-33,192.0.2.1=00-53-00-11-22-33\"}. Optional keys: TunnelPattern (default WireGuardTunnel$*), TrustDomainAuthenticated (true|false), TrustedDnsSuffixes, AllowGatewayIpOnly (true|false), ManageOffNetwork (true|false), TaskName. Uninstall needs no package arguments."
+}
