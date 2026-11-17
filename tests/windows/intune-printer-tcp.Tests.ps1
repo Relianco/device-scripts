@@ -95,6 +95,7 @@ for ($i = 0; $i -lt $tokens.Count; $i++) {
     }
 }
 
+# Review finding rejected: these tokens are intentional. They are the same packager-filled convention as packages/browser-extension/intune.json (on main), so the committed file never holds a queue name or address. A raw upload is not a supported path.
 # {env:RELIAN_PRINTER_NAME}, {env:RELIAN_PRINTER_ADDRESS}, and {env:RELIAN_PRINTER_MODEL} tokens stay in the command because the packager fills them before upload, and this file must not contain a queue name, address, or model.
 $expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Install -Action Install -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
 $expectedUninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
