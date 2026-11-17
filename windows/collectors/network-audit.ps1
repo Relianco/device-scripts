@@ -247,7 +247,7 @@ try {
 
     # Write to NinjaOne custom field
     try {
-        Ninja-Property-Set relian_network_audit $json
+        $json | Ninja-Property-Set-Piped relian_network_audit
         Write-Status "Network audit written to relian_network_audit custom field"
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"

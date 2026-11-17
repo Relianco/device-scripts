@@ -28,7 +28,7 @@ foreach ($sample in @('& $cli get x # ninjarmm-cli.exe', 'Ninja-Property-Set a b
 }
 if ($regex.IsMatch('Run it through the deploy runner (NinjaOne script 374).')) { Fail 'lint flags a plain NinjaOne mention' }
 
-$roots = @('windows/packages', 'windows/jobs', 'windows/releases', 'linux/packages', 'macos/packages')
+$roots = @('windows/packages', 'windows/read', 'windows/jobs', 'windows/releases', 'linux/packages', 'macos/packages')
 $files = foreach ($r in $roots) {
     $p = Join-Path $repoRoot $r
     if (Test-Path -LiteralPath $p) { Get-ChildItem -LiteralPath $p -Recurse -File }
