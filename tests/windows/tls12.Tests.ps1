@@ -40,7 +40,7 @@ foreach ($case in @(@(0, 0), @(768, (768 -bor 3072)), @(($ssl3Tls), ($ssl3Tls -b
 
 # A package runs in a child process, which does not inherit the setting.
 # Every script that downloads must carry the guard line verbatim.
-$scripts = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages') -Filter '*.ps1' -Recurse)
+$scripts = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages'), (Join-Path $repoRoot 'windows/read') -Filter '*.ps1' -Recurse)
 foreach ($rel in @('windows/runner/Invoke-RelianRunner.ps1', 'windows/runner/Invoke-RelianJob.ps1', 'windows/bootstrap.ps1')) {
     $scripts += Get-Item -LiteralPath (Join-Path $repoRoot $rel)
 }

@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 $env:RELIAN_DEPLOY_TEST='1'
-. (Join-Path $PSScriptRoot '../../windows/packages/maintenance-evidence/Invoke-MaintenanceEvidence.ps1') -DeploymentType Install -Action Repair -PinVersion ''
+. (Join-Path $PSScriptRoot '../../windows/read/maintenance-evidence/Invoke-MaintenanceEvidence.ps1') -DeploymentType Install -Action Repair -PinVersion ''
 function Assert($ok,$message) { if(-not $ok) { throw $message } }
 function Refuses($block,$message) { $failed=$false; try { & $block } catch { $failed=$true }; Assert $failed $message }
 Refuses { Get-MeReportPath Storage '../escape' } 'Traversal refused'

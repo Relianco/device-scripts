@@ -12,6 +12,7 @@ $failures = [System.Collections.Generic.List[string]]::new()
 $inventory = [ordered]@{
     Windows = @(
         @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/packages') -Directory | ForEach-Object Name) +
+        @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/read') -Directory | ForEach-Object Name) +
         @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'windows/jobs') -Filter '*.ps1' -File | ForEach-Object BaseName)
     )
     Linux   = @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'linux/packages') -Directory | ForEach-Object Name)
@@ -47,7 +48,7 @@ foreach ($platform in $inventory.Keys) {
 }
 
 # An explicit path must exist, wherever it appears.
-foreach ($m in [regex]::Matches($readme, '(windows|linux|macos)/(packages|jobs)/([A-Za-z0-9][A-Za-z0-9._-]*)')) {
+foreach ($m in [regex]::Matches($readme, '(windows|linux|macos)/(packages|jobs|read)/([A-Za-z0-9][A-Za-z0-9._-]*)')) {
     $name = $m.Groups[3].Value -replace '\.(ps1|sh|json)$', ''
     $dir = Join-Path $repoRoot ($m.Groups[1].Value + '/' + $m.Groups[2].Value)
     if (-not ((Test-Path -LiteralPath (Join-Path $dir $name)) -or (Test-Path -LiteralPath (Join-Path $dir "$name.ps1")))) {
