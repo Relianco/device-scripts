@@ -196,6 +196,8 @@ function Invoke-SrMain {
     }
 
     # The installer: a local file or a download, pinned by SHA256 and signed by SentinelOne.
+    # An empty InstallerSha256 is not an off switch: PinVersion is. Bind needs no installer, so a run
+    # that reaches this point asked for the installer and is refused (exit 1) without one.
     if ($InstallerSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or [bool]$InstallerPath -eq [bool]$InstallerUrl) {
         Say 'refused: give one of InstallerPath or InstallerUrl, and a lowercase hex InstallerSha256; nothing changed'; return Done 1
     }
@@ -204,7 +206,14 @@ function Invoke-SrMain {
         if ($InstallerUrl -notmatch '\Ahttps://[^/@\s]+/\S+\z') { Say 'refused: InstallerUrl must be https without userinfo'; return Done 1 }
         $dir = & $script:SrNewWorkDir
         $exe = Join-Path $dir ([IO.Path]::GetFileName(([Uri]$InstallerUrl).AbsolutePath))
-        & $script:SrDownload $InstallerUrl $exe
+        # Three tries for any download error: a wrong file is caught by the hash check below, not here.
+        for ($n = 1; $n -le 3; $n++) {
+            try { & $script:SrDownload $InstallerUrl $exe; break } catch {
+                Say "download try $n failed: $($_.Exception.GetType().Name)"
+                if ($n -eq 3) { Say 'refused: download failed; nothing changed'; return Done 1 }
+                & $script:SrSleep 10
+            }
+        }
         Say "downloaded $([IO.Path]::GetFileName($exe))"
     }
     if (-not (Test-Path -LiteralPath $exe) -or (& $script:SrFileSha256 $exe) -cne $InstallerSha256) {

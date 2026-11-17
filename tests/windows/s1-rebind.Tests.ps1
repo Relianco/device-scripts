@@ -182,6 +182,17 @@ foreach ($u in 'http://resources.example.com/a.zip', 'https://user@resources.exa
 Reset
 $r = Rein -InstallerPath $PSCommandPath
 Assert ($r.ExitCode -eq 1 -and $script:Installs.Count -eq 0) 'both InstallerPath and InstallerUrl refused'
+# Download: two failures then success installs; three failures change nothing.
+Reset
+$script:Config = $bound
+$script:UpgradeTakes = $true
+$script:SrDownload = { param($u, $p) $script:Downloads++; if ($script:Downloads -lt 3) { throw [Net.WebException]::new('timeout') }; Set-Content -LiteralPath $p -Value 'zip' }
+$r = Rein
+Assert ($r.ExitCode -eq 0 -and $script:Downloads -eq 3 -and ($script:Installs -join ',') -eq '-t') 'download retried'
+Reset
+$script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('timeout') }
+$r = Rein -AllowUninstall true
+Assert ($r.ExitCode -eq 1 -and $script:Downloads -eq 3 -and $script:Installs.Count -eq 0) 'download fails after three tries'
 Reset; $script:SrFileSha256 = { param($p) 'b' * 64 }
 $r = Rein -AllowUninstall true
 Assert ($r.ExitCode -eq 1 -and $script:Installs.Count -eq 0 -and $script:Downloads -eq 1) 'download hash mismatch refused'

@@ -246,7 +246,6 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 
 One module per file under `windows/jobs/`.
 
-- `s1-installer-locate`: read only. Reports SentinelOne uninstall entries, pending reboot, the RMM's cached SentinelOne installer (path, version, signer, SHA256), RMM log lines about SentinelOne, the component download URL, and Microsoft Defender's state.
 - `scansnap-update-prompts`: stops ScanSnap Online Update from prompting staff who cannot install updates. It marks the watcher's startup entry disabled and stops a running watcher. A machine without ScanSnap reports `compliant`.
 
 ### Pin records
