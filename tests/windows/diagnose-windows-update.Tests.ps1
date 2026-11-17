@@ -96,13 +96,19 @@ try {
 
     # Bounds: bytes, time and the code table.
     [IO.File]::WriteAllText((Join-Path $cbs 'CBS.log'), (@(1..10000 | ForEach-Object { "2026-11-12 07:31:00, Error CBS failure 0x8007{0:x4}" -f ($_ % 400) }) -join "`r`n"))
+    $saved = [IO.File]::ReadAllBytes((Join-Path $cbs 'CBS.log'))
     $script:ScanMaxBytes = 4096
     $r = Read-WuServicingHistory ([Diagnostics.Stopwatch]::StartNew())
     Assert ($r.files[0].stoppedBy -eq 'bytes' -and -not $r.files[0].complete) 'byte cap stops the scan and says so'
     Assert ($r.files[0].lines -lt 100) 'byte cap is checked on every line, not every 4096'
     Assert (@($r.files | Select-Object -Skip 1 | Where-Object { $_.Contains('status') -and $_.status -eq 'byteBudget' }).Count -eq 3) 'files after the byte cap are skipped, never opened'
+    # The budget is file bytes, not characters: a UTF-16 log of 200,000 bytes is 100,000 characters.
+    $script:ScanMaxBytes = 150000
+    [IO.File]::WriteAllText((Join-Path $cbs 'CBS.log'), (@(1..1000 | ForEach-Object { '2026-11-12 07:31:00, Info CBS ' + ('u' * 66) }) -join "`r`n"), [Text.Encoding]::Unicode)
+    $r = Read-WuServicingHistory ([Diagnostics.Stopwatch]::StartNew())
+    Assert ($r.files[0].stoppedBy -eq 'bytes') 'a UTF-16 log is counted in bytes'
+    $script:ScanMaxBytes = 4096
     # Long lines: fewer than 4096 of them still stop at the cap.
-    $saved = [IO.File]::ReadAllBytes((Join-Path $cbs 'CBS.log'))
     [IO.File]::WriteAllText((Join-Path $cbs 'CBS.log'), (@(1..50 | ForEach-Object { '2026-11-12 07:31:00, Error CBS 0x80070002 ' + ('z' * 2000) }) -join "`r`n"))
     $r = Read-WuServicingHistory ([Diagnostics.Stopwatch]::StartNew())
     Assert ($r.files[0].stoppedBy -eq 'bytes' -and $r.files[0].lines -le 3) 'long lines stop at the cap'
@@ -143,6 +149,12 @@ Assert $threw 'nothing to trim: fail rather than print too much'
     Assert ($k.values.Secretish -eq 'omitted' -and $k.values.Blob -eq 'omitted' -and $k.moreNames -eq 0) 'other values named, not read out'
     $k = Read-WuKey 'HKLM:\x' -Max 2
     Assert ($k.values.Count -eq 2 -and $k.moreNames -eq 3) 'name cap'
+    # A report of dictionaries only (Policy) is trimmed too: values move to moreNames, nothing is lost silently.
+    $wide = [ordered]@{ status = 'collected'; policy = [ordered]@{} }
+    foreach ($n in 1..5) { $v = [ordered]@{}; foreach ($i in 1..25) { $v[('LongPolicyValueName' + ('x' * 50) + $i)] = $i }; $wide.policy["k$n"] = [ordered]@{ status = 'read'; values = $v; moreNames = 0 } }
+    $json = ConvertTo-WuJson $wide -MaxBytes 7600
+    $o = $json | ConvertFrom-Json
+    Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 7600 -and $o.truncated -and $o.policy.k1.moreNames -gt 0 -and $o.policy.k1.values.PSObject.Properties.Name -contains ('LongPolicyValueName' + ('x' * 50) + '1')) 'dictionary values trimmed into moreNames'
     $json = Invoke-WindowsUpdateDiagnostic -Section Policy
     Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 7600 -and ($json | ConvertFrom-Json -DateKind String).policy.windowsUpdate.values.WUServer -eq 'host:wsus.example.invalid') 'Policy section'
     function Test-Path { param($LiteralPath, $ErrorAction) $false }

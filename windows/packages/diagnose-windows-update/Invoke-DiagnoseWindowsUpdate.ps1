@@ -331,11 +331,10 @@ function Read-WuLogDigest {
         $f.sizeBytes = $stream.Length; $f.lastWriteUtc = Get-WuUtc ([IO.File]::GetLastWriteTimeUtc($Path))
         # shortcut: ReadLine has no per-line cap, a multi-megabyte line without a newline is held whole; upgrade if a real log ever has one.
         $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true, 65536)
-        $lines = 0L; $errorLines = 0L; $ts = $null; $firstTs = $null; $f.stoppedBy = $null; $read = 0L
+        $lines = 0L; $errorLines = 0L; $ts = $null; $firstTs = $null; $f.stoppedBy = $null
         while ($null -ne ($line = $reader.ReadLine())) {
-            # Every line counts against the shared budget (characters plus CRLF: bytes for the ASCII these logs hold).
-            $read += $line.Length + 2
-            if ($State.BytesRead + $read -gt $script:ScanMaxBytes) { $f.stoppedBy = 'bytes'; break }
+            # File bytes, whatever the encoding: the stream position runs at most one 64 KiB reader buffer ahead of the line.
+            if ($State.BytesRead + $stream.Position -gt $script:ScanMaxBytes) { $f.stoppedBy = 'bytes'; break }
             $lines++
             if (($lines -band 4095) -eq 0 -and $State.Clock.Elapsed.TotalSeconds -gt $script:ScanSeconds) { $f.stoppedBy = 'time'; break }
             # CBS and DISM lines start 'yyyy-MM-dd HH:mm:ss,'; a continuation line keeps the last stamp.
@@ -368,7 +367,7 @@ function Read-WuLogDigest {
         }
         $f.lines = $lines; $f.errorLines = $errorLines; $f.firstTime = $firstTs; $f.lastTime = $ts
         $f.complete = $null -eq $f.stoppedBy
-        $State.BytesRead += $read
+        $State.BytesRead += $stream.Position
         return $f
     } catch { $f.status = 'unavailable'; $f.error = $_.Exception.GetType().Name; return $f }
     finally { if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() } }
@@ -411,13 +410,13 @@ function Read-WuServicingHistory {
     return $r
 }
 
-# Arrays held by a dictionary key, anywhere in the report, with their serialized size.
+# Arrays held by a dictionary key, and Read-WuKey 'values' dictionaries, anywhere in the report, with their serialized size.
 function Get-WuLists {
     param($Value)
     if ($Value -is [Collections.IDictionary]) {
         foreach ($k in @($Value.Keys)) {
             $item = $Value[$k]
-            if ($item -is [array] -and $item.Count) { [pscustomobject]@{ Parent = $Value; Key = $k; Size = (ConvertTo-Json -InputObject $item -Depth 8 -Compress).Length } }
+            if (($item -is [array] -or ($k -eq 'values' -and $item -is [Collections.IDictionary])) -and $item.Count) { [pscustomobject]@{ Parent = $Value; Key = $k; Size = (ConvertTo-Json -InputObject $item -Depth 8 -Compress).Length } }
             Get-WuLists $item
         }
     } elseif ($Value -is [array]) { foreach ($x in $Value) { Get-WuLists $x } }
@@ -433,7 +432,11 @@ function ConvertTo-WuJson {
         $list = @(Get-WuLists $Report | Sort-Object Size -Descending) | Select-Object -First 1
         if (-not $list) { throw 'Report exceeds the output budget.' }
         $rows = $list.Parent[$list.Key]
-        $list.Parent[$list.Key] = @($rows | Select-Object -First ($rows.Count - 1))
+        if ($rows -is [Collections.IDictionary]) {
+            # A registry value dictionary loses its last name; moreNames keeps the count honest.
+            $rows.Remove(@($rows.Keys)[-1])
+            if ($list.Parent.Contains('moreNames')) { $list.Parent['moreNames'] = [long]$list.Parent['moreNames'] + 1 }
+        } else { $list.Parent[$list.Key] = @($rows | Select-Object -First ($rows.Count - 1)) }
         $json = $Report | ConvertTo-Json -Depth 8 -Compress
     }
     return $json
