@@ -1,6 +1,12 @@
 # Intune runs this file with no arguments.
-# Exit 0 when PDF-XChange PRO is installed at or above the pin. Exit 1 otherwise, so Intune
-# runs the install, which upgrades an older V10 or V11 in place.
+# Exit 0 when PDF-XChange PRO is installed at or above the pin AND this package's marker
+# (ProgramData\Relian\pdf-xchange\marker.txt, written by the install script only after the
+# licence key and machine policy are applied) agrees. Exit 1 otherwise, so Intune runs the install:
+# it upgrades an older V10 or V11 in place, and finishes a hand-installed or half-done copy.
+# The marker rules mirror Get-PdfXchangePlan (Install) in the install script; keep them in step.
+# The two policy values are not checked: the marker is written after they are set, and the install
+# script's plan exits 0 without touching them when the marker is right, so a policy check here
+# could only make Intune re-run a no-op forever.
 # 11.1.2 and 11.1.2.0 are one release. An empty publisher still counts.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -88,10 +94,53 @@ function Test-RelianPdfXchangeVersionAtPin {
     return $candidate.CompareTo($required) -ge 0
 }
 
+function Test-RelianPdfXchangeMarker {
+    param(
+        [string]$MarkerText,
+        [string]$InstalledText,
+        [string]$PinVersion
+    )
+    # Same as the install plan: at the pin the marker must equal the pin; vendor-newer needs a
+    # marker at or above the pin (the plan rewrites it to the installed version without a rerun).
+    $marker = Convert-RelianPdfXchangeVersionText -Text $MarkerText
+    $installed = Convert-RelianPdfXchangeVersionText -Text $InstalledText
+    $pin = Convert-RelianPdfXchangeVersionText -Text $PinVersion
+    foreach ($v in @($marker, $installed, $pin)) {
+        if ($v -isnot [version]) {
+            return $false
+        }
+    }
+    $pinCompare = Convert-RelianPdfXchangeComparableVersion -Version $pin
+    $markerCompare = (Convert-RelianPdfXchangeComparableVersion -Version $marker).CompareTo($pinCompare)
+    $installedCompare = (Convert-RelianPdfXchangeComparableVersion -Version $installed).CompareTo($pinCompare)
+    if ($installedCompare -eq 0) {
+        return $markerCompare -eq 0
+    }
+    return $markerCompare -ge 0
+}
+
+function Get-RelianPdfXchangeMarkerText {
+    param([string]$Root)
+    if ([string]::IsNullOrWhiteSpace($Root)) {
+        # Same path as Get-PdfXchangeDefaultMarkerRoot in the install script.
+        $base = $env:ProgramData
+        if ([string]::IsNullOrWhiteSpace($base)) {
+            $base = [Environment]::GetFolderPath('CommonApplicationData')
+        }
+        $Root = Join-Path $base 'Relian\pdf-xchange'
+    }
+    $path = Join-Path $Root 'marker.txt'
+    if (-not (Test-Path -LiteralPath $path)) {
+        return ''
+    }
+    return ([System.IO.File]::ReadAllText($path)).Trim()
+}
+
 function Test-RelianPdfXchangeEntry {
     param(
         $Entry,
-        [string]$PinVersion
+        [string]$PinVersion,
+        [string]$MarkerText = ''
     )
     $displayName = Get-RelianPdfXchangePropertyText -Object $Entry -Name 'DisplayName'
     if (-not (Test-RelianPdfXchangeX64EditionName -Name $displayName)) {
@@ -102,13 +151,17 @@ function Test-RelianPdfXchangeEntry {
         return $false
     }
     $displayVersion = Get-RelianPdfXchangePropertyText -Object $Entry -Name 'DisplayVersion'
-    return Test-RelianPdfXchangeVersionAtPin -VersionText $displayVersion -PinVersion $PinVersion
+    if (-not (Test-RelianPdfXchangeVersionAtPin -VersionText $displayVersion -PinVersion $PinVersion)) {
+        return $false
+    }
+    return Test-RelianPdfXchangeMarker -MarkerText $MarkerText -InstalledText $displayVersion -PinVersion $PinVersion
 }
 
 function Test-RelianPdfXchangeInstalled {
     param(
         $Entries,
-        [string]$PinVersion = '11.1.2.0'
+        [string]$PinVersion = '11.1.2.0',
+        [string]$MarkerText = ''
     )
     foreach ($entry in @($Entries)) {
         if ($null -eq $entry) {
@@ -117,7 +170,7 @@ function Test-RelianPdfXchangeInstalled {
         # One unreadable entry must not hide another entry that matches.
         $matched = $false
         try {
-            $matched = [bool](Test-RelianPdfXchangeEntry -Entry $entry -PinVersion $PinVersion)
+            $matched = [bool](Test-RelianPdfXchangeEntry -Entry $entry -PinVersion $PinVersion -MarkerText $MarkerText)
         } catch {
             $matched = $false
         }
@@ -163,7 +216,7 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1') {
 
 $present = $false
 try {
-    $present = [bool](Test-RelianPdfXchangeInstalled -Entries @(Get-RelianPdfXchangeUninstallEntries))
+    $present = [bool](Test-RelianPdfXchangeInstalled -Entries @(Get-RelianPdfXchangeUninstallEntries) -MarkerText (Get-RelianPdfXchangeMarkerText))
 } catch {
     $present = $false
 }
