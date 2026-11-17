@@ -381,8 +381,9 @@ function Read-WuServicingHistory {
     $targets = @(@('cbs', (Join-Path $cbsDir 'CBS.log')), @('dism', (Join-Path $win 'Logs\DISM\dism.log')))
     $r = [ordered]@{}
     try {
-        # CbsPersist_<yyyyMMddHHmmss>: newest first, so a time stop drops the oldest history.
-        $persist = @(Get-ChildItem -LiteralPath $cbsDir -Filter 'CbsPersist_*.log' -File -ErrorAction Stop | Sort-Object Name -Descending | Select-Object -First 16)
+        # CbsPersist_<yyyyMMddHHmmss>: all of them, newest first; only the time and byte budgets stop the scan, and each skipped file is listed.
+        $persist = @(Get-ChildItem -LiteralPath $cbsDir -Filter 'CbsPersist_*.log' -File -ErrorAction Stop | Sort-Object Name -Descending)
+        $r.persistLogs = $persist.Count
         foreach ($p in $persist) { $targets += , @(('persist-' + ($p.BaseName -replace '\ACbsPersist_', '')), $p.FullName) }
         $cabs = @(Get-ChildItem -LiteralPath $cbsDir -Filter 'CbsPersist_*.cab' -File -ErrorAction Stop | Sort-Object Name)
         $r.archives = [ordered]@{ count = $cabs.Count; oldest = $(if ($cabs.Count) { $cabs[0].BaseName -replace '\ACbsPersist_', '' } else { $null }); newest = $(if ($cabs.Count) { $cabs[-1].BaseName -replace '\ACbsPersist_', '' } else { $null }); note = 'not opened' }
