@@ -79,6 +79,10 @@ Reset
 $script:BindConfig = $unbound
 $r = M -SiteToken $token -AllowUninstall true -InstallerPath $PSCommandPath -InstallerSha256 ('b' * 64)
 Assert ($r.ExitCode -eq 1 -and $script:Installs.Count -eq 0) 'hash mismatch removes nothing'
+Reset
+$script:BindConfig = $unbound
+$r = M -SiteToken $token -AllowUninstall true -InstallerPath $PSCommandPath -InstallerSha256 ('A' * 64)
+Assert ($r.ExitCode -eq 1 -and $script:Installs.Count -eq 0) 'uppercase hash refused (lowercase hex only)'
 
 # AllowUninstall with a verified installer: clean then install.
 Reset

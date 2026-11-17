@@ -139,8 +139,8 @@ function Invoke-SrMain {
     if (Test-SrBound $b $tok.Url) { Say 'bound: agent should register within minutes; check the console'; return Done 0 }
 
     if ($AllowUninstall -ne 'true') { Say 'not bound; uninstall not allowed (pass AllowUninstall true with InstallerPath and InstallerSha256)'; return Done 1 }
-    if (-not $InstallerPath -or -not (Test-Path -LiteralPath $InstallerPath) -or $InstallerSha256 -notmatch '\A[0-9a-f]{64}\z' -or
-        (& $script:SrFileSha256 $InstallerPath) -ne $InstallerSha256) {
+    if (-not $InstallerPath -or -not (Test-Path -LiteralPath $InstallerPath) -or $InstallerSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
+        (& $script:SrFileSha256 $InstallerPath) -cne $InstallerSha256) {
         Say 'refused: uninstall needs an existing InstallerPath whose SHA256 matches InstallerSha256'; return Done 1
     }
     $c = & $script:SrRunInstaller $InstallerPath @('-c', '-t', $SiteToken)
