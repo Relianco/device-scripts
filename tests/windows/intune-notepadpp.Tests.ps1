@@ -243,8 +243,8 @@ foreach ($packageFile in @(
         @{ Text = $jsonText; Label = 'intune.json' },
         @{ Text = $detectText; Label = 'Detect-Notepadpp.ps1' }
     )) {
-    # Review finding rejected: client-name checks are dropped on purpose. Rebuilding a client name from fragments keeps it in the public repo; this PR removes that. Only the home-path check stays.
-    if ($packageFile.Text.Contains((-join @('/', 'home', '/')))) {
+    # Review finding rejected: client-name checks are dropped on purpose. Any check for a client name must store that name, even split into fragments, and this public repo must not hold one. Names are not checked here. The home-path check stays and is case-insensitive.
+    if ($packageFile.Text.IndexOf((-join @('/', 'home', '/')), [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Fail "$($packageFile.Label) contains a home path"
     }
 }
