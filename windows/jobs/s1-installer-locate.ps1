@@ -6,6 +6,7 @@
 [CmdletBinding()]
 param([switch]$ReportOnly)
 $ErrorActionPreference = 'Continue'
+Set-StrictMode -Off  # the loader runs modules under Latest; optional registry values are read below
 $out = [Collections.Generic.List[string]]::new()
 function Add-Line([string]$s) {
     $s = ($s -replace '[A-Za-z0-9+/=_-]{40,}', '[redacted]') -replace '(?i)(site_?key|token|passphrase|password)\S*\s*[:=]\s*\S+', '$1=[redacted]'
@@ -47,8 +48,9 @@ Add-Line ("roots: " + ($roots -join '; '))
 
 $found = 0
 foreach ($r in $roots) {
-    foreach ($f in @(Get-ChildItem -LiteralPath $r -Recurse -File -Force -ErrorAction SilentlyContinue -Include '*.exe', '*.msi' |
-            Where-Object { $_.Name -match 'Sentinel|S1|Installer' -and $_.Length -gt 5MB } | Select-Object -First 15)) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $r -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.exe', '.msi' -and $_.Name -match 'Sentinel|S1|Installer' -and $_.Length -gt 5MB } | Select-Object -First 15)) {
+        try {
         $sig = Get-AuthenticodeSignature -LiteralPath $f.FullName -ErrorAction SilentlyContinue
         $signer = if ($sig -and $sig.SignerCertificate) { ($sig.SignerCertificate.Subject -split ',')[0] } else { '' }
         if ($signer -notmatch 'Sentinel' -and $f.Name -notmatch 'Sentinel') { continue }
@@ -57,12 +59,24 @@ foreach ($r in $roots) {
         Add-Line ("installer: {0} size={1} date={2:u} ver={3} sig={4} signer={5} sha256={6}" -f $f.FullName, $f.Length, $f.LastWriteTimeUtc, $ver,
             $(if ($sig) { $sig.Status } else { '' }), $signer, $(if ($h) { $h.ToLowerInvariant() } else { '' }))
         $found++
+        } catch { Add-Line ("installer: {0} unreadable: {1}" -f $f.FullName, $_.Exception.GetType().Name) }
     }
 }
 Add-Line "installers found: $found"
 
+# What protects the device if SentinelOne is removed: Defender state and policy.
+try {
+    $mp = Get-MpComputerStatus -ErrorAction Stop
+    Add-Line ("defender: amRunningMode={0} rtp={1} avEnabled={2} sigAge={3}" -f $mp.AMRunningMode, $mp.RealTimeProtectionEnabled, $mp.AntivirusEnabled, $mp.AntivirusSignatureAge)
+} catch { Add-Line ("defender: Get-MpComputerStatus failed: " + $_.Exception.GetType().Name) }
+$dp = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -ErrorAction SilentlyContinue
+Add-Line ("defenderPolicy: DisableAntiSpyware={0} DisableAntiVirus={1}" -f $dp.DisableAntiSpyware, $dp.DisableAntiVirus)
+foreach ($p in @(Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue)) {
+    Add-Line ("wsc: {0} state=0x{1:x}" -f $p.displayName, [int]$p.productState)
+}
+
 # Last S1-related lines of the RMM agent logs (the URL host is kept; query strings are cut).
-$logs = @(foreach ($r in $roots) { if ($r -match 'Ninja') { Get-ChildItem -LiteralPath $r -Recurse -File -Force -ErrorAction SilentlyContinue -Include '*.log', '*.txt' } }) |
+$logs = @(foreach ($r in $roots) { if ($r -match 'Ninja') { Get-ChildItem -LiteralPath $r -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.log', '.txt' } } }) |
     Sort-Object LastWriteTime -Descending | Select-Object -First 12
 Add-Line ("logs: " + (($logs | ForEach-Object { "$($_.FullName)@$($_.LastWriteTime.ToString('MM-dd'))" }) -join '; '))
 $hits = [Collections.Generic.List[string]]::new()
