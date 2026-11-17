@@ -142,7 +142,10 @@ function Get-PdfXchangePlan {
                 $write = $installedText
             }
         } elseif ($markerText -cne $pinText) {
-            $write = $pinText
+            # No marker means the licence step may never have finished (MSI ok, XCVault failed),
+            # or the app came from elsewhere. Run the install path again: msiexec is a no-op on the
+            # installed product, then the key and policy are applied and the marker written.
+            return New-PdfXchangePlan -RunInstaller 'install'
         }
         if ([string]::IsNullOrWhiteSpace($write)) {
             return New-PdfXchangePlan -ExitCode 0

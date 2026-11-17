@@ -151,7 +151,7 @@ $installRows = @(
         Pin = '2.0.0.0'
         Installed = '2.0.0.0'
         Marker = ''
-        Expect = (New-Expect -WriteMarker '2.0.0.0')
+        Expect = (New-Expect -RunInstaller 'install')
     }
     @{
         Label = 'vendor newer than pin'
@@ -186,7 +186,7 @@ $installRows = @(
         Pin = '26.04.00.0'
         Installed = '26.04'
         Marker = ''
-        Expect = (New-Expect -WriteMarker '26.4.0.0')
+        Expect = (New-Expect -RunInstaller 'install')
     }
     @{
         Label = 'vendor two-part newer than msi pin'
