@@ -167,7 +167,10 @@ function Invoke-SrMain {
     function Say([string]$s) { $out.Add((Protect-SrText $s)) }
     function Done([int]$code) { @{ ExitCode = $code; Lines = $out.ToArray() } }
 
+    # Repo rules: a URL with userinfo is refused first; an empty installer hash on a reinstall is the off switch.
+    if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Say 'refused: InstallerUrl contains userinfo'; return Done 1 }
     if ([string]::IsNullOrWhiteSpace($PinVersion)) { Say 'noPin: nothing done'; return Done 0 }
+    if ($Reinstall -eq 'true' -and $Section -ne 'Report' -and [string]::IsNullOrWhiteSpace($InstallerSha256)) { Say 'noPin: empty InstallerSha256; nothing done'; return Done 0 }
     $report = $Section -eq 'Report'
     if (-not $report -and $Action -ne 'Install') { Say "refused: action '$Action' (only Install binds; uninstall is -AllowUninstall)"; return Done 1 }
     $tok = $null
@@ -212,8 +215,7 @@ function Invoke-SrMain {
     }
 
     # The installer: a local file or a download, pinned by SHA256 and signed by SentinelOne.
-    # An empty InstallerSha256 is not an off switch: PinVersion is. Bind needs no installer, so a run
-    # that reaches this point asked for the installer and is refused (exit 1) without one.
+    # Reached after a failed bind with AllowUninstall: that run asked for the installer, so no hash is a refusal.
     if ($InstallerSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or [bool]$InstallerPath -eq [bool]$InstallerUrl) {
         Say 'refused: give one of InstallerPath or InstallerUrl, and a lowercase hex InstallerSha256; nothing changed'; return Done 1
     }

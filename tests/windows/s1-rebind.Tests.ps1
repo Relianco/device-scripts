@@ -194,6 +194,14 @@ Reset
 $script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('timed out', [Net.WebExceptionStatus]::Timeout) }
 $r = Rein -AllowUninstall true
 Assert ($r.ExitCode -eq 1 -and $script:Downloads -eq 3 -and $script:Installs.Count -eq 0) 'download fails after three tries'
+# Empty installer hash on a reinstall is the off switch; a userinfo URL is refused before anything, even when bound.
+Reset
+$r = M -SiteToken $token -Reinstall true -InstallerUrl $zipUrl -InstallerSha256 ''
+Assert ($r.ExitCode -eq 0 -and $script:Calls.Count -eq 0 -and $script:Downloads -eq 0 -and $script:Installs.Count -eq 0) 'empty installer hash does nothing'
+Reset
+$script:Config = $bound
+$r = M -SiteToken $token -InstallerUrl 'https://u:p@resources.example.com/a.zip' -InstallerSha256 ('a' * 64)
+Assert ($r.ExitCode -eq 1 -and $script:Calls.Count -eq 0 -and $script:Downloads -eq 0) 'userinfo url refused first, even when bound'
 # A permanent failure (here: not a transient status) is tried once.
 Reset
 $script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('forbidden', [Net.WebExceptionStatus]::ProtocolError) }
