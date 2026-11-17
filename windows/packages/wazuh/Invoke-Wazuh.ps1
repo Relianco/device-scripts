@@ -831,6 +831,11 @@ function Invoke-WazuhEnrollAction {
     if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
         return 0
     }
+    # Refused even when the agent is present and nothing would be downloaded.
+    if (Test-WazuhUrlHasUserInfo -Url $InstallerUrl) {
+        Add-WazuhError -Message 'refusing a URL that contains userinfo for installer'
+        return 1
+    }
     if ($Action -ne 'Install') {
         Add-WazuhError -Message 'enroll mode only supports Install'
         return 1

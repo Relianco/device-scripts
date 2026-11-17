@@ -86,10 +86,11 @@ function Invoke-EnrollCase {
     param(
         [string]$Action = 'Install',
         [string]$Floor = $floor,
-        [string]$Sha256 = $script:GoodSha
+        [string]$Sha256 = $script:GoodSha,
+        [string]$Url = 'https://example.invalid/wazuh.msi'
     )
     # Every stream is captured so a leak through output, warning or host shows up.
-    $script:LastOutput = (Invoke-WazuhEnrollAction -Action $Action -PinVersion $pin -FloorVersion $Floor -InstallerUrl 'https://example.invalid/wazuh.msi' -InstallerSha256 $Sha256 -CancelPath '' *>&1 | Out-String)
+    $script:LastOutput = (Invoke-WazuhEnrollAction -Action $Action -PinVersion $pin -FloorVersion $Floor -InstallerUrl $Url -InstallerSha256 $Sha256 -CancelPath '' *>&1 | Out-String)
     $code = [int](($script:LastOutput.Trim() -split "`n")[-1])
     return $code
 }
@@ -209,6 +210,16 @@ $code = Invoke-EnrollCase
 if ($code -ne 1 -or $script:MsiCalls.Count -ne 0 -or $script:AuthdWrites.Count -ne 0 -or $script:ServiceStarts.Count -ne 0) { Fail 'hash mismatch did not abort' }
 if (-not (($script:WazuhErrorLog -join ';').Contains('hash mismatch'))) { Fail 'hash mismatch was not reported' }
 Assert-NoSecretLeak -Label 'hash mismatch'
+# A URL with userinfo exits 1 even when no download is needed.
+$userInfoUrl = -join @('https://', 'user', '@', 'example.invalid/wazuh.msi')
+foreach ($installed in @('', '4.14.9')) {
+    Reset-EnrollCase -Installed $installed -Keys 120
+    $code = Invoke-EnrollCase -Url $userInfoUrl
+    if ($code -ne 1 -or $script:DownloadCount -ne 0 -or $script:MsiCalls.Count -ne 0 -or $script:ServiceStarts.Count -ne 0) {
+        Fail "userinfo URL with installed '$installed' was not refused"
+    }
+}
+
 # An empty hash is the repo-wide off switch: exit 0 and touch nothing, for every action and state.
 foreach ($emptyCase in @(@('Install', '', 0), @('Install', '4.14.9', 0), @('Uninstall', '4.14.9', 0))) {
     Reset-EnrollCase -Installed $emptyCase[1] -Keys $emptyCase[2]

@@ -261,8 +261,8 @@ if ($null -eq $installArgs -or $installArgs.Count -ne 4 -or
     Fail "install arguments $($installArgs -join ' ')"
 }
 # Start-Process joins the array with spaces, so a path with a space must stay one quoted argument.
-$spacedArgs = Get-WazuhMsiArgumentList -Mode 'install' -InstallerPath 'C:\Users\A B\Temp\wazuh.msi' -ProductCode ''
-if (($spacedArgs -join ' ') -cne '/i "C:\Users\A B\Temp\wazuh.msi" /qn /norestart') {
+$spacedArgs = Get-WazuhMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\A B\wazuh.msi' -ProductCode ''
+if (($spacedArgs -join ' ') -cne '/i "C:\cache\A B\wazuh.msi" /qn /norestart') {
     Fail "spaced installer path arguments $($spacedArgs -join ' ')"
 }
 $removeCode = '{11111111-2222-3333-4444-555555555555}'
