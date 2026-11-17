@@ -124,8 +124,8 @@ if (Test-RelianWauInstalled -Installed $pc -Policy @{ WAU_UseWhiteList = 0 } -Ed
 if (-not (Test-RelianWauInstalled -Installed $pc -Policy @{ WAU_DisableAutoUpdate = 1 } -EditionId 'Professional')) { Fail 'an agreeing policy failed detection' }
 if (Test-RelianWauInstalled -Installed $null -Policy $pc -EditionId 'Professional') { Fail 'policy values alone were an install' }
 
-# No client data in committed files.
-$banned = @(('Le' + 'ague'), ('Sit' + 'ka'), ('/' + 'home' + '/'))
+# No home-directory path in committed files. Client names are not listed here, because a list of them is client data.
+$banned = @(('/' + 'home' + '/'))
 foreach ($path in @($jsonPath, $detectPath, $installerPath, $releasePath, $PSCommandPath)) {
     $text = Get-Content -LiteralPath $path -Raw -Encoding utf8
     foreach ($word in $banned) {
