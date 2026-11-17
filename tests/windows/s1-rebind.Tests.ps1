@@ -186,13 +186,19 @@ Assert ($r.ExitCode -eq 1 -and $script:Installs.Count -eq 0) 'both InstallerPath
 Reset
 $script:Config = $bound
 $script:UpgradeTakes = $true
-$script:SrDownload = { param($u, $p) $script:Downloads++; if ($script:Downloads -lt 3) { throw [Net.WebException]::new('timeout') }; Set-Content -LiteralPath $p -Value 'zip' }
+$script:SrDownload = { param($u, $p) $script:Downloads++
+    if ($script:Downloads -lt 3) { throw [Net.WebException]::new('timed out', [Net.WebExceptionStatus]::Timeout) }; Set-Content -LiteralPath $p -Value 'zip' }
 $r = Rein
 Assert ($r.ExitCode -eq 0 -and $script:Downloads -eq 3 -and ($script:Installs -join ',') -eq '-t') 'download retried'
 Reset
-$script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('timeout') }
+$script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('timed out', [Net.WebExceptionStatus]::Timeout) }
 $r = Rein -AllowUninstall true
 Assert ($r.ExitCode -eq 1 -and $script:Downloads -eq 3 -and $script:Installs.Count -eq 0) 'download fails after three tries'
+# A permanent failure (here: not a transient status) is tried once.
+Reset
+$script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('forbidden', [Net.WebExceptionStatus]::ProtocolError) }
+$r = Rein -AllowUninstall true
+Assert ($r.ExitCode -eq 1 -and $script:Downloads -eq 1 -and $script:Installs.Count -eq 0) 'permanent download failure not retried'
 Reset; $script:SrFileSha256 = { param($p) 'b' * 64 }
 $r = Rein -AllowUninstall true
 Assert ($r.ExitCode -eq 1 -and $script:Installs.Count -eq 0 -and $script:Downloads -eq 1) 'download hash mismatch refused'

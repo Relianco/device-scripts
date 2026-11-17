@@ -143,6 +143,22 @@ function Test-SrBound {
     $Binding.Site -and $Binding.Mgmt -match '\Ahttps://' -and (-not $Url -or $Binding.Mgmt.TrimEnd('/') -eq $Url)
 }
 
+# Timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504. Same classes as Invoke-RelianJob.
+function Test-SrRetryable {
+    param($Exception)
+    $response = $Exception.PSObject.Properties['Response']
+    if ($response -and $response.Value) { return @(408, 429, 500, 502, 503, 504) -contains [int]$response.Value.StatusCode }
+    $webTransient = @('Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure')
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'SecureConnectionError', 'ResponseEnded')
+    for ($c = $Exception; $null -ne $c; $c = $c.InnerException) {
+        if ($c -is [TimeoutException] -or $c -is [Threading.Tasks.TaskCanceledException] -or $c -is [Net.Sockets.SocketException]) { return $true }
+        if ($c -is [Net.WebException] -and $webTransient -contains [string]$c.Status) { return $true }
+        $request = $c.PSObject.Properties['HttpRequestError']
+        if ($request -and $requestTransient -contains [string]$request.Value) { return $true }
+    }
+    $false
+}
+
 function Invoke-SrMain {
     param([string]$Action, [string]$PinVersion, [string]$Section, [string]$SiteToken, [string]$AllowUninstall,
         [string]$InstallerPath, [string]$InstallerSha256, [string]$InstallerUrl = '', [string]$Reinstall = '', [string]$WaitSeconds = '180')
@@ -206,11 +222,11 @@ function Invoke-SrMain {
         if ($InstallerUrl -notmatch '\Ahttps://[^/@\s]+/\S+\z') { Say 'refused: InstallerUrl must be https without userinfo'; return Done 1 }
         $dir = & $script:SrNewWorkDir
         $exe = Join-Path $dir ([IO.Path]::GetFileName(([Uri]$InstallerUrl).AbsolutePath))
-        # Three tries for any download error: a wrong file is caught by the hash check below, not here.
+        # Up to three tries, only for transient failures; a wrong file is caught by the hash check below.
         for ($n = 1; $n -le 3; $n++) {
             try { & $script:SrDownload $InstallerUrl $exe; break } catch {
                 Say "download try $n failed: $($_.Exception.GetType().Name)"
-                if ($n -eq 3) { Say 'refused: download failed; nothing changed'; return Done 1 }
+                if ($n -eq 3 -or -not (Test-SrRetryable $_.Exception)) { Say 'refused: download failed; nothing changed'; return Done 1 }
                 & $script:SrSleep 10
             }
         }
