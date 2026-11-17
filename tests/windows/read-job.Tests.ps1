@@ -365,7 +365,7 @@ $hostExe = (Get-Process -Id $PID).Path
 $env:RELIAN_DEPLOY_TEST = $null
 $entryCases = @(
     @((ConvertTo-B64 '{"Section":"-x"}'), $fakeSha, 'bad argument value'),
-    @('', 'nothex', 'package hash missing or malformed')
+    @('e30=', 'nothex', 'package hash missing or malformed')  # not '': 5.1 drops an empty native argument
 )
 foreach ($c in $entryCases) {
     $out = & $hostExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $loaderPath -PackageUrl (Get-PkgUrl) -PackageSha256 $c[1] -Job 'gpo-evidence' -JobArguments $c[0] -RequestId $rid
