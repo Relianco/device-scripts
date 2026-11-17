@@ -167,10 +167,11 @@ function Invoke-SrMain {
     function Say([string]$s) { $out.Add((Protect-SrText $s)) }
     function Done([int]$code) { @{ ExitCode = $code; Lines = $out.ToArray() } }
 
-    # Repo rules: a URL with userinfo is refused first; an empty installer hash on a reinstall is the off switch.
-    if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Say 'refused: InstallerUrl contains userinfo'; return Done 1 }
+    # Off switches first, then a URL with userinfo is refused before any other work.
+    # An empty InstallerSha256 is an off switch only for a reinstall: a bind-only run passes no installer at all.
     if ([string]::IsNullOrWhiteSpace($PinVersion)) { Say 'noPin: nothing done'; return Done 0 }
     if ($Reinstall -eq 'true' -and $Section -ne 'Report' -and [string]::IsNullOrWhiteSpace($InstallerSha256)) { Say 'noPin: empty InstallerSha256; nothing done'; return Done 0 }
+    if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Say 'refused: InstallerUrl contains userinfo'; return Done 1 }
     $report = $Section -eq 'Report'
     if (-not $report -and $Action -ne 'Install') { Say "refused: action '$Action' (only Install binds; uninstall is -AllowUninstall)"; return Done 1 }
     $tok = $null
