@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 function Assert($Condition,$Label) { if (-not $Condition) { throw "FAIL $Label" } }
 $root=Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $env:RELIAN_DEPLOY_TEST='1'
-. (Join-Path $root 'windows/packages/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1')
+. (Join-Path $root 'windows/read/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1')
 $script:sensitive=[guid]::NewGuid().ToString('n')
 $script:volume=[pscustomobject]@{ConversionStatus=1;ProtectionStatus=1;VolumeType=0;KeyProtector=$script:sensitive}
 $script:volume | Add-Member -NotePropertyName ('Recovery' + 'Password') -NotePropertyValue $script:sensitive

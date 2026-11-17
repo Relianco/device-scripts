@@ -202,40 +202,105 @@ if ($shortCompare.CompareTo($fullCompare) -ne 0) {
 $pinName = 'PDF-XChange PRO'
 $v11Publisher = 'PDF-XChange Co Ltd.'
 $v10Publisher = 'Tracker Software Products (Canada) Ltd.'
-if (-not (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v11Publisher -DisplayVersion '11.1.2.0'))) {
+$markerPin = '11.1.2.0'
+if (-not (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v11Publisher -DisplayVersion '11.1.2.0'))) {
     Fail 'PRO at the pin was absent'
 }
-if (-not (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v11Publisher -DisplayVersion (@(11, 2, 0, 0) -join '.')))) {
+if (-not (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v11Publisher -DisplayVersion (@(11, 2, 0, 0) -join '.')))) {
     Fail 'a version above the pin was absent'
 }
 # Older installs must read as absent so Intune runs the in-place upgrade.
 foreach ($old in @(@('10.6.0.396', $v10Publisher), @('10.3.0.386', $v10Publisher), @((@(11, 0, 1, 0) -join '.'), $v11Publisher))) {
-    if (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $old[1] -DisplayVersion $old[0])) {
+    if (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $old[1] -DisplayVersion $old[0])) {
         Fail "$($old[0]) was present"
     }
 }
-if (-not (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v10Publisher -DisplayVersion '11.1.2.0'))) {
+if (-not (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v10Publisher -DisplayVersion '11.1.2.0'))) {
     Fail 'the Tracker Software publisher was not accepted'
 }
 foreach ($otherName in @('PDF-XChange Editor', 'PDF-XChange PRO 11', 'pdf-xchange pro')) {
-    if (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $otherName -Publisher $v11Publisher -DisplayVersion '11.1.2.0')) {
+    if (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $otherName -Publisher $v11Publisher -DisplayVersion '11.1.2.0')) {
         Fail "'$otherName' counted as PRO"
     }
 }
-if (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher 'Someone Else' -DisplayVersion '11.1.2.0')) {
+if (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher 'Someone Else' -DisplayVersion '11.1.2.0')) {
     Fail 'publisher Someone Else was present'
 }
-if (-not (Test-RelianPdfXchangeInstalled -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher '' -DisplayVersion '11.1.2.0'))) {
+if (-not (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher '' -DisplayVersion '11.1.2.0'))) {
     Fail 'empty publisher at the pin was absent'
 }
 $mixed = @(
     (New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher 'Someone Else' -DisplayVersion '11.1.2.0'),
     (New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher '' -DisplayVersion '11.1.2.0')
 )
-if (-not (Test-RelianPdfXchangeInstalled -Entries $mixed)) {
+if (-not (Test-RelianPdfXchangeInstalled -MarkerText $markerPin -Entries $mixed)) {
     Fail 'a matching entry was hidden by another publisher'
 }
 
+
+# A hand-installed copy has no marker: it must read as absent so Intune runs the install, which
+# applies the licence key and machine policy. Same for a stale or unreadable marker.
+# Split like the pin scanner below expects: only the pin itself may look like an address.
+$newer = @(11, 2, 0, 0) -join '.'
+$older = @(11, 0, 1, 0) -join '.'
+$atPin = @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v11Publisher -DisplayVersion '11.1.2.0')
+$aboveEntry = @(New-PdfXchangeDetectEntry -DisplayName $pinName -Publisher $v11Publisher -DisplayVersion $newer)
+foreach ($bad in @('', '   ', $older, $newer, 'garbage')) {
+    if (Test-RelianPdfXchangeInstalled -MarkerText $bad -Entries $atPin) {
+        Fail "installed at the pin with marker '$bad' read as installed"
+    }
+}
+if (Test-RelianPdfXchangeInstalled -Entries $atPin) {
+    Fail 'installed at the pin with no marker read as installed'
+}
+if (Test-RelianPdfXchangeInstalled -Entries $aboveEntry) {
+    Fail 'vendor-newer with no marker read as installed'
+}
+if (Test-RelianPdfXchangeInstalled -MarkerText $older -Entries $aboveEntry) {
+    Fail 'vendor-newer with a marker below the pin read as installed'
+}
+foreach ($ok in @('11.1.2', $newer, "$newer`r`n")) {
+    if (-not (Test-RelianPdfXchangeInstalled -MarkerText $ok -Entries $aboveEntry)) {
+        Fail "vendor-newer with marker '$ok' read as absent"
+    }
+}
+if (-not (Test-RelianPdfXchangeInstalled -MarkerText '11.1.2' -Entries $atPin)) {
+    Fail 'marker 11.1.2 and pin 11.1.2.0 are one release'
+}
+
+# The marker path must be the one the install script writes, and an unreadable root is no marker.
+$markerDir = Join-Path ([System.IO.Path]::GetTempPath()) ('pdfx-detect-' + [guid]::NewGuid().ToString('n'))
+New-Item -ItemType Directory -Path $markerDir -Force | Out-Null
+if ((Get-RelianPdfXchangeMarkerText -Root $markerDir) -ne '') {
+    Fail 'missing marker file did not read as empty'
+}
+[System.IO.File]::WriteAllText((Join-Path $markerDir 'marker.txt'), "11.1.2.0`n")
+if ((Get-RelianPdfXchangeMarkerText -Root $markerDir) -ne '11.1.2.0') {
+    Fail 'marker.txt was not read'
+}
+$setupText = Get-Content -LiteralPath (Join-Path $packageDir 'Invoke-PdfXchange.ps1') -Raw -Encoding utf8
+if (-not $setupText.Contains("'Relian\pdf-xchange'") -or -not $detectText.Contains("'Relian\pdf-xchange'") -or -not $detectText.Contains("'marker.txt'")) {
+    Fail 'detection and install disagree on the marker path'
+}
+
+# End to end as Intune runs it: no arguments, marker location from ProgramData.
+$savedProgramData = $env:ProgramData
+$env:ProgramData = Join-Path $markerDir 'pd'
+$env:RELIAN_DEPLOY_TEST = '0'
+try {
+    # Only the marker leg: the registry is absent on non-Windows runners, so detection exits 1 either way.
+    if ((Get-RelianPdfXchangeMarkerText) -ne '') {
+        Fail 'default marker root should be empty here'
+    }
+    New-Item -ItemType Directory -Path (Join-Path $env:ProgramData 'Relian\pdf-xchange') -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $env:ProgramData 'Relian\pdf-xchange\marker.txt'), '11.1.2.0')
+    if ((Get-RelianPdfXchangeMarkerText) -ne '11.1.2.0') {
+        Fail 'default marker root did not resolve to ProgramData\Relian\pdf-xchange'
+    }
+} finally {
+    $env:ProgramData = $savedProgramData
+    $env:RELIAN_DEPLOY_TEST = '1'
+}
 $sampleAddress = (@(10, 1, 2, 3) -join '.')
 if (-not (Test-IntuneTextHasIpv4 -Text "prefix $sampleAddress suffix")) {
     Fail 'ipv4 scanner missed an address'

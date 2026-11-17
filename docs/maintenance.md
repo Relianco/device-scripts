@@ -290,7 +290,7 @@ The old Run Windows Cleanup automation started Disk Cleanup without checking for
 
 ## Retrieve stored evidence
 
-`windows/packages/maintenance-evidence/Invoke-MaintenanceEvidence.ps1` runs through the same pinned runner to read an existing report without starting maintenance. Set `Package` to `Storage` or `Update`, and `ReportId` to the exact Storage filename without `.json` or Update run-directory identifier from the original ReportPath. It accepts only those owned report locations; it does not accept arbitrary paths. The reader checks ownership, modification rights and reparse ancestors, refuses concurrent writers and caps report size at 16 MiB.
+`windows/read/maintenance-evidence/Invoke-MaintenanceEvidence.ps1` runs through the same pinned runner to read an existing report without starting maintenance. Set `Package` to `Storage` or `Update`, and `ReportId` to the exact Storage filename without `.json` or Update run-directory identifier from the original ReportPath. It accepts only those owned report locations; it does not accept arbitrary paths. The reader checks ownership, modification rights and reparse ancestors, refuses concurrent writers and caps report size at 16 MiB.
 
 Start with `Section='Index'`, then choose `Guards`, `Snapshot`, `Policy`, `ProfileIndex`, `Profiles`, `Scan`, `ActionSummary`, `Actions`, `Errors`, `Evidence` or `Omissions`. `Profiles` uses a zero-based `Ordinal`; `Page` defaults to zero. Each bounded JSON response contains a base64 UTF-8 JSON byte page, page count, offset, section length/hash and report length/hash. Concatenate decoded bytes in page order and verify the section SHA256 and length before parsing; all pages must refer to the same report hash. Do not review deletion candidates from aggregate counts alone.
 
