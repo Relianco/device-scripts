@@ -581,6 +581,16 @@ $script:InvokeMsiExec = {
     return [int]$process.ExitCode
 }
 
+# The link's own attributes, not its target's, so a link to a missing log is still found. Missing is $null.
+function Get-WauLinkAttributes {
+    param([string]$Path)
+    try {
+        return [System.IO.File]::GetAttributes($Path)
+    } catch [System.IO.FileNotFoundException], [System.IO.DirectoryNotFoundException] {
+        return $null
+    }
+}
+
 # WAU 2.12.0 no longer makes the IME log link its README describes. Intune "Collect diagnostics"
 # takes the IME Logs folder, so the package links WAU's log there.
 $script:SetImeLogLink = {
@@ -595,15 +605,24 @@ $script:SetImeLogLink = {
     }
     $link = Join-Path $imeLogs 'WAU-updates.log'
     $target = Join-Path $InstallLocation 'logs\updates.log'
-    $existing = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+    $existing = Get-WauLinkAttributes -Path $link
     if ($null -ne $existing) {
-        if (-not ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        if (-not ($existing -band [System.IO.FileAttributes]::ReparsePoint)) {
             # A real file of that name is someone's log. Leave it.
             return 'skipped'
         }
-        Remove-Item -LiteralPath $link -Force
+        [System.IO.File]::Delete($link)
     }
-    New-Item -ItemType SymbolicLink -Path $link -Target $target -Force | Out-Null
+    # WAU makes its log on its first run, after install (RUN_WAU=NO). Windows PowerShell 5.1's
+    # New-Item refuses a link to a missing target; mklink does not.
+    $cmd = 'cmd.exe'
+    if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    }
+    & $cmd /d /c mklink $link $target | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "mklink exited $LASTEXITCODE"
+    }
     return 'linked'
 }
 
@@ -613,9 +632,10 @@ $script:RemoveImeLogLink = {
         return
     }
     $link = Join-Path $programData 'Microsoft\IntuneManagementExtension\Logs\WAU-updates.log'
-    $existing = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
-    if ($null -ne $existing -and ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-        Remove-Item -LiteralPath $link -Force
+    # After msiexec /x the link points at nothing.
+    $existing = Get-WauLinkAttributes -Path $link
+    if ($null -ne $existing -and ($existing -band [System.IO.FileAttributes]::ReparsePoint)) {
+        [System.IO.File]::Delete($link)
     }
 }
 
