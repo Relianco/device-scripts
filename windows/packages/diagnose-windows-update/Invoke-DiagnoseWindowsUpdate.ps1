@@ -331,13 +331,13 @@ function Read-WuLogDigest {
         $f.sizeBytes = $stream.Length; $f.lastWriteUtc = Get-WuUtc ([IO.File]::GetLastWriteTimeUtc($Path))
         # shortcut: ReadLine has no per-line cap, a multi-megabyte line without a newline is held whole; upgrade if a real log ever has one.
         $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8, $true, 65536)
-        $lines = 0L; $errorLines = 0L; $ts = $null; $firstTs = $null; $f.stoppedBy = $null
+        $lines = 0L; $errorLines = 0L; $ts = $null; $firstTs = $null; $f.stoppedBy = $null; $read = 0L
         while ($null -ne ($line = $reader.ReadLine())) {
+            # Every line counts against the shared budget (characters plus CRLF: bytes for the ASCII these logs hold).
+            $read += $line.Length + 2
+            if ($State.BytesRead + $read -gt $script:ScanMaxBytes) { $f.stoppedBy = 'bytes'; break }
             $lines++
-            if (($lines -band 4095) -eq 0) {
-                if ($State.Clock.Elapsed.TotalSeconds -gt $script:ScanSeconds) { $f.stoppedBy = 'time'; break }
-                if ($State.BytesRead + $stream.Position -gt $script:ScanMaxBytes) { $f.stoppedBy = 'bytes'; break }
-            }
+            if (($lines -band 4095) -eq 0 -and $State.Clock.Elapsed.TotalSeconds -gt $script:ScanSeconds) { $f.stoppedBy = 'time'; break }
             # CBS and DISM lines start 'yyyy-MM-dd HH:mm:ss,'; a continuation line keeps the last stamp.
             if ($line.Length -ge 19 -and $line[4] -eq '-' -and $line[7] -eq '-' -and $line[10] -eq ' ' -and $line[13] -eq ':' -and [char]::IsDigit($line[0])) {
                 $ts = $line.Substring(0, 19)
@@ -368,7 +368,7 @@ function Read-WuLogDigest {
         }
         $f.lines = $lines; $f.errorLines = $errorLines; $f.firstTime = $firstTs; $f.lastTime = $ts
         $f.complete = $null -eq $f.stoppedBy
-        $State.BytesRead += $stream.Position
+        $State.BytesRead += $read
         return $f
     } catch { $f.status = 'unavailable'; $f.error = $_.Exception.GetType().Name; return $f }
     finally { if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() } }
@@ -392,6 +392,7 @@ function Read-WuServicingHistory {
     $r.files = @()
     foreach ($t in $targets) {
         if ($Clock.Elapsed.TotalSeconds -gt $script:ScanSeconds) { $r.files += [ordered]@{ label = $t[0]; status = 'timeBudget' }; continue }
+        if ($state.BytesRead -ge $script:ScanMaxBytes) { $r.files += [ordered]@{ label = $t[0]; status = 'byteBudget' }; continue }
         $r.files += Read-WuLogDigest -Path $t[1] -Label $t[0] -Codes $codes -State $state
     }
     $sorted = @($codes.Values | Sort-Object @{ Expression = { [string]$_.last }; Descending = $true }, @{ Expression = { $_.n }; Descending = $true })

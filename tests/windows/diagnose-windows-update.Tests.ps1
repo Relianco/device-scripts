@@ -58,7 +58,7 @@ try {
         ('2026-10-01 09:00:00, Info                  CBS    password=' + $secret + ' 0x80070005')
         '2026-11-12 07:30:00, Error                 CBS    Failed to resolve package [HRESULT = 0x800f081f - CBS_E_SOURCE_MISSING]'
     )
-    # The live CBS.log holds only November; the September history is in a persisted log, as on REL-5.
+    # The live CBS.log holds only November; the September history is in a persisted log (CBS rotation).
     [IO.File]::WriteAllText((Join-Path $cbs 'CBS.log'), (@($cbsLines[7]) + @(1..50 | ForEach-Object { "2026-11-12 07:31:$('{0:d2}' -f ($_ % 60)), Info CBS ordinary $_" }) -join "`r`n"))
     [IO.File]::WriteAllText((Join-Path $cbs 'CbsPersist_20261001090000.log'), ($cbsLines[0..6] -join "`r`n"))
     [IO.File]::WriteAllText((Join-Path $cbs 'CbsPersist_20260801000000.log'), "2026-08-01 00:00:00, Error CBS old 0xc0000005`r`n")
@@ -90,6 +90,14 @@ try {
     $script:ScanMaxBytes = 4096
     $r = Read-WuServicingHistory ([Diagnostics.Stopwatch]::StartNew())
     Assert ($r.files[0].stoppedBy -eq 'bytes' -and -not $r.files[0].complete) 'byte cap stops the scan and says so'
+    Assert ($r.files[0].lines -lt 100) 'byte cap is checked on every line, not every 4096'
+    Assert (@($r.files | Select-Object -Skip 1 | Where-Object { $_.Contains('status') -and $_.status -eq 'byteBudget' }).Count -eq 3) 'files after the byte cap are skipped, never opened'
+    # Long lines: fewer than 4096 of them still stop at the cap.
+    $saved = [IO.File]::ReadAllBytes((Join-Path $cbs 'CBS.log'))
+    [IO.File]::WriteAllText((Join-Path $cbs 'CBS.log'), (@(1..50 | ForEach-Object { '2026-11-12 07:31:00, Error CBS 0x80070002 ' + ('z' * 2000) }) -join "`r`n"))
+    $r = Read-WuServicingHistory ([Diagnostics.Stopwatch]::StartNew())
+    Assert ($r.files[0].stoppedBy -eq 'bytes' -and $r.files[0].lines -le 3) 'long lines stop at the cap'
+    [IO.File]::WriteAllBytes((Join-Path $cbs 'CBS.log'), $saved)
     $script:ScanMaxBytes = 1GB
     # A clock that passes the per-file check once, then is over budget: the first file stops inside, the rest are skipped.
     $script:ticks = 0
