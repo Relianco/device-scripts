@@ -206,10 +206,12 @@ function Test-RelianUrlHasUserInfo {
 }
 
 # A key may not be a case-insensitive prefix of these: PowerShell binds an unambiguous prefix of a parameter name,
-# so 'Act' would rebind -Action. The fixed pairs, the packages' change switches, and the common parameters.
+# so 'Act' would rebind -Action. The fixed pairs, the packages' change switches, the common parameters and their aliases
+# ('ea' binds -ErrorAction exactly as the name does).
 $script:ReservedKeys = @('DeploymentType', 'Action', 'PinVersion', 'Fix', 'Apply', 'Mode', 'ReportOnly',
     'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ProgressAction', 'ErrorVariable',
-    'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'WhatIf', 'Confirm')
+    'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'WhatIf', 'Confirm',
+    'vb', 'db', 'ea', 'wa', 'infa', 'proga', 'ev', 'wv', 'iv', 'ov', 'ob', 'pv', 'wi', 'cf')
 
 # Validated arguments as a list of '-Key', 'value' pairs in ordinal key order, or a fixed error string.
 # Generic rules only: which keys and values a job accepts is the forge allowlist's job.

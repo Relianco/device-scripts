@@ -185,7 +185,7 @@ $badUrls = [ordered]@{
     'percent dir'    = (Get-PkgUrl -Dir 'gpo%2Devidence')
     'query'          = ((Get-PkgUrl) + '?x=1')
     'fragment'       = ((Get-PkgUrl) + '#x')
-    'userinfo'       = "https://user:secret@raw.githubusercontent.com/Relianco/device-scripts/$commit/windows/read/gpo-evidence/Invoke-GpoEvidence.ps1"
+    'userinfo'       = "https://user@raw.githubusercontent.com/Relianco/device-scripts/$commit/windows/read/gpo-evidence/Invoke-GpoEvidence.ps1"
     'empty userinfo' = "https://@raw.githubusercontent.com/Relianco/device-scripts/$commit/windows/read/gpo-evidence/Invoke-GpoEvidence.ps1"
     'leading space'  = (' ' + (Get-PkgUrl))
     'trailing nl'    = ((Get-PkgUrl) + "`n")
@@ -229,6 +229,8 @@ $argCases = [ordered]@{
     'reserved ErrorAction' = @('{"ErrorAction":"Ignore"}', 'reserved argument key')
     'reserved Verb'        = @('{"Verb":"x"}', 'reserved argument key')
     'reserved WhatIf'      = @('{"whatif":"x"}', 'reserved argument key')
+    'alias ea'             = @('{"ea":"Ignore"}', 'reserved argument key')
+    'alias upper EA'       = @('{"EA":"Ignore"}', 'reserved argument key')
     'key digit first'      = @('{"1Section":"x"}', 'bad argument key')
     'key dash'             = @('{"Sec-tion":"x"}', 'bad argument key')
     'key trailing space'   = @('{"Section ":"x"}', 'bad argument key')
@@ -248,6 +250,8 @@ $argCases = [ordered]@{
     'trailing comma'       = @('{"Section":"a",}', $flat)
     'two objects'          = @('{"Section":"a"}{}', $flat)
 }
+# Common-parameter aliases bind exactly like their names: -ea Ignore is -ErrorAction Ignore.
+foreach ($a in @('wa', 'infa', 'proga', 'ev', 'wv', 'iv', 'ov', 'ob', 'pv', 'vb', 'db', 'wi', 'cf')) { $argCases["alias $a"] = @(('{"' + $a + '":"x"}'), 'reserved argument key') }
 foreach ($label in $argCases.Keys) {
     $r = Invoke-Case -JobArguments (ConvertTo-B64 $argCases[$label][0]); Assert-Refused "args $label" $r $argCases[$label][1]
 }
