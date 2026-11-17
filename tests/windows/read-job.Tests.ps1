@@ -48,7 +48,7 @@ if ($pipeline -isnot [Management.Automation.Language.PipelineAst] -or $pipeline.
 if ($fieldCalls[0].CommandElements.Count -ne 2) { Fail 'Ninja-Property-Set-Piped takes only the field name as an argument' }
 
 # ---- The table ---------------------------------------------------------------------------------------------
-$jobNames = @('diagnose-feature-upgrade', 'maintenance-evidence', 'gpo-evidence')
+$jobNames = @('diagnose-feature-upgrade', 'maintenance-evidence', 'gpo-evidence', 'wake-device')
 if ((@($script:Jobs.Keys | Sort-Object) -join '|') -cne (@($jobNames | Sort-Object) -join '|')) { Fail "table keys were [$(@($script:Jobs.Keys) -join '|')]" }
 $cmd = Get-Command -Name $loaderPath
 $vs = @($cmd.Parameters['Job'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })
@@ -73,6 +73,19 @@ if ((@($script:Jobs['gpo-evidence'].Keys.Keys | Sort-Object) -join '|') -cne 'Gp
 foreach ($forbidden in @('Fix', 'Apply', 'Mode', 'Action', 'Name', 'Match', 'Source', 'Message', 'ReportOnly', 'DeploymentType', 'PinVersion')) {
     foreach ($name in $jobNames) { if ($script:Jobs[$name].Keys.ContainsKey($forbidden)) { Fail "$name allows $forbidden" } }
 }
+# wake-device: the pinned package at the #143 merge commit, and only Mac, Broadcast and Port.
+$wakePin = $script:Jobs['wake-device']
+if ($wakePin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts/a152dbd5ce91811706f4a6a4f993f8d578954def/windows/packages/wake-device/Invoke-WakeDevice.ps1' -or $wakePin.Sha256 -cne '7a3626ae9de046031d83e305452edde2120ddd0dc9e323fbb6ae46c5c8daaaee') { Fail 'wake-device pin is not the #143 merge commit' }
+if ((@($wakePin.Keys.Keys | Sort-Object) -join '|') -cne 'Broadcast|Mac|Port') { Fail 'wake-device keys' }
+# The three read pins are unchanged by the wake row.
+$pins = @{ 'diagnose-feature-upgrade' = 'f27d3c26a3f7fb5c4120e93eacc184d0fdca61bfa9def41ecacce7c66b22f403'; 'maintenance-evidence' = '895d9193842341b349ed9ff26dafeab70ca68ae76bd86a71e631d2548754bc25'; 'gpo-evidence' = '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8' }
+foreach ($n in $pins.Keys) { if ($script:Jobs[$n].Sha256 -cne $pins[$n]) { Fail "$n pin changed" } }
+function Test-WakeRule { param($Key, $Value) $rule = $wakePin.Keys[$Key]; if ($rule.ContainsKey('Enum')) { return $rule.Enum -ccontains $Value }; return $Value.Length -le $rule.Max -and $Value -cmatch $rule.Regex }
+foreach ($ok in @('AA-BB-CC-DD-EE-FF', '00-11-22-33-44-55')) { if (-not (Test-WakeRule 'Mac' $ok)) { Fail "Mac $ok refused" } }
+foreach ($bad in @('aa-bb-cc-dd-ee-ff', 'AA:BB:CC:DD:EE:FF', 'AABBCCDDEEFF', 'AA-BB-CC-DD-EE', 'AA-BB-CC-DD-EE-FF-00', "AA-BB-CC-DD-EE-FF`n", '')) { if (Test-WakeRule 'Mac' $bad) { Fail "Mac [$bad] accepted" } }
+foreach ($ok in @('192.168.1.255', '10.0.255.255', '172.16.0.255', '172.31.255.255', '255.255.255.255')) { if (-not (Test-WakeRule 'Broadcast' $ok)) { Fail "Broadcast $ok refused" } }
+foreach ($bad in @('8.8.8.8', '172.32.0.255', '172.15.0.255', '127.0.0.1', '192.168.1.256', '192.168.01.255', '192-168-1-255', "192.168.1.255`n", '192.168.1.255 ', '')) { if (Test-WakeRule 'Broadcast' $bad) { Fail "Broadcast [$bad] accepted" } }
+if (-not (Test-WakeRule 'Port' '9') -or (Test-WakeRule 'Port' '7') -or (Test-WakeRule 'Port' '80')) { Fail 'Port is 9 only' }
 $gpoGuid = [guid]::NewGuid().ToString()
 $rx = $script:Jobs['gpo-evidence'].Keys['Gpo'].Regex
 if ($gpoGuid -cnotmatch $rx -or ('{' + $gpoGuid + '}') -cnotmatch $rx -or 'Default Domain Policy' -cmatch $rx -or ($gpoGuid + '`n') -cmatch $rx) { Fail 'Gpo GUID regex' }
@@ -157,7 +170,8 @@ $cases = @(
     @('maintenance-evidence', ('{"Package":"Storage","ReportId":"20261116T010203-' + ('a1' * 16) + '","Section":"Errors","Ordinal":2,"Page":"3"}'), ('-Ordinal 2 -Package Storage -Page 3 -ReportId 20261116T010203-' + ('a1' * 16) + ' -Section Errors')),
     @('maintenance-evidence', ('{"Package":"Update","ReportId":"' + ('b2' * 16) + '"}'), ('-Package Update -ReportId ' + ('b2' * 16))),
     @('gpo-evidence', ('{"Gpo":"{' + $gpoGuid + '}"}'), ('-Gpo {' + $gpoGuid + '}')),
-    @('gpo-evidence', '{"Section":"Gpos","Offset":"12345"}', '-Offset 12345 -Section Gpos')
+    @('gpo-evidence', '{"Section":"Gpos","Offset":"12345"}', '-Offset 12345 -Section Gpos'),
+    @('wake-device', '{"Mac":"AA-BB-CC-DD-EE-01","Broadcast":"192.168.1.255","Port":"9"}', '-Broadcast 192.168.1.255 -Mac AA-BB-CC-DD-EE-01 -Port 9')
 )
 foreach ($c in $cases) {
     $r = Invoke-Case -Job $c[0] -JobArguments (ConvertTo-B64 $c[1])
@@ -187,6 +201,12 @@ $realJobs['gpo-evidence'].Keys['Offset'] = $script:Jobs['gpo-evidence'].Keys['Of
 $r = Invoke-Case -JobArguments (ConvertTo-B64 '{"Offset":-1}'); Assert-Refused 'negative int' $r 'bad argument value'
 $r = Invoke-Case -JobArguments (ConvertTo-B64 '{"Offset":1.5}'); Assert-Refused 'float' $r 'bad argument value'
 $r = Invoke-Case -Job 'diagnose-feature-upgrade' -JobArguments (ConvertTo-B64 '{"Offset":"1"}'); Assert-Refused 'key of another job' $r 'unknown argument key'
+# wake-device through the whole loader: a bad MAC, a public address, another port, an extra key: nothing is downloaded or run.
+foreach ($w in @('{"Mac":"aa:bb:cc:dd:ee:01","Broadcast":"192.168.1.255"}', '{"Mac":"AA-BB-CC-DD-EE-01","Broadcast":"8.8.8.255"}',
+        '{"Mac":"AA-BB-CC-DD-EE-01","Broadcast":"192.168.1.255","Port":"7"}')) {
+    $r = Invoke-Case -Job 'wake-device' -JobArguments (ConvertTo-B64 $w); Assert-Refused "wake [$w]" $r 'bad argument value'
+}
+$r = Invoke-Case -Job 'wake-device' -JobArguments (ConvertTo-B64 '{"Mac":"AA-BB-CC-DD-EE-01","Target":"x"}'); Assert-Refused 'wake extra key' $r 'unknown argument key'
 # Table hash: empty, missing (spaces), malformed, uppercase. All exit non-zero by design: this loader has no empty-hash off switch, so an empty hash is never a quiet success.
 foreach ($bad in @('', ' ', 'abc', $fakeSha.ToUpperInvariant(), ($fakeSha + "`n"))) {
     $r = Invoke-Case -TableHash $bad; Assert-Refused "table hash [$bad]" $r 'table hash missing or malformed'

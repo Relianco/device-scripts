@@ -30,7 +30,8 @@
     before it has read the first. A refusal also writes its line, so a stale result never answers a new request (except an invalid -Job, which fails at parameter binding before any line).
 
 .PARAMETER Job
-    One of the built-in jobs: diagnose-feature-upgrade, maintenance-evidence, gpo-evidence.
+    One of the built-in jobs: diagnose-feature-upgrade, maintenance-evidence, gpo-evidence, wake-device. wake-device is the one
+    job that is not a read: it sends three Wake-on-LAN UDP packets from this device to a MAC on its own subnet and changes nothing.
 
 .PARAMETER JobArguments
     Base64 (UTF-8) of a flat JSON object whose keys and values the job's table entry allows. Empty means none.
@@ -45,7 +46,7 @@
 # Parameters are not Mandatory: a mandatory param block prompts when this file is dot-sourced under test.
 [CmdletBinding()]
 param(
-    [ValidateSet('diagnose-feature-upgrade', 'maintenance-evidence', 'gpo-evidence')][string]$Job,
+    [ValidateSet('diagnose-feature-upgrade', 'maintenance-evidence', 'gpo-evidence', 'wake-device')][string]$Job,
     [string]$JobArguments,
     [string]$RequestId
 )
@@ -63,7 +64,7 @@ Set-StrictMode -Version Latest
 # The table. Every URL is raw.githubusercontent.com at a 40-hex commit already on Relianco/device-scripts main,
 # every hash is the SHA256 of that file at that commit (git show <commit>:<path> | sha256sum). Allowed values are
 # an Enum (case-sensitive) or an anchored Regex with Max length; none accepts free text, and every allowed
-# character is in [A-Za-z0-9{}-], so nothing needs quoting. [0-9], not \d: \d matches other scripts' digits.
+# character is in [A-Za-z0-9{}.-], so nothing needs quoting. [0-9], not \d: \d matches other scripts' digits.
 $script:Jobs = @{
     'diagnose-feature-upgrade' = @{
         Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/f9f486091b479616a186f5923bf9571e4b00de44/windows/packages/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1'
@@ -92,6 +93,17 @@ $script:Jobs = @{
             # A GUID only: a GPO name is free text that reaches Get-GPO -Name.
             Gpo     = @{ Regex = '\A\{?[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}?\z'; Max = 38 }
             Offset  = @{ Regex = '\A[0-9]{1,5}\z'; Max = 5 }
+        }
+    }
+    'wake-device'              = @{
+        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/a152dbd5ce91811706f4a6a4f993f8d578954def/windows/packages/wake-device/Invoke-WakeDevice.ps1'
+        Sha256 = '7a3626ae9de046031d83e305452edde2120ddd0dc9e323fbb6ae46c5c8daaaee'
+        Keys   = @{
+            # Upper-case dash form only; the package also refuses multicast and all-zero.
+            Mac       = @{ Regex = '\A[0-9A-F]{2}(-[0-9A-F]{2}){5}\z'; Max = 17 }
+            # An RFC 1918 address (the subnet's directed broadcast) or the limited broadcast: never a public address.
+            Broadcast = @{ Regex = '\A(10\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|172\.(1[6-9]|2[0-9]|3[01])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|192\.168\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|255\.255\.255\.255)\z'; Max = 15 }
+            Port      = @{ Enum = @('9') }
         }
     }
 }

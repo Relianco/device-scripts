@@ -132,7 +132,7 @@ Drop `-ReportOnly` to let the job fix the drift.
 
 **Parameters:**
 
-- `-Job`: `diagnose-feature-upgrade`, `maintenance-evidence` or `gpo-evidence`.
+- `-Job`: `diagnose-feature-upgrade`, `maintenance-evidence`, `gpo-evidence` or `wake-device` (not a read: it sends three Wake-on-LAN packets from this device to a MAC on its subnet; `Mac`, `Broadcast` (RFC 1918 or `255.255.255.255`) and `Port` `9` only).
 - `-JobArguments`: base64 of flat JSON, for example `{"Section":"Summary"}`. Empty means none. Each key has an enum or an anchored regex with a length cap (`gpo-evidence` takes a GUID, never a name). Free text is refused.
 - `-RequestId`: 32 lowercase hex characters, echoed in the result.
 
