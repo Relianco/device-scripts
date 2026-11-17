@@ -764,6 +764,10 @@ function Invoke-PdfXchangeAction {
     if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
         return 0
     }
+    # Empty pin disables the package before the URL is read (the planner repeats this check).
+    if ([string]::IsNullOrWhiteSpace($PinVersion)) {
+        return 0
+    }
     if (-not (Test-PdfXchangePinHash -Sha256 $InstallerSha256)) {
         Add-PdfXchangeError -Message 'invalid hash for installer'
         return 1

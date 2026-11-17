@@ -242,6 +242,8 @@ if (-not (Test-IntuneTextHasIpv4 -Text "prefix $sampleAddress suffix")) {
 }
 # The pin 11.1.2.0 has the shape of an address. It is the only such text allowed.
 $pinText = (@(11, 1, 2, 0) -join '.')
+# Split on purpose, same as the other intune-*.Tests.ps1 scanners: the repo must not hold the
+# names whole, and the scanner still has to know them.
 $banned = @(
     ('Le' + 'ague'),
     ('PI' + 'LA'),

@@ -528,6 +528,10 @@ try {
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '9.0.0.0' -Label 'empty pin'
 
     Reset-PdfXchangeCase
+    $code = Invoke-Case -Action 'Install' -PinVersion '' -InstallerUrl (New-PdfXchangeUserInfoUrl)
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'empty pin with userinfo url'
+
+    Reset-PdfXchangeCase
     $script:InstalledVersion = ''
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0' -InstallerUrl (New-PdfXchangeUserInfoUrl)
     Assert-Case -Code $code -ExpectCode 1 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -MarkerAbsent $true -Label 'userinfo'
