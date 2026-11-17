@@ -91,6 +91,7 @@ try {
 }
 
 # The script run end to end: refused input exits 1 and prints the refusal.
+# RELIAN_DEPLOY_TEST=1 is inherited on purpose: the package skips its entry point only when dot-sourced (InvocationName '.'), and -File is not.
 $out = & pwsh -NoProfile -File $path -Action Install -Mac 'zz' -Broadcast '192.168.1.255'
 Assert ($LASTEXITCODE -eq 1 -and ($out | ConvertFrom-Json).error -eq 'bad mac') 'script exits 1 on a refusal'
 $out = & pwsh -NoProfile -File $path -Action Uninstall
