@@ -10,7 +10,10 @@ param(
     [string]$InstallerUrl = 'https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.9-1.msi',
     [string]$InstallerSha256 = 'e3f18109d36c98c2f861f210fc6661226d99251b79321c5d7ff27821b906ea49',
     [string]$CancelPath = '',
-    [string]$MarkerRoot = ''
+    [string]$MarkerRoot = '',
+    # Intune only: install and enrol from RELIAN_WAZUH_* environment variables.
+    [string]$FloorVersion = '',
+    [switch]$Enroll
 )
 
 $ErrorActionPreference = 'Stop'
@@ -505,12 +508,13 @@ function Get-WazuhRegistryProduct {
     }
 }
 
-# Enrollment properties stay off this command line. The runner does not pass them.
+# The runner passes no enrollment properties. Enroll mode passes manager, group and name on a fresh install only.
 function Get-WazuhMsiArgumentList {
     param(
         [string]$Mode,
         [string]$InstallerPath,
-        [string]$ProductCode
+        [string]$ProductCode,
+        [string[]]$Properties = @()
     )
     if ($Mode -eq 'uninstall') {
         if ([string]::IsNullOrWhiteSpace($ProductCode)) {
@@ -521,7 +525,7 @@ function Get-WazuhMsiArgumentList {
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
-    return @('/i', $InstallerPath, '/qn', '/norestart')
+    return @('/i', $InstallerPath, '/qn', '/norestart') + @($Properties)
 }
 
 function Test-WazuhMsiSucceeded {
@@ -574,8 +578,8 @@ $script:GetWazuhProductCode = {
 
 # msiexec is only started from this hook. It is waited on and never killed.
 $script:InvokeMsiExec = {
-    param($Mode, $InstallerPath, $ProductCode)
-    $argumentList = Get-WazuhMsiArgumentList -Mode $Mode -InstallerPath $InstallerPath -ProductCode $ProductCode
+    param($Mode, $InstallerPath, $ProductCode, [string[]]$Properties = @())
+    $argumentList = Get-WazuhMsiArgumentList -Mode $Mode -InstallerPath $InstallerPath -ProductCode $ProductCode -Properties $Properties
     if ($null -eq $argumentList) {
         return 1
     }
@@ -694,6 +698,237 @@ function Invoke-WazuhAction {
     }
 }
 
+# Enroll mode (Intune, SYSTEM). Settings come from these environment variables so no value
+# is ever on a command line. The Intune install script sets them before it runs this file.
+$script:WazuhEnrollNames = @('RELIAN_WAZUH_MANAGER', 'RELIAN_WAZUH_GROUP', 'RELIAN_WAZUH_PREFIX', 'RELIAN_WAZUH_AUTHD_PASS')
+
+# Returns $null after naming (never printing) a missing, unsubstituted or malformed setting.
+function Get-WazuhEnrollSettings {
+    $values = @{}
+    foreach ($name in $script:WazuhEnrollNames) {
+        $values[$name] = ([string][Environment]::GetEnvironmentVariable($name)).Trim()
+    }
+    # Children (msiexec) must not inherit the secret, on every path.
+    [Environment]::SetEnvironmentVariable('RELIAN_WAZUH_AUTHD_PASS', $null)
+    foreach ($name in $script:WazuhEnrollNames) {
+        # CIPP leaves an unknown %variable% in place.
+        if ($values[$name] -eq '' -or $values[$name] -match '^%[^%\s]+%$') {
+            Add-WazuhError -Message "$name is empty or not substituted"
+            return $null
+        }
+    }
+    $secret = $values['RELIAN_WAZUH_AUTHD_PASS']
+    if ($secret -match '[\r\n]') {
+        Add-WazuhError -Message 'RELIAN_WAZUH_AUTHD_PASS is not one line'
+        return $null
+    }
+    # Charset checks keep every msiexec property one plain token.
+    $manager = $values['RELIAN_WAZUH_MANAGER']
+    if ($manager -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') {
+        Add-WazuhError -Message 'RELIAN_WAZUH_MANAGER is not a host name'
+        return $null
+    }
+    $groups = [System.Collections.Generic.List[string]]::new()
+    $groups.Add('default')
+    foreach ($group in $values['RELIAN_WAZUH_GROUP'].Split(',')) {
+        $group = $group.Trim()
+        if ($group -notmatch '^[A-Za-z0-9._-]{1,255}$') {
+            Add-WazuhError -Message 'RELIAN_WAZUH_GROUP is not a group list'
+            return $null
+        }
+        if (-not $groups.Contains($group)) {
+            $groups.Add($group)
+        }
+    }
+    # Same name rule as the earlier RMM installer: <prefix>--<COMPUTERNAME>, kept when the name already has '--'.
+    $prefix = $values['RELIAN_WAZUH_PREFIX'] -replace '-+$', ''
+    if ($prefix -notmatch '^[A-Za-z0-9._-]{1,64}$') {
+        Add-WazuhError -Message 'RELIAN_WAZUH_PREFIX is not a name prefix'
+        return $null
+    }
+    $computer = ([string]$env:COMPUTERNAME).Trim()
+    if ($computer -notmatch '^[A-Za-z0-9._-]{1,63}$') {
+        Add-WazuhError -Message 'COMPUTERNAME is not usable as an agent name'
+        return $null
+    }
+    $agentName = $computer
+    if (-not $computer.Contains('--')) {
+        $agentName = "$prefix--$computer"
+    }
+    return [pscustomobject]@{
+        Manager   = $manager
+        Group     = ($groups -join ',')
+        AgentName = $agentName
+        Secret    = $secret
+    }
+}
+
+function Get-WazuhAgentDir {
+    $root = ${env:ProgramFiles(x86)}
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = $env:ProgramFiles
+    }
+    return Join-Path ([string]$root) 'ossec-agent'
+}
+
+$script:GetClientKeysLength = {
+    $path = Join-Path (Get-WazuhAgentDir) 'client.keys'
+    if (-not (Test-Path -LiteralPath $path)) {
+        return [int64]0
+    }
+    return [int64](Get-Item -LiteralPath $path).Length
+}
+
+$script:GetWazuhServiceStatus = {
+    $service = Get-Service -Name 'WazuhSvc' -ErrorAction SilentlyContinue
+    if ($null -eq $service) {
+        return ''
+    }
+    return [string]$service.Status
+}
+
+$script:StartWazuhService = {
+    param([bool]$Restart)
+    if ($Restart) {
+        Restart-Service -Name 'WazuhSvc' -Force -ErrorAction Stop
+    } else {
+        Start-Service -Name 'WazuhSvc' -ErrorAction Stop
+    }
+}
+
+# The agent reads authd.pass from its folder when it enrolls. SYSTEM and Administrators only.
+$script:WriteAuthdPass = {
+    param($Value)
+    $path = Join-Path (Get-WazuhAgentDir) 'authd.pass'
+    if (-not (Test-Path -LiteralPath $path)) {
+        [System.IO.File]::WriteAllText($path, '')
+    }
+    # Lock the file down before the secret goes in, so Users never can read it.
+    $acl = [System.Security.AccessControl.FileSecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $identity = [System.Security.Principal.SecurityIdentifier]::new($sid)
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'Allow'))
+    }
+    Set-Acl -LiteralPath $path -AclObject $acl
+    [System.IO.File]::WriteAllText($path, [string]$Value, [System.Text.UTF8Encoding]::new($false))
+}
+
+# Presence and enrollment at or above a floor. Never downgrades, never re-enrolls an agent with keys,
+# never changes the manager of an installed agent. Version bumps above the floor belong to the manager (WPK).
+function Invoke-WazuhEnrollAction {
+    param(
+        [string]$Action,
+        [string]$PinVersion,
+        [string]$FloorVersion,
+        [string]$InstallerUrl,
+        [string]$InstallerSha256,
+        [string]$CancelPath
+    )
+
+    if ($Action -ne 'Install') {
+        Add-WazuhError -Message 'enroll mode only supports Install'
+        return 1
+    }
+    $settings = Get-WazuhEnrollSettings
+    if ($null -eq $settings) {
+        return 1
+    }
+    if ([string]::IsNullOrWhiteSpace($FloorVersion)) {
+        $FloorVersion = $PinVersion
+    }
+    $pin = Convert-WazuhVersionText -Text $PinVersion
+    $floor = Convert-WazuhVersionText -Text $FloorVersion
+    if ($pin -isnot [version] -or $floor -isnot [version]) {
+        Add-WazuhError -Message 'pin or floor is not a version'
+        return 1
+    }
+    $pin = [version](Format-WazuhVersion -Version $pin)
+    $floor = [version](Format-WazuhVersion -Version $floor)
+    if ($floor.CompareTo($pin) -gt 0) {
+        Add-WazuhError -Message 'floor is above the pinned installer'
+        return 1
+    }
+
+    $installedText = ''
+    try {
+        $installedText = [string](& $script:GetInstalledWazuhVersion)
+    } catch {
+        Add-WazuhError -Message 'could not read the installed Wazuh version'
+        return 1
+    }
+    $installed = Convert-WazuhVersionText -Text $installedText
+    if ($installed -eq 'invalid') {
+        Add-WazuhError -Message 'installed Wazuh version is not a version'
+        return 1
+    }
+
+    $properties = $null
+    if ($null -eq $installed) {
+        $properties = @(
+            "WAZUH_MANAGER=$($settings.Manager)",
+            "WAZUH_AGENT_GROUP=$($settings.Group)",
+            "WAZUH_AGENT_NAME=$($settings.AgentName)"
+        )
+    } elseif (([version](Format-WazuhVersion -Version $installed)).CompareTo($floor) -lt 0) {
+        # In-place upgrade. The MSI keeps client.keys and ossec.conf; no enrollment properties.
+        $properties = @()
+    }
+
+    if ($null -ne $properties) {
+        if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
+            Add-WazuhError -Message 'missing hash for installer'
+            return 1
+        }
+        if (Test-WazuhCancelled -CancelPath $CancelPath) {
+            return 130
+        }
+        $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-wazuh-' + [guid]::NewGuid().ToString('n'))
+        try {
+            New-Item -ItemType Directory -Path $cache -Force | Out-Null
+            $installerPath = Join-Path $cache 'wazuh-agent.msi'
+            $downloaded = [int](Save-WazuhPayload -Url $InstallerUrl -Destination $installerPath -Sha256 $InstallerSha256 -Label 'installer' -CancelPath $CancelPath)
+            if ($downloaded -ne 0) {
+                return $downloaded
+            }
+            if (Test-WazuhCancelled -CancelPath $CancelPath) {
+                return 130
+            }
+            $result = & $script:InvokeMsiExec -Mode 'install' -InstallerPath $installerPath -ProductCode '' -Properties $properties
+            if ($null -eq $result -or -not (Test-WazuhMsiSucceeded -Code ([int]$result))) {
+                Add-WazuhError -Message 'installer failed'
+                return 1
+            }
+        } finally {
+            try {
+                if (Test-Path -LiteralPath $cache) {
+                    Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction Stop
+                }
+            } catch {
+                Add-WazuhError -Message 'could not remove the installer cache'
+            }
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string](& $script:GetWazuhServiceStatus))) {
+        Add-WazuhError -Message 'WazuhSvc does not exist'
+        return 1
+    }
+    try {
+        if ([int64](& $script:GetClientKeysLength) -le 0) {
+            # Not enrolled yet: the agent enrolls on start with the manager in ossec.conf.
+            & $script:WriteAuthdPass -Value $settings.Secret
+            [void](& $script:StartWazuhService -Restart $true)
+        } elseif ([string](& $script:GetWazuhServiceStatus) -ne 'Running') {
+            [void](& $script:StartWazuhService -Restart $false)
+        }
+    } catch {
+        Add-WazuhError -Message 'could not start WazuhSvc'
+        return 1
+    }
+    return 0
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
@@ -706,6 +941,9 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 try {
+    if ($Enroll) {
+        exit ([int](Invoke-WazuhEnrollAction -Action $Action -PinVersion $PinVersion -FloorVersion $FloorVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath))
+    }
     $wazuhExit = [int](Invoke-WazuhAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot)
     exit $wazuhExit
 } catch {

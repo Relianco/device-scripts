@@ -198,7 +198,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 - `teams`: installs Microsoft Teams from a pinned bootstrapper and MSIX.
 - `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
 - `vlc`: installs VLC.
-- `wazuh`: installs the Wazuh agent.
+- `wazuh`: installs the Wazuh agent. With `-Enroll` (Intune) it also enrolls a fresh install from the `RELIAN_WAZUH_MANAGER`, `RELIAN_WAZUH_GROUP`, `RELIAN_WAZUH_PREFIX` and `RELIAN_WAZUH_AUTHD_PASS` environment variables, never re-enrolls an agent that has keys, and never downgrades; detection needs the agent at or above the floor, `WazuhSvc`, and a non-empty `client.keys`.
 - `winget`: installs Microsoft App Installer (winget). It does not install other apps.
 - `zoom`: installs Zoom.
 - `browser-extension`: sets browser policy to force-install one extension in Chrome, Edge, Brave, or Firefox. The pin is `<browser>-<extension id>`. It does not download the extension.
