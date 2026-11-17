@@ -1,0 +1,98 @@
+{
+  "publisher": "Relian",
+  "setupFile": "Invoke-ApplyAction.ps1",
+  "detectionScript": "Detect-ApplyAction.ps1",
+  "detectReplace": [
+    "__ACTION_ID__"
+  ],
+  "apps": [
+    {
+      "id": "avd-logon-timeouts",
+      "displayName": "Relian AVD logon timeouts",
+      "pinVersion": "avd-logon-timeouts:09b95315a8d24b9a0d30c23b48d78bbbbe93da4721f830945fd8a0f8b3010ecc",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion avd-logon-timeouts:09b95315a8d24b9a0d30c23b48d78bbbbe93da4721f830945fd8a0f8b3010ecc",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion avd-logon-timeouts:09b95315a8d24b9a0d30c23b48d78bbbbe93da4721f830945fd8a0f8b3010ecc",
+      "uninstallWorks": false
+    },
+    {
+      "id": "azure-ad-sso-zone",
+      "displayName": "Relian Azure AD SSO zone",
+      "pinVersion": "azure-ad-sso-zone:47fa7a67720024f6061657d8a37ab3c71e8000a4e1ad5efacfc4b7a82b7dd8a4",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion azure-ad-sso-zone:47fa7a67720024f6061657d8a37ab3c71e8000a4e1ad5efacfc4b7a82b7dd8a4",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion azure-ad-sso-zone:47fa7a67720024f6061657d8a37ab3c71e8000a4e1ad5efacfc4b7a82b7dd8a4",
+      "uninstallWorks": false
+    },
+    {
+      "id": "cloud-kerberos-ticket",
+      "displayName": "Relian cloud Kerberos ticket",
+      "pinVersion": "cloud-kerberos-ticket:fcb7fa6e430671c1a62b3aeaab40fc981f3b6720c76d158d198b9e8a998f4f7b",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion cloud-kerberos-ticket:fcb7fa6e430671c1a62b3aeaab40fc981f3b6720c76d158d198b9e8a998f4f7b",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion cloud-kerberos-ticket:fcb7fa6e430671c1a62b3aeaab40fc981f3b6720c76d158d198b9e8a998f4f7b",
+      "uninstallWorks": false
+    },
+    {
+      "id": "edge-startup-boost-off",
+      "displayName": "Relian Edge startup boost off",
+      "pinVersion": "edge-startup-boost-off:e4b5f5d24009595178fa40488e2e20e317728422d5be361eeec2ccbfb4c851d0",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion edge-startup-boost-off:e4b5f5d24009595178fa40488e2e20e317728422d5be361eeec2ccbfb4c851d0",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion edge-startup-boost-off:e4b5f5d24009595178fa40488e2e20e317728422d5be361eeec2ccbfb4c851d0",
+      "uninstallWorks": false
+    },
+    {
+      "id": "fast-startup-off",
+      "displayName": "Relian fast startup off",
+      "pinVersion": "fast-startup-off:07252ef7c9266025984c8af818123019fb07d1412909996c819c6224baba7f9d",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion fast-startup-off:07252ef7c9266025984c8af818123019fb07d1412909996c819c6224baba7f9d",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion fast-startup-off:07252ef7c9266025984c8af818123019fb07d1412909996c819c6224baba7f9d",
+      "uninstallWorks": false
+    },
+    {
+      "id": "fslogix-cleanup-invalid-sessions",
+      "displayName": "Relian FSLogix cleanup invalid sessions",
+      "pinVersion": "fslogix-cleanup-invalid-sessions:0a7f90c867df0d6f26a960eef427fd8f59452d6b5c0eef6e1cff300b1fa6f96e",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion fslogix-cleanup-invalid-sessions:0a7f90c867df0d6f26a960eef427fd8f59452d6b5c0eef6e1cff300b1fa6f96e",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion fslogix-cleanup-invalid-sessions:0a7f90c867df0d6f26a960eef427fd8f59452d6b5c0eef6e1cff300b1fa6f96e",
+      "uninstallWorks": false
+    },
+    {
+      "id": "fslogix-no-roam-recycle-bin",
+      "displayName": "Relian FSLogix roam recycle bin off",
+      "pinVersion": "fslogix-no-roam-recycle-bin:10c9ff7526fe740e7aad221e443668831de42f8696a5273a9f78251e054baba6",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion fslogix-no-roam-recycle-bin:10c9ff7526fe740e7aad221e443668831de42f8696a5273a9f78251e054baba6",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion fslogix-no-roam-recycle-bin:10c9ff7526fe740e7aad221e443668831de42f8696a5273a9f78251e054baba6",
+      "uninstallWorks": false
+    },
+    {
+      "id": "long-paths",
+      "displayName": "Relian long paths",
+      "pinVersion": "long-paths:bf5cecec30195be21e58ecb833a894c440f30a51a99b11022ec44649096b8be9",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion long-paths:bf5cecec30195be21e58ecb833a894c440f30a51a99b11022ec44649096b8be9",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion long-paths:bf5cecec30195be21e58ecb833a894c440f30a51a99b11022ec44649096b8be9",
+      "uninstallWorks": false
+    },
+    {
+      "id": "mapped-drive-reconnect",
+      "displayName": "Relian mapped drive reconnect",
+      "pinVersion": "mapped-drive-reconnect:ac9b53a8a0f8df39893b4cd8ce15cef86c616c44ec88d9104c872969442bc6cc",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion mapped-drive-reconnect:ac9b53a8a0f8df39893b4cd8ce15cef86c616c44ec88d9104c872969442bc6cc",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion mapped-drive-reconnect:ac9b53a8a0f8df39893b4cd8ce15cef86c616c44ec88d9104c872969442bc6cc",
+      "uninstallWorks": false
+    },
+    {
+      "id": "onedrive-dehydrate-team-sites",
+      "displayName": "Relian OneDrive dehydrate team sites",
+      "pinVersion": "onedrive-dehydrate-team-sites:3578ae0c77cd197d5e3d7ede0498eaa761f85523ef88d69112fa65272933d30f",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion onedrive-dehydrate-team-sites:3578ae0c77cd197d5e3d7ede0498eaa761f85523ef88d69112fa65272933d30f",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion onedrive-dehydrate-team-sites:3578ae0c77cd197d5e3d7ede0498eaa761f85523ef88d69112fa65272933d30f",
+      "uninstallWorks": false
+    },
+    {
+      "id": "teams-avd-media",
+      "displayName": "Relian Teams AVD media",
+      "pinVersion": "teams-avd-media:90150d30e0835721623feeab820389cc2ab6f0d66449399e070cd9ef6f68c389",
+      "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion teams-avd-media:90150d30e0835721623feeab820389cc2ab6f0d66449399e070cd9ef6f68c389",
+      "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion teams-avd-media:90150d30e0835721623feeab820389cc2ab6f0d66449399e070cd9ef6f68c389",
+      "uninstallWorks": false
+    }
+  ]
+}
