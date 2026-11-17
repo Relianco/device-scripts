@@ -201,7 +201,7 @@ One folder per package under `windows/packages/`. The read jobs that `Invoke-Rel
 - `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
 - `vlc`: installs VLC.
 - `wau`: installs Winget-AutoUpdate from a pinned MSI. It runs winget as SYSTEM once a day (and at logon, except on multi-session hosts) and updates only the app IDs in the allow list it reads from `ListUrl`, a ring folder under `https://relianpub.blob.core.windows.net/pub/wau/`. WAU self-update and the user-context run are off. Exits 1618 (retry) until winget is installed; use the `winget` package first.
-- `wazuh`: installs the Wazuh agent.
+- `wazuh`: installs the Wazuh agent. With `-Enroll` (Intune) it also enrolls a fresh install from the `RELIAN_WAZUH_MANAGER`, `RELIAN_WAZUH_GROUP`, `RELIAN_WAZUH_PREFIX` and `RELIAN_WAZUH_AUTHD_PASS` environment variables, never re-enrolls an agent that has keys, and never downgrades; detection needs the agent at or above the floor, `WazuhSvc`, and a non-empty `client.keys`.
 - `winget`: installs Microsoft App Installer (winget). It does not install other apps.
 - `zoom`: installs Zoom.
 - `browser-extension`: sets browser policy to force-install one extension in Chrome, Edge, Brave, or Firefox. The pin is `<browser>-<extension id>`. It does not download the extension.
