@@ -8,13 +8,12 @@
 #   WazuhPasswordFile  path to a root-only file holding the enrolment password.
 #                      Needed only when the agent must enrol. Never read onto a
 #                      command line or printed.
-# The pin version is a floor (default 4.14.3). The package never downgrades: an
+# The pin version is a floor (the release record pins 4.14.3; an empty pin disables). The package never downgrades: an
 # agent at or above the floor is kept, because the manager's WPK upgrades own versions.
 # It never re-enrols while /var/ossec/etc/client.keys has content.
 # The agent package is held (apt-mark hold / dnf versionlock) so unattended upgrades
 # never pass the manager. No firewall, sshd, or PVE config is touched.
 
-WZ_FLOOR_DEFAULT='4.14.3'
 WZ_KEY_URL='https://packages.wazuh.com/key/GPG-KEY-WAZUH'
 # Primary key "Wazuh.com (Wazuh Signing Key) <support@wazuh.com>", expires 2027-05-15.
 WZ_KEY_FPR='0DCF CA55 47B1 9D2A 6099  5060 96B3 EE5F 2911 1145'
@@ -141,6 +140,7 @@ wz_pkg_install() {
     apt-mark unhold wazuh-agent > /dev/null 2>&1 || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q "wazuh-agent=$1-1"
   else
+    dnf versionlock delete wazuh-agent > /dev/null 2>&1 || true
     dnf install -y -q "wazuh-agent-$1-1"
   fi
 }
@@ -159,8 +159,9 @@ wz_install_password() {
 wz_set_manager() {
   sed -i "s|<address>[^<]*</address>|<address>$1</address>|" "$WZ_CONF"
 }
-# agent-auth reads the password from etc/authd.pass, so none is passed.
-wz_agent_auth() { /var/ossec/bin/agent-auth -m "$1" -g "$2" -A "$3"; }
+# agent-auth reads the password from etc/authd.pass, so none is passed. -G is the
+# enrolment group; -g would mean the OS group to run as.
+wz_agent_auth() { /var/ossec/bin/agent-auth -m "$1" -G "$2" -A "$3"; }
 wz_enable_service() { systemctl enable --now wazuh-agent; }
 # $1 path. Prints "OWNER MODE TYPE" so the policy check stays pure.
 wz_stat_pass() {
@@ -267,7 +268,10 @@ wz_main() {
     return 1
   fi
   pin="$(wz_trim "$pin")"
-  [[ -n "$pin" ]] || pin="$WZ_FLOOR_DEFAULT"
+  # An empty pin disables the package before anything is read, as in the other Linux packages.
+  if [[ -z "$pin" ]]; then
+    return 0
+  fi
 
   local manager group prefix passfile
   manager="$(wz_trim "${WazuhManager:-}")"
@@ -300,6 +304,10 @@ wz_main() {
   fi
   if [[ "$PLAN_ENROL" -eq 1 ]]; then
     wz_enrol "$manager" "$group" "$prefix--$(wz_short_hostname)" "$passfile" || return 1
+  fi
+  # A package upgrade of a keyed agent must leave it running; enrolment already starts it.
+  if [[ "$PLAN_INSTALL" -eq 1 && "$PLAN_ENROL" -eq 0 ]]; then
+    wz_enable_service || { wz_error 'could not start wazuh-agent'; return 1; }
   fi
   wz_hold || { wz_error 'could not hold wazuh-agent'; return 1; }
   return 0

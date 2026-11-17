@@ -35,7 +35,8 @@ ok() {
 # shellcheck disable=SC1090
 source "$PACKAGE"
 
-SECRET='Pw-9f3kQ-secret-value'
+# Built at runtime so no password is committed.
+SECRET="pw-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')"
 WORK="$(mktemp -d)"
 trap 'rm -rf -- "$WORK"' EXIT
 CALLS="$WORK/calls"
@@ -150,7 +151,7 @@ run "${GOOD[@]}"
 [[ "$LAST_CODE" -eq 0 && "$(calls)" == 'hold,' ]] || fail "keyed current: code=$LAST_CODE calls=$(calls)"
 fake_reset 4.13.0 1 4.14.3
 run "${GOOD[@]}"
-[[ "$LAST_CODE" -eq 0 && "$(calls)" == 'install 4.14.3,hold,' ]] || fail "keyed old: code=$LAST_CODE calls=$(calls)"
+[[ "$LAST_CODE" -eq 0 && "$(calls)" == 'install 4.14.3,enable,hold,' ]] || fail "keyed old: code=$LAST_CODE calls=$(calls)"
 case "$(calls)" in *agent-auth*|*password-file*|*manager*) fail "re-enrolled a keyed agent: $(calls)" ;; esac
 # A keyed host needs no password file at all.
 fake_reset 4.14.3 1
@@ -171,16 +172,19 @@ case "$(calls)" in *install*4.14.3*) fail "newer agent without keys was reinstal
   || fail "newer unkeyed: code=$LAST_CODE calls=$(calls)"
 fake_reset 4.13.9 1
 run "${GOOD[@]}" PIN=4.14.3
-[[ "$(calls)" == 'install 4.14.3,hold,' ]] || fail "older agent: calls=$(calls)"
+[[ "$(calls)" == 'install 4.14.3,enable,hold,' ]] || fail "older agent: calls=$(calls)"
 ok
 
-begin "the pin version is a parameter and defaults to 4.14.3"
+begin "the pin version is a parameter; an empty pin disables"
 fake_reset
 run "${GOOD[@]}" PIN=4.14.8 
 [[ "$(calls)" == install\ 4.14.8,* ]] || fail "explicit pin: calls=$(calls)"
-fake_reset '' 0 4.14.3
+fake_reset
 run "${GOOD[@]}" PIN=
-[[ "$(calls)" == install\ 4.14.3,* ]] || fail "empty pin should default to the floor: calls=$(calls)"
+[[ "$LAST_CODE" -eq 0 && "$(calls)" == '' ]] || fail "empty pin should disable: code=$LAST_CODE calls=$(calls)"
+fake_reset
+run "${GOOD[@]}" PIN= ACTION=Uninstall
+[[ "$LAST_CODE" -eq 0 && "$(calls)" == '' ]] || fail "empty pin and Uninstall should exit 0: code=$LAST_CODE"
 ok
 
 begin "password never in argv, calls, or output; the file is checked first"
@@ -224,6 +228,16 @@ declare -f wz_stat_pass >> "$WORK/fakes.sh"
 fake_reset
 run "${GOOD[@]}"
 [[ "$LAST_CODE" -eq 1 && "$(calls)" == '' ]] || fail "code=$LAST_CODE calls=$(calls)"
+ok
+
+begin "agent-auth gets the enrolment group with -G, never -g"
+real="$(bash -c 'source "$1"; declare -f wz_agent_auth' _ "$PACKAGE")"
+[[ "$real" == *'-G "$2"'* && "$real" != *' -g '* ]] || fail "agent-auth flags: $real"
+ok
+
+begin "dnf: an existing version lock is dropped before the package is raised"
+real="$(bash -c 'source "$1"; declare -f wz_pkg_install' _ "$PACKAGE")"
+[[ "$real" == *'versionlock delete wazuh-agent'* ]] || fail "no versionlock delete before dnf install"
 ok
 
 begin "unsigned or wrong repository key is refused before any package change"
