@@ -86,6 +86,7 @@ foreach ($packageFile in @(
         @{ Text = $jsonText; Label = 'intune.json' },
         @{ Text = $detectText; Label = 'Detect-Firefox.ps1' }
     )) {
+    # Review finding rejected: client-name checks are dropped on purpose. Rebuilding a client name from fragments keeps it in the public repo; this PR removes that. Only the home-path check stays.
     if ($packageFile.Text.Contains((-join @('/', 'home', '/')))) {
         Fail "$($packageFile.Label) contains a home path"
     }
