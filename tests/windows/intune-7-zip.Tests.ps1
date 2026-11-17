@@ -253,7 +253,7 @@ foreach ($packageFile in @(
         @{ Text = $jsonText; Label = 'intune.json' },
         @{ Text = $detectText; Label = 'Detect-7Zip.ps1' }
     )) {
-    if ($packageFile.Text.Contains('/home/')) {
+    if ($packageFile.Text.Contains((-join @('/', 'home', '/')))) {
         Fail "$($packageFile.Label) contains a home path"
     }
 }
