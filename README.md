@@ -198,6 +198,7 @@ One folder per package under `windows/packages/`. Each is a single script. In th
 - `teams`: installs Microsoft Teams from a pinned bootstrapper and MSIX.
 - `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
 - `vlc`: installs VLC.
+- `wau`: installs Winget-AutoUpdate from a pinned MSI. It runs winget as SYSTEM once a day (and at logon, except on multi-session hosts) and updates only the app IDs in the allow list it reads from `ListUrl`, a ring folder under `https://relianpub.blob.core.windows.net/pub/wau/`. WAU self-update and the user-context run are off. Exits 1618 (retry) until winget is installed; use the `winget` package first.
 - `wazuh`: installs the Wazuh agent.
 - `winget`: installs Microsoft App Installer (winget). It does not install other apps.
 - `zoom`: installs Zoom.
