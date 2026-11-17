@@ -166,6 +166,17 @@ $r = New-FixRecord; $r.appraiser.task.state = 'Running'; $r.appraiser.indicators
 Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'already running: do not start again'
 $r = New-FixRecord; $r.appraiser.task = [ordered]@{ state = 'missing' }
 Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'task missing: nothing'
+# VDOT disables the Exp appraiser task with the main one; the fix enables it too.
+$expOff = @([ordered]@{ name = 'Microsoft Compatibility Appraiser Exp'; state = 'Disabled' })
+$r = New-FixRecord; $r.appraiser['otherTasks'] = $expOff
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserExpTask' 'exp disabled, main fresh'
+$r = New-FixRecord; $r.appraiser['otherTasks'] = $expOff; $r.appraiser.task.state = 'Disabled'; $r.appraiser.lastEvaluated = '2023-11-23 20:27'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserTask,EnableAppraiserExpTask,RunAppraiser' 'both disabled and old'
+$r = New-FixRecord; $r.appraiser['otherTasks'] = $expOff; $r.appraiser.task.state = 'Running'
+Assert-Same ((Get-FurFixPlan $r) -join ',') 'EnableAppraiserExpTask' 'exp disabled while main runs'
+$r = New-FixRecord; $r.appraiser['otherTasks'] = @([ordered]@{ name = 'Microsoft Compatibility Appraiser Exp'; state = 'Ready' })
+Assert-Same ((Get-FurFixPlan $r) -join ',') '' 'exp ready: nothing'
+if ($source -notmatch "'EnableAppraiserExpTask'\s*\{[^}]*Enable-ScheduledTask[^}]*-TaskName 'Microsoft Compatibility Appraiser Exp'") { Fail 'EnableAppraiserExpTask must enable the Exp task' }
 
 # The verdict needs the timestamp, so it is set first.
 $iTs = $source.IndexOf('$record.timestamp =', [StringComparison]::Ordinal)

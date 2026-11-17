@@ -260,10 +260,10 @@ function Get-GpeContext {
 }
 
 function Get-GpeLinkMap {
-    param($Context)
+    param($Context, $Report)
     $map = @{}
     $objects = @(Get-ADObject -LDAPFilter '(gPLink=*)' -Properties gPLink -Server $Context.Server -ErrorAction Stop)
-    if ($Context.ConfigDN) { try { $objects += @(Get-ADObject -SearchBase ("CN=Sites," + $Context.ConfigDN) -LDAPFilter '(gPLink=*)' -Properties gPLink -Server $Context.Server -ErrorAction Stop) } catch { } }
+    if ($Context.ConfigDN) { try { $objects += @(Get-ADObject -SearchBase ("CN=Sites," + $Context.ConfigDN) -LDAPFilter '(gPLink=*)' -Properties gPLink -Server $Context.Server -ErrorAction Stop) } catch { $Report['notes'] = @($Report['notes']) + ('siteLinksUnavailable: ' + $_.Exception.GetType().Name) } }
     foreach ($o in $objects) {
         foreach ($l in @(ConvertFrom-GpeLinks ([string]$o.gPLink))) {
             if (-not $map.ContainsKey($l.id)) { $map[$l.id] = [Collections.Generic.List[object]]::new() }
@@ -327,13 +327,13 @@ function Get-GpeSummary {
     $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })
     $Report.cpasswordScan = [ordered]@{ complete = $scan.complete; files = $scan.files; errors = $scan.errors }
     $Report.cpassword = @($scan.hits | ForEach-Object { [ordered]@{ gpo = (Protect-GpeText ([string]$names[$_.id]) -Max 80); id = $_.id; file = (Protect-GpeText $_.file -Max 120); count = $_.count } })
-    try { $map = Get-GpeLinkMap $Context; $Report.unlinked = @($gpos | Where-Object { -not $map.ContainsKey($_.Id.ToString().ToLowerInvariant()) }).Count } catch { $Report.unlinked = Get-GpeError $_ }
+    try { $map = Get-GpeLinkMap $Context $Report; $Report.unlinked = if ($Report['notes']) { $null } else { @($gpos | Where-Object { -not $map.ContainsKey($_.Id.ToString().ToLowerInvariant()) }).Count } } catch { $Report.unlinked = Get-GpeError $_ }
 }
 
 function Get-GpeGposSection {
     param($Context, $Report, [int]$Start)
     $gpos = @(Get-GPO -All -Server $Context.Server -ErrorAction Stop | Sort-Object @{ Expression = { -not (Get-GpeVersionRow $_).mismatch } }, DisplayName)
-    $links = Get-GpeLinkMap $Context
+    $links = Get-GpeLinkMap $Context $Report
     $scan = Find-GpeCpassword -PoliciesPath $Context.PoliciesPath -Ids @($gpos | ForEach-Object { $_.Id })
     $cp = @{}; foreach ($h in @($scan.hits)) { $cp[$h.id] = [int]$cp[$h.id] + $h.count }
     $Report.cpasswordScanComplete = $scan.complete
@@ -410,7 +410,7 @@ function Get-GpeGpoSection {
     } catch [System.ArgumentException] { $Report.gpo = @{ status = 'notFound' }; return }
     $id = $g.Id.ToString().ToLowerInvariant(); $v = Get-GpeVersionRow $g
     $Report.gpo = [ordered]@{ name = (Protect-GpeText $g.DisplayName -Max 80); id = $id; status = [string]$g.GpoStatus; ad = $v.ad; sysvol = $v.sysvol; mismatch = $v.mismatch; links = @() }
-    try { $map = Get-GpeLinkMap $Context; if ($map.ContainsKey($id)) { $Report.gpo.links = @($map[$id]) } } catch { $Report.gpo.links = Get-GpeError $_ }
+    try { $map = Get-GpeLinkMap $Context $Report; if ($map.ContainsKey($id)) { $Report.gpo.links = @($map[$id]) } } catch { $Report.gpo.links = Get-GpeError $_ }
     $dir = Get-GpeGpoDir $Context $id
     foreach ($side in @('Machine', 'User')) {
         $polPath = Join-Path $dir "$side\Registry.pol"

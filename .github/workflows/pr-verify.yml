@@ -64,6 +64,18 @@ jobs:
         run: |
           pwsh -NoProfile -File tests/windows/storage-maintenance.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/storage-maintenance-profile-report.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Aged-file deletion needs settable creation times (NTFS), under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/storage-maintenance-cleanup-tiers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/storage-maintenance-cleanup-tiers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Audit chain, atomic replace and the lock file on NTFS, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/storage-maintenance-profile-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/storage-maintenance-profile-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/update-maintenance.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/maintenance-evidence.Tests.ps1
@@ -74,10 +86,27 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/scansnap-update-prompts.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Read-only evidence: real registry on a Windows host, then Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/endpoint-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/endpoint-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # Windows PowerShell 5.1 is the host on Server 2016 guests.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/comet-vss-provider.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/eventlog-source.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-stale-computers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-group-member.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The wau package runs under Intune's Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wau-plan.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/intune-wau.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The read-only job loader: a real child killed at the timeout, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/read-job.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/read-job.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

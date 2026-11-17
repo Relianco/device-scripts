@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 function Assert($Condition, $Label) { if (-not $Condition) { throw "FAIL $Label" } }
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$path = Join-Path $root 'windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1'
+$path = Join-Path $root 'windows/read/gpo-evidence/Invoke-GpoEvidence.ps1'
 $env:RELIAN_DEPLOY_TEST = '1'
 . $path
 
@@ -166,6 +166,21 @@ try {
         $cap = Invoke-GpoEvidence -Section Gpos -Context $ctx | ConvertFrom-Json
         $row = @($cap.gpos | Where-Object { $_.name -eq 'Default Domain Policy' })[0]
         Assert ($row.linkCount -eq 7 -and @($row.links).Count -eq 6 -and $cap.truncated) 'link cap marks truncated'
+    }
+    Assert (-not $s.PSObject.Properties['notes']) 'a successful site-link read adds no notes'
+    # A failed site-link read is reported, not shown as "no site links".
+    & {
+        function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $Server, $ErrorAction)
+            if ($Identity -like '*DFSR-GlobalSettings*') { return [pscustomobject]@{ 'msDFSR-Flags' = 48 } }
+            if ($SearchBase) { throw [UnauthorizedAccessException]::new('denied') }
+            @([pscustomobject]@{ DistinguishedName = 'DC=example,DC=invalid'; gPLink = "[LDAP://cn={$ddpId},cn=policies,cn=system,DC=example,DC=invalid;0]" }) }
+        $ctx.ConfigDN = 'CN=Configuration,DC=example,DC=invalid'
+        $f = Invoke-GpoEvidence -Context $ctx | ConvertFrom-Json
+        Assert (@($f.notes) -contains 'siteLinksUnavailable: UnauthorizedAccessException') 'failed site-link read is noted'
+        Assert ($null -eq $f.unlinked) 'unlinked is unknown, not a count, when site links were unreadable'
+        $fg = Invoke-GpoEvidence -Section Gpos -Context $ctx | ConvertFrom-Json
+        Assert (@($fg.notes) -contains 'siteLinksUnavailable: UnauthorizedAccessException') 'Gpos section notes a failed site-link read'
+        $ctx.ConfigDN = $null
     }
     Assert ([Text.Encoding]::UTF8.GetByteCount($sj) -le 8000 -and $sj -notmatch $secret) 'summary bounded and redacted'
 

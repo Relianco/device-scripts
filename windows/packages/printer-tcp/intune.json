@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian TCP printer __PRINTER_NAME__",
+  "publisher": "Relian",
+  "setupFile": "Invoke-PrinterTcp.ps1",
+  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-PrinterTcp.ps1 -DeploymentType Install -Action Install -PinVersion pinned -PrinterName \"{env:RELIAN_PRINTER_NAME}\" -PrinterAddress \"{env:RELIAN_PRINTER_ADDRESS}\" -PrinterModel \"{env:RELIAN_PRINTER_MODEL}\"",
+  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-PrinterTcp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion pinned -PrinterName \"{env:RELIAN_PRINTER_NAME}\" -PrinterAddress \"{env:RELIAN_PRINTER_ADDRESS}\" -PrinterModel \"{env:RELIAN_PRINTER_MODEL}\"",
+  "detectionScript": "Detect-PrinterTcp.ps1",
+  "detectReplace": ["__PRINTER_NAME__", "__PRINTER_ADDRESS__", "__PRINTER_MODEL__"]
+}
