@@ -1,0 +1,16 @@
+{
+  "name": "wazuh",
+  "installsSoftware": true,
+  "file": "wazuh.sh",
+  "sha256": "f4168088f8d6789fe98623281b5f00b88237b283faaa8a9e631c16de12a4459b",
+  "pinVersion": "4.14.3",
+  "pinMeaning": "floor; an existing newer agent is never downgraded, the manager's WPK upgrades own versions",
+  "repo": "https://packages.wazuh.com/4.x/apt/",
+  "repoKey": {
+    "url": "https://packages.wazuh.com/key/GPG-KEY-WAZUH",
+    "fingerprint": "0DCFCA5547B19D2A6099506096B3EE5F29111145",
+    "uid": "Wazuh.com (Wazuh Signing Key) <support@wazuh.com>",
+    "expires": "2027-05-15",
+    "checked": "2026-11-17: key downloaded from packages.wazuh.com; gpg --show-keys shows one public key with this primary fingerprint"
+  }
+}
