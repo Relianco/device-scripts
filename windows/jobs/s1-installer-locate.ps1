@@ -8,8 +8,8 @@ param([switch]$ReportOnly)
 $ErrorActionPreference = 'Continue'
 Set-StrictMode -Off  # the loader runs modules under Latest; optional registry values are read below
 $out = [Collections.Generic.List[string]]::new()
-function Add-Line([string]$s) {
-    $s = ($s -replace '[A-Za-z0-9+/=_-]{40,}', '[redacted]') -replace '(?i)(site_?key|token|passphrase|password)\S*\s*[:=]\s*\S+', '$1=[redacted]'
+function Add-Line([string]$s, [switch]$Raw) {
+    if (-not $Raw) { $s = ($s -replace '[A-Za-z0-9+/=_-]{40,}', '[redacted]') -replace '(?i)(site_?key|token|passphrase|password)\S*\s*[:=]\s*\S+', '$1=[redacted]' }
     $s = ($s -replace '\s+', ' ').Trim()
     if ($s.Length -gt 300) { $s = $s.Substring(0, 300) + '..' }
     $out.Add($s)
@@ -57,7 +57,7 @@ foreach ($r in $roots) {
         $ver = $f.VersionInfo.ProductVersion
         $h = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
         Add-Line ("installer: {0} size={1} date={2:u} ver={3} sig={4} signer={5} sha256={6}" -f $f.FullName, $f.Length, $f.LastWriteTimeUtc, $ver,
-            $(if ($sig) { $sig.Status } else { '' }), $signer, $(if ($h) { $h.ToLowerInvariant() } else { '' }))
+            $(if ($sig) { $sig.Status } else { '' }), $signer, $(if ($h) { $h.ToLowerInvariant() } else { '' })) -Raw  # a file path and hash hold no secret
         $found++
         } catch { Add-Line ("installer: {0} unreadable: {1}" -f $f.FullName, $_.Exception.GetType().Name) }
     }
@@ -88,5 +88,16 @@ foreach ($l in $logs) {
     } catch { }
 }
 foreach ($h in @($hits | Select-Object -Last 30)) { Add-Line ("log " + $h) }
+
+# Where the RMM downloaded the SentinelOne component from (host and path only; query strings are cut).
+$urls = [Collections.Generic.List[string]]::new()
+foreach ($l in @(foreach ($r in $roots) { if ($r -match 'Ninja') { Get-ChildItem -LiteralPath $r -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Extension -eq '.log' } } })) {
+    try {
+        foreach ($m in @(Select-String -LiteralPath $l.FullName -Pattern 'https?://[^\s"''|]*(sentinel|s1)[^\s"''|]*' -AllMatches -ErrorAction Stop)) {
+            foreach ($u in $m.Matches) { $urls.Add(($u.Value -replace '\?.*$', '')) }
+        }
+    } catch { }
+}
+foreach ($u in @($urls | Select-Object -Unique | Select-Object -First 10)) { Add-Line ("url " + $u) -Raw }
 
 $out | ForEach-Object { Write-Output $_ }
