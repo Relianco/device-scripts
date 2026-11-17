@@ -1,0 +1,6 @@
+{
+  "name": "Group Policy baseline",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Required: {\"Definition\":\"cis-ws2022-dc-low-risk\"} or {\"Definition\":\"comet-vss-provider-qemu\"}. Plan-only unless \"Apply\":\"true\". \"LinkTo\":\"<OU DN in this domain>\" links the GPO, disabled unless \"LinkEnabled\":\"true\". \"AllowDefaultPolicy\":\"true\" is needed, with a definition that opts in, to change a default policy. Uninstall with \"Apply\":\"true\" removes the GPO this package created (and its unused WMI filter) or restores the last Relian backup of a default policy. Run on the PDC emulator; backups go to %ProgramData%\\Relian\\gpo-backups. The comet definition downloads its hash-pinned script once over TLS 1.2."
+}

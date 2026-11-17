@@ -699,6 +699,15 @@ exit 9
         Fail 'userinfo with empty hash called DownloadFile'
     }
 
+    # An empty user name is still userinfo. [Uri] reports no UserInfo for it.
+    foreach ($emptyName in @('https://@example.invalid/package.ps1', 'HTTPS:\\@example.invalid/package.ps1')) {
+        Set-ByteStubs -Payloads $urlPayloads
+        $code = Invoke-PinnedRunner -Hashes (Get-RoleHashes -Payloads $payloads -Casing 'upper') -Action 'Install' -PinVersion '1.0.0' -PackageUrlValue $emptyName
+        if ($code -ne 1 -or $script:downloadUrls.Count -ne 0) {
+            Fail "empty userinfo [$emptyName] returned $code after $($script:downloadUrls.Count) downloads"
+        }
+    }
+
     $upper = Get-RoleHashes -Payloads $payloads -Casing 'upper'
     $upper['package'] = ('ab' * 32)
     Set-ByteStubs -Payloads $urlPayloads

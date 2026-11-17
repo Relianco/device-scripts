@@ -1,0 +1,6 @@
+{
+  "name": "Group Policy evidence report",
+  "kind": "diagnostic",
+  "installsSoftware": false,
+  "packageArguments": "Optional: {\"Section\":\"Summary\"} (default), Gpos (with optional \"Offset\" from the previous nextOffset), Policy, Rsop, or {\"Gpo\":\"<name or GUID>\"} for one GPO's settings. Base64 in PackageArguments. Read-only stdout JSON, at most 8000 UTF-8 bytes; cpassword values are counted, never printed; no custom field writes."
+}

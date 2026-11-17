@@ -12,7 +12,8 @@ param(
     [string]$Action,
     [string]$PinVersion,
     [AllowEmptyString()][string]$CancelPath,
-    [AllowEmptyString()][string]$PackageArguments = ''
+    [AllowEmptyString()][string]$PackageArguments = '',
+    [AllowEmptyString()][string]$ReportOutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,8 @@ function Write-RelianRunnerDetail {
 
 function Test-RelianUrlHasUserInfo {
     param([Parameter(Mandatory)][string]$Url)
+    # The regex is for an empty name: [Uri] reports no UserInfo for https://@host.
+    if ($Url -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { return $true }
     try {
         $uri = [Uri]$Url
         if (-not $uri.IsAbsoluteUri) {
@@ -504,6 +507,9 @@ function ConvertTo-RelianWindowsCommandLine {
     return ($parts -join ' ')
 }
 
+# The last package process's stdout. Set by InvokePackage; read only by Save-RelianProfileReport.
+$script:RelianPackageStdout = ''
+
 # Child process so a package exit does not end a second reinstall call.
 # Executable is this host process. Windows PowerShell 5.1 has no pwsh on PATH
 # and rejects -WorkingDirectory. The package path is absolute.
@@ -562,6 +568,7 @@ $script:InvokePackage = {
             [void]$stdoutTask.Wait()
             [void]$stderrTask.Wait()
             $stdoutText = [string]$stdoutTask.Result
+            $script:RelianPackageStdout = $stdoutText
             $stderrText = [string]$stderrTask.Result
             if (-not [string]::IsNullOrEmpty($stdoutText)) {
                 $stdoutText | Out-Host
@@ -574,8 +581,45 @@ $script:InvokePackage = {
             $proc.Dispose()
         }
     }
-    & $hostPath @argList | Out-Host
+    $captured = @(& $hostPath @argList)
+    $script:RelianPackageStdout = ($captured | ForEach-Object { [string]$_ }) -join "`n"
+    $captured | Out-Host
     return [int]$LASTEXITCODE
+}
+
+# Saves the report line a storage-maintenance ProfileReport run printed to a file, for an RMM layer to
+# pick up. The runner calls no RMM: this is a plain file write. Nothing is parsed unless the run was a
+# report-only ProfileReport run that exited 0. Contract: exactly one stdout line starting with the schema
+# marker below; it is saved byte for byte, never re-serialised or cut.
+# shortcut: only the storage-maintenance report is recognised; add a marker per package when a second one needs it.
+$script:RelianReportMarker = '{"schemaVersion":2,"package":"storage-maintenance",'
+$script:RelianReportMaxBytes = 9500
+$script:SaveReport = { param($Path, $Text) [System.IO.File]::WriteAllText($Path, $Text, [System.Text.UTF8Encoding]::new($false)) }
+
+function Save-RelianProfileReport {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowEmptyString()][string]$Stdout,
+        [string]$Action,
+        $PackageParameters
+    )
+    $arg = @{}
+    foreach ($pair in @($PackageParameters)) { $arg[[string]$pair.Name] = [string]$pair.Value }
+    $reportRun = $Action -ne 'Uninstall' -and $arg['ProfileReport'] -ceq 'true' -and
+        (-not $arg.ContainsKey('Mode') -or $arg['Mode'] -ceq 'Report') -and
+        $arg['RemoveProfiles'] -cne 'true' -and $arg['ComponentCleanup'] -cne 'true'
+    if (-not $reportRun) { return }
+    $warn = { param($Why) Write-Host "report file not written: $Why" }
+    $lines = @(([string]$Stdout) -split "`r?`n" | Where-Object { $_.StartsWith($script:RelianReportMarker, [StringComparison]::Ordinal) })
+    if ($lines.Count -ne 1) { & $warn "expected one report line, found $($lines.Count)"; return }
+    $json = [string]$lines[0]
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -gt $script:RelianReportMaxBytes) { & $warn "report over $($script:RelianReportMaxBytes) bytes"; return }
+    try {
+        $doc = $json | ConvertFrom-Json
+        if ($doc.mode -cne 'Report') { & $warn 'report is not a Report-mode run'; return }
+    } catch { & $warn 'report is not valid JSON'; return }
+    try { & $script:SaveReport $Path $json } catch { & $warn 'write failed'; return }
+    Write-Host 'report file written'
 }
 
 function Invoke-RelianRunner {
@@ -593,7 +637,8 @@ function Invoke-RelianRunner {
         [string]$Action,
         [Parameter(Mandatory)][string]$PinVersion,
         [AllowEmptyString()][string]$CancelPath = '',
-        [AllowEmptyString()][string]$PackageArguments = ''
+        [AllowEmptyString()][string]$PackageArguments = '',
+        [AllowEmptyString()][string]$ReportOutputPath = ''
     )
 
     foreach ($url in @($PackageUrl, $ToolkitUrl, $BrandPackUrl)) {
@@ -608,6 +653,13 @@ function Invoke-RelianRunner {
         [string]::IsNullOrWhiteSpace($ToolkitSha256) -or
         [string]::IsNullOrWhiteSpace($BrandPackSha256)) {
         return 0
+    }
+
+    # A drive-qualified or UNC path. IsPathRooted also accepts C:name and \name, which depend on the current drive.
+    $fullyQualified = $ReportOutputPath -match '\A([A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/])' -or ([System.IO.Path]::DirectorySeparatorChar -eq '/' -and $ReportOutputPath.StartsWith('/'))
+    if ($ReportOutputPath -ne '' -and -not $fullyQualified) {
+        Write-RelianRunnerError 'ReportOutputPath must be an absolute path'
+        return 1
     }
 
     try {
@@ -664,7 +716,12 @@ function Invoke-RelianRunner {
             [void](& $script:ExpandArchive -Path $brandFile -Destination $work)
             $scriptPath = Join-Path $work 'Invoke-Package.ps1'
             [System.IO.File]::Copy($packageFile, $scriptPath, $true)
+            $script:RelianPackageStdout = ''
             $exitCode = [int](Invoke-RelianPackageSequence -ScriptPath $scriptPath -Action $Action -PinVersion $PinVersion -WorkRoot $work -CancelPath $CancelPath -PackageParameters $packageParameters)
+            if ($exitCode -eq 0 -and $ReportOutputPath -ne '') {
+                # A failed save is a warning only: the package result stands.
+                try { Save-RelianProfileReport -Path $ReportOutputPath -Stdout $script:RelianPackageStdout -Action $Action -PackageParameters $packageParameters } catch { Write-Host 'report file not written: unexpected error' }
+            }
         }
     } catch {
         Write-RelianRunnerDetail -Message $_.Exception.Message -Urls @($PackageUrl, $ToolkitUrl, $BrandPackUrl)
@@ -678,6 +735,10 @@ function Invoke-RelianRunner {
     }
     return [int]$exitCode
 }
+
+# Server 2016 PowerShell 5.1 defaults to explicit TLS 1.0/1.1; Azure Storage needs 1.2.
+# SystemDefault (0) and any set with Tls12/Tls13 are left alone so modern hosts keep TLS 1.3.
+$tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
 
 # Dot-sourcing under test defines functions and does not download.
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {

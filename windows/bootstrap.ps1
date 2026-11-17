@@ -155,7 +155,7 @@ try {
             }
 
             try {
-                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
                 Invoke-WebRequest -Uri $rawUrl -OutFile $downloadPath -Headers $headers -UseBasicParsing
                 $scriptPath = $downloadPath
             } catch {
