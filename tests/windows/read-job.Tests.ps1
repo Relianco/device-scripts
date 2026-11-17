@@ -79,7 +79,7 @@ if ($wakePin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts
 if ((@($wakePin.Keys.Keys | Sort-Object) -join '|') -cne 'Broadcast|Mac|Port') { Fail 'wake-device keys' }
 # diagnose-windows-update: the package at the commit that added it, and only Section.
 $wuPin = $script:Jobs['diagnose-windows-update']
-if ($wuPin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts/3801fefba8dff2964ffe0a3bd039b4e9a2622418/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1' -or $wuPin.Sha256 -cne '12ca9a2485def6f796c069b3a7ba30191573ff1d27199aaaac248eb16fc1194e') { Fail 'diagnose-windows-update pin is not the package commit' }
+if ($wuPin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts/6613c71a270464ad84c50a06e43a485f8d85062d/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1' -or $wuPin.Sha256 -cne '5b76ae11dd05a9c9ec41df982a00711c8682906a6b0efb4d755113a9cb1def2d') { Fail 'diagnose-windows-update pin is not the package commit' }
 if ((@($wuPin.Keys.Keys) -join '|') -cne 'Section' -or (@($wuPin.Keys.Section.Enum) -join '|') -cne 'Summary|History|Events|Policy|Service|ServicingHistory') { Fail 'diagnose-windows-update keys' }
 # The other read pins and the wake pin are unchanged by the new row.
 $pins = @{ 'diagnose-feature-upgrade' = 'f27d3c26a3f7fb5c4120e93eacc184d0fdca61bfa9def41ecacce7c66b22f403'; 'maintenance-evidence' = '895d9193842341b349ed9ff26dafeab70ca68ae76bd86a71e631d2548754bc25'; 'gpo-evidence' = '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8'; 'wake-device' = '7a3626ae9de046031d83e305452edde2120ddd0dc9e323fbb6ae46c5c8daaaee' }
