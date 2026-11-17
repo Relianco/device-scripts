@@ -168,7 +168,9 @@ function Invoke-SrMain {
     function Done([int]$code) { @{ ExitCode = $code; Lines = $out.ToArray() } }
 
     # Off switches first, then a URL with userinfo is refused before any other work.
-    # An empty InstallerSha256 is an off switch only for a reinstall: a bind-only run passes no installer at all.
+    # Not an empty-hash-exits-0 package: PinVersion is the pin. Bind needs no installer, so an empty InstallerSha256
+    # means bind only (as on main before Reinstall existed) and nothing is ever downloaded; exiting 0 here would
+    # turn every bind-only deployment into a no-op. A reinstall with no installer hash does nothing and exits 0.
     if ([string]::IsNullOrWhiteSpace($PinVersion)) { Say 'noPin: nothing done'; return Done 0 }
     if ($Reinstall -eq 'true' -and $Section -ne 'Report' -and [string]::IsNullOrWhiteSpace($InstallerSha256)) { Say 'noPin: empty InstallerSha256; nothing done'; return Done 0 }
     if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Say 'refused: InstallerUrl contains userinfo'; return Done 1 }

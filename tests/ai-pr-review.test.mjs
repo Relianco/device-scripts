@@ -164,6 +164,7 @@ test('the prompt is PowerShell rules and names JSON', () => {
   assert.doesNotMatch(PROMPT, /Nuxt/)
   assert.match(PROMPT, /Relian is the product name\. It is not a client name\. Do not report Relian in a namespace, a filename, or UI text\./)
   assert.match(PROMPT, /The user-check package installs nothing\. It has no installer sha256\. pagePin and codePin are mode labels, not pin hashes\. Do not require a 64-character hash in windows\/releases\/user-check\.json\./)
+  assert.match(PROMPT, /Its off switch is an empty PinVersion\. An empty InstallerSha256 means no installer: bind still runs, nothing is downloaded/)
   const skip = [
     'SecureConnectionError is a connection failure and is retryable. Do not report it.',
     'The OpenAI client may retry HTTP 409 and 425 once. Do not report that single retry.',
