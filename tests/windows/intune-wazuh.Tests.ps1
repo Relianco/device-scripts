@@ -121,7 +121,7 @@ if (-not (Test-Path -LiteralPath $namedDetectPath)) {
 
 $installCommand = [string]$meta.installCommand
 $uninstallCommand = [string]$meta.uninstallCommand
-$expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wazuh.ps1 -DeploymentType Install -Action Install -PinVersion 4.14.9'
+$expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wazuh.ps1 -DeploymentType Install -Action Install -PinVersion 4.14.9 -FloorVersion 4.14.3 -Enroll'
 $expectedUninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wazuh.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 4.14.9'
 if ($installCommand -cne $expectedInstall) {
     Fail 'install command'
@@ -361,6 +361,41 @@ if (Test-RelianWazuhInstalled -Entries @() -VersionValue 'v4.14.9') {
 }
 if (Test-RelianWazuhInstalled -Entries @() -VersionValue '') {
     Fail 'an empty version key was present'
+}
+
+# Enrollment: floor line, service, and keys.
+$floorLines = @([regex]::Matches($detectText, "(?m)^\`$RelianWazuhFloor = '([0-9.]+)'\r?$"))
+if ($floorLines.Count -ne 1 -or $floorLines[0].Groups[1].Value -cne '4.14.3') {
+    Fail 'detection does not have exactly one floor line at 4.14.3'
+}
+if (-not $detectText.Contains('-PinVersion $RelianWazuhFloor)')) {
+    Fail 'detection main path does not use the floor'
+}
+foreach ($needle in @("Get-Service -Name 'WazuhSvc'", 'Test-RelianWazuhEnrolled -ServiceStatus', 'ossec-agent\client.keys')) {
+    if (-not $detectText.Contains($needle)) {
+        Fail "detection main path misses $needle"
+    }
+}
+if (-not (Get-Command Test-RelianWazuhEnrolled -ErrorAction SilentlyContinue)) {
+    Fail 'Test-RelianWazuhEnrolled was not defined'
+}
+if (-not (Test-RelianWazuhEnrolled -ServiceStatus 'Running' -KeysLength 64)) {
+    Fail 'a running enrolled agent was not enrolled'
+}
+if (-not (Test-RelianWazuhEnrolled -ServiceStatus 'Stopped' -KeysLength 64)) {
+    Fail 'a stopped enrolled agent was not enrolled'
+}
+if (Test-RelianWazuhEnrolled -ServiceStatus 'Running' -KeysLength 0) {
+    Fail 'empty client.keys was enrolled'
+}
+if (Test-RelianWazuhEnrolled -ServiceStatus '' -KeysLength 64) {
+    Fail 'a missing service was enrolled'
+}
+if (-not (Test-RelianWazuhInstalled -Entries @(New-WazuhDetectEntry -DisplayName 'Wazuh Agent' -DisplayVersion '4.14.3') -PinVersion $RelianWazuhFloor)) {
+    Fail 'an agent at the floor was absent'
+}
+if (Test-RelianWazuhInstalled -Entries @(New-WazuhDetectEntry -DisplayName 'Wazuh Agent' -DisplayVersion '4.14.2') -PinVersion $RelianWazuhFloor) {
+    Fail 'an agent below the floor was present'
 }
 
 $sampleAddress = (@(10, 1, 2, 3) -join '.')
