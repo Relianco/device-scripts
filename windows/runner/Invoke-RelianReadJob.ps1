@@ -30,7 +30,7 @@
     before it has read the first. A refusal also writes its line, so a stale result never answers a new request (except an invalid -Job, which fails at parameter binding before any line).
 
 .PARAMETER Job
-    One of the built-in jobs: diagnose-feature-upgrade, maintenance-evidence, gpo-evidence, wake-device. wake-device is the one
+    One of the built-in jobs: diagnose-feature-upgrade, diagnose-windows-update, maintenance-evidence, gpo-evidence, wake-device. wake-device is the one
     job that is not a read: it sends three Wake-on-LAN UDP packets from this device to a MAC on its own subnet and changes nothing.
 
 .PARAMETER JobArguments
@@ -46,7 +46,7 @@
 # Parameters are not Mandatory: a mandatory param block prompts when this file is dot-sourced under test.
 [CmdletBinding()]
 param(
-    [ValidateSet('diagnose-feature-upgrade', 'maintenance-evidence', 'gpo-evidence', 'wake-device')][string]$Job,
+    [ValidateSet('diagnose-feature-upgrade', 'diagnose-windows-update', 'maintenance-evidence', 'gpo-evidence', 'wake-device')][string]$Job,
     [string]$JobArguments,
     [string]$RequestId
 )
@@ -71,6 +71,13 @@ $script:Jobs = @{
         Sha256 = 'f27d3c26a3f7fb5c4120e93eacc184d0fdca61bfa9def41ecacce7c66b22f403'
         Keys   = @{
             Section = @{ Enum = @('Summary', 'Rollback', 'Servicing', 'Setup', 'Boot', 'Maintenance') }
+        }
+    }
+    'diagnose-windows-update'  = @{
+        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/3801fefba8dff2964ffe0a3bd039b4e9a2622418/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1'
+        Sha256 = '12ca9a2485def6f796c069b3a7ba30191573ff1d27199aaaac248eb16fc1194e'
+        Keys   = @{
+            Section = @{ Enum = @('Summary', 'History', 'Events', 'Policy', 'Service', 'ServicingHistory') }
         }
     }
     'maintenance-evidence'     = @{

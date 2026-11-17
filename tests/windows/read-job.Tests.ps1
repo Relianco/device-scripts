@@ -48,7 +48,7 @@ if ($pipeline -isnot [Management.Automation.Language.PipelineAst] -or $pipeline.
 if ($fieldCalls[0].CommandElements.Count -ne 2) { Fail 'Ninja-Property-Set-Piped takes only the field name as an argument' }
 
 # ---- The table ---------------------------------------------------------------------------------------------
-$jobNames = @('diagnose-feature-upgrade', 'maintenance-evidence', 'gpo-evidence', 'wake-device')
+$jobNames = @('diagnose-feature-upgrade', 'diagnose-windows-update', 'maintenance-evidence', 'gpo-evidence', 'wake-device')
 if ((@($script:Jobs.Keys | Sort-Object) -join '|') -cne (@($jobNames | Sort-Object) -join '|')) { Fail "table keys were [$(@($script:Jobs.Keys) -join '|')]" }
 $cmd = Get-Command -Name $loaderPath
 $vs = @($cmd.Parameters['Job'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateSetAttribute] })
@@ -77,8 +77,12 @@ foreach ($forbidden in @('Fix', 'Apply', 'Mode', 'Action', 'Name', 'Match', 'Sou
 $wakePin = $script:Jobs['wake-device']
 if ($wakePin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts/a152dbd5ce91811706f4a6a4f993f8d578954def/windows/packages/wake-device/Invoke-WakeDevice.ps1' -or $wakePin.Sha256 -cne '7a3626ae9de046031d83e305452edde2120ddd0dc9e323fbb6ae46c5c8daaaee') { Fail 'wake-device pin is not the #143 merge commit' }
 if ((@($wakePin.Keys.Keys | Sort-Object) -join '|') -cne 'Broadcast|Mac|Port') { Fail 'wake-device keys' }
-# The three read pins are unchanged by the wake row.
-$pins = @{ 'diagnose-feature-upgrade' = 'f27d3c26a3f7fb5c4120e93eacc184d0fdca61bfa9def41ecacce7c66b22f403'; 'maintenance-evidence' = '895d9193842341b349ed9ff26dafeab70ca68ae76bd86a71e631d2548754bc25'; 'gpo-evidence' = '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8' }
+# diagnose-windows-update: the package at the commit that added it, and only Section.
+$wuPin = $script:Jobs['diagnose-windows-update']
+if ($wuPin.Url -cne 'https://raw.githubusercontent.com/Relianco/device-scripts/3801fefba8dff2964ffe0a3bd039b4e9a2622418/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1' -or $wuPin.Sha256 -cne '12ca9a2485def6f796c069b3a7ba30191573ff1d27199aaaac248eb16fc1194e') { Fail 'diagnose-windows-update pin is not the package commit' }
+if ((@($wuPin.Keys.Keys) -join '|') -cne 'Section' -or (@($wuPin.Keys.Section.Enum) -join '|') -cne 'Summary|History|Events|Policy|Service|ServicingHistory') { Fail 'diagnose-windows-update keys' }
+# The other read pins and the wake pin are unchanged by the new row.
+$pins = @{ 'diagnose-feature-upgrade' = 'f27d3c26a3f7fb5c4120e93eacc184d0fdca61bfa9def41ecacce7c66b22f403'; 'maintenance-evidence' = '895d9193842341b349ed9ff26dafeab70ca68ae76bd86a71e631d2548754bc25'; 'gpo-evidence' = '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8'; 'wake-device' = '7a3626ae9de046031d83e305452edde2120ddd0dc9e323fbb6ae46c5c8daaaee' }
 foreach ($n in $pins.Keys) { if ($script:Jobs[$n].Sha256 -cne $pins[$n]) { Fail "$n pin changed" } }
 function Test-WakeRule { param($Key, $Value) $rule = $wakePin.Keys[$Key]; if ($rule.ContainsKey('Enum')) { return $rule.Enum -ccontains $Value }; return $Value.Length -le $rule.Max -and $Value -cmatch $rule.Regex }
 foreach ($ok in @('AA-BB-CC-DD-EE-FF', '00-11-22-33-44-55')) { if (-not (Test-WakeRule 'Mac' $ok)) { Fail "Mac $ok refused" } }
@@ -171,6 +175,7 @@ $cases = @(
     @('maintenance-evidence', ('{"Package":"Update","ReportId":"' + ('b2' * 16) + '"}'), ('-Package Update -ReportId ' + ('b2' * 16))),
     @('gpo-evidence', ('{"Gpo":"{' + $gpoGuid + '}"}'), ('-Gpo {' + $gpoGuid + '}')),
     @('gpo-evidence', '{"Section":"Gpos","Offset":"12345"}', '-Offset 12345 -Section Gpos'),
+    @('diagnose-windows-update', '{"Section":"ServicingHistory"}', '-Section ServicingHistory'),
     @('wake-device', '{"Mac":"AA-BB-CC-DD-EE-01","Broadcast":"192.168.1.255","Port":"9"}', '-Broadcast 192.168.1.255 -Mac AA-BB-CC-DD-EE-01 -Port 9')
 )
 foreach ($c in $cases) {
@@ -207,6 +212,9 @@ foreach ($w in @('{"Mac":"aa:bb:cc:dd:ee:01","Broadcast":"192.168.1.255"}', '{"M
     $r = Invoke-Case -Job 'wake-device' -JobArguments (ConvertTo-B64 $w); Assert-Refused "wake [$w]" $r 'bad argument value'
 }
 $r = Invoke-Case -Job 'wake-device' -JobArguments (ConvertTo-B64 '{"Mac":"AA-BB-CC-DD-EE-01","Target":"x"}'); Assert-Refused 'wake extra key' $r 'unknown argument key'
+# diagnose-windows-update through the whole loader: an unknown Section or any other key is refused before a download.
+$r = Invoke-Case -Job 'diagnose-windows-update' -JobArguments (ConvertTo-B64 '{"Section":"Install"}'); Assert-Refused 'windows-update section' $r 'bad argument value'
+$r = Invoke-Case -Job 'diagnose-windows-update' -JobArguments (ConvertTo-B64 '{"Section":"Summary","Fix":"true"}'); Assert-Refused 'windows-update extra key' $r 'unknown argument key'
 # Table hash: empty, missing (spaces), malformed, uppercase. All exit non-zero by design: this loader has no empty-hash off switch, so an empty hash is never a quiet success.
 foreach ($bad in @('', ' ', 'abc', $fakeSha.ToUpperInvariant(), ($fakeSha + "`n"))) {
     $r = Invoke-Case -TableHash $bad; Assert-Refused "table hash [$bad]" $r 'table hash missing or malformed'
