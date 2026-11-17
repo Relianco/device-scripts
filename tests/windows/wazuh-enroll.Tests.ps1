@@ -129,6 +129,12 @@ if ($script:AuthdWrites.Count -ne 1 -or $script:AuthdWrites[0] -cne $script:Secr
 if ($script:ServiceStarts.Count -ne 1 -or -not $script:ServiceStarts[0]) { Fail 'fresh install did not restart the service once' }
 Assert-NoSecretLeak -Label 'fresh install'
 
+# The secret is written verbatim: edge whitespace is part of it.
+Reset-EnrollCase
+$env:RELIAN_WAZUH_AUTHD_PASS = " $($script:Secret) "
+[void](Invoke-EnrollCase)
+if ($script:AuthdWrites.Count -ne 1 -or $script:AuthdWrites[0] -cne " $($script:Secret) ") { Fail 'the secret was not written verbatim' }
+
 # Prefix given with the separator, a group list that names default, and a name that is already prefixed.
 Reset-EnrollCase
 $env:RELIAN_WAZUH_PREFIX = 'tenantexample--'

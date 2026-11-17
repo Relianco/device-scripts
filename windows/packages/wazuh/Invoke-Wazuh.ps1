@@ -707,13 +707,17 @@ $script:WazuhEnrollNames = @('RELIAN_WAZUH_MANAGER', 'RELIAN_WAZUH_GROUP', 'RELI
 function Get-WazuhEnrollSettings {
     $values = @{}
     foreach ($name in $script:WazuhEnrollNames) {
-        $values[$name] = ([string][Environment]::GetEnvironmentVariable($name)).Trim()
+        $values[$name] = [string][Environment]::GetEnvironmentVariable($name)
+        # The secret stays verbatim; edge whitespace may be part of it.
+        if ($name -ne 'RELIAN_WAZUH_AUTHD_PASS') {
+            $values[$name] = $values[$name].Trim()
+        }
     }
     # Children (msiexec) must not inherit the secret, on every path.
     [Environment]::SetEnvironmentVariable('RELIAN_WAZUH_AUTHD_PASS', $null)
     foreach ($name in $script:WazuhEnrollNames) {
         # CIPP leaves an unknown %variable% in place.
-        if ($values[$name] -eq '' -or $values[$name] -match '^%[^%\s]+%$') {
+        if ([string]::IsNullOrWhiteSpace($values[$name]) -or $values[$name].Trim() -match '^%[^%\s]+%$') {
             Add-WazuhError -Message "$name is empty or not substituted"
             return $null
         }
