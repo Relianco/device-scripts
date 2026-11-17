@@ -219,7 +219,7 @@ $repairRows = @(
     @{
         Label = 'Repair equal'
         Pin = '2.0.0.0'; Installed = '2.0.0.0'; Marker = '2.0.0.0'
-        Expect = (New-Expect -RunInstaller 'install')
+        Expect = (New-Expect -RunInstaller 'repair')
     }
     @{
         Label = 'Repair older than pin'
@@ -273,6 +273,13 @@ if ($null -eq $installArgs -or $installArgs.Count -ne 6 -or
     $installArgs[2] -cne '/qn' -or $installArgs[3] -cne '/norestart' -or
     $installArgs[4] -cne 'DESKTOP_SHORTCUTS="0"' -or $installArgs[5] -cne 'NOUPDATER="1"') {
     Fail "install arguments $($installArgs -join ' ')"
+}
+$repairArgs = Get-PdfXchangeMsiArgumentList -Mode 'repair' -InstallerPath 'C:\cache\pdfx.msi' -ProductCode ''
+if ($null -eq $repairArgs -or $repairArgs[0] -cne '/i' -or $repairArgs -cnotcontains 'REINSTALL=ALL' -or $repairArgs -cnotcontains 'REINSTALLMODE=vomus') {
+    Fail "repair arguments $($repairArgs -join ' ')"
+}
+if ($installArgs -ccontains 'REINSTALL=ALL') {
+    Fail 'plain install must not carry REINSTALL'
 }
 $spacedArgs = Get-PdfXchangeMsiArgumentList -Mode 'install' -InstallerPath 'C:\Program Files\PDF X\pdfx.msi' -ProductCode ''
 if ($null -eq $spacedArgs -or $spacedArgs[1] -cne '"C:\Program Files\PDF X\pdfx.msi"') {
@@ -621,8 +628,8 @@ try {
     Set-Marker '2.0.0.0'
     $code = Invoke-Case -Action 'Repair' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectMsi 1 -ExpectMarker '2.0.0.0' -Label 'Repair present'
-    if ($script:MsiCalls[0].Mode -cne 'install') {
-        Fail 'Repair present did not run the installer again'
+    if ($script:MsiCalls[0].Mode -cne 'repair') {
+        Fail 'Repair present did not run msiexec in repair mode'
     }
 
     Reset-PdfXchangeCase

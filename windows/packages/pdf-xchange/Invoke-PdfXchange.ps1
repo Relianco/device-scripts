@@ -1,6 +1,8 @@
 # File parameters are not Mandatory. A mandatory parameter prompts when this
 # file is dot-sourced under RELIAN_DEPLOY_TEST.
 # InstallerUrl and InstallerSha256 are the pin in windows/releases/pdf-xchange.json.
+# intune.json passes only -PinVersion on purpose: the hash is this default, and an empty
+# -InstallerSha256 is only the off switch when a caller passes it explicitly.
 # The runner copies this script alone, so the values are inlined.
 # The URL is the versioned 64-bit PDF-XChange PRO MSI that the winget manifest
 # TrackerSoftware.PDF-XChangePRO 11.1.2.0 records. It shares its UpgradeCode with V10,
@@ -161,6 +163,10 @@ function Get-PdfXchangePlan {
                 return New-PdfXchangePlan -ExitCode 0
             }
             return New-PdfXchangePlan -WriteMarker $write
+        }
+        if ($installedCompare.CompareTo($pinCompare) -eq 0) {
+            # Same version: plain /i is a no-op on an installed product, so force a file reinstall.
+            return New-PdfXchangePlan -RunInstaller 'repair'
         }
         return New-PdfXchangePlan -RunInstaller 'install'
     }
@@ -593,6 +599,10 @@ function Get-PdfXchangeMsiArgumentList {
     if (-not [string]::IsNullOrWhiteSpace($UserMail)) {
         $list += ('USERMAIL="{0}"' -f $UserMail)
     }
+    if ($Mode -eq 'repair') {
+        # Reinstall every feature and overwrite damaged or missing files, registry and shortcuts.
+        $list += @('REINSTALL=ALL', 'REINSTALLMODE=vomus')
+    }
     return $list
 }
 
@@ -788,7 +798,7 @@ function Invoke-PdfXchangeAction {
     $keyData = ''
     $organization = ''
     $userMail = ''
-    if ($plan.RunInstaller -eq 'install') {
+    if ($plan.RunInstaller -in @('install', 'repair')) {
         # Checked before the 450 MB download. The key is never printed.
         $keyData = Get-PdfXchangeKeyData -Text $KeyText
         if ([string]::IsNullOrWhiteSpace($keyData)) {
@@ -805,7 +815,7 @@ function Invoke-PdfXchangeAction {
 
     $cache = ''
     try {
-        if ($plan.RunInstaller -eq 'install') {
+        if ($plan.RunInstaller -in @('install', 'repair')) {
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-pdf-xchange-' + [guid]::NewGuid().ToString('n'))
             New-Item -ItemType Directory -Path $cache -Force | Out-Null
             $installerPath = Join-Path $cache 'ProV11.x64.msi'
@@ -817,7 +827,7 @@ function Invoke-PdfXchangeAction {
             if (Test-PdfXchangeCancelled -CancelPath $CancelPath) {
                 return 130
             }
-            $result = & $script:InvokeMsiExec -Mode 'install' -InstallerPath $installerPath -ProductCode '' -Organization $organization -UserMail $userMail
+            $result = & $script:InvokeMsiExec -Mode $plan.RunInstaller -InstallerPath $installerPath -ProductCode '' -Organization $organization -UserMail $userMail
             if ($null -eq $result -or -not (Test-PdfXchangeMsiSucceeded -Code ([int]$result))) {
                 Add-PdfXchangeError -Message 'installer failed'
                 return 1
