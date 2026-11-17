@@ -86,12 +86,12 @@ try {
     Assert ($json -notmatch $secret) 'no secret in the output'
 
     # Every persisted log is read while the budgets last: no file-count cap hides the oldest one.
-    foreach ($i in 1..18) { [IO.File]::WriteAllText((Join-Path $cbs ('CbsPersist_2026060{0:d2}000000.log' -f $i)), "2026-06-01 00:00:00, Info CBS ordinary $i`r`n") }
+    foreach ($i in 1..18) { [IO.File]::WriteAllText((Join-Path $cbs ('CbsPersist_202606{0:d2}000000.log' -f $i)), "2026-06-01 00:00:00, Info CBS ordinary $i`r`n") }
     [IO.File]::WriteAllText((Join-Path $cbs 'CbsPersist_20260500000000.log'), "2026-05-01 00:00:00, Error CBS oldest 0x800f0991`r`n")
     $r = Read-WuServicingHistory ([Diagnostics.Stopwatch]::StartNew())
     Assert ($r.persistLogs -eq 21 -and @($r.files).Count -eq 23) 'all 21 persisted logs listed and read'
     Assert (@($r.codes | Where-Object { $_.code -eq '0x800f0991' }).Count -eq 1) 'a code only in the oldest persisted log is found'
-    foreach ($i in 1..18) { Remove-Item -LiteralPath (Join-Path $cbs ('CbsPersist_2026060{0:d2}000000.log' -f $i)) }
+    foreach ($i in 1..18) { Remove-Item -LiteralPath (Join-Path $cbs ('CbsPersist_202606{0:d2}000000.log' -f $i)) }
     Remove-Item -LiteralPath (Join-Path $cbs 'CbsPersist_20260500000000.log')
 
     # Bounds: bytes, time and the code table.
