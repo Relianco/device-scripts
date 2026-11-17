@@ -278,6 +278,7 @@ That base64 string is `ClientTag=tag:client-example`. Set the auth key in the `A
 Packages in `linux/packages/`:
 
 - `tailscale`: installs Tailscale from the signed apt repo on Debian and Proxmox VE (bookworm and trixie) and joins it with a tag. The pin version is a floor. It must run as root. It never changes the firewall, sshd, or Proxmox config. The key is read from a `0600` file, not a command line.
+- `wazuh`: installs the Wazuh agent from the official apt (or dnf) repo, key pinned by fingerprint, on Debian, Ubuntu and Proxmox VE. The pin version is a floor (default 4.14.3): a newer agent is never downgraded, and the package is held so the manager's WPK upgrades own versions. It reads `WazuhManager`, `WazuhGroup`, `WazuhNamePrefix` and `WazuhPasswordFile` (a root-only file) from the environment, refuses if one is empty, and never re-enrols while `client.keys` has content. The password is copied from the file, never put on a command line.
 - `diagnose-pve`: read-only diagnostics for Proxmox VE and Debian hosts. It prints plain text: host, kernel, uptime, load, CPU, memory pressure, swap, ZFS ARC, block devices, file systems, RAID, ZFS and LVM state, and disk activity sampled twice (`Sample`, 1 to 10 seconds, default 5). Every command runs under `timeout`. It writes nothing, and exits 0 even when a command is missing.
 - `noop`: installs nothing and exits 0. Use it to prove that the runner, the hash pin, and the NinjaOne wiring work on a host before a real package.
 
