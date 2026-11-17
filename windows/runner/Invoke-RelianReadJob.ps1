@@ -74,8 +74,8 @@ $script:Jobs = @{
         }
     }
     'diagnose-windows-update'  = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/6613c71a270464ad84c50a06e43a485f8d85062d/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1'
-        Sha256 = '5b76ae11dd05a9c9ec41df982a00711c8682906a6b0efb4d755113a9cb1def2d'
+        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/c7be1b024d747e261a548d37a2be695fb1a8b1e4/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1'
+        Sha256 = '47470158a48a8c14f1251d5dc6c1ead7d38feb6360290e3a2d0bf196fa8ee8ee'
         Keys   = @{
             Section = @{ Enum = @('Summary', 'History', 'Events', 'Policy', 'Service', 'ServicingHistory') }
         }
