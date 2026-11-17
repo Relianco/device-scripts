@@ -167,15 +167,16 @@ function Invoke-SrMain {
     function Say([string]$s) { $out.Add((Protect-SrText $s)) }
     function Done([int]$code) { @{ ExitCode = $code; Lines = $out.ToArray() } }
 
-    # Off switches first, then a URL with userinfo is refused before any other work.
-    # Not an empty-hash-exits-0 package: PinVersion is the pin. Bind needs no installer, so an empty InstallerSha256
-    # means bind only (as on main before Reinstall existed) and nothing is ever downloaded; exiting 0 here would
-    # turn every bind-only deployment into a no-op. A reinstall with no installer hash does nothing and exits 0.
+    # Off switch, then the action, then installer rules. Not an empty-hash-exits-0 package: PinVersion is the pin.
+    # Bind needs no installer, so an empty InstallerSha256 means bind only (as on main before Reinstall existed):
+    # InstallerUrl is ignored and nothing is downloaded. Exiting 0 on it would make every bind-only run a no-op.
     if ([string]::IsNullOrWhiteSpace($PinVersion)) { Say 'noPin: nothing done'; return Done 0 }
-    if ($Reinstall -eq 'true' -and $Section -ne 'Report' -and [string]::IsNullOrWhiteSpace($InstallerSha256)) { Say 'noPin: empty InstallerSha256; nothing done'; return Done 0 }
-    if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Say 'refused: InstallerUrl contains userinfo'; return Done 1 }
     $report = $Section -eq 'Report'
     if (-not $report -and $Action -ne 'Install') { Say "refused: action '$Action' (only Install binds; uninstall is -AllowUninstall)"; return Done 1 }
+    $noInstaller = [string]::IsNullOrWhiteSpace($InstallerSha256)
+    if ($noInstaller) { $InstallerUrl = '' }
+    if ($Reinstall -eq 'true' -and -not $report -and $noInstaller) { Say 'noPin: empty InstallerSha256; nothing done'; return Done 0 }
+    if ($InstallerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Say 'refused: InstallerUrl contains userinfo'; return Done 1 }
     $tok = $null
     if (-not $report) {
         $tok = Read-SrToken $SiteToken

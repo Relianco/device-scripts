@@ -202,6 +202,14 @@ Reset
 $script:Config = $bound
 $r = M -SiteToken $token -InstallerUrl 'https://u@resources.example.com/a.zip' -InstallerSha256 ('a' * 64)
 Assert ($r.ExitCode -eq 1 -and $script:Calls.Count -eq 0 -and $script:Downloads -eq 0) 'userinfo url refused first, even when bound'
+# Uninstall is refused before the empty-installer reinstall shortcut.
+Reset
+$r = Invoke-SrMain -PinVersion '1' -Action Uninstall -SiteToken $token -Reinstall true -InstallerSha256 ''
+Assert ($r.ExitCode -eq 1 -and $script:Calls.Count -eq 0 -and $script:Downloads -eq 0) 'Uninstall refused even with an empty installer hash'
+# With no installer hash the URL is ignored: bind-only still binds and downloads nothing.
+Reset
+$r = M -SiteToken $token -InstallerUrl 'https://u@resources.example.com/a.zip' -InstallerSha256 ''
+Assert ($r.ExitCode -eq 0 -and $script:Calls.Contains('bind') -and $script:Downloads -eq 0) 'empty installer hash ignores InstallerUrl and binds'
 # A permanent failure (here: not a transient status) is tried once.
 Reset
 $script:SrDownload = { param($u, $p) $script:Downloads++; throw [Net.WebException]::new('forbidden', [Net.WebExceptionStatus]::ProtocolError) }
