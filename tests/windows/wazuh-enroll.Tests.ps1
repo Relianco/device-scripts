@@ -32,6 +32,8 @@ $script:GoodSha = ([System.BitConverter]::ToString($sha.ComputeHash($script:Good
 $sha.Dispose()
 # Generated per run, so no literal secret is committed.
 $script:Secret = 'sentinel-' + [guid]::NewGuid().ToString('n')
+# Synthetic host name, generated so no device name is committed.
+$script:HostName = 'H' + [guid]::NewGuid().ToString('n').Substring(0, 10)
 
 function Reset-EnrollCase {
     param(
@@ -43,7 +45,7 @@ function Reset-EnrollCase {
     $env:RELIAN_WAZUH_GROUP = 'tenant_group'
     $env:RELIAN_WAZUH_PREFIX = 'tenantexample'
     $env:RELIAN_WAZUH_AUTHD_PASS = $script:Secret
-    $env:COMPUTERNAME = 'PC01'
+    $env:COMPUTERNAME = $script:HostName
     $script:InstalledVersion = $Installed
     $script:ServiceStatus = $Service
     $script:KeysLength = $Keys
@@ -119,7 +121,7 @@ Reset-EnrollCase
 $code = Invoke-EnrollCase
 if ($code -ne 0) { Fail "fresh install exit $code $($script:WazuhErrorLog -join ';')" }
 if ($script:DownloadCount -ne 1 -or $script:MsiCalls.Count -ne 1) { Fail 'fresh install did not download and run msiexec once' }
-$wantProps = @("WAZUH_MANAGER=$manager", 'WAZUH_AGENT_GROUP=default,tenant_group', 'WAZUH_AGENT_NAME=tenantexample--PC01')
+$wantProps = @("WAZUH_MANAGER=$manager", 'WAZUH_AGENT_GROUP=default,tenant_group', "WAZUH_AGENT_NAME=tenantexample--$($script:HostName)")
 if ((@($script:MsiCalls[0].Properties) -join '|') -cne ($wantProps -join '|')) { Fail "fresh install properties $(@($script:MsiCalls[0].Properties) -join '|')" }
 $args0 = @($script:MsiCalls[0].Arguments)
 if ($args0[0] -cne '/i' -or $args0[2] -cne '/qn' -or $args0[3] -cne '/norestart' -or $args0.Count -ne 7) { Fail 'fresh install argument list' }
@@ -132,11 +134,11 @@ Reset-EnrollCase
 $env:RELIAN_WAZUH_PREFIX = 'tenantexample--'
 $env:RELIAN_WAZUH_GROUP = 'default, tenant_group,extra'
 [void](Invoke-EnrollCase)
-if ((@($script:MsiCalls[0].Properties) -join '|') -cne "WAZUH_MANAGER=$manager|WAZUH_AGENT_GROUP=default,tenant_group,extra|WAZUH_AGENT_NAME=tenantexample--PC01") { Fail 'prefix separator or group list' }
+if ((@($script:MsiCalls[0].Properties) -join '|') -cne "WAZUH_MANAGER=$manager|WAZUH_AGENT_GROUP=default,tenant_group,extra|WAZUH_AGENT_NAME=tenantexample--$($script:HostName)") { Fail 'prefix separator or group list' }
 Reset-EnrollCase
-$env:COMPUTERNAME = 'other--PC02'
+$env:COMPUTERNAME = "other--$($script:HostName)"
 [void](Invoke-EnrollCase)
-if (@($script:MsiCalls[0].Properties)[2] -cne 'WAZUH_AGENT_NAME=other--PC02') { Fail 'an already prefixed name was prefixed again' }
+if (@($script:MsiCalls[0].Properties)[2] -cne "WAZUH_AGENT_NAME=other--$($script:HostName)") { Fail 'an already prefixed name was prefixed again' }
 
 # Keys exist: no download, no msiexec, no authd.pass, no re-enrollment.
 foreach ($installed in @('4.14.3', '4.14.9', '4.15.0')) {
