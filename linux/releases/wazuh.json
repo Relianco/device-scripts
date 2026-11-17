@@ -2,7 +2,7 @@
   "name": "wazuh",
   "installsSoftware": true,
   "file": "wazuh.sh",
-  "sha256": "948c6cbf2457a118dc268bb8516c61a11006c823c098a8f7d8937edc9dfc0958",
+  "sha256": "97c04eef998104dc241f2e07ac6916703267d93fb6b3d8e46d65ab6c71728fc5",
   "pinVersion": "4.14.3",
   "pinMeaning": "floor; an existing newer agent is never downgraded, the manager's WPK upgrades own versions",
   "repo": "https://packages.wazuh.com/4.x/apt/",

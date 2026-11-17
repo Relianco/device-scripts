@@ -240,6 +240,18 @@ real="$(bash -c 'source "$1"; declare -f wz_pkg_install' _ "$PACKAGE")"
 [[ "$real" == *'versionlock delete wazuh-agent'* ]] || fail "no versionlock delete before dnf install"
 ok
 
+begin "installed version is read for a held package too (dpkg status 'hold ok installed')"
+mkdir -p "$WORK/bin"
+printf '#!/bin/bash\nprintf "%%s" "$DPKG_STATUS"\n' > "$WORK/bin/dpkg-query"
+chmod +x "$WORK/bin/dpkg-query"
+for st in 'install ok installed 4.14.9-1' 'hold ok installed 4.14.9-1'; do
+  got="$(DPKG_STATUS="$st" PATH="$WORK/bin:$PATH" bash -c 'source "$1"; wz_pkg_manager() { printf apt; }; wz_installed_version' _ "$PACKAGE")"
+  [[ "$got" == '4.14.9' ]] || fail "[$st] gave [$got]"
+done
+got="$(DPKG_STATUS='deinstall ok config-files 4.14.9-1' PATH="$WORK/bin:$PATH" bash -c 'source "$1"; wz_pkg_manager() { printf apt; }; wz_installed_version' _ "$PACKAGE")"
+[[ -z "$got" ]] || fail "removed package read as installed: [$got]"
+ok
+
 begin "unsigned or wrong repository key is refused before any package change"
 # shellcheck disable=SC1090
 source "$PACKAGE"

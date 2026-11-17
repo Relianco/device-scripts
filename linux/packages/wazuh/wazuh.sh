@@ -113,7 +113,8 @@ wz_installed_version() {
   if [[ "$(wz_pkg_manager)" == 'apt' ]]; then
     line="$(dpkg-query -W -f='${Status} ${Version}' wazuh-agent 2>/dev/null)" || return 0
     case "$line" in
-      'install ok installed '*) line="${line##* }"; printf '%s' "${line%%-*}" ;;
+      # A held package reports "hold ok installed".
+      'install ok installed '*|'hold ok installed '*) line="${line##* }"; printf '%s' "${line%%-*}" ;;
     esac
   else
     rpm -q --qf '%{VERSION}' wazuh-agent 2>/dev/null | grep -E '^[0-9]' || true
