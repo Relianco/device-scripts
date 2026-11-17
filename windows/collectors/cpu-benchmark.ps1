@@ -180,7 +180,7 @@ try {
 
     # Write to NinjaOne custom field
     try {
-        Ninja-Property-Set relian_cpu_benchmark $json
+        $json | Ninja-Property-Set-Piped relian_cpu_benchmark
         Write-Status "Benchmark results written to relian_cpu_benchmark custom field"
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"

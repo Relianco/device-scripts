@@ -2,6 +2,13 @@
 # file is dot-sourced under RELIAN_DEPLOY_TEST.
 # InstallerUrl and InstallerSha256 are the pin in windows/releases/autoelevate.json.
 # The runner copies this script alone, so the values are inlined.
+# CompanyName, CompanyInitials, LocationName and ElevationMode come in PackageArguments.
+# The license key is the LicenseKey argument if it is not empty, else the AE_LICENSE_KEY
+# environment variable. The argument is kept in NinjaOne activity history and is on the
+# child command line; the environment variable is neither. Either way it is redacted from output.
+# MSI property names are from the AESetup.msi Property, AppSearch and CustomAction tables
+# and https://support.cyberfox.com/115003703811-System-Agent-Installation
+# -Section Evidence is a read-only report.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
@@ -10,7 +17,16 @@ param(
     [string]$InstallerUrl = 'https://autoelevate-installers.s3.us-east-2.amazonaws.com/current/AESetup.msi',
     [string]$InstallerSha256 = '391e21349bdd0053067b7c6528b872ce4f4db522e48f3c546291dce40f596bfa',
     [string]$CancelPath = '',
-    [string]$MarkerRoot = ''
+    [string]$MarkerRoot = '',
+    [string]$Section = '',
+    [string]$CompanyName = '',
+    [string]$CompanyInitials = '',
+    [string]$LocationName = '',
+    [string]$ElevationMode = '',
+    # Owner decision (2026-11-10): the key may arrive as a package argument. This knowingly
+    # puts it in NinjaOne activity history and on the child command line. AE_LICENSE_KEY
+    # stays supported for callers that want neither. Do not remove this parameter.
+    [string]$LicenseKey = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -160,13 +176,62 @@ function Get-AutoElevatePlan {
 }
 
 $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
+$script:AutoElevateReport = [ordered]@{ Package = 'autoelevate' }
+$script:AutoElevateSecret = ''
+
+function Select-AutoElevateKey {
+    param([string]$Argument)
+    if (-not [string]::IsNullOrWhiteSpace($Argument)) { return [string]$Argument }
+    return [string]$env:AE_LICENSE_KEY
+}
+
+function ConvertTo-AutoElevateRedacted {
+    param([string]$Text)
+    $out = [regex]::Replace([string]$Text, '(?i)(LICENSE_KEY=)("[^"]*"|\S*)', '$1"[redacted]"')
+    if (-not [string]::IsNullOrEmpty($script:AutoElevateSecret)) {
+        $out = $out.Replace($script:AutoElevateSecret, '[redacted]')
+    }
+    return $out
+}
+
+# Redact report strings before JSON encoding. A plain-text replacement after encoding
+# can consume escaped quotes or introduce unescaped quotes into the JSON document.
+function ConvertTo-AutoElevateRedactedValue {
+    param([AllowNull()]$Value)
+    if ($null -eq $Value) { return ,$null }
+    if ($Value -is [string]) { return ConvertTo-AutoElevateRedacted -Text $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $copy = [ordered]@{}
+        foreach ($key in $Value.Keys) { $copy[$key] = ConvertTo-AutoElevateRedactedValue -Value $Value[$key] }
+        return ,$copy
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $items = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in $Value) { $items.Add((ConvertTo-AutoElevateRedactedValue -Value $item)) }
+        return ,$items.ToArray()
+    }
+    if ($Value -is [pscustomobject]) {
+        $copy = [ordered]@{}
+        foreach ($property in $Value.PSObject.Properties) { $copy[$property.Name] = ConvertTo-AutoElevateRedactedValue -Value $property.Value }
+        return ,$copy
+    }
+    return ,$Value
+}
+
+function ConvertTo-AutoElevateReportJson {
+    param($Report)
+    $redacted = ConvertTo-AutoElevateRedactedValue -Value $Report
+    return ConvertTo-Json -InputObject $redacted -Depth 6 -Compress
+}
 
 function Add-AutoElevateError {
     param([string]$Message)
     if ($null -eq $script:AutoElevateErrorLog) {
         $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
     }
+    $Message = ConvertTo-AutoElevateRedacted -Text $Message
     $script:AutoElevateErrorLog.Add($Message)
+    $script:AutoElevateReport['Reason'] = $Message
     if ($env:RELIAN_DEPLOY_TEST -ne '1') {
         [Console]::Error.WriteLine($Message)
     }
@@ -525,8 +590,11 @@ function Get-AutoElevateMsiArgumentList {
     param(
         [string]$Mode,
         [string]$InstallerPath,
-        [string]$ProductCode
+        [string]$ProductCode,
+        [string[]]$Properties = @()
     )
+    # No /l*v: AppSearch loads the stored key into LICENSE_KEY_REG, and the MSI does not
+    # hide it, so any verbose log would hold the key. MsiInstaller events and Evidence remain.
     if ($Mode -eq 'uninstall') {
         if ([string]::IsNullOrWhiteSpace($ProductCode)) {
             return $null
@@ -536,7 +604,220 @@ function Get-AutoElevateMsiArgumentList {
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
         return $null
     }
-    return @('/i', $InstallerPath, '/quiet', '/norestart')
+    # Start-Process joins the array with spaces, so a path is quoted to stay one argument.
+    return @('/i', ('"' + $InstallerPath + '"'), '/quiet', '/norestart') + @($Properties)
+}
+
+# Stop order matters: the delayed-start service can start the agent again.
+# Both names are in the AESetup.msi ServiceControl table.
+$script:AutoElevateServiceNames = @('AEDelayedStartService', 'AutoElevateAgent')
+# HKLM\SOFTWARE\AutoElevate (64-bit view) values the MSI reads back on an upgrade.
+# LicenseKey and Settings are secret and are reported only as present or absent.
+$script:AutoElevateRegistrationValueNames = @('CompanyName', 'CompanyInitials', 'CompanyID', 'LocationName', 'LocationID', 'ElevationMode', 'AutoBlockerMode', 'InstallationDirectory')
+
+function Test-AutoElevateRegistered {
+    param($Registration)
+    if ($null -eq $Registration -or -not [bool]$Registration.HasLicenseKey) {
+        return $false
+    }
+    $values = $Registration.Values
+    return (-not [string]::IsNullOrWhiteSpace([string]$values['CompanyName'])) -and (-not [string]::IsNullOrWhiteSpace([string]$values['LocationName']))
+}
+
+function Get-AutoElevateRegistrationProperties {
+    param(
+        [string]$LicenseKey,
+        [string]$CompanyName,
+        [string]$CompanyInitials,
+        [string]$LocationName,
+        [string]$ElevationMode,
+        [bool]$Registered
+    )
+    $refuse = { param($Reason) [pscustomobject]@{ ExitCode = 1; Reason = $Reason; Properties = @() } }
+    $given = @(@($LicenseKey, $CompanyName, $CompanyInitials, $LocationName, $ElevationMode) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($given.Count -eq 0) {
+        if ($Registered) {
+            # The MSI reads the existing registration back from the registry.
+            return [pscustomobject]@{ ExitCode = $null; Reason = ''; Properties = @() }
+        }
+        return & $refuse 'AutoElevate is not registered on this device: pass LicenseKey or set the AE_LICENSE_KEY environment variable, and pass CompanyName and LocationName'
+    }
+    # Registration values go to the MSI as a set, so a partial set is refused.
+    if ([string]::IsNullOrWhiteSpace($LicenseKey)) {
+        return & $refuse 'registration needs the LicenseKey argument or the AE_LICENSE_KEY environment variable'
+    }
+    if ([string]::IsNullOrWhiteSpace($CompanyName) -or [string]::IsNullOrWhiteSpace($LocationName)) {
+        return & $refuse 'registration needs CompanyName and LocationName'
+    }
+    if (-not [regex]::IsMatch($LicenseKey, '\A[A-Za-z0-9._+/=-]{8,256}\z')) {
+        return & $refuse 'the license key has characters a license key does not use'
+    }
+    # Names: letters, digits, space and . , & ' ( ) _ - ; no quote, so the msiexec quoting holds.
+    $namePattern = '\A[A-Za-z0-9][A-Za-z0-9 .,&''()_-]{0,99}\z'
+    if (-not [regex]::IsMatch($CompanyName, $namePattern)) {
+        return & $refuse 'CompanyName must be 1 to 100 letters, digits, spaces or . , & '' ( ) _ -'
+    }
+    if (-not [regex]::IsMatch($LocationName, $namePattern)) {
+        return & $refuse 'LocationName must be 1 to 100 letters, digits, spaces or . , & '' ( ) _ -'
+    }
+    # The vendor asks for two or three characters; five leaves room for an existing portal value.
+    if (-not [string]::IsNullOrEmpty($CompanyInitials) -and -not [regex]::IsMatch($CompanyInitials, '\A[A-Za-z0-9]{2,5}\z')) {
+        return & $refuse 'CompanyInitials must be 2 to 5 letters or digits'
+    }
+    # Lowercase only: the vendor says another case falls back to the default mode.
+    if (-not [string]::IsNullOrEmpty($ElevationMode) -and @('audit', 'live', 'policy') -cnotcontains $ElevationMode) {
+        return & $refuse 'ElevationMode must be audit, live or policy'
+    }
+    $properties = @("LICENSE_KEY=`"$LicenseKey`"", "COMPANY_NAME=`"$CompanyName`"")
+    if (-not [string]::IsNullOrEmpty($CompanyInitials)) {
+        $properties += "COMPANY_INITIALS=`"$CompanyInitials`""
+    }
+    $properties += "LOCATION_NAME=`"$LocationName`""
+    if (-not [string]::IsNullOrEmpty($ElevationMode)) {
+        $properties += "ELEVATION_MODE=`"$ElevationMode`""
+    }
+    return [pscustomobject]@{ ExitCode = $null; Reason = ''; Properties = $properties }
+}
+
+function Get-AutoElevateServiceText {
+    param($Service)
+    if ($null -eq $Service) {
+        return 'missing'
+    }
+    return [string]$Service.Status
+}
+
+# Stops each AutoElevate service with a bounded wait. Returns $false and leaves the
+# services as they were when one will not stop. Nothing is killed.
+function Stop-AutoElevateServices {
+    param([int]$TimeoutSeconds = 60)
+    $stopped = @()
+    foreach ($name in $script:AutoElevateServiceNames) {
+        $service = & $script:GetAutoElevateService -Name $name
+        if ((Get-AutoElevateServiceText -Service $service) -in @('missing', 'Stopped')) {
+            continue
+        }
+        try {
+            [void](& $script:StopAutoElevateService -Name $name)
+        } catch {
+            # The wait below reports the state.
+        }
+        for ($waited = 0; $waited -lt $TimeoutSeconds; $waited++) {
+            $service = & $script:GetAutoElevateService -Name $name
+            if ((Get-AutoElevateServiceText -Service $service) -in @('missing', 'Stopped')) {
+                break
+            }
+            [void](& $script:ServiceWait -Seconds 1)
+        }
+        $state = Get-AutoElevateServiceText -Service $service
+        if ($state -notin @('missing', 'Stopped')) {
+            foreach ($back in $stopped) {
+                try { [void](& $script:StartAutoElevateService -Name $back) } catch { }
+            }
+            Add-AutoElevateError -Message ("service $name did not stop in $TimeoutSeconds s: state $state, start $($service.StartType), accepts stop $($service.CanStop), process $($service.ProcessId), recovery $($service.Recovery). msiexec was not run")
+            return $false
+        }
+        $stopped += $name
+    }
+    return $true
+}
+
+# After a failed msiexec, start what the rollback left stopped so UAC brokering returns.
+function Restore-AutoElevateServices {
+    foreach ($name in @($script:AutoElevateServiceNames)) {
+        try {
+            $service = & $script:GetAutoElevateService -Name $name
+            if ((Get-AutoElevateServiceText -Service $service) -eq 'Stopped') {
+                [void](& $script:StartAutoElevateService -Name $name)
+            }
+        } catch {
+            # Best effort. The error already explains the failure.
+        }
+    }
+}
+
+function Wait-AutoElevateAgentRunning {
+    param([int]$TimeoutSeconds = 60)
+    $started = $false
+    $state = 'missing'
+    for ($waited = 0; $waited -le $TimeoutSeconds; $waited++) {
+        $state = Get-AutoElevateServiceText -Service (& $script:GetAutoElevateService -Name 'AutoElevateAgent')
+        if ($state -eq 'Running') {
+            return $state
+        }
+        if ($state -eq 'Stopped' -and -not $started) {
+            $started = $true
+            try { [void](& $script:StartAutoElevateService -Name 'AutoElevateAgent') } catch { }
+        }
+        if ($waited -lt $TimeoutSeconds) {
+            [void](& $script:ServiceWait -Seconds 1)
+        }
+    }
+    return $state
+}
+
+function Invoke-AutoElevateSafe {
+    param([scriptblock]$Block, $Fallback)
+    try {
+        return & $Block
+    } catch {
+        return $Fallback
+    }
+}
+
+function Get-AutoElevateEvidence {
+    $versionText = [string](Invoke-AutoElevateSafe -Block { & $script:GetInstalledAutoElevateVersion } -Fallback '')
+    $parsed = Convert-AutoElevateVersionText -Text $versionText
+    $version = ''
+    if ($parsed -is [version]) {
+        $version = Format-AutoElevateVersion -Version $parsed
+    }
+    $registration = Invoke-AutoElevateSafe -Block { & $script:GetAutoElevateRegistration } -Fallback $null
+    $values = [ordered]@{}
+    $hasKey = $false
+    $hasSettings = $false
+    if ($null -ne $registration) {
+        foreach ($name in @($registration.Values.Keys)) {
+            $values[$name] = ConvertTo-AutoElevateRedacted -Text ([string]$registration.Values[$name])
+        }
+        $hasKey = [bool]$registration.HasLicenseKey
+        $hasSettings = [bool]$registration.HasSettings
+    }
+    $values['LicenseKey'] = if ($hasKey) { 'present' } else { 'absent' }
+    $values['Settings'] = if ($hasSettings) { 'present' } else { 'absent' }
+    $services = foreach ($name in $script:AutoElevateServiceNames) {
+        $service = Invoke-AutoElevateSafe -Block { & $script:GetAutoElevateService -Name $name } -Fallback $null
+        if ($null -eq $service) {
+            [pscustomobject]@{ Name = $name; Status = 'missing' }
+        } else {
+            $service
+        }
+    }
+    $events = foreach ($event in @(Invoke-AutoElevateSafe -Block { & $script:GetAutoElevateMsiEvents } -Fallback @())) {
+        if ($null -eq $event) { continue }
+        $message = ConvertTo-AutoElevateRedacted -Text ([string]$event.Message)
+        if ($message.Length -gt 400) {
+            $message = $message.Substring(0, 400)
+        }
+        [pscustomobject]@{ TimeCreated = [string]$event.TimeCreated; Id = [int]$event.Id; Message = $message }
+    }
+    $installPath = ''
+    if ($values.Contains('InstallationDirectory')) {
+        $installPath = [string]$values['InstallationDirectory']
+    }
+    return [ordered]@{
+        Package      = 'autoelevate'
+        Section      = 'Evidence'
+        Status       = 'evidence'
+        Version      = $version
+        ProductCode  = [string](Invoke-AutoElevateSafe -Block { & $script:GetAutoElevateProductCode } -Fallback '')
+        InstallPath  = $installPath
+        Registered   = (Test-AutoElevateRegistered -Registration $registration)
+        Registration = $values
+        Services     = @($services)
+        Processes    = @(Invoke-AutoElevateSafe -Block { & $script:GetAutoElevateProcesses } -Fallback @())
+        MsiEvents    = @($events)
+    }
 }
 
 function Test-AutoElevateMsiSucceeded {
@@ -545,23 +826,13 @@ function Test-AutoElevateMsiSucceeded {
     return $Code -eq 0 -or $Code -eq 3010
 }
 
-function Get-AutoElevateMarkerAfterInstall {
-    param([string]$PinVersion)
-    $afterText = ''
-    try {
-        $afterText = [string](& $script:GetInstalledAutoElevateVersion)
-    } catch {
-        $afterText = ''
-    }
+function Get-AutoElevateVersionAfterInstall {
+    $afterText = [string](Invoke-AutoElevateSafe -Block { & $script:GetInstalledAutoElevateVersion } -Fallback '')
     $after = Convert-AutoElevateVersionText -Text $afterText
-    $pin = Convert-AutoElevateVersionText -Text $PinVersion
-    if ($after -is [version] -and $pin -is [version] -and $after.CompareTo($pin) -ge 0) {
-        return Format-AutoElevateVersion -Version $after
+    if ($after -is [version]) {
+        return $after
     }
-    if ($pin -is [version]) {
-        return Format-AutoElevateVersion -Version $pin
-    }
-    return ''
+    return $null
 }
 
 $script:DownloadFile = {
@@ -570,6 +841,7 @@ $script:DownloadFile = {
     if (-not [string]::IsNullOrWhiteSpace($parent) -and -not (Test-Path -LiteralPath $parent)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
+    $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing
 }
 
@@ -588,8 +860,8 @@ $script:GetAutoElevateProductCode = {
 
 # msiexec is only started from this hook. It is waited on and never killed.
 $script:InvokeMsiExec = {
-    param($Mode, $InstallerPath, $ProductCode)
-    $argumentList = Get-AutoElevateMsiArgumentList -Mode $Mode -InstallerPath $InstallerPath -ProductCode $ProductCode
+    param($Mode, $ArgumentList)
+    $argumentList = $ArgumentList
     if ($null -eq $argumentList) {
         return 1
     }
@@ -604,6 +876,111 @@ $script:InvokeMsiExec = {
     return [int]$process.ExitCode
 }
 
+$script:ServiceWait = {
+    param($Seconds)
+    Start-Sleep -Seconds ([int]$Seconds)
+}
+
+# sc.exe labels are localized. Only a recognized complete action section establishes
+# recovery configuration; unknown output must not be reported as no recovery actions.
+function ConvertFrom-AutoElevateRecoveryOutput {
+    param([string[]]$Lines, [int]$ExitCode)
+    if ($ExitCode -ne 0) { return 'unknown' }
+    $found = $false
+    $actions = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in $Lines) {
+        $row = [string]$line
+        if ($row -cmatch '^\s*FAILURE_ACTIONS\s*:\s*(.*)$') {
+            if ($found) { return 'unknown' }
+            $found = $true
+            $row = $Matches[1]
+        } elseif (-not $found) { continue }
+        if ([string]::IsNullOrWhiteSpace($row)) { continue }
+        if ($row -cnotmatch '^\s*(RESTART|RUN PROCESS|REBOOT|NONE)\s+--\s+Delay\s*=\s*[0-9]+\s+milliseconds\.\s*$') {
+            return 'unknown'
+        }
+        $actions.Add($Matches[1].ToLowerInvariant())
+    }
+    if (-not $found) { return 'unknown' }
+    if ($actions.Count -eq 0) { return 'none' }
+    return $actions -join ', '
+}
+
+$script:GetAutoElevateService = {
+    param($Name)
+    $cim = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
+    if ($null -eq $cim) {
+        return $null
+    }
+    # A restart recovery action runs after a crash, not after a stop request.
+    $failure = @(& sc.exe qfailure $Name 2>$null)
+    $recovery = ConvertFrom-AutoElevateRecoveryOutput -Lines $failure -ExitCode $LASTEXITCODE
+    return [pscustomobject]@{
+        Name      = $Name
+        Status    = [string]$cim.State
+        StartType = [string]$cim.StartMode
+        CanStop   = [bool]$cim.AcceptStop
+        ProcessId = [int]$cim.ProcessId
+        Recovery  = $recovery
+    }
+}
+
+$script:StopAutoElevateService = {
+    param($Name)
+    [void](& sc.exe stop $Name 2>$null)
+}
+
+$script:StartAutoElevateService = {
+    param($Name)
+    [void](& sc.exe start $Name 2>$null)
+}
+
+# Returns non-secret values and presence flags. LicenseKey and Settings never leave this hook.
+$script:GetAutoElevateRegistration = {
+    $values = [ordered]@{}
+    $hasKey = $false
+    $hasSettings = $false
+    try {
+        # The MSI AppSearch reads this key from the 64-bit view (RegLocator type 18).
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+        try {
+            $key = $base.OpenSubKey('SOFTWARE\AutoElevate')
+            if ($null -ne $key) {
+                try {
+                    foreach ($name in $script:AutoElevateRegistrationValueNames) {
+                        $value = [string]$key.GetValue($name, '')
+                        if (-not [string]::IsNullOrWhiteSpace($value)) {
+                            $values[$name] = $value.Trim()
+                        }
+                    }
+                    $hasKey = -not [string]::IsNullOrWhiteSpace([string]$key.GetValue('LicenseKey', ''))
+                    $hasSettings = -not [string]::IsNullOrWhiteSpace([string]$key.GetValue('Settings', ''))
+                } finally {
+                    $key.Dispose()
+                }
+            }
+        } finally {
+            $base.Dispose()
+        }
+    } catch {
+        # No registry on this host. Reported as not registered.
+    }
+    return [pscustomobject]@{ Values = $values; HasLicenseKey = $hasKey; HasSettings = $hasSettings }
+}
+
+$script:GetAutoElevateMsiEvents = {
+    $filter = @{ LogName = 'Application'; ProviderName = 'MsiInstaller'; StartTime = (Get-Date).AddDays(-30) }
+    return @(Get-WinEvent -FilterHashtable $filter -MaxEvents 500 -ErrorAction SilentlyContinue |
+            Where-Object { [string]$_.Message -like '*AutoElevate*' } |
+            Select-Object -First 20 |
+            ForEach-Object { [pscustomobject]@{ TimeCreated = $_.TimeCreated.ToUniversalTime().ToString('o'); Id = $_.Id; Message = [string]$_.Message } })
+}
+
+# AEAlert and AEUACAgent run in each user session (vendor install guide). They are reported, not stopped.
+$script:GetAutoElevateProcesses = {
+    return @(Get-Process -Name 'AutoElevateAgent', 'AEAlert', 'AEUACAgent' -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName })
+}
+
 function Invoke-AutoElevateAction {
     param(
         [string]$DeploymentType,
@@ -612,9 +989,16 @@ function Invoke-AutoElevateAction {
         [string]$InstallerUrl,
         [string]$InstallerSha256,
         [string]$CancelPath,
-        [string]$MarkerRoot
+        [string]$MarkerRoot,
+        [string]$LicenseKey = '',
+        [string]$CompanyName = '',
+        [string]$CompanyInitials = '',
+        [string]$LocationName = '',
+        [string]$ElevationMode = ''
     )
 
+    $script:AutoElevateSecret = [string]$LicenseKey
+    $script:AutoElevateReport = [ordered]@{ Package = 'autoelevate'; Action = $Action }
     if ([string]::IsNullOrWhiteSpace($MarkerRoot)) {
         $MarkerRoot = Get-AutoElevateDefaultMarkerRoot
     }
@@ -626,6 +1010,7 @@ function Invoke-AutoElevateAction {
         Add-AutoElevateError -Message 'could not read the installed AutoElevate version'
         return 1
     }
+    $script:AutoElevateReport['InstalledBefore'] = $installed
     $marker = Read-AutoElevateMarkerVersion -Root $MarkerRoot
     $plan = Get-AutoElevatePlan -Action $Action -PinVersion $PinVersion -InstalledVersion $installed -MarkerVersion $marker
     if ($null -ne $plan.ExitCode) {
@@ -634,12 +1019,25 @@ function Invoke-AutoElevateAction {
     if (Test-AutoElevateCancelled -CancelPath $CancelPath) {
         return 130
     }
+    $present = -not [string]::IsNullOrWhiteSpace($installed)
 
     $cache = ''
     try {
         if ($plan.RunInstaller -eq 'install') {
             if ([string]::IsNullOrWhiteSpace($InstallerSha256)) {
                 Add-AutoElevateError -Message 'missing hash for installer'
+                return 1
+            }
+            if (Test-AutoElevateUrlHasUserInfo -Url $InstallerUrl) {
+                Add-AutoElevateError -Message 'refusing a URL that contains userinfo for installer'
+                return 1
+            }
+            # Decided before the download: a fresh or unregistered device needs the key.
+            $registered = Test-AutoElevateRegistered -Registration (Invoke-AutoElevateSafe -Block { & $script:GetAutoElevateRegistration } -Fallback $null)
+            $script:AutoElevateReport['Registered'] = $registered
+            $registration = Get-AutoElevateRegistrationProperties -LicenseKey $LicenseKey -CompanyName $CompanyName -CompanyInitials $CompanyInitials -LocationName $LocationName -ElevationMode $ElevationMode -Registered $registered
+            if ($null -ne $registration.ExitCode) {
+                Add-AutoElevateError -Message $registration.Reason
                 return 1
             }
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-autoelevate-' + [guid]::NewGuid().ToString('n'))
@@ -653,18 +1051,35 @@ function Invoke-AutoElevateAction {
             if (Test-AutoElevateCancelled -CancelPath $CancelPath) {
                 return 130
             }
-            $result = & $script:InvokeMsiExec -Mode 'install' -InstallerPath $installerPath -ProductCode ''
+            # Error 1921 is the MSI failing to stop the agent. Stop it first, or do not start msiexec.
+            if ($present -and -not (Stop-AutoElevateServices)) {
+                return 1
+            }
+            $argumentList = Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $installerPath -ProductCode '' -Properties $registration.Properties
+            $script:AutoElevateReport['MsiCommand'] = ConvertTo-AutoElevateRedacted -Text ('msiexec ' + ($argumentList -join ' '))
+            # A throw is treated as a failed run, so the stopped services are restored below.
+            $result = Invoke-AutoElevateSafe -Block { & $script:InvokeMsiExec -Mode 'install' -ArgumentList $argumentList -InstallerPath $installerPath -ProductCode '' } -Fallback $null
+            $script:AutoElevateReport['MsiExitCode'] = $result
             if ($null -eq $result -or -not (Test-AutoElevateMsiSucceeded -Code ([int]$result))) {
-                Add-AutoElevateError -Message 'installer failed'
+                Restore-AutoElevateServices
+                Add-AutoElevateError -Message "installer failed (exit code: $result)"
                 return 1
             }
-            $write = Get-AutoElevateMarkerAfterInstall -PinVersion $PinVersion
-            if ([string]::IsNullOrWhiteSpace($write)) {
-                Add-AutoElevateError -Message 'installer succeeded without a version'
+            $service = Wait-AutoElevateAgentRunning
+            $after = Get-AutoElevateVersionAfterInstall
+            $pin = Convert-AutoElevateVersionText -Text $PinVersion
+            $script:AutoElevateReport['Service'] = $service
+            $script:AutoElevateReport['Version'] = if ($null -eq $after) { '' } else { Format-AutoElevateVersion -Version $after }
+            if ($null -eq $after -or $after.CompareTo($pin) -lt 0) {
+                Add-AutoElevateError -Message "installed version '$($script:AutoElevateReport['Version'])' is below the pin $PinVersion"
                 return 1
             }
-            Write-AutoElevateMarker -Root $MarkerRoot -Version $write
+            Write-AutoElevateMarker -Root $MarkerRoot -Version (Format-AutoElevateVersion -Version $after)
             Add-AutoElevateLogLine -Root $MarkerRoot -Line ([string]$plan.Log)
+            if ($service -ne 'Running') {
+                Add-AutoElevateError -Message "service AutoElevateAgent is $service after the install"
+                return 1
+            }
             return 0
         }
 
@@ -682,8 +1097,13 @@ function Invoke-AutoElevateAction {
                 Add-AutoElevateError -Message 'missing product code for uninstall'
                 return 1
             }
-            $result = & $script:InvokeMsiExec -Mode 'uninstall' -InstallerPath '' -ProductCode $productCode
+            if (-not (Stop-AutoElevateServices)) {
+                return 1
+            }
+            $argumentList = Get-AutoElevateMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode $productCode
+            $result = Invoke-AutoElevateSafe -Block { & $script:InvokeMsiExec -Mode 'uninstall' -ArgumentList $argumentList -InstallerPath '' -ProductCode $productCode } -Fallback $null
             if ($null -eq $result -or -not (Test-AutoElevateMsiSucceeded -Code ([int]$result))) {
+                Restore-AutoElevateServices
                 Add-AutoElevateError -Message 'uninstall failed'
                 return 1
             }
@@ -714,6 +1134,11 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
+# An empty hash is a no-op before parameter validation and before the URL is read.
+if ($PSBoundParameters.ContainsKey('InstallerSha256') -and [string]::IsNullOrWhiteSpace($InstallerSha256)) {
+    exit 0
+}
+
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
         [Console]::Error.WriteLine("missing parameter $name")
@@ -721,14 +1146,33 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     }
 }
 
+# Read once, then remove from this process so msiexec and anything later does not inherit it.
+$autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey
+Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
+$script:AutoElevateSecret = $autoelevateKey
+$autoelevateExit = 1
 try {
-    $autoelevateExit = [int](Invoke-AutoElevateAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot)
-    exit $autoelevateExit
+    # The installer URL is checked for userinfo only where it is downloaded (Invoke-AutoElevateAction).
+    if ($Section -eq 'Evidence') {
+        $script:AutoElevateReport = Get-AutoElevateEvidence
+        $autoelevateExit = 0
+    } elseif (-not [string]::IsNullOrEmpty($Section)) {
+        Add-AutoElevateError -Message 'unsupported Section'
+    } else {
+        $autoelevateExit = [int](Invoke-AutoElevateAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot -LicenseKey $autoelevateKey -CompanyName $CompanyName -CompanyInitials $CompanyInitials -LocationName $LocationName -ElevationMode $ElevationMode)
+        $script:AutoElevateReport['Status'] = if ($autoelevateExit -eq 0) { 'ok' } else { 'error' }
+    }
 } catch {
     $detail = [string]$_.Exception.Message
     if ($detail -match '://') {
         $detail = 'autoelevate package failed'
     }
-    [Console]::Error.WriteLine($detail)
-    exit 1
+    Add-AutoElevateError -Message $detail
+    $script:AutoElevateReport['Status'] = 'error'
+    $autoelevateExit = 1
+} finally {
+    $autoelevateKey = $null
+    $LicenseKey = $null
 }
+Write-Output (ConvertTo-AutoElevateReportJson -Report $script:AutoElevateReport)
+exit $autoelevateExit

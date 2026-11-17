@@ -200,7 +200,7 @@ foreach ($paramName in @('DeploymentType', 'Action', 'PinVersion', 'CancelPath',
         Fail "missing empty default for $paramName"
     }
 }
-if ($script:DownloadFile.ToString() -notmatch 'Tls12') {
+if ($script:DownloadFile.ToString() -notmatch '-bor 3072') {
     Fail 'download does not set TLS 1.2'
 }
 if ($script:DownloadFile.ToString() -notmatch 'Referer') {
