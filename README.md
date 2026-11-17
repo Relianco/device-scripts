@@ -16,7 +16,7 @@ People confuse these. Each one does a different job.
 
 - **Install, repair or diagnose on Windows:** paste `windows/runner/Invoke-RelianRunner.ps1`. It runs one package.
 - **A recurring fix on a schedule, on Windows:** paste `windows/runner/Invoke-RelianJob.ps1`. It runs one job module.
-- **Read-only evidence from a device, on Windows:** paste `windows/runner/Invoke-RelianReadJob.ps1` as its own script. It runs one built-in evidence package and writes the answer to a custom field.
+- **Read-only evidence from a device, on Windows:** paste `windows/runner/Invoke-RelianReadJob.ps1` as its own script. It runs one hash-pinned evidence package from `windows/read/` and writes the answer to a custom field.
 - **Inventory on Windows:** paste `windows/bootstrap.ps1`. It runs one collector. It is not an installer.
 - **Linux:** paste `linux/runner/relian-runner.sh`.
 - **macOS:** paste `macos/runner/relian-runner.sh`.
@@ -78,7 +78,7 @@ The toolkit and the brand pack come from `https://relianpub.blob.core.windows.ne
 **Example.** Run `gpo-evidence`, Summary section, on a domain controller. Replace each placeholder with the real value.
 
 ```
--PackageUrl "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1" -PackageSha256 "<package-sha256>" -ToolkitUrl "<toolkit-url>" -ToolkitSha256 "<toolkit-sha256>" -BrandPackUrl "<brand-pack-url>" -BrandPackSha256 "<brand-pack-sha256>" -Action "Install" -PinVersion "1.0.0" -PackageArguments "eyJTZWN0aW9uIjoiU3VtbWFyeSJ9"
+-PackageUrl "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/read/gpo-evidence/Invoke-GpoEvidence.ps1" -PackageSha256 "<package-sha256>" -ToolkitUrl "<toolkit-url>" -ToolkitSha256 "<toolkit-sha256>" -BrandPackUrl "<brand-pack-url>" -BrandPackSha256 "<brand-pack-sha256>" -Action "Install" -PinVersion "1.0.0" -PackageArguments "eyJTZWN0aW9uIjoiU3VtbWFyeSJ9"
 ```
 
 The base64 string above is `{"Section":"Summary"}`. Most read-only packages use `-Action "Install"` to mean "run now". `Uninstall` on a read-only package changes nothing.
@@ -126,19 +126,21 @@ Drop `-ReportOnly` to let the job fix the drift.
 
 ### Read-only evidence jobs: Invoke-RelianReadJob
 
-**When:** something must ask a device for evidence and must not be able to change it. This loader has no URL or hash parameter. Its job names, the commit-pinned URL and SHA256 of each package, and the arguments each job accepts are a table inside the script.
+**When:** something must ask a device for evidence and must not be able to change it. The loader is static: it holds no job table. The forge executor passes the package URL and SHA256 from its reviewed allowlist (`business/bmcp/device-jobs-read.json` in the forge), and the loader only validates, fetches, verifies and runs. A new read job is a package under `windows/read/<job>/` plus a forge allowlist entry, never a new paste of this file.
 
-**Paste** as a **new** NinjaOne library script (do not replace `Invoke-RelianJob`). Set **Run As** to System.
+**Paste** as a **new** NinjaOne library script (do not replace `Invoke-RelianJob`). Set **Run As** to System. No preset parameters.
 
-**Parameters:**
+**Parameters**, in this order:
 
-- `-Job`: `diagnose-feature-upgrade`, `diagnose-windows-update`, `maintenance-evidence`, `gpo-evidence` or `wake-device` (not a read: it sends three Wake-on-LAN packets from this device to a MAC on its subnet; `Mac`, `Broadcast` (RFC 1918 or `255.255.255.255`) and `Port` `9` only).
-- `-JobArguments`: base64 of flat JSON, for example `{"Section":"Summary"}`. Empty means none. Each key has an enum or an anchored regex with a length cap (`gpo-evidence` takes a GUID, never a name). Free text is refused.
+- `-PackageUrl`: `https://raw.githubusercontent.com/Relianco/device-scripts/<40-hex commit>/windows/read/<job>/Invoke-<Name>.ps1`, matched case-sensitively. No userinfo, branch name, query, fragment, `%` escape, `..`, backslash or whitespace.
+- `-PackageSha256`: the package's SHA256, 64 lowercase hex characters.
+- `-Job`: lowercase letters, digits and `-`, at most 64 characters, and equal to the `<job>` directory in the URL.
+- `-JobArguments`: base64 (at most 2048 characters, no BOM) of a flat JSON object of string values, for example `{"Section":"Summary"}`. Empty, or `{}`, means none. At most 16 keys. A key is a letter then letters or digits (at most 32), with no duplicate ignoring case, and no key that is a case-insensitive prefix of `DeploymentType`, `Action`, `PinVersion`, `Fix`, `Apply`, `Mode`, `ReportOnly` or a common parameter (PowerShell binds a prefix). A value is 1 to 64 of `A-Z a-z 0-9 { } . -`, not starting with `-`. Which keys and values a job takes is the forge allowlist's rule.
 - `-RequestId`: 32 lowercase hex characters, echoed in the result.
 
-**Refused, exit 1:** an unknown job or key, a value that fails its rule, nested or non-base64 arguments, a table hash that is empty or not 64 lowercase hex, a hash mismatch, a cache with the wrong owner or ACL. There is no empty-hash off switch.
+**Refused, exit 1:** any of the above, a hash mismatch (the download is deleted), a package over 1 MiB, a redirect, a cache with the wrong owner or ACL. There is no empty-hash off switch.
 
-**Run:** the package is cached like `Invoke-RelianJob` does (SYSTEM-only, owner, ACL and hash re-checked on every run), then runs in a child `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File` with only the validated arguments, without the toolkit. The child is killed after 120 seconds.
+**Run:** the package is cached like `Invoke-RelianJob` does (SYSTEM-only, owner, ACL and hash re-checked on every run), then runs in a child `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File` with `-DeploymentType Install -Action Install -PinVersion 1.0.0` and the validated arguments sorted by key, without the toolkit. The child is killed after 120 seconds.
 
 **Result:** NinjaOne cuts a script run's activity text to about 40 characters, so the loader prints one JSON line and writes the same line to the device custom field `relianJobResult` (Multi-line text, script Read/Write, API Read-only) with `Ninja-Property-Set-Piped`:
 
@@ -146,11 +148,11 @@ Drop `-ReportOnly` to let the job fix the drift.
 {"schemaVersion":1,"requestId":"<32 hex>","job":"<name>","loaderSha256":"<hash or null>","exitCode":0,"result":{...},"error":null}
 ```
 
-The line is at most 8000 UTF-8 bytes; a larger result is dropped and `error` is `result too large`. `exitCode` is -1 when the package did not run or did not finish. `error` is a fixed string. The field holds only the latest line, so run **one job at a time per device** and match `requestId` before you trust a line. A refusal writes its line too, so an old result never answers a new request (an invalid `-Job` is refused at parameter binding, before any line). If the field or the cmdlet is missing, the loader prints one line naming only the field and exits 1.
+The line is at most 8000 UTF-8 bytes; a larger result is dropped and `error` is `result too large`. `exitCode` is -1 when the package did not run or did not finish. `error` is a fixed string; the URL and the arguments are never echoed. The field holds only the latest line, so run **one job at a time per device** and match `requestId` before you trust a line. A refusal writes its line too, so an old result never answers a new request (an invalid `-RequestId` writes nothing). If the field or the cmdlet is missing, the loader prints one line naming only the field and exits 1.
 
-**Change a job:** commit the package change, take its SHA256 at a commit already on `main`, edit that job's URL and hash in the table in a new pull request, and paste the file again. Review it like any script that runs as SYSTEM.
+**Change or add a job:** commit the package under `windows/read/<job>/`, take its SHA256 at a commit already on `main`, and pin that URL and hash in the forge allowlist. Review the package like any script that runs as SYSTEM. The loader itself changes only for a loader fix, and then needs a new paste.
 
-**Tests:** `tests/windows/read-job.Tests.ps1`: refusals, the table rules, an AST scan that lists the only write commands (the cache and the one field write), the piped field write, the 8000-byte cap, and a real child killed at the timeout.
+**Tests:** `tests/windows/read-job.Tests.ps1`: no table and the exact parameters, every URL, hash and argument refusal with nothing downloaded, the 1 MiB cap, `-MaximumRedirection 0`, an AST scan that lists the only write commands (the cache and the one field write), the piped field write, the 8000-byte cap, and a real child killed at the timeout.
 
 ### Inventory: bootstrap.ps1 and collectors
 
@@ -174,7 +176,7 @@ Windows PowerShell 5.1 on an older host (Server 2016) defaults to TLS 1.0 and 1.
 
 ### Packages
 
-One folder per package under `windows/packages/`. Each is a single script. In the lists below, "read-only" means the package changes nothing on the device.
+One folder per package under `windows/packages/`. The read jobs that `Invoke-RelianReadJob` runs (`diagnose-feature-upgrade`, `diagnose-windows-update`, `maintenance-evidence`, `gpo-evidence`, `wake-device`) are under `windows/read/` instead; the runner can run them too. Each is a single script. In the lists below, "read-only" means the package changes nothing on the device.
 
 **Applications.** Each downloads a hash-pinned installer from the vendor. The pin is in the script and in `windows/releases/<name>.json`.
 
@@ -309,7 +311,7 @@ Pin records are in `macos/releases/<name>.json`.
 
 For a security reviewer. This is what a pasted script can and cannot do.
 
-- **The PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. `Invoke-RelianReadJob` downloads only the three packages in its built-in table. They check each SHA256 before they run anything.
+- **The PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. `Invoke-RelianReadJob` downloads only a package under `windows/read/` of this repo at a 40-hex commit, with no redirect, and the hash it is given. They check each SHA256 before they run anything.
 - **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
 - **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
 - **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. `autoelevate` takes its license key only from the `AE_LICENSE_KEY` environment variable. No package reads `relian_git_deploy_token`.

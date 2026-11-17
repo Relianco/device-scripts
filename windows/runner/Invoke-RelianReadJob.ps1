@@ -3,14 +3,21 @@
     Read-only job loader for NinjaOne. Paste this file as its own library script and run it as SYSTEM.
 
 .DESCRIPTION
-    Runs one built-in read-only evidence package and reports its result. Nothing is configurable from outside:
-    the job names, each package's commit-pinned URL and SHA256, and the arguments each job accepts (an enum or
-    an anchored regex with a length cap) are in the table below. An unknown job, an unknown key, a value that
-    fails its rule, or a missing or malformed table hash exits non-zero. There is no empty-hash off switch.
+    Runs one read-only evidence package and reports its result. This file holds no job table: the caller (the
+    forge executor) passes the package URL and SHA256 from its reviewed allowlist, so a new read job never changes
+    this file. The loader only validates, fetches, verifies and runs:
 
-    The package is downloaded once to the SYSTEM-only cache shared with Invoke-RelianJob, checked against its
-    hash (owner, ACL and hash again on every run), then run in a child powershell with only the validated
-    arguments, with no deployment framework. The child is killed after 120 seconds.
+    - the URL must be raw.githubusercontent.com/Relianco/device-scripts at a 40-hex commit, under windows/read/<job>/,
+      with no userinfo, query, fragment, escape, dot segment, backslash or whitespace (case-sensitive), and its
+      directory must equal -Job;
+    - the hash must be 64 lowercase hex. There is no empty-hash off switch;
+    - the arguments must pass generic rules (flat JSON, string values, safe keys and values, no key that could bind
+      a fixed or common parameter). Per-job rules live in the forge allowlist.
+
+    The package is downloaded once, without following a redirect, to the SYSTEM-only cache shared with
+    Invoke-RelianJob, checked against its hash (owner, ACL and hash again on every run; over 1 MiB is refused), then
+    run in a child powershell with only the validated arguments, with no deployment framework. The child is killed
+    after 120 seconds.
 
     Result path. NinjaOne's activity text for a script run is cut to about 40 characters, so the answer cannot
     come back through activities. After the child ends, the loader prints one JSON line to stdout and writes
@@ -27,26 +34,34 @@
 
     ONE FIELD, ONE JOB AT A TIME PER DEVICE: the field holds only the latest line. requestId binds a line to the
     request that caused it; a reader must match requestId and must not start a second job on the same device
-    before it has read the first. A refusal also writes its line, so a stale result never answers a new request (except an invalid -Job, which fails at parameter binding before any line).
+    before it has read the first. A refusal also writes its line, so a stale result never answers a new request
+    (except an invalid RequestId, which has nothing to bind a line to).
+
+.PARAMETER PackageUrl
+    https://raw.githubusercontent.com/Relianco/device-scripts/<40-hex commit>/windows/read/<job>/Invoke-<Name>.ps1
+
+.PARAMETER PackageSha256
+    The package's SHA256, 64 lowercase hex characters.
 
 .PARAMETER Job
-    One of the built-in jobs: diagnose-feature-upgrade, diagnose-windows-update, maintenance-evidence, gpo-evidence, wake-device. wake-device is the one
-    job that is not a read: it sends three Wake-on-LAN UDP packets from this device to a MAC on its own subnet and changes nothing.
+    The job name: lowercase letters, digits and '-', at most 64 characters, equal to the package directory.
 
 .PARAMETER JobArguments
-    Base64 (UTF-8) of a flat JSON object whose keys and values the job's table entry allows. Empty means none.
+    Base64 (UTF-8) of a flat JSON object of string values. Empty, or the empty object, means none.
 
 .PARAMETER RequestId
     32 lowercase hex characters, echoed in the result line.
 
 .NOTES
-    Requirements: Windows PowerShell 5.1+, run as SYSTEM. Changing a package means a new device-scripts commit,
-    a table bump in a new pull request and a new paste of this file.
+    Requirements: Windows PowerShell 5.1+, run as SYSTEM. A new or changed package needs a device-scripts commit
+    and a forge allowlist entry, not a new paste of this file.
 #>
 # Parameters are not Mandatory: a mandatory param block prompts when this file is dot-sourced under test.
 [CmdletBinding()]
 param(
-    [ValidateSet('diagnose-feature-upgrade', 'diagnose-windows-update', 'maintenance-evidence', 'gpo-evidence', 'wake-device')][string]$Job,
+    [string]$PackageUrl,
+    [string]$PackageSha256,
+    [string]$Job,
     [string]$JobArguments,
     [string]$RequestId
 )
@@ -61,61 +76,10 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 
-# The table. Every URL is raw.githubusercontent.com at a 40-hex commit already on Relianco/device-scripts main,
-# every hash is the SHA256 of that file at that commit (git show <commit>:<path> | sha256sum). Allowed values are
-# an Enum (case-sensitive) or an anchored Regex with Max length; none accepts free text, and every allowed
-# character is in [A-Za-z0-9{}.-], so nothing needs quoting. [0-9], not \d: \d matches other scripts' digits.
-$script:Jobs = @{
-    'diagnose-feature-upgrade' = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/f9f486091b479616a186f5923bf9571e4b00de44/windows/packages/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1'
-        Sha256 = 'f27d3c26a3f7fb5c4120e93eacc184d0fdca61bfa9def41ecacce7c66b22f403'
-        Keys   = @{
-            Section = @{ Enum = @('Summary', 'Rollback', 'Servicing', 'Setup', 'Boot', 'Maintenance') }
-        }
-    }
-    'diagnose-windows-update'  = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/c2a36ee790163dc21b0eebdc85d6d9cc02f8fd54/windows/packages/diagnose-windows-update/Invoke-DiagnoseWindowsUpdate.ps1'
-        Sha256 = '7a7ce2e342b518dd9f583eed6b839d864616622c3a986055c07a683ec00db419'
-        Keys   = @{
-            Section = @{ Enum = @('Summary', 'History', 'Events', 'Policy', 'Service', 'ServicingHistory') }
-        }
-    }
-    'maintenance-evidence'     = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/f9f486091b479616a186f5923bf9571e4b00de44/windows/packages/maintenance-evidence/Invoke-MaintenanceEvidence.ps1'
-        Sha256 = '895d9193842341b349ed9ff26dafeab70ca68ae76bd86a71e631d2548754bc25'
-        Keys   = @{
-            Package  = @{ Enum = @('Storage', 'Update') }
-            # The package checks the form that goes with each Package; this admits only the two forms.
-            ReportId = @{ Regex = '\A([0-9]{8}T[0-9]{6}-[a-f0-9]{32}|[a-f0-9]{32})\z'; Max = 49 }
-            Section  = @{ Enum = @('Index', 'Profiles', 'ProfileIndex', 'ActionSummary', 'Snapshot', 'Policy', 'Scan', 'Actions', 'Errors', 'Guards', 'Evidence', 'Omissions') }
-            Ordinal  = @{ Regex = '\A[0-9]{1,3}\z'; Max = 3 }
-            Page     = @{ Regex = '\A[0-9]{1,3}\z'; Max = 3 }
-        }
-    }
-    'gpo-evidence'             = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/adf27694140a903dccab255db2cef5034b824f80/windows/packages/gpo-evidence/Invoke-GpoEvidence.ps1'
-        Sha256 = '66e4f4ec29bace44e5772613a2d436601da220995ab99e5e2cb04267041fb1a8'
-        Keys   = @{
-            Section = @{ Enum = @('Summary', 'Gpos', 'Policy', 'Rsop', 'Gpo') }
-            # A GUID only: a GPO name is free text that reaches Get-GPO -Name.
-            Gpo     = @{ Regex = '\A\{?[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}?\z'; Max = 38 }
-            Offset  = @{ Regex = '\A[0-9]{1,5}\z'; Max = 5 }
-        }
-    }
-    'wake-device'              = @{
-        Url    = 'https://raw.githubusercontent.com/Relianco/device-scripts/a152dbd5ce91811706f4a6a4f993f8d578954def/windows/packages/wake-device/Invoke-WakeDevice.ps1'
-        Sha256 = '7a3626ae9de046031d83e305452edde2120ddd0dc9e323fbb6ae46c5c8daaaee'
-        Keys   = @{
-            # Upper-case dash form only; the package also refuses multicast and all-zero.
-            Mac       = @{ Regex = '\A[0-9A-F]{2}(-[0-9A-F]{2}){5}\z'; Max = 17 }
-            # An RFC 1918 address (the subnet's directed broadcast) or the limited broadcast: never a public address.
-            Broadcast = @{ Regex = '\A(10\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|172\.(1[6-9]|2[0-9]|3[01])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|192\.168\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])|255\.255\.255\.255)\z'; Max = 15 }
-            Port      = @{ Enum = @('9') }
-        }
-    }
-}
-
-$script:UrlPattern = '\Ahttps://raw\.githubusercontent\.com/Relianco/device-scripts/[0-9a-f]{40}/windows/packages/[a-z-]+/Invoke-[A-Za-z]+\.ps1\z'
+# Case-sensitive. [0-9a-f], not \d or \w: those match other scripts' characters. Group 1 is the package directory.
+$script:UrlPattern = '\Ahttps://raw\.githubusercontent\.com/Relianco/device-scripts/[0-9a-f]{40}/windows/read/([a-z0-9-]+)/Invoke-[A-Za-z]+\.ps1\z'
+$script:JobPattern = '\A[a-z0-9][a-z0-9-]{0,63}\z'
+$script:PackageMaxBytes = 1048576
 $script:ResultField = 'relianJobResult'
 $script:LineMaxBytes = 8000
 $script:StdoutMaxChars = 65536
@@ -127,7 +91,8 @@ $script:WriteLine = { param($Line) [Console]::Out.WriteLine($Line) }
 $script:DownloadFile = {
     param($Url, $Destination)
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
-    $null = Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 120
+    # No redirect: the bytes come from the pinned URL itself, or the download fails.
+    $null = Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 120 -MaximumRedirection 0
 }
 $script:RetryDelay = { param($Seconds) [Threading.Thread]::Sleep(1000 * $Seconds) }
 $script:ReadSddl = { param($Path) (Get-Acl -LiteralPath $Path).Sddl }
@@ -228,42 +193,61 @@ function Assert-RelianNotReparse {
     }
 }
 
-# Validated arguments as a list of '-Key', 'value' pairs in table order, or a fixed error string.
+function Test-RelianUrlHasUserInfo {
+    param([AllowEmptyString()][string]$Url)
+    # Same check as Invoke-RelianJob. The regex is for an empty name: [Uri] reports no UserInfo for https://@host.
+    if ($Url -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { return $true }
+    try {
+        $uri = [Uri]$Url
+        return $uri.IsAbsoluteUri -and -not [string]::IsNullOrEmpty($uri.UserInfo)
+    } catch {
+        return $false
+    }
+}
+
+# A key may not be a case-insensitive prefix of these: PowerShell binds an unambiguous prefix of a parameter name,
+# so 'Act' would rebind -Action. The fixed pairs, the packages' change switches, and the common parameters.
+$script:ReservedKeys = @('DeploymentType', 'Action', 'PinVersion', 'Fix', 'Apply', 'Mode', 'ReportOnly',
+    'Verbose', 'Debug', 'ErrorAction', 'WarningAction', 'InformationAction', 'ProgressAction', 'ErrorVariable',
+    'WarningVariable', 'InformationVariable', 'OutVariable', 'OutBuffer', 'PipelineVariable', 'WhatIf', 'Confirm')
+
+# Validated arguments as a list of '-Key', 'value' pairs in ordinal key order, or a fixed error string.
+# Generic rules only: which keys and values a job accepts is the forge allowlist's job.
 function ConvertTo-RelianJobArgumentList {
-    param([hashtable]$Rules, [AllowEmptyString()][string]$JobArguments)
+    param([AllowEmptyString()][string]$JobArguments)
     $flat = 'JobArguments is not valid base64 flat JSON'
-    $values = [Collections.Generic.Dictionary[string, string]]::new()   # ordinal: 'section' and 'Section' stay two keys
-    if (-not [string]::IsNullOrEmpty($JobArguments)) {
-        if ($JobArguments.Length -gt 2048 -or $JobArguments -cnotmatch '\A[A-Za-z0-9+/]+={0,2}\z') { return @{ Error = $flat } }
-        try {
-            $bytes = [Convert]::FromBase64String($JobArguments)
-            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return @{ Error = $flat } }
-            $json = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
-            if (-not $json.TrimStart().StartsWith('{')) { return @{ Error = $flat } }
-            $object = $json | ConvertFrom-Json
-        } catch { return @{ Error = $flat } }
-        if ($object -isnot [pscustomobject]) { return @{ Error = $flat } }
-        foreach ($property in $object.PSObject.Properties) {
-            $v = $property.Value
-            if ($v -is [string]) { $text = $v }
-            elseif ($v -is [int] -or $v -is [long]) { $text = [string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $v) }
-            else { return @{ Error = 'bad argument value' } }   # a nested object, array, boolean, null or fraction
-            $values[[string]$property.Name] = $text
+    if ([string]::IsNullOrEmpty($JobArguments)) { return @{ Error = $null; Arguments = @() } }
+    if ($JobArguments.Length -gt 2048 -or $JobArguments -cnotmatch '\A[A-Za-z0-9+/]+={0,2}\z') { return @{ Error = $flat } }
+    try {
+        $bytes = [Convert]::FromBase64String($JobArguments)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { return @{ Error = $flat } }
+        $json = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    } catch { return @{ Error = $flat } }
+    # A grammar, not ConvertFrom-Json: 5.1 and 7 differ on duplicate keys and number types. Only a flat object of
+    # string values without escapes matches; a number, boolean, null, nested value or escape is refused.
+    $ws = '[ \t\r\n]*'
+    $pair = '"([^"\\]*)"' + $ws + ':' + $ws + '"([^"\\]*)"'
+    if ($json -cnotmatch ('\A' + $ws + '\{' + $ws + '(' + $pair + $ws + '(,' + $ws + $pair + $ws + ')*)?\}' + $ws + '\z')) { return @{ Error = $flat } }
+    $pairs = [regex]::Matches($json, $pair)
+    if ($pairs.Count -gt 16) { return @{ Error = 'too many argument keys' } }
+    $values = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($m in $pairs) {
+        $key = $m.Groups[1].Value
+        $value = $m.Groups[2].Value
+        if ($key -cnotmatch '\A[A-Za-z][A-Za-z0-9]{0,31}\z') { return @{ Error = 'bad argument key' } }
+        foreach ($reserved in $script:ReservedKeys) {
+            if ($reserved.StartsWith($key, [StringComparison]::OrdinalIgnoreCase)) { return @{ Error = 'reserved argument key' } }
         }
+        # PowerShell parameter names ignore case, so 'Section' and 'section' are one parameter.
+        if ($values.ContainsKey($key)) { return @{ Error = 'duplicate argument key' } }
+        # No leading '-' (it would read as a parameter name), nothing that needs quoting.
+        if ($value -cnotmatch '\A[A-Za-z0-9{}.][A-Za-z0-9{}.-]{0,63}\z') { return @{ Error = 'bad argument value' } }
+        $values[$key] = $value
     }
-    foreach ($key in $values.Keys) {
-        if (-not ($Rules.Keys -ccontains $key)) { return @{ Error = 'unknown argument key' } }
-    }
+    $keys = [string[]]@($values.Keys)
+    [Array]::Sort($keys, [StringComparer]::Ordinal)
     $list = [Collections.Generic.List[string]]::new()
-    foreach ($key in @($Rules.Keys | Sort-Object)) {
-        if (-not $values.ContainsKey($key)) { continue }
-        $rule = $Rules[$key]; $value = $values[$key]
-        $ok = $false
-        if ($rule.ContainsKey('Enum')) { $ok = $rule.Enum -ccontains $value }
-        else { $ok = $value.Length -ge 1 -and $value.Length -le $rule.Max -and $value -cmatch $rule.Regex }
-        if (-not $ok) { return @{ Error = 'bad argument value' } }
-        [void]$list.Add("-$key"); [void]$list.Add($value)
-    }
+    foreach ($key in $keys) { [void]$list.Add("-$key"); [void]$list.Add($values[$key]) }
     return @{ Error = $null; Arguments = $list.ToArray() }
 }
 
@@ -294,6 +278,7 @@ function Get-RelianCachedPackage {
                     [void](& $script:RetryDelay (@(5, 20)[$attempt - 1]))
                 }
             }
+            if ((Get-Item -LiteralPath $temp -Force).Length -gt $script:PackageMaxBytes) { return @{ Error = 'package too large' } }
             if ((Get-RelianSha256 -Bytes ([IO.File]::ReadAllBytes($temp))) -ne $Expected) { return @{ Error = 'hash mismatch' } }
             Move-Item -LiteralPath $temp -Destination $file -Force
         }
@@ -305,6 +290,7 @@ function Get-RelianCachedPackage {
         # on Windows an open file cannot be replaced, and its directory cannot be renamed away, so the child runs
         # the bytes that were hashed. The parent of the cache is not owner-checked; this lock closes that gap.
         $lock = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        if ($lock.Length -gt $script:PackageMaxBytes) { $lock.Dispose(); return @{ Error = 'package too large' } }
         $bytes = [byte[]]::new([int]$lock.Length)
         $read = 0
         while ($read -lt $bytes.Length) { $n = $lock.Read($bytes, $read, $bytes.Length - $read); if ($n -le 0) { break }; $read += $n }
@@ -351,26 +337,33 @@ function Complete-RelianReadJob {
 
 function Invoke-RelianReadJob {
     [CmdletBinding()]
-    param([string]$Job, [AllowEmptyString()][string]$JobArguments, [string]$RequestId)
+    param([string]$PackageUrl, [string]$PackageSha256, [string]$Job, [AllowEmptyString()][string]$JobArguments, [string]$RequestId)
 
     # Without a valid request id there is nothing to bind a line to: no line, no field write.
     if ($RequestId -cnotmatch '\A[0-9a-f]{32}\z') { Write-Host 'RequestId must be 32 lowercase hex characters'; return 1 }
-    if (-not $Job -or $Job -isnot [string] -or -not ($script:Jobs.Keys -ccontains $Job)) {
-        return Complete-RelianReadJob -RequestId $RequestId -JobName $null -ExitCode -1 -ResultJson $null -ErrorText 'unknown job'
+    if ($Job -cnotmatch $script:JobPattern) {
+        return Complete-RelianReadJob -RequestId $RequestId -JobName $null -ExitCode -1 -ResultJson $null -ErrorText 'invalid job'
     }
-    $entry = $script:Jobs[$Job]
-    # Deliberately not a no-op: unlike Invoke-RelianJob, an empty or missing table hash is an error (exit 1). This loader has no off switch (design 3.1); a silent success would hide an unpinned job.
-    if ([string]$entry.Sha256 -cnotmatch '\A[0-9a-f]{64}\z') {
-        return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'table hash missing or malformed'
+    if (Test-RelianUrlHasUserInfo $PackageUrl) {
+        return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'URL has userinfo'
     }
-    if ([string]$entry.Url -cnotmatch $script:UrlPattern) {
-        return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'table URL is not commit-pinned'
+    $url = [regex]::Match($PackageUrl, $script:UrlPattern)
+    if (-not $url.Success) {
+        return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'package URL is not commit-pinned'
     }
-    $parsed = ConvertTo-RelianJobArgumentList -Rules $entry.Keys -JobArguments $JobArguments
+    # The job name is the package directory, so a reviewed URL cannot be reported under another job's name.
+    if ($url.Groups[1].Value -cne $Job) {
+        return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'job does not match package'
+    }
+    # Deliberately not a no-op: unlike Invoke-RelianJob, an empty hash is an error (exit 1). This loader has no off switch.
+    if ($PackageSha256 -cnotmatch '\A[0-9a-f]{64}\z') {
+        return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText 'package hash missing or malformed'
+    }
+    $parsed = ConvertTo-RelianJobArgumentList -JobArguments $JobArguments
     if ($parsed.Error) {
         return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText $parsed.Error
     }
-    $package = Get-RelianCachedPackage -Url $entry.Url -Expected $entry.Sha256
+    $package = Get-RelianCachedPackage -Url $PackageUrl -Expected $PackageSha256
     if ($package.Error) {
         return Complete-RelianReadJob -RequestId $RequestId -JobName $Job -ExitCode -1 -ResultJson $null -ErrorText $package.Error
     }
@@ -404,4 +397,4 @@ function Invoke-RelianReadJob {
 
 # Dot-sourcing under test defines functions and runs nothing.
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-exit ([int](Invoke-RelianReadJob -Job $Job -JobArguments $JobArguments -RequestId $RequestId))
+exit ([int](Invoke-RelianReadJob -PackageUrl $PackageUrl -PackageSha256 $PackageSha256 -Job $Job -JobArguments $JobArguments -RequestId $RequestId))
