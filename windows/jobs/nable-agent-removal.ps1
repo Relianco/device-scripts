@@ -11,9 +11,11 @@ param([switch]$ReportOnly)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Add/Remove Programs names and publishers of the agent and its parts. Generic part names such as
-# "Request Handler Agent" match through the publisher only.
+# Add/Remove Programs names of the agent and its parts. A name on the first list matches alone. A part
+# name on the second list is generic, so it matches only with an agent publisher. The publisher never
+# matches alone: the same vendors ship other products (backup, for one) that must not be uninstalled.
 $script:NaNamePattern = '(?i)\A(Advanced Monitoring Agent\b.*|Take Control Agent\b.*|N-able Take Control\b.*|BeAnywhere Support Express\b.*)\z'
+$script:NaPartPattern = '(?i)\A(Request Handler Agent|File Cache Service Agent|Patch Management Service Controller)\z'
 $script:NaPublisherPattern = '(?i)\A(Remote Monitoring Services|SolarWinds MSP|N-able Technologies|LogicNow( Ltd)?|BeAnywhere)\z'
 # Agent folders: a direct child of Program Files (either view) or ProgramData with one of these names.
 $script:NaFolderPattern = '(?i)\A(Advanced Monitoring Agent[^\\]*|BeAnywhere Support Express|Take Control Agent|MspPlatform|SolarWinds MSP|N-able Technologies|GetSupportService[^\\]*)\z'
@@ -108,7 +110,7 @@ $script:NaFileExists = { param($Path) Test-Path -LiteralPath $Path -PathType Lea
 function Test-NaAppEntry {
     param($Entry)
     if (-not $Entry.Name -or (Test-NaProtected "$($Entry.Name) $($Entry.Publisher) $($Entry.Uninstall)")) { return $false }
-    return ($Entry.Name -match $script:NaNamePattern) -or ($Entry.Publisher -match $script:NaPublisherPattern)
+    return ($Entry.Name -match $script:NaNamePattern) -or ($Entry.Name -match $script:NaPartPattern -and $Entry.Publisher -match $script:NaPublisherPattern)
 }
 
 # True when the path sits inside an agent folder: a direct child of Program Files or ProgramData

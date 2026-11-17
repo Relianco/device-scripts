@@ -202,6 +202,18 @@ Assert-True (-not (Test-NaAppEntry (New-App 'x' 'Request Handler Agent' 'Contoso
 Assert-True (-not (Test-NaAppEntry (New-App 'x' 'SolarWinds Orion' 'SolarWinds'))) 'other SolarWinds products do not match'
 Assert-True (-not (Test-NaAppEntry (New-App 'x' 'GFI ReportCenter Framework' 'GFI Software'))) 'GFI does not match'
 Assert-True (-not (Test-NaAppEntry (New-App 'x' '' 'Remote Monitoring Services'))) 'an entry without a name does not match'
+# The publisher only confirms a listed part name; it never selects a product by itself.
+foreach ($p in @('Remote Monitoring Services', 'SolarWinds MSP', 'N-able Technologies', 'LogicNow Ltd', 'BeAnywhere')) {
+    Assert-True (-not (Test-NaAppEntry (New-App 'x' 'Backup Manager' $p))) "another product from [$p] does not match"
+}
+Assert-True (Test-NaAppEntry (New-App 'x' 'File Cache Service Agent' 'SolarWinds MSP')) 'file cache part matches by publisher'
+Assert-True (Test-NaAppEntry (New-App 'x' 'Patch Management Service Controller' 'N-able Technologies')) 'patch part matches by publisher'
+Reset-Test
+Add-Agent
+$script:Apps.Add((New-App 'BM' 'Backup Manager' 'N-able Technologies' '"C:\Program Files\Backup Manager\unins000.exe"'))
+$r = Invoke-Job
+Assert-True (-not ($script:Runs -like '*Backup Manager*')) 'another product from the vendor is not uninstalled'
+Assert-True (@($script:Apps | Where-Object Id -eq 'BM').Count -eq 1) 'another product from the vendor keeps its key'
 Assert-True (Test-NaServiceEntry (New-Svc 'FileCacheServiceAgent' '"C:\Program Files (x86)\MspPlatform\FileCacheServiceAgent\FileCacheServiceAgent.exe"')) 'MspPlatform service matches by folder'
 Assert-True (-not (Test-NaServiceEntry (New-Svc 'Other' 'C:\Tools\other.exe --cache "C:\Program Files (x86)\MspPlatform\x"'))) 'a folder in another program''s arguments does not match'
 Assert-True (-not (Test-NaAppEntry (New-App 'x' 'Ninja Patch Helper' 'SolarWinds MSP'))) 'a protected name wins over a matching publisher'
