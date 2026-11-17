@@ -26,6 +26,8 @@ if (-not (Test-Path -LiteralPath $releasePath)) {
 $env:RELIAN_DEPLOY_TEST = '1'
 Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_CANCEL' -ErrorAction SilentlyContinue
 . $scriptPath
+$realSetImeLogLink = $script:SetImeLogLink
+$realRemoveImeLogLink = $script:RemoveImeLogLink
 
 # The pin. The SHA256 is the GitHub release asset digest for v2.12.0 WAU.msi, checked against the downloaded file.
 $pinnedUrl = 'https://github.com/Romanitho/Winget-AutoUpdate/releases/download/v2.12.0/WAU.msi'
@@ -282,6 +284,44 @@ if ((@($script:State.Msi[0].Args) -join '|') -cne '/x|{FB0EB14E-95AC-45D7-A951-4
 Reset-Fakes -Before $null -After $null
 $code = [int](Invoke-WauAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.12.0' -ListUrl '' -UpdatesAtTime '' -AvdUpdatesAtTime '' -InstallerUrl $pinnedUrl -InstallerSha256 $payloadSha -CancelPath '')
 if ($code -ne 0 -or $script:State.Msi.Count -ne 0) { Fail 'uninstall of an absent WAU ran msiexec' }
+
+# The real log link hooks, on Windows only (CI runs this under Windows PowerShell 5.1, like Intune).
+# The install runs with RUN_WAU=NO, so WAU's log does not exist yet when the link is made.
+if ($env:OS -eq 'Windows_NT') {
+    $savedProgramData = $env:ProgramData
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('wau-link-' + [guid]::NewGuid().ToString('n'))
+    try {
+        $imeLogs = Join-Path $root 'Microsoft\IntuneManagementExtension\Logs'
+        New-Item -ItemType Directory -Path $imeLogs -Force | Out-Null
+        $install = Join-Path $root 'Program Files\Winget-AutoUpdate\'
+        $env:ProgramData = $root
+        $link = Join-Path $imeLogs 'WAU-updates.log'
+        $target = Join-Path $install 'logs\updates.log'
+        foreach ($pass in 1, 2) {
+            # The second pass is a reconfigure over a link that still points at nothing.
+            $result = & $realSetImeLogLink -InstallLocation $install
+            if ($result -cne 'linked') { Fail "log link pass $pass returned '$result'" }
+            $item = [System.IO.FileInfo]::new($link)
+            if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { Fail "log link pass $pass is not a link" }
+        }
+        # WAU's first run writes the log; reading it through the link proves the target.
+        New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force | Out-Null
+        [System.IO.File]::WriteAllText($target, 'first run')
+        if ([System.IO.File]::ReadAllText($link) -cne 'first run') { Fail 'log link does not read the WAU log' }
+        # Uninstall removes WAU's folder first, so the link points at nothing again.
+        Remove-Item -LiteralPath (Join-Path $root 'Program Files') -Recurse -Force
+        & $realRemoveImeLogLink
+        if ($null -ne (Get-WauLinkAttributes -Path $link)) { Fail 'uninstall left a link to a missing log' }
+        # A real file of that name is left alone.
+        [System.IO.File]::WriteAllText($link, 'someone else')
+        if ((& $realSetImeLogLink -InstallLocation $install) -cne 'skipped') { Fail 'a real file was replaced' }
+        & $realRemoveImeLogLink
+        if (-not [System.IO.File]::Exists($link)) { Fail 'uninstall removed a real file' }
+    } finally {
+        $env:ProgramData = $savedProgramData
+        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 
 Write-Output 'wau-plan tests passed'
 exit 0
