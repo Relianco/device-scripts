@@ -25,6 +25,7 @@ function Invoke-Read { $r = Invoke-ReadMsiLogJob; [pscustomobject]@{ Code = $r.E
 
 $userName = 'u' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 $userPath = "C:\Users\$userName\AppData\x.txt"
+$secretA = 'p' + [guid]::NewGuid().ToString('N').Substring(0, 8); $secretB = 't' + [guid]::NewGuid().ToString('N').Substring(0, 8); $otherUser = 'v' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 $body = @(1..30 | ForEach-Object { "MSI (s) (00:00): filler line $_" })
 $body += @(
     'Action start 10:00:01: InstallInitialize.',
@@ -40,10 +41,10 @@ $body += @(
     'Property(S): INSTALLLEVEL = 1',
     'Property(S): UILevel = 2',
     'Property(S): INSTALLDIR = C:\Program Files\Agent\',
-    'Property(S): ADMINPASSWORD = hunter2 and more',
-    'Property(S): TargetDir = C:\Users\someone\Agent',
-    'Property(S): LOGONUSER = someone',
-    'cmd SERVICE_TOKEN=abc123 other=1',
+    "Property(S): ADMINPASSWORD = $secretA and more",
+    "Property(S): TargetDir = C:\Users\$otherUser\Agent",
+    "Property(S): LOGONUSER = svc",
+    "cmd SERVICE_TOKEN=$secretB other=1",
     ('x' * 500)
 )
 $text = $body -join "`r`n"
@@ -86,9 +87,9 @@ Assert-True (-not ($names -contains 'LOGONUSER' -or $names -contains 'ADMINPASSW
 
 # Redaction across every section, and the 300-character cap.
 $all = $r.Line
-foreach ($leak in $userName, 'admin@example.com', '192.0.2.10', 'TESTBOX01', 'S-1-5-21-111', 'hunter2', 'abc123') { Assert-True (-not $all.Contains($leak)) "redacted $leak" }
+foreach ($leak in $userName, 'admin@example.com', '192.0.2.10', 'TESTBOX01', 'S-1-5-21-111', $secretA, $secretB, $otherUser) { Assert-True (-not $all.Contains($leak)) "redacted $leak" }
 foreach ($mark in 'Users\\\\<user>', '<email>', '<ip>', '<machine>', '<sid>', 'SERVICE_TOKEN=<redacted>') { Assert-True ($all -match $mark) "mask $mark present" }
-Assert-Same (Get-RmRedacted 'Property(S): ADMINPASSWORD = hunter2 and more') 'Property(S): ADMINPASSWORD = <redacted>' 'secret property value'
+Assert-Same (Get-RmRedacted "Property(S): ADMINPASSWORD = $secretA and more") 'Property(S): ADMINPASSWORD = <redacted>' 'secret property value'
 Assert-Same @($j.tail).Count 40 'tail of 40'
 Assert-Same @($j.tail)[39].Length 300 'line cap'
 
