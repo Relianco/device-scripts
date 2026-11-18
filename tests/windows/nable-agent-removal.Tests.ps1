@@ -21,8 +21,8 @@ $pf86 = 'C:\Program Files (x86)'
 $amaDir = "$pf86\Advanced Monitoring Agent"
 $gpCode = '{11111111-2222-3333-4444-555555555555}'
 
-function New-App { param($Id, $Name, $Publisher = '', $Uninstall = '', [switch]$Msi, $Root = $u32)
-    [pscustomobject]@{ Key = "$Root\$Id"; Id = $Id; Name = $Name; Publisher = $Publisher; Uninstall = $Uninstall; Msi = [bool]$Msi }
+function New-App { param($Id, $Name, $Publisher = '', $Uninstall = '', [switch]$Msi, $Root = $u32, $InstallLocation = '')
+    [pscustomobject]@{ Key = "$Root\$Id"; Id = $Id; Name = $Name; Publisher = $Publisher; Uninstall = $Uninstall; Msi = [bool]$Msi; InstallLocation = $InstallLocation }
 }
 function New-Svc { param($Name, $Path, $DisplayName = $Name) [pscustomobject]@{ Name = $Name; DisplayName = $DisplayName; Path = $Path; ProcessId = 0 } }
 
@@ -36,13 +36,25 @@ function Reset-Test {
     $script:UninstallWorks = $true
     $script:MsiWorks = $true
     $script:FolderLocked = $false
+    $script:Files = [Collections.Generic.List[string]]::new()
+    $script:Products = [Collections.Generic.List[string]]::new()
+    $script:LocalPackages = @{}
+    $script:BackupDirs = [Collections.Generic.List[string]]::new()
+    $script:NaBackupDir = Join-Path $script:TmpRoot ([guid]::NewGuid().ToString('N'))
 }
+$script:TmpRoot = Join-Path ([IO.Path]::GetTempPath()) ('na-backup-' + [guid]::NewGuid().ToString('N'))
+$script:NaProtectDir = { param($Path) $script:BackupDirs.Add($Path) }
+$script:NaReadKeyValues = { param($Path) @(@{ name = 'DisplayName'; kind = 'String'; data = "of $Path" }, @{ name = 'WindowsInstaller'; kind = 'DWord'; data = 1 }, @{ name = 'Bin'; kind = 'Binary'; data = 'AQID' }) }
+$script:NaPathExists = { param($Path) ($script:Dirs -contains $Path) -or ($script:Dirs -contains (Get-Parent $Path)) -or ($script:Files -contains $Path) }
+$script:NaHasProduct = { param($Packed) $script:Products -contains $Packed }
+$script:NaReadLocalPackage = { param($Packed) $script:LocalPackages[$Packed] }
+$script:NaDeleteProduct = { param($Packed) $script:Removed.Add("product $Packed"); [void]$script:Products.Remove($Packed) }
 $script:NaReadUninstall = { $script:Apps.ToArray() }
 $script:NaReadServices = { $script:Svcs.ToArray() }
 $script:NaFolderParents = { @($pf86, 'C:\ProgramData') }
 $script:NaListFolders = { param($Parent) @($script:Dirs | Where-Object { $_.StartsWith("$Parent\") -and $_.Substring($Parent.Length + 1) -match $script:NaFolderPattern }) }
 $script:NaSettle = { }
-$script:NaFileExists = { param($Path) $script:Dirs -contains (Get-Parent $Path) }
+$script:NaFileExists = { param($Path) ($script:Dirs -contains (Get-Parent $Path)) -or ($script:Files -contains $Path) }
 $script:NaRun = { param($File, $Arguments)
     $script:Runs.Add("$File $($Arguments -join ' ')")
     if (-not $(if ($File -eq 'msiexec.exe') { $script:MsiWorks } else { $script:UninstallWorks })) { return 1603 }
@@ -305,4 +317,184 @@ try {
     [IO.Directory]::Delete($tmp, $true)
 }
 
+# Orphan Add/Remove Programs keys. The packed product code format, with known GUIDs.
+Assert-Same (ConvertTo-NaPackedGuid '{90120000-0030-0000-0000-0000000FF1CE}') '00002109030000000000000000F01FEC' 'packed GUID, Office'
+$msiCode = '{12345678-9ABC-DEF0-1234-56789ABCDEF0}'
+$msiPacked = '87654321CBA90FED21436587A9CBED0F'
+Assert-Same (ConvertTo-NaPackedGuid $msiCode) $msiPacked 'packed GUID, mixed digits'
+Assert-Same (ConvertTo-NaPackedGuid $msiCode.ToLower()) $msiPacked.ToUpper() 'packed GUID is upper case'
+$threw = $false; try { $null = ConvertTo-NaPackedGuid 'not-a-guid' } catch { $threw = $true }
+Assert-True $threw 'a malformed product code throws'
+
+function Get-BackupFiles { @(if (Test-Path -LiteralPath $script:NaBackupDir) { Get-ChildItem -LiteralPath $script:NaBackupDir -Filter 'backup-*.json' }) }
+
+# No uninstaller at all: the key is backed up, then deleted, and the run reports removed.
+Reset-Test
+Add-Protected
+$script:Apps.Add((New-App 'GPNoUninst' 'Advanced Monitoring Agent GP' 'Remote Monitoring Services'))
+$protectedKeys = @($script:Apps | Where-Object Id -ne 'GPNoUninst' | ForEach-Object Key)
+$script:NaDeleteKey = { param($Path) $script:BackupAtDelete = @(Get-BackupFiles).Count; $script:Removed.Add("key $Path"); foreach ($a in @($script:Apps | Where-Object { $_.Key -eq $Path })) { [void]$script:Apps.Remove($a) } }
+$r = Invoke-Job
+Assert-Same $r.Code 0 'orphan without uninstaller exit'
+Assert-Same $r.Json.status 'removed' 'orphan without uninstaller status'
+Assert-True ($script:Removed -contains "key $u32\GPNoUninst") 'orphan without uninstaller key deleted'
+Assert-Same $script:Runs.Count 0 'nothing to run for a key without an uninstaller'
+Assert-Same $script:BackupAtDelete 1 'the backup exists before the delete'
+$files = @(Get-BackupFiles)
+Assert-Same $files.Count 1 'one backup file'
+Assert-Same @($r.Json.backups).Count 1 'the output names the backup'
+Assert-Same $r.Json.backups[0] $files[0].Name 'the output names the backup file'
+$doc = Get-Content -LiteralPath $files[0].FullName -Raw | ConvertFrom-Json
+Assert-Same $doc.key "HKLM\$u32\GPNoUninst" 'the backup holds the key path'
+Assert-Same @($doc.values).Count 3 'the backup holds every value'
+Assert-Same $doc.values[0].data "of $u32\GPNoUninst" 'the backup holds the value data'
+Assert-Same $script:BackupDirs.Count 1 'the backup folder is locked down'
+Assert-Same @($script:Apps | ForEach-Object Key | Where-Object { $protectedKeys -notcontains $_ }).Count 0 'only the orphan went'
+Assert-Same @($script:Apps).Count $protectedKeys.Count 'protected keys stay'
+$script:NaDeleteKey = { param($Path) $script:Removed.Add("key $Path"); foreach ($a in @($script:Apps | Where-Object { $_.Key -eq $Path })) { [void]$script:Apps.Remove($a) } }
+
+# A backup is a new file each time and never overwrites one.
+$p1 = Write-NaBackup 'K\a' @(@{ name = 'x'; kind = 'String'; data = '1' })
+$p2 = Write-NaBackup 'K\a' @(@{ name = 'x'; kind = 'String'; data = '1' })
+Assert-True ($p1 -ne $p2) 'two backups get two names'
+$p3 = Write-NaBackup 'K\empty' @()
+Assert-True (Test-Path -LiteralPath (Join-Path $script:NaBackupDir $p3)) 'a key with no values is backed up'
+
+# MSI uninstall returns 1603 and the install folder is gone: key removed, and the Products entry too
+# when the cached package is missing.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' "MsiExec.exe /I$msiCode" -Msi -InstallLocation "$pf86\Advanced Monitoring Agent GP\"))
+$script:Products.Add($msiPacked)
+$script:LocalPackages[$msiPacked] = 'C:\Windows\Installer\1a2b3c.msi'
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 0 '1603 with files gone exit'
+Assert-Same $r.Json.status 'removed' '1603 with files gone status'
+Assert-True ($script:Runs -contains "msiexec.exe /x $msiCode /qn /norestart") '1603 case ran the uninstaller first'
+Assert-True ($script:Removed -contains "key $u32\$msiCode") '1603 with files gone key deleted'
+Assert-True ($script:Removed -contains "product $msiPacked") 'Products entry removed when the cached package is missing'
+Assert-Same @($r.Json.left).Count 0 'nothing left to report'
+
+# The cached package is still on disk: the Products entry stays and is reported.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' "MsiExec.exe /I$msiCode" -Msi -InstallLocation "$pf86\Advanced Monitoring Agent GP"))
+$script:Products.Add($msiPacked)
+$script:LocalPackages[$msiPacked] = 'C:\Windows\Installer\1a2b3c.msi'
+$script:Files.Add('C:\Windows\Installer\1a2b3c.msi')
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Json.status 'removed' 'package on disk: the uninstall key is still removed'
+Assert-True (-not ($script:Removed -contains "product $msiPacked")) 'Products entry kept while the cached package exists'
+Assert-Same @($r.Json.left).Count 1 'the kept Products entry is reported'
+Assert-True ($r.Json.left[0] -like "*$msiPacked*cached package on disk*") 'the report names the entry and why'
+
+# An absent LocalPackage value counts as a missing package. A product with no Products entry is not an error.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '' -Msi -InstallLocation 'C:\Gone\GP'))
+$script:Products.Add($msiPacked)
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-True ($script:Removed -contains "product $msiPacked") 'an absent LocalPackage value counts as missing'
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '' -Msi -InstallLocation 'C:\Gone\GP'))
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 0 'no Products entry: still removed'
+Assert-Same @($script:Removed | Where-Object { $_ -like 'product*' }).Count 0 'no Products entry: nothing to delete'
+
+# 1603 with the install folder or the uninstaller target still on disk: nothing is deleted, the run fails.
+Reset-Test
+$script:Dirs.Add('C:\Tools\GP')
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' "MsiExec.exe /I$msiCode" -Msi -InstallLocation 'C:\Tools\GP'))
+$script:Products.Add($msiPacked)
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 2 '1603 with the folder on disk exit'
+Assert-Same $script:Removed.Count 0 '1603 with the folder on disk deletes nothing'
+Assert-Same @(Get-BackupFiles).Count 0 '1603 with the folder on disk writes no backup'
+Reset-Test
+$script:Files.Add('C:\Tools\GP\unins000.exe')
+$script:Apps.Add((New-App 'GPI' 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '"C:\Tools\GP\unins000.exe"' -InstallLocation 'C:\Gone\GP'))
+$script:UninstallWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 2 '1603 with the uninstaller target on disk exit'
+Assert-Same $script:Removed.Count 0 '1603 with the uninstaller target on disk deletes nothing'
+# A failed uninstall with no path to check proves nothing.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' "MsiExec.exe /I$msiCode" -Msi))
+$script:MsiWorks = $false
+$r = Invoke-Job
+Assert-Same $r.Code 2 '1603 with no known path exit'
+Assert-Same $script:Removed.Count 0 '1603 with no known path deletes nothing'
+
+# A service that is still installed blocks the delete.
+Reset-Test
+$script:Apps.Add((New-App 'GPNoUninst' 'Advanced Monitoring Agent GP' 'Remote Monitoring Services'))
+$script:Svcs.Add((New-Svc 'Advanced Monitoring Agent' "`"$amaDir\winagent.exe`""))
+$script:NaRemoveService = { param($Service) throw 'dependent' }
+$r = Invoke-Job
+Assert-Same $r.Code 2 'a remaining service exit'
+Assert-True (-not ($script:Removed -contains "key $u32\GPNoUninst")) 'a remaining service blocks the key delete'
+Assert-Same @(Get-BackupFiles).Count 0 'a remaining service writes no backup'
+$script:NaRemoveService = { param($Service) $script:Removed.Add("svc $($Service.Name)"); [void]$script:Svcs.Remove($Service) }
+
+# A backup that cannot be written blocks the delete, and the run fails.
+Reset-Test
+$blocker = Join-Path $script:TmpRoot 'blocker'
+$null = New-Item -ItemType Directory -Path $script:TmpRoot -Force
+Set-Content -LiteralPath $blocker -Value 'x'
+$script:NaBackupDir = Join-Path $blocker 'sub'
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services'))
+$script:Products.Add($msiPacked)
+$r = Invoke-Job
+Assert-Same $r.Code 2 'backup failure exit'
+Assert-Same $r.Json.status 'failed' 'backup failure status'
+Assert-Same $script:Removed.Count 0 'backup failure deletes nothing, not the Products entry either'
+Assert-True (@(@($r.Json.log) -like 'uninstall key kept:*').Count -eq 1) 'backup failure is logged'
+# So does a key whose values cannot be read.
+Reset-Test
+$script:Apps.Add((New-App 'GPNoUninst' 'Advanced Monitoring Agent GP' 'Remote Monitoring Services'))
+$script:NaReadKeyValues = { param($Path) throw 'Access denied' }
+$r = Invoke-Job
+Assert-Same $r.Code 2 'unreadable key exit'
+Assert-Same $script:Removed.Count 0 'unreadable key deletes nothing'
+$script:NaReadKeyValues = { param($Path) @(@{ name = 'DisplayName'; kind = 'String'; data = "of $Path" }) }
+
+# A protected name is never touched, even with nothing else about it.
+Reset-Test
+Add-Protected
+$script:Apps.Add((New-App 'NinjaNoUninst' 'Advanced Monitoring Agent Ninja' 'Remote Monitoring Services'))
+$r = Invoke-Job
+Assert-Same $r.Json.status 'compliant' 'a protected key without an uninstaller is not a target'
+Assert-Same $script:Removed.Count 0 'a protected key without an uninstaller is not deleted'
+Assert-Same (Get-NaOrphanReason (New-App 'x' 'Advanced Monitoring Agent Wazuh' 'Remote Monitoring Services') @() @()) $null 'a protected entry has no orphan reason'
+# The matching rules are not loosened: another vendor product without an uninstaller stays.
+Reset-Test
+$script:Apps.Add((New-App 'BM' 'Backup Manager' 'N-able Technologies'))
+$r = Invoke-Job
+Assert-Same $r.Json.status 'compliant' 'another vendor product is not a target'
+Assert-Same $script:Removed.Count 0 'another vendor product keeps its key'
+
+# -ReportOnly writes and deletes nothing, and reports the orphan as drift.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services'))
+$script:Products.Add($msiPacked)
+$r = Invoke-Job -ReportOnly
+Assert-Same $r.Code 1 'report-only orphan exit'
+Assert-Same $r.Json.status 'drift' 'report-only orphan status'
+Assert-True (@($r.Json.apps) -contains 'Advanced Monitoring Agent GP') 'report-only names the orphan'
+Assert-Same $script:Removed.Count 0 'report-only deletes nothing'
+Assert-True (-not (Test-Path -LiteralPath $script:NaBackupDir)) 'report-only writes no backup'
+Assert-Same $script:BackupDirs.Count 0 'report-only creates no folder'
+
+# Registry reads that return nothing: an entry without an InstallLocation property, empty strings, no services.
+$bare = [pscustomobject]@{ Key = "$u32\X"; Id = 'X'; Name = 'Advanced Monitoring Agent'; Publisher = ''; Uninstall = ''; Msi = $false }
+Assert-Same (Get-NaOrphanReason $bare @() @()) 'no uninstaller' 'an entry without an InstallLocation property is read safely'
+$bare.Uninstall = '"C:\Gone\x.exe" /u'
+Assert-Same (Get-NaOrphanReason $bare @($bare.Key) @()) 'uninstall failed, files gone' 'a missing target alone proves a failed uninstall orphaned'
+Assert-Same (Get-NaOrphanReason $bare @() @()) $null 'an uninstaller that never ran proves nothing'
+$bare.Uninstall = ''
+Assert-Same (Get-NaOrphanReason $bare @() @($null)) $null 'a service in the list blocks'
+
+[IO.Directory]::Delete($script:TmpRoot, $true)
 Write-Output 'nable-agent-removal: ok'
