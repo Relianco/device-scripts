@@ -219,7 +219,7 @@ These change settings when you ask, and most have a read-only mode.
 - `eventlog-source`: registers one event log `Source` as SYSTEM, so a program stops asking for admin rights. Uninstall removes only that source.
 - `gpo-baseline`: applies an embedded GPO `Definition` on the PDC emulator, after a backup. Plan-only unless `Apply` is `true`.
 - `msi-repair`: repairs one installed MSI product (`msiexec /f`) by `ProductCode` or `DisplayName`. `Section` `Evidence` is read-only.
-- `printer-tcp`: adds a TCP/IP printer from `PrinterName`, `PrinterAddress` and `PrinterModel`. Empty values exit 0.
+- `printer-tcp`: adds a TCP/IP printer from `PrinterName`, `PrinterAddress` and `PrinterModel`, with optional printing defaults `PrinterColor` (`Color`, `Monochrome` or `Grayscale`), `PrinterDuplex` (`OneSided`, `TwoSidedLongEdge` or `TwoSidedShortEdge`) and `PrinterTray` (`Auto`, `Tray1`..`Tray4`, `Manual` or `Lct`). Empty values exit 0.
 - `s1-rebind`: re-binds a SentinelOne agent that lost its console with `SiteToken`, or reinstalls a signed installer when `Reinstall` is `true`. `Section` `Report` is read-only. It never reboots.
 - `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
 - `unity`: Unity Accounting and esiLaw elevation prompt evidence and guarded repairs. See [the notes](windows/packages/unity/README.md).

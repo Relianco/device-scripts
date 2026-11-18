@@ -12,7 +12,10 @@ param(
     [string]$MarkerRoot = '',
     [string]$PrinterName = '',
     [string]$PrinterAddress = '',
-    [string]$PrinterModel = ''
+    [string]$PrinterModel = '',
+    [string]$PrinterColor = '',
+    [string]$PrinterDuplex = '',
+    [string]$PrinterTray = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -99,6 +102,7 @@ function New-PrinterTcpPlan {
         [bool]$UpdateQueue = $false,
         [string]$PreviousDriver = '',
         [string]$PreviousPort = '',
+        [bool]$ConfigureDefaults = $false,
         [bool]$RemoveQueue = $false,
         [bool]$RemovePort = $false,
         [string]$RemovePortName = '',
@@ -107,18 +111,19 @@ function New-PrinterTcpPlan {
     )
     # ExitCode stays null when the caller still has to perform the plan.
     return [pscustomobject]@{
-        ExitCode       = $ExitCode
-        EnsureDriver   = $EnsureDriver
-        CreatePort     = $CreatePort
-        CreateQueue    = $CreateQueue
-        UpdateQueue    = $UpdateQueue
-        PreviousDriver = $PreviousDriver
-        PreviousPort   = $PreviousPort
-        RemoveQueue    = $RemoveQueue
-        RemovePort     = $RemovePort
-        RemovePortName = $RemovePortName
-        WriteMarker    = $WriteMarker
-        ClearMarker    = $ClearMarker
+        ExitCode          = $ExitCode
+        EnsureDriver      = $EnsureDriver
+        CreatePort        = $CreatePort
+        CreateQueue       = $CreateQueue
+        UpdateQueue       = $UpdateQueue
+        PreviousDriver    = $PreviousDriver
+        PreviousPort      = $PreviousPort
+        ConfigureDefaults = $ConfigureDefaults
+        RemoveQueue       = $RemoveQueue
+        RemovePort        = $RemovePort
+        RemovePortName    = $RemovePortName
+        WriteMarker       = $WriteMarker
+        ClearMarker       = $ClearMarker
     }
 }
 
@@ -212,6 +217,166 @@ function Get-PrinterTcpPortSettings {
     }
 }
 
+function Test-PrinterTcpColor {
+    param([string]$Color)
+    if ([string]::IsNullOrEmpty($Color)) {
+        return $true
+    }
+    return @('Color', 'Monochrome', 'Grayscale') -ccontains $Color
+}
+
+function Test-PrinterTcpDuplex {
+    param([string]$Duplex)
+    if ([string]::IsNullOrEmpty($Duplex)) {
+        return $true
+    }
+    return @('OneSided', 'TwoSidedLongEdge', 'TwoSidedShortEdge') -ccontains $Duplex
+}
+
+function Test-PrinterTcpTray {
+    param([string]$Tray)
+    if ([string]::IsNullOrEmpty($Tray)) {
+        return $true
+    }
+    return @('Auto', 'Tray1', 'Tray2', 'Tray3', 'Tray4', 'Manual', 'Lct') -ccontains $Tray
+}
+
+function Get-PrinterTcpTrayFallbackId {
+    param([string]$Tray)
+    switch -Exact ($Tray) {
+        'Auto'   { return 7 }
+        'Tray1'  { return 257 }
+        'Tray2'  { return 258 }
+        'Tray3'  { return 259 }
+        'Tray4'  { return 260 }
+        'Manual' { return 4 }
+        'Lct'    { return 261 }
+    }
+    return 0
+}
+
+function Get-PrinterTcpTrayCandidateIds {
+    param([string]$Tray)
+    switch -Exact ($Tray) {
+        'Auto'   { return @(7, 15) }
+        'Tray1'  { return @(257, 1) }
+        'Tray2'  { return @(258, 2) }
+        'Tray3'  { return @(259, 3) }
+        'Tray4'  { return @(260) }
+        'Manual' { return @(4, 6) }
+        'Lct'    { return @(261, 11) }
+    }
+    return @()
+}
+
+function Resolve-PrinterTcpTraySourceId {
+    param(
+        [string]$Tray,
+        [int[]]$BinIds = @(),
+        [string[]]$BinNames = @()
+    )
+    if ([string]::IsNullOrEmpty($Tray)) {
+        return 0
+    }
+    $candidates = @()
+    switch -Exact ($Tray) {
+        'Auto'   { $candidates = @('Auto', 'Auto Select', 'Automatically Select', 'Default') }
+        'Tray1'  { $candidates = @('Tray 1', 'Tray1', 'Cassette 1', 'Cassette1', 'Upper') }
+        'Tray2'  { $candidates = @('Tray 2', 'Tray2', 'Cassette 2', 'Cassette2', 'Lower') }
+        'Tray3'  { $candidates = @('Tray 3', 'Tray3', 'Cassette 3', 'Cassette3', 'Middle') }
+        'Tray4'  { $candidates = @('Tray 4', 'Tray4', 'Cassette 4', 'Cassette4') }
+        'Manual' { $candidates = @('Manual', 'Manual Feed', 'Bypass', 'Bypass Tray', 'MP Tray', 'Multi-Purpose Tray') }
+        'Lct'    { $candidates = @('LCT', 'Large Capacity', 'Large Capacity Tray', 'Large Capacity Feeder') }
+    }
+    $count = [Math]::Min(@($BinIds).Count, @($BinNames).Count)
+    foreach ($candidate in $candidates) {
+        for ($i = 0; $i -lt $count; $i++) {
+            $rawName = [string]$BinNames[$i]
+            if ([string]::Equals($rawName.Trim(), $candidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return [int]$BinIds[$i]
+            }
+        }
+    }
+    if ($count -gt 0) {
+        $advertised = @($BinIds[0..($count - 1)])
+        foreach ($candidateId in @(Get-PrinterTcpTrayCandidateIds -Tray $Tray)) {
+            if ($advertised -contains [int]$candidateId) {
+                return [int]$candidateId
+            }
+        }
+        return 0
+    }
+    return [int](Get-PrinterTcpTrayFallbackId -Tray $Tray)
+}
+
+function Get-PrinterTcpDefaultsSpec {
+    param(
+        [string]$Color = '',
+        [string]$Duplex = '',
+        [string]$Tray = ''
+    )
+    $hasColor = -not [string]::IsNullOrEmpty($Color)
+    $colorEnabled = $Color -ceq 'Color'
+    $dmColor = 0
+    if ($hasColor) {
+        if ($colorEnabled) {
+            $dmColor = 2
+        } else {
+            $dmColor = 1
+        }
+    }
+    $hasDuplex = -not [string]::IsNullOrEmpty($Duplex)
+    $dmDuplex = 0
+    switch -Exact ($Duplex) {
+        'OneSided'          { $dmDuplex = 1 }
+        'TwoSidedLongEdge'  { $dmDuplex = 2 }
+        'TwoSidedShortEdge' { $dmDuplex = 3 }
+    }
+    $hasTray = -not [string]::IsNullOrEmpty($Tray)
+    $defaultSourceId = Get-PrinterTcpTrayFallbackId -Tray $Tray
+    return [pscustomobject]@{
+        HasColor        = $hasColor
+        Color           = $Color
+        ColorEnabled    = $colorEnabled
+        DmColor         = $dmColor
+        HasDuplex       = $hasDuplex
+        DuplexingMode   = $Duplex
+        DmDuplex        = $dmDuplex
+        HasTray         = $hasTray
+        Tray            = $Tray
+        DefaultSourceId = $defaultSourceId
+    }
+}
+
+function Set-PrinterTcpDevModeBytes {
+    param(
+        [byte[]]$Bytes,
+        $Spec,
+        [int]$SourceId = 0
+    )
+    if ($null -eq $Bytes -or $Bytes.Length -lt 96 -or $null -eq $Spec) {
+        return
+    }
+    $dmFields = [System.BitConverter]::ToUInt32($Bytes, 72)
+    if ([bool]$Spec.HasTray -and $SourceId -gt 0) {
+        $dmFields = $dmFields -bor [uint32]0x0200
+        $srcBytes = [System.BitConverter]::GetBytes([int16]$SourceId)
+        [System.Array]::Copy($srcBytes, 0, $Bytes, 88, 2)
+    }
+    if ([bool]$Spec.HasColor -and [int]$Spec.DmColor -gt 0) {
+        $dmFields = $dmFields -bor [uint32]0x0800
+        $colBytes = [System.BitConverter]::GetBytes([int16]$Spec.DmColor)
+        [System.Array]::Copy($colBytes, 0, $Bytes, 92, 2)
+    }
+    if ([bool]$Spec.HasDuplex -and [int]$Spec.DmDuplex -gt 0) {
+        $dmFields = $dmFields -bor [uint32]0x1000
+        $dupBytes = [System.BitConverter]::GetBytes([int16]$Spec.DmDuplex)
+        [System.Array]::Copy($dupBytes, 0, $Bytes, 94, 2)
+    }
+    $fieldBytes = [System.BitConverter]::GetBytes([uint32]$dmFields)
+    [System.Array]::Copy($fieldBytes, 0, $Bytes, 72, 4)
+}
+
 # -1 means the request is valid and the caller should keep going.
 # 0 disables the package. 1 rejects the request.
 function Get-PrinterTcpValidationCode {
@@ -221,7 +386,10 @@ function Get-PrinterTcpValidationCode {
         [string]$PrinterName,
         [string]$PrinterAddress,
         [string]$PrinterModel,
-        [string]$SourceUrl
+        [string]$SourceUrl,
+        [string]$PrinterColor = '',
+        [string]$PrinterDuplex = '',
+        [string]$PrinterTray = ''
     )
     # An empty pin, queue, address, or model disables the package.
     # Do not download or change the marker. A bad pin cannot exit 1 first.
@@ -244,6 +412,15 @@ function Get-PrinterTcpValidationCode {
         return 1
     }
     if (-not (Test-PrinterTcpIpv4 -Address $PrinterAddress)) {
+        return 1
+    }
+    if (-not (Test-PrinterTcpColor -Color $PrinterColor)) {
+        return 1
+    }
+    if (-not (Test-PrinterTcpDuplex -Duplex $PrinterDuplex)) {
+        return 1
+    }
+    if (-not (Test-PrinterTcpTray -Tray $PrinterTray)) {
         return 1
     }
     # Uninstall does not download. A userinfo URL does not block it.
@@ -401,6 +578,9 @@ function Get-PrinterTcpPlan {
         [string]$PrinterName,
         [string]$PrinterAddress,
         [string]$PrinterModel,
+        [string]$PrinterColor = '',
+        [string]$PrinterDuplex = '',
+        [string]$PrinterTray = '',
         [string]$SourceUrl = '',
         $MarkerPrinters = $null,
         $ExistingPrinters = $null,
@@ -409,7 +589,7 @@ function Get-PrinterTcpPlan {
         $InstalledDriverVersion = ''
     )
 
-    $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl)
+    $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
     if ($validation -ge 0) {
         return New-PrinterTcpPlan -ExitCode $validation
     }
@@ -418,6 +598,9 @@ function Get-PrinterTcpPlan {
     $driverName = [string]$model.DriverName
     $portName = 'IP_' + $PrinterAddress
     $entry = Get-PrinterTcpMarkerEntry -MarkerPrinters $MarkerPrinters -Name $PrinterName
+    $configureDefaults = (-not [string]::IsNullOrEmpty($PrinterColor)) -or
+        (-not [string]::IsNullOrEmpty($PrinterDuplex)) -or
+        (-not [string]::IsNullOrEmpty($PrinterTray))
 
     if ($Action -eq 'Uninstall') {
         if ($null -eq $entry) {
@@ -464,7 +647,7 @@ function Get-PrinterTcpPlan {
         }
     }
     if ($null -eq $printer) {
-        return New-PrinterTcpPlan -EnsureDriver $ensure -CreatePort $createPort -CreateQueue $true -WriteMarker $true
+        return New-PrinterTcpPlan -EnsureDriver $ensure -CreatePort $createPort -CreateQueue $true -ConfigureDefaults $configureDefaults -WriteMarker $true
     }
 
     $liveDriver = [string](Get-PrinterTcpField -Object $printer -Names @('DriverName', 'driverName'))
@@ -481,12 +664,12 @@ function Get-PrinterTcpPlan {
         }
     }
     if ($driverDiffers -or $addressDiffers) {
-        return New-PrinterTcpPlan -EnsureDriver $ensure -CreatePort $createPort -UpdateQueue $true -PreviousDriver $liveDriver -PreviousPort $livePort -WriteMarker $true
+        return New-PrinterTcpPlan -EnsureDriver $ensure -CreatePort $createPort -UpdateQueue $true -PreviousDriver $liveDriver -PreviousPort $livePort -ConfigureDefaults $configureDefaults -WriteMarker $true
     }
-    if (-not $ensure -and -not $createPort -and -not $write) {
+    if (-not $ensure -and -not $createPort -and -not $write -and -not $configureDefaults) {
         return New-PrinterTcpPlan -ExitCode 0
     }
-    return New-PrinterTcpPlan -EnsureDriver $ensure -CreatePort $createPort -WriteMarker $write
+    return New-PrinterTcpPlan -EnsureDriver $ensure -CreatePort $createPort -ConfigureDefaults $configureDefaults -WriteMarker $write
 }
 
 $script:PrinterTcpErrorLog = [System.Collections.Generic.List[string]]::new()
@@ -1572,6 +1755,293 @@ $script:SetPrinter = {
     Set-Printer -Name $Name -DriverName $DriverName -PortName $PortName
 }
 
+function Initialize-PrinterTcpWinSpool {
+    if ('Relian.PrinterTcpWinSpool' -as [type]) {
+        return
+    }
+    $source = @'
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace Relian {
+    public static class PrinterTcpWinSpool {
+        private const int PRINTER_ALL_ACCESS = 0x000F000C;
+        private const int DM_OUT_BUFFER = 2;
+        private const int DM_IN_BUFFER = 8;
+        private const short DC_BINS = 6;
+        private const short DC_BINNAMES = 12;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct PRINTER_DEFAULTS {
+            public IntPtr pDatatype;
+            public IntPtr pDevMode;
+            public int DesiredAccess;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct PRINTER_INFO_2 {
+            public IntPtr pServerName;
+            public IntPtr pPrinterName;
+            public IntPtr pShareName;
+            public IntPtr pPortName;
+            public IntPtr pDriverName;
+            public IntPtr pComment;
+            public IntPtr pLocation;
+            public IntPtr pDevMode;
+            public IntPtr pSepFile;
+            public IntPtr pPrintProcessor;
+            public IntPtr pDatatype;
+            public IntPtr pParameters;
+            public IntPtr pSecurityDescriptor;
+            public uint Attributes;
+            public uint Priority;
+            public uint DefaultPriority;
+            public uint StartTime;
+            public uint UntilTime;
+            public uint Status;
+            public uint cJobs;
+            public uint AveragePPM;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PRINTER_INFO_8 {
+            public IntPtr pDevMode;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PRINTER_INFO_9 {
+            public IntPtr pDevMode;
+        }
+
+        [DllImport("winspool.drv", EntryPoint = "OpenPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, ref PRINTER_DEFAULTS pDefault);
+
+        [DllImport("winspool.drv", EntryPoint = "ClosePrinter", SetLastError = true)]
+        private static extern bool ClosePrinter(IntPtr hPrinter);
+
+        [DllImport("winspool.drv", EntryPoint = "GetPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool GetPrinter(IntPtr hPrinter, int Level, IntPtr pPrinter, int cbBuf, out int pcbNeeded);
+
+        [DllImport("winspool.drv", EntryPoint = "SetPrinterW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool SetPrinter(IntPtr hPrinter, int Level, IntPtr pPrinter, int Command);
+
+        [DllImport("winspool.drv", EntryPoint = "DocumentPropertiesW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int DocumentProperties(IntPtr hwnd, IntPtr hPrinter, string pDeviceName, IntPtr pDevModeOutput, IntPtr pDevModeInput, int fMode);
+
+        [DllImport("winspool.drv", EntryPoint = "DeviceCapabilitiesW", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern int DeviceCapabilities(string pDevice, string pPort, short fwCapability, IntPtr pOutput, IntPtr pDevMode);
+
+        public static void GetDriverBins(string printerName, out int[] binIds, out string[] binNames) {
+            binIds = new int[0];
+            binNames = new string[0];
+            PRINTER_DEFAULTS defs = new PRINTER_DEFAULTS { DesiredAccess = PRINTER_ALL_ACCESS };
+            IntPtr hPrinter;
+            if (!OpenPrinter(printerName, out hPrinter, ref defs)) {
+                return;
+            }
+            IntPtr pInfo2 = IntPtr.Zero;
+            try {
+                int needed = 0;
+                GetPrinter(hPrinter, 2, IntPtr.Zero, 0, out needed);
+                if (needed <= 0) {
+                    return;
+                }
+                pInfo2 = Marshal.AllocHGlobal(needed);
+                if (!GetPrinter(hPrinter, 2, pInfo2, needed, out needed)) {
+                    return;
+                }
+                PRINTER_INFO_2 info2 = (PRINTER_INFO_2)Marshal.PtrToStructure(pInfo2, typeof(PRINTER_INFO_2));
+                string portName = info2.pPortName != IntPtr.Zero ? Marshal.PtrToStringUni(info2.pPortName) : "";
+                int count = DeviceCapabilities(printerName, portName, DC_BINS, IntPtr.Zero, IntPtr.Zero);
+                int nameCount = DeviceCapabilities(printerName, portName, DC_BINNAMES, IntPtr.Zero, IntPtr.Zero);
+                if (count <= 0 || nameCount <= 0) {
+                    return;
+                }
+                int allocCount = Math.Max(count, nameCount);
+                IntPtr pBins = Marshal.AllocHGlobal(allocCount * 2);
+                IntPtr pNames = Marshal.AllocHGlobal(allocCount * 24 * 2);
+                try {
+                    int gotBins = DeviceCapabilities(printerName, portName, DC_BINS, pBins, IntPtr.Zero);
+                    int gotNames = DeviceCapabilities(printerName, portName, DC_BINNAMES, pNames, IntPtr.Zero);
+                    int pairCount = Math.Min(Math.Min(gotBins, gotNames), allocCount);
+                    if (pairCount <= 0) {
+                        return;
+                    }
+                    short[] rawBins = new short[pairCount];
+                    Marshal.Copy(pBins, rawBins, 0, pairCount);
+                    binIds = new int[pairCount];
+                    binNames = new string[pairCount];
+                    for (int i = 0; i < pairCount; i++) {
+                        binIds[i] = (ushort)rawBins[i];
+                        IntPtr namePtr = IntPtr.Add(pNames, i * 48);
+                        string name = Marshal.PtrToStringUni(namePtr, 24);
+                        int nul = name.IndexOf('\0');
+                        if (nul >= 0) {
+                            name = name.Substring(0, nul);
+                        }
+                        binNames[i] = name.Trim();
+                    }
+                } finally {
+                    Marshal.FreeHGlobal(pBins);
+                    Marshal.FreeHGlobal(pNames);
+                }
+            } finally {
+                if (pInfo2 != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pInfo2);
+                }
+                ClosePrinter(hPrinter);
+            }
+        }
+
+        public static byte[] ReadDevMode(string printerName) {
+            PRINTER_DEFAULTS defs = new PRINTER_DEFAULTS { DesiredAccess = PRINTER_ALL_ACCESS };
+            IntPtr hPrinter;
+            if (!OpenPrinter(printerName, out hPrinter, ref defs)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenPrinterW failed");
+            }
+            IntPtr pDevMode = IntPtr.Zero;
+            try {
+                int dmSize = DocumentProperties(IntPtr.Zero, hPrinter, printerName, IntPtr.Zero, IntPtr.Zero, 0);
+                if (dmSize <= 0) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "DocumentPropertiesW size query failed");
+                }
+                pDevMode = Marshal.AllocHGlobal(dmSize);
+                int rc = DocumentProperties(IntPtr.Zero, hPrinter, printerName, pDevMode, IntPtr.Zero, DM_OUT_BUFFER);
+                if (rc < 0) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "DocumentPropertiesW read failed");
+                }
+                byte[] bytes = new byte[dmSize];
+                Marshal.Copy(pDevMode, bytes, 0, dmSize);
+                return bytes;
+            } finally {
+                if (pDevMode != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pDevMode);
+                }
+                ClosePrinter(hPrinter);
+            }
+        }
+
+        public static void WriteDevMode(string printerName, byte[] modifiedDevMode) {
+            PRINTER_DEFAULTS defs = new PRINTER_DEFAULTS { DesiredAccess = PRINTER_ALL_ACCESS };
+            IntPtr hPrinter;
+            if (!OpenPrinter(printerName, out hPrinter, ref defs)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenPrinterW failed");
+            }
+            IntPtr pIn = IntPtr.Zero;
+            IntPtr pOut = IntPtr.Zero;
+            IntPtr pInfo2 = IntPtr.Zero;
+            IntPtr pInfo8 = IntPtr.Zero;
+            IntPtr pInfo9 = IntPtr.Zero;
+            try {
+                if (modifiedDevMode == null || modifiedDevMode.Length < 96) {
+                    throw new ArgumentException("DEVMODEW buffer is too small");
+                }
+                int dmSize = DocumentProperties(IntPtr.Zero, hPrinter, printerName, IntPtr.Zero, IntPtr.Zero, 0);
+                if (dmSize <= 0) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "DocumentPropertiesW size query failed");
+                }
+                int outSize = Math.Max(dmSize, modifiedDevMode.Length);
+                pIn = Marshal.AllocHGlobal(modifiedDevMode.Length);
+                Marshal.Copy(modifiedDevMode, 0, pIn, modifiedDevMode.Length);
+                pOut = Marshal.AllocHGlobal(outSize);
+                int rc = DocumentProperties(IntPtr.Zero, hPrinter, printerName, pOut, pIn, DM_IN_BUFFER | DM_OUT_BUFFER);
+                if (rc < 0) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "DocumentPropertiesW update failed");
+                }
+
+                int needed = 0;
+                GetPrinter(hPrinter, 2, IntPtr.Zero, 0, out needed);
+                if (needed <= 0) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetPrinterW level 2 size failed");
+                }
+                pInfo2 = Marshal.AllocHGlobal(needed);
+                if (!GetPrinter(hPrinter, 2, pInfo2, needed, out needed)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetPrinterW level 2 failed");
+                }
+                PRINTER_INFO_2 info2 = (PRINTER_INFO_2)Marshal.PtrToStructure(pInfo2, typeof(PRINTER_INFO_2));
+                info2.pDevMode = pOut;
+                info2.pSecurityDescriptor = IntPtr.Zero;
+                Marshal.StructureToPtr(info2, pInfo2, false);
+                if (!SetPrinter(hPrinter, 2, pInfo2, 0)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetPrinterW level 2 failed");
+                }
+
+                PRINTER_INFO_8 info8 = new PRINTER_INFO_8 { pDevMode = pOut };
+                pInfo8 = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(PRINTER_INFO_8)));
+                Marshal.StructureToPtr(info8, pInfo8, false);
+                if (!SetPrinter(hPrinter, 8, pInfo8, 0)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetPrinterW level 8 failed");
+                }
+
+                PRINTER_INFO_9 info9 = new PRINTER_INFO_9 { pDevMode = pOut };
+                pInfo9 = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(PRINTER_INFO_9)));
+                Marshal.StructureToPtr(info9, pInfo9, false);
+                SetPrinter(hPrinter, 9, pInfo9, 0);
+            } finally {
+                if (pInfo9 != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pInfo9);
+                }
+                if (pInfo8 != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pInfo8);
+                }
+                if (pInfo2 != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pInfo2);
+                }
+                if (pOut != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pOut);
+                }
+                if (pIn != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(pIn);
+                }
+                ClosePrinter(hPrinter);
+            }
+        }
+    }
+}
+'@
+    Add-Type -TypeDefinition $source -ErrorAction Stop
+}
+
+$script:SetPrinterDefaults = {
+    param($Name, $Color, $Duplex, $Tray)
+    if ($env:RELIAN_DEPLOY_TEST -eq '1') {
+        throw 'refusing to configure printer defaults while a test is running'
+    }
+    $spec = Get-PrinterTcpDefaultsSpec -Color ([string]$Color) -Duplex ([string]$Duplex) -Tray ([string]$Tray)
+    if (-not $spec.HasColor -and -not $spec.HasDuplex -and -not $spec.HasTray) {
+        return
+    }
+    Initialize-PrinterTcpWinSpool
+    $sourceId = 0
+    if ($spec.HasTray) {
+        $binIds = [int[]]@()
+        $binNames = [string[]]@()
+        [Relian.PrinterTcpWinSpool]::GetDriverBins([string]$Name, [ref]$binIds, [ref]$binNames)
+        $sourceId = [int](Resolve-PrinterTcpTraySourceId -Tray ([string]$Tray) -BinIds $binIds -BinNames $binNames)
+        if ($sourceId -le 0) {
+            throw "printer tray $Tray is not available for $Name"
+        }
+    }
+    if (($spec.HasColor -or $spec.HasDuplex) -and (Get-Command -Name 'Set-PrintConfiguration' -ErrorAction SilentlyContinue)) {
+        $printConfigArgs = @{
+            PrinterName = [string]$Name
+            ErrorAction = 'Stop'
+        }
+        if ($spec.HasColor) {
+            $printConfigArgs['Color'] = [bool]$spec.ColorEnabled
+        }
+        if ($spec.HasDuplex) {
+            $printConfigArgs['DuplexingMode'] = [string]$spec.DuplexingMode
+        }
+        Set-PrintConfiguration @printConfigArgs
+    }
+    $devModeBytes = [Relian.PrinterTcpWinSpool]::ReadDevMode([string]$Name)
+    Set-PrinterTcpDevModeBytes -Bytes $devModeBytes -Spec $spec -SourceId $sourceId
+    [Relian.PrinterTcpWinSpool]::WriteDevMode([string]$Name, $devModeBytes)
+}
+
 $script:RemovePrinter = {
     param($Name)
     if ($env:RELIAN_DEPLOY_TEST -eq '1') {
@@ -1790,10 +2260,13 @@ function Invoke-PrinterTcpAction {
         [string]$MarkerRoot,
         [string]$PrinterName,
         [string]$PrinterAddress,
-        [string]$PrinterModel
+        [string]$PrinterModel,
+        [string]$PrinterColor = '',
+        [string]$PrinterDuplex = '',
+        [string]$PrinterTray = ''
     )
 
-    $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl '')
+    $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl '' -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
     if ($validation -ge 0) {
         if ($validation -eq 1) {
             Add-PrinterTcpUrlProblem -ModelId $PrinterModel
@@ -1842,7 +2315,7 @@ function Invoke-PrinterTcpAction {
         }
     }
     $planPrinters = ConvertTo-PrinterTcpPlanPrinters -Printers $livePrinters -Ports $livePorts
-    $plan = Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl '' -MarkerPrinters $markerRead.Printers -ExistingPrinters $planPrinters -ExistingPorts $livePorts -DriverInstalled $driverInstalled -InstalledDriverVersion $installedVersion
+    $plan = Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -SourceUrl '' -MarkerPrinters $markerRead.Printers -ExistingPrinters $planPrinters -ExistingPorts $livePorts -DriverInstalled $driverInstalled -InstalledDriverVersion $installedVersion
     if ($null -ne $plan.ExitCode) {
         return [int]$plan.ExitCode
     }
@@ -1852,6 +2325,8 @@ function Invoke-PrinterTcpAction {
 
     $cache = ''
     $attemptedUpdate = $false
+    $createdQueue = $false
+    $createdPort = $false
     $portSettings = Get-PrinterTcpPortSettings -Address $PrinterAddress
     try {
         if ($plan.EnsureDriver) {
@@ -1864,6 +2339,7 @@ function Invoke-PrinterTcpAction {
         }
         if ($plan.CreatePort) {
             [void](& $script:AddPrinterPort -Name $portSettings.Name -PrinterHostAddress $portSettings.PrinterHostAddress -PortNumber $portSettings.PortNumber -SnmpEnabled $portSettings.SnmpEnabled)
+            $createdPort = $true
         }
         if ($plan.RemoveQueue) {
             [void](& $script:RemovePrinter -Name $PrinterName)
@@ -1874,6 +2350,10 @@ function Invoke-PrinterTcpAction {
         }
         if ($plan.CreateQueue) {
             [void](& $script:AddPrinter -Name $PrinterName -DriverName ([string]$model.DriverName) -PortName $portSettings.Name)
+            $createdQueue = $true
+        }
+        if ($plan.ConfigureDefaults) {
+            [void](& $script:SetPrinterDefaults -Name $PrinterName -Color $PrinterColor -Duplex $PrinterDuplex -Tray $PrinterTray)
         }
         if ($plan.RemovePort) {
             [void](& $script:RemovePrinterPort -Name ([string]$plan.RemovePortName))
@@ -1885,11 +2365,25 @@ function Invoke-PrinterTcpAction {
         }
         return 0
     } catch {
+        if ($createdQueue) {
+            try {
+                [void](& $script:RemovePrinter -Name $PrinterName)
+            } catch {
+                Add-PrinterTcpError -Message "could not remove printer $PrinterName"
+            }
+        }
         if ($attemptedUpdate) {
             try {
                 [void](& $script:SetPrinter -Name $PrinterName -DriverName ([string]$plan.PreviousDriver) -PortName ([string]$plan.PreviousPort))
             } catch {
                 Add-PrinterTcpError -Message "could not restore printer $PrinterName"
+            }
+        }
+        if ($createdPort) {
+            try {
+                [void](& $script:RemovePrinterPort -Name $portSettings.Name)
+            } catch {
+                Add-PrinterTcpError -Message "could not remove printer port $($portSettings.Name)"
             }
         }
         $detail = [string]$_.Exception.Message
@@ -1926,7 +2420,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 try {
-    $printerTcpExit = [int](Invoke-PrinterTcpAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel)
+    $printerTcpExit = [int](Invoke-PrinterTcpAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
     exit $printerTcpExit
 } catch {
     $detail = [string]$_.Exception.Message
