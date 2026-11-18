@@ -106,7 +106,9 @@ exit (Invoke-RelianJob -ModuleUrl 'https://example.invalid/storage-health.ps1' -
 $pwshPath = (Get-Process -Id $PID).Path
 $errFile = Join-Path $tempRoot 'stderr.txt'
 function Invoke-Child { param([string[]]$Extra)
-    $out = & $pwshPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $wrapper @Extra 2>$errFile
+    # Windows PowerShell 5.1 turns redirected native stderr into errors, which Stop would throw.
+    $ErrorActionPreference = 'Continue'
+    $out =& $pwshPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $wrapper @Extra 2>$errFile
     [pscustomobject]@{ Code = $LASTEXITCODE; Out = @($out); Err = [IO.File]::ReadAllText($errFile) }
 }
 
