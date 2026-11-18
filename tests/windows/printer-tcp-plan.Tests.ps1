@@ -42,7 +42,13 @@ foreach ($command in @(
         'Find-PrinterTcpDriverInf',
         'Get-PrinterTcpModel',
         'Test-PrinterTcpQueueName',
-        'Test-PrinterTcpIpv4'
+        'Test-PrinterTcpIpv4',
+        'Test-PrinterTcpColor',
+        'Test-PrinterTcpDuplex',
+        'Test-PrinterTcpTray',
+        'Get-PrinterTcpDefaultsSpec',
+        'Resolve-PrinterTcpTraySourceId',
+        'Set-PrinterTcpDevModeBytes'
     )) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         Fail "$command was not defined"
@@ -195,7 +201,7 @@ if ($null -ne $emptyPort) {
 if (($emptyPort -join ' ').Contains('-me')) {
     Fail 'empty port name contains -me'
 }
-foreach ($paramName in @('DeploymentType', 'Action', 'PinVersion', 'CancelPath', 'MarkerRoot', 'PrinterName', 'PrinterAddress', 'PrinterModel')) {
+foreach ($paramName in @('DeploymentType', 'Action', 'PinVersion', 'CancelPath', 'MarkerRoot', 'PrinterName', 'PrinterAddress', 'PrinterModel', 'PrinterColor', 'PrinterDuplex', 'PrinterTray')) {
     if ($scriptText -notmatch ('\$' + $paramName + '\s*=\s*''''')) {
         Fail "missing empty default for $paramName"
     }
@@ -448,23 +454,25 @@ function New-Expect {
         [bool]$UpdateQueue = $false,
         [string]$PreviousDriver = '',
         [string]$PreviousPort = '',
+        [bool]$ConfigureDefaults = $false,
         [bool]$RemoveQueue = $false,
         [bool]$RemovePort = $false,
         [bool]$WriteMarker = $false,
         [bool]$ClearMarker = $false
     )
     return @{
-        ExitCode       = $ExitCode
-        EnsureDriver   = $EnsureDriver
-        CreatePort     = $CreatePort
-        CreateQueue    = $CreateQueue
-        UpdateQueue    = $UpdateQueue
-        PreviousDriver = $PreviousDriver
-        PreviousPort   = $PreviousPort
-        RemoveQueue    = $RemoveQueue
-        RemovePort     = $RemovePort
-        WriteMarker    = $WriteMarker
-        ClearMarker    = $ClearMarker
+        ExitCode          = $ExitCode
+        EnsureDriver      = $EnsureDriver
+        CreatePort        = $CreatePort
+        CreateQueue       = $CreateQueue
+        UpdateQueue       = $UpdateQueue
+        PreviousDriver    = $PreviousDriver
+        PreviousPort      = $PreviousPort
+        ConfigureDefaults = $ConfigureDefaults
+        RemoveQueue       = $RemoveQueue
+        RemovePort        = $RemovePort
+        WriteMarker       = $WriteMarker
+        ClearMarker       = $ClearMarker
     }
 }
 
@@ -472,7 +480,8 @@ function Assert-Plan {
     param($Plan, [hashtable]$Expect, [string]$Label)
     foreach ($name in @(
             'ExitCode', 'EnsureDriver', 'CreatePort', 'CreateQueue', 'UpdateQueue',
-            'PreviousDriver', 'PreviousPort', 'RemoveQueue', 'RemovePort', 'WriteMarker', 'ClearMarker'
+            'PreviousDriver', 'PreviousPort', 'ConfigureDefaults', 'RemoveQueue',
+            'RemovePort', 'WriteMarker', 'ClearMarker'
         )) {
         if ($Plan.PSObject.Properties.Name -notcontains $name) {
             Fail "$Label missing property $name"
@@ -485,8 +494,8 @@ function Assert-Plan {
         Fail "$Label ExitCode '$exit' expected '$wantExit'"
     }
     foreach ($name in @(
-            'EnsureDriver', 'CreatePort', 'CreateQueue', 'UpdateQueue', 'RemoveQueue',
-            'RemovePort', 'WriteMarker', 'ClearMarker'
+            'EnsureDriver', 'CreatePort', 'CreateQueue', 'UpdateQueue', 'ConfigureDefaults',
+            'RemoveQueue', 'RemovePort', 'WriteMarker', 'ClearMarker'
         )) {
         if ([bool]$Plan.$name -ne [bool]$Expect[$name]) {
             Fail "$Label $name '$($Plan.$name)' expected '$($Expect[$name])'"
@@ -506,6 +515,9 @@ function Get-Plan {
         [string]$PrinterName = 'Front Desk',
         [string]$PrinterAddress = '192.0.2.10',
         [string]$PrinterModel = 'BrotherHlL2370Dw',
+        [string]$PrinterColor = '',
+        [string]$PrinterDuplex = '',
+        [string]$PrinterTray = '',
         [string]$SourceUrl = '',
         $MarkerPrinters = $null,
         $ExistingPrinters = $null,
@@ -513,7 +525,7 @@ function Get-Plan {
         [bool]$DriverInstalled = $false,
         $InstalledDriverVersion = ''
     )
-    return Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl -MarkerPrinters $MarkerPrinters -ExistingPrinters $ExistingPrinters -ExistingPorts $ExistingPorts -DriverInstalled $DriverInstalled -InstalledDriverVersion $InstalledDriverVersion
+    return Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -SourceUrl $SourceUrl -MarkerPrinters $MarkerPrinters -ExistingPrinters $ExistingPrinters -ExistingPorts $ExistingPorts -DriverInstalled $DriverInstalled -InstalledDriverVersion $InstalledDriverVersion
 }
 
 foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
@@ -838,6 +850,8 @@ function Reset-Case {
     $script:SetCalls = [System.Collections.Generic.List[object]]::new()
     $script:RemovePrinterCalls = [System.Collections.Generic.List[string]]::new()
     $script:RemovePortCalls = [System.Collections.Generic.List[string]]::new()
+    $script:DefaultCalls = [System.Collections.Generic.List[object]]::new()
+    $script:FailNextDefaults = $false
     $script:LivePrinters = [System.Collections.Generic.List[object]]::new()
     $script:LivePorts = [System.Collections.Generic.List[object]]::new()
     $script:DriverNames = [System.Collections.Generic.List[string]]::new()
@@ -936,6 +950,19 @@ function Reset-Case {
                 $printer.DriverName = [string]$DriverName
                 $printer.PortName = [string]$PortName
             }
+        }
+    }
+    $script:SetPrinterDefaults = {
+        param($Name, $Color, $Duplex, $Tray)
+        $script:DefaultCalls.Add([pscustomobject]@{
+                Name   = [string]$Name
+                Color  = [string]$Color
+                Duplex = [string]$Duplex
+                Tray   = [string]$Tray
+            })
+        if ($script:FailNextDefaults) {
+            $script:FailNextDefaults = $false
+            throw 'set printer defaults failed'
         }
     }
     $script:RemovePrinter = {
@@ -1072,9 +1099,12 @@ function Invoke-Case {
         [string]$PrinterName = 'Front Desk',
         [string]$PrinterAddress = '192.0.2.10',
         [string]$PrinterModel = 'BrotherHlL2370Dw',
+        [string]$PrinterColor = '',
+        [string]$PrinterDuplex = '',
+        [string]$PrinterTray = '',
         [string]$CancelPath = ''
     )
-    return [int](Invoke-PrinterTcpAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel)
+    return [int](Invoke-PrinterTcpAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
 }
 
 try {
@@ -1458,6 +1488,152 @@ try {
     $code = Invoke-Case
     if ($code -ne 0 -or $script:DownloadCount -ne 1 -or $script:SetCalls.Count -ne 0) {
         Fail "older installed driver returned $code downloads $($script:DownloadCount) sets $($script:SetCalls.Count)"
+    }
+
+    foreach ($color in @('', 'Color', 'Monochrome', 'Grayscale')) {
+        if (-not (Test-PrinterTcpColor -Color $color)) {
+            Fail "valid color '$color' was rejected"
+        }
+    }
+    foreach ($badColor in @('color', 'monochrome', 'grayscale', 'BW', '   ', ' Color')) {
+        if (Test-PrinterTcpColor -Color $badColor) {
+            Fail "invalid color '$badColor' was accepted"
+        }
+        Assert-Plan -Plan (Get-Plan -PrinterColor $badColor) -Expect (New-Expect -ExitCode 1) -Label "bad color '$badColor'"
+    }
+
+    foreach ($duplex in @('', 'OneSided', 'TwoSidedLongEdge', 'TwoSidedShortEdge')) {
+        if (-not (Test-PrinterTcpDuplex -Duplex $duplex)) {
+            Fail "valid duplex '$duplex' was rejected"
+        }
+    }
+    foreach ($badDuplex in @('onesided', 'Simplex', 'Duplex', '   ', ' OneSided')) {
+        if (Test-PrinterTcpDuplex -Duplex $badDuplex) {
+            Fail "invalid duplex '$badDuplex' was accepted"
+        }
+        Assert-Plan -Plan (Get-Plan -PrinterDuplex $badDuplex) -Expect (New-Expect -ExitCode 1) -Label "bad duplex '$badDuplex'"
+    }
+
+    foreach ($tray in @('', 'Auto', 'Tray1', 'Tray2', 'Tray3', 'Tray4', 'Manual', 'Lct')) {
+        if (-not (Test-PrinterTcpTray -Tray $tray)) {
+            Fail "valid tray '$tray' was rejected"
+        }
+    }
+    foreach ($badTray in @('tray1', 'Tray5', 'Bypass', '   ', ' Tray1')) {
+        if (Test-PrinterTcpTray -Tray $badTray) {
+            Fail "invalid tray '$badTray' was accepted"
+        }
+        Assert-Plan -Plan (Get-Plan -PrinterTray $badTray) -Expect (New-Expect -ExitCode 1) -Label "bad tray '$badTray'"
+    }
+
+    Assert-Plan -Plan (Get-Plan -PrinterName '' -PrinterColor 'invalid') -Expect (New-Expect -ExitCode 0) -Label 'empty name with invalid color still exits 0'
+
+    Assert-Plan -Plan (Get-Plan -PrinterColor 'Monochrome' -PrinterDuplex 'OneSided' -PrinterTray 'Tray1') -Expect (New-Expect -EnsureDriver $true -CreatePort $true -CreateQueue $true -ConfigureDefaults $true -WriteMarker $true) -Label 'new queue with defaults'
+    Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -PrinterColor 'Monochrome') -Expect (New-Expect -ConfigureDefaults $true) -Label 'existing ready queue with color default'
+    Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -PrinterDuplex 'OneSided') -Expect (New-Expect -ConfigureDefaults $true) -Label 'existing ready queue with duplex default'
+    Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -PrinterTray 'Tray1') -Expect (New-Expect -ConfigureDefaults $true) -Label 'existing ready queue with tray default'
+    Assert-Plan -Plan (Get-Plan -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true -PrinterColor 'Monochrome') -Expect (New-Expect -ExitCode 1) -Label 'unmanaged queue with defaults still refused'
+
+    $monoSpec = Get-PrinterTcpDefaultsSpec -Color 'Monochrome' -Duplex 'OneSided' -Tray 'Tray1' -ModelId 'KonicaUniversalPcl'
+    if (-not $monoSpec.HasColor -or $monoSpec.ColorEnabled -or [int]$monoSpec.DmColor -ne 1) {
+        Fail 'Monochrome spec wrong'
+    }
+    if (-not $monoSpec.HasDuplex -or $monoSpec.DuplexingMode -cne 'OneSided' -or [int]$monoSpec.DmDuplex -ne 1) {
+        Fail 'OneSided spec wrong'
+    }
+    if (-not $monoSpec.HasTray -or $monoSpec.Tray -cne 'Tray1' -or [int]$monoSpec.DefaultSourceId -ne 257) {
+        Fail 'Tray1 spec wrong'
+    }
+    $colorSpec = Get-PrinterTcpDefaultsSpec -Color 'Color' -Duplex 'TwoSidedLongEdge' -Tray 'Auto' -ModelId 'KonicaUniversalPcl'
+    if (-not $colorSpec.HasColor -or -not $colorSpec.ColorEnabled -or [int]$colorSpec.DmColor -ne 2) {
+        Fail 'Color spec wrong'
+    }
+    if ([int]$colorSpec.DmDuplex -ne 2 -or [int]$colorSpec.DefaultSourceId -ne 7) {
+        Fail 'TwoSidedLongEdge/Auto spec wrong'
+    }
+    $graySpec = Get-PrinterTcpDefaultsSpec -Color 'Grayscale' -Duplex 'TwoSidedShortEdge' -Tray 'Manual' -ModelId 'BrotherHlL2370Dw'
+    if (-not $graySpec.HasColor -or $graySpec.ColorEnabled -or [int]$graySpec.DmColor -ne 1 -or [int]$graySpec.DmDuplex -ne 3 -or [int]$graySpec.DefaultSourceId -ne 4) {
+        Fail 'Grayscale/TwoSidedShortEdge/Manual spec wrong'
+    }
+
+    $konicaBins = @(7, 257, 258, 259, 260, 4, 261)
+    $konicaNames = @('Auto', 'Tray 1', 'Tray 2', 'Tray 3', 'Tray 4', 'Bypass Tray', 'LCT')
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $konicaBins -BinNames $konicaNames -ModelId 'KonicaUniversalPcl') -ne 257) {
+        Fail 'Konica Tray 1 bin did not resolve to 257'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Manual' -BinIds $konicaBins -BinNames $konicaNames -ModelId 'KonicaUniversalPcl') -ne 4) {
+        Fail 'Konica Bypass Tray did not resolve to 4'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Lct' -BinIds $konicaBins -BinNames $konicaNames -ModelId 'KonicaUniversalPcl') -ne 261) {
+        Fail 'Konica LCT did not resolve to 261'
+    }
+    $brotherBins = @(7, 1, 4)
+    $brotherNames = @('Auto Select', 'Tray1', 'Manual')
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $brotherBins -BinNames $brotherNames -ModelId 'BrotherHlL2370Dw') -ne 1) {
+        Fail 'Brother Tray1 bin did not resolve to 1'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray2' -BinIds $brotherBins -BinNames $brotherNames -ModelId 'BrotherHlL2370Dw') -ne 0) {
+        Fail 'Brother unsupported Tray2 did not return 0'
+    }
+    $localizedBins = @(7, 257, 4)
+    $localizedNames = @('Auto-Auswahl', 'Kassette A', 'Einzelblatt')
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $localizedBins -BinNames $localizedNames -ModelId 'KonicaUniversalPcl') -ne 257) {
+        Fail 'localized Konica Tray1 bin did not resolve via model mapping 257'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $localizedBins -BinNames $localizedNames) -ne 0) {
+        Fail 'unmatched bin names without model mapping should return 0'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -ModelId 'KonicaUniversalPcl') -ne 257) {
+        Fail 'Konica model fallback Tray1 bin did not resolve to 257'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -ModelId 'BrotherHlL2370Dw') -ne 1) {
+        Fail 'Brother model fallback Tray1 bin did not resolve to 1'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1') -ne 0) {
+        Fail 'unknown model fallback Tray1 should return 0'
+    }
+
+    $dmBytes = New-Object byte[] 220
+    Set-PrinterTcpDevModeBytes -Bytes $dmBytes -Spec $monoSpec -SourceId 257
+    $dmFields = [System.BitConverter]::ToUInt32($dmBytes, 72)
+    $dmDefaultSource = [System.BitConverter]::ToInt16($dmBytes, 88)
+    $dmColor = [System.BitConverter]::ToInt16($dmBytes, 92)
+    $dmDuplex = [System.BitConverter]::ToInt16($dmBytes, 94)
+    if (($dmFields -band 0x1A00) -ne 0x1A00) {
+        Fail "dmFields 0x$($dmFields.ToString('X')) did not set DM_DEFAULTSOURCE|DM_COLOR|DM_DUPLEX"
+    }
+    if ($dmDefaultSource -ne 257 -or $dmColor -ne 1 -or $dmDuplex -ne 1) {
+        Fail "DEVMODEW bytes source=$dmDefaultSource color=$dmColor duplex=$dmDuplex"
+    }
+
+    Reset-Case
+    Use-FakePins
+    $code = Invoke-Case -PrinterModel 'KonicaUniversalPcl' -PinVersion '3.9.1203.500' -PrinterName 'KONICA MINOLTA C360i' -PrinterAddress '192.0.2.15' -PrinterColor 'Monochrome' -PrinterDuplex 'OneSided' -PrinterTray 'Tray1'
+    if ($code -ne 0 -or $script:DefaultCalls.Count -ne 1) {
+        Fail "Konica install with defaults returned $code defaultCalls=$($script:DefaultCalls.Count)"
+    }
+    if ($script:DefaultCalls[0].Name -cne 'KONICA MINOLTA C360i' -or
+        $script:DefaultCalls[0].Color -cne 'Monochrome' -or
+        $script:DefaultCalls[0].Duplex -cne 'OneSided' -or
+        $script:DefaultCalls[0].Tray -cne 'Tray1') {
+        Fail 'SetPrinterDefaults did not receive the requested defaults'
+    }
+
+    $code2 = Invoke-Case -PrinterModel 'KonicaUniversalPcl' -PinVersion '3.9.1203.500' -PrinterName 'KONICA MINOLTA C360i' -PrinterAddress '192.0.2.15' -PrinterColor 'Monochrome' -PrinterDuplex 'OneSided' -PrinterTray 'Tray1'
+    if ($code2 -ne 0 -or $script:DefaultCalls.Count -ne 2 -or $script:AddCalls.Count -ne 1 -or $script:DownloadCount -ne 1) {
+        Fail "re-applying defaults on existing queue returned $code2 defaultCalls=$($script:DefaultCalls.Count)"
+    }
+
+    Reset-Case
+    Use-FakePins
+    $script:FailNextDefaults = $true
+    $codeFail = Invoke-Case -PrinterColor 'Monochrome'
+    if ($codeFail -ne 1 -or @(Read-Marker).Count -ne 0 -or $script:LivePrinters.Count -ne 0 -or $script:LivePorts.Count -ne 0) {
+        Fail "failed defaults returned $codeFail or left orphan queue/port/marker"
+    }
+    $codeRetry = Invoke-Case -PrinterColor 'Monochrome'
+    if ($codeRetry -ne 0 -or @(Read-Marker).Count -ne 1 -or $script:LivePrinters.Count -ne 1) {
+        Fail "retry after failed defaults returned $codeRetry"
     }
 } finally {
     Restore-Models
