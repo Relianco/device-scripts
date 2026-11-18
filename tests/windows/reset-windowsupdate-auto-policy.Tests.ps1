@@ -141,6 +141,17 @@ Assert-Same $r.Status 'drift' 'report-only status'
 Assert-Same $script:Log.Count 0 'report-only changes nothing'
 Assert-Same (@(Backups).Count) 0 'report-only writes no backup'
 
+Reset-Test -Au $auAll
+$null = Invoke-WuJob
+$script:Log.Clear()
+# -ReportOnly with -Restore is a preview: nothing is written.
+$script:Log.Clear()
+$r = Invoke-WuJob -Restore -ReportOnly
+Assert-Same $r.ExitCode 0 'restore preview exit'
+Assert-Same $r.Status 'would-restore' 'restore preview status'
+Assert-Same $script:Log.Count 0 'restore preview writes nothing'
+Assert-True ($r.Backup -like 'backup-*.json') 'restore preview names the backup'
+
 # -Restore with no backup fails cleanly: exit 2, no change.
 Reset-Test -Au @((New-V 'ScheduledInstallDay' 'DWord' 0))
 $r = Invoke-WuJob -Restore

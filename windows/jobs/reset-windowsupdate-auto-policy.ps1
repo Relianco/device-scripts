@@ -3,7 +3,7 @@
 # Before it deletes, it writes the whole WindowsUpdate policy key (all values, all subkeys) to a new JSON file under
 # C:\ProgramData\Relian\WuAutoPolicyBackup, SYSTEM-only. A backup that cannot be written and read back stops the run
 # with nothing deleted. A backup is never overwritten. -Restore writes the two values back from the newest backup
-# (or -BackupName). -ReportOnly changes and writes nothing. Absent values: nothing changes, status unchanged.
+# (or -BackupName). -ReportOnly changes and writes nothing, also with -Restore (a preview). Absent values: nothing changes, status unchanged.
 # Exit 0 done or unchanged, 1 drift with -ReportOnly, 2 failed. Prints one JSON line.
 # The job loader forwards only -ReportOnly; -Restore and -BackupName reach the module only when it is run directly.
 [CmdletBinding()]
@@ -143,12 +143,17 @@ function Invoke-WuJob {
         if ($Restore) {
             $b = Read-WuBackup $BackupName
             $r.Backup = $b.name
-            foreach ($n in $script:WuTargets) {
-                $t = $b.doc.targets.$n
-                if ($t -and $t.present) { & $script:WuSetValue 'AU' $n ([string]$t.kind) $t.data }
+            if ($ReportOnly) {
+                # -ReportOnly wins over -Restore: a preview writes nothing.
+                $r.After = $r.Before; $r.Status = 'would-restore'; $r.ExitCode = 0
+            } else {
+                foreach ($n in $script:WuTargets) {
+                    $t = $b.doc.targets.$n
+                    if ($t -and $t.present) { & $script:WuSetValue 'AU' $n ([string]$t.kind) $t.data }
+                }
+                $r.After = Get-WuSummary (Get-WuTargets (& $script:WuReadTree))
+                $r.Status = 'restored'; $r.ExitCode = 0
             }
-            $r.After = Get-WuSummary (Get-WuTargets (& $script:WuReadTree))
-            $r.Status = 'restored'; $r.ExitCode = 0
         } elseif ($before.Count -eq 0) {
             $r.After = $r.Before; $r.Status = 'unchanged'; $r.ExitCode = 0
         } elseif ($ReportOnly) {
