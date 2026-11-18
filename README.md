@@ -44,7 +44,7 @@ A pasted loader can run only what you pinned. This is what each piece can and ca
 - **No NinjaOne calls from packages.** The runners and packages read and write no NinjaOne field and call no NinjaOne API. A package reports one JSON line on stdout and an exit code.
 - **Field writers are named.** Only `Invoke-RelianReadJob` (its result line), the inventory collectors, and `windows/collectors/runner-report-field.ps1` (the storage ProfileReport) write NinjaOne fields.
 - **One exception.** `windows/bootstrap.ps1` follows a branch, checks no hash, and may read the org field `relian_git_deploy_token`. It runs inventory collectors only. No package reads that token.
-- **Secrets stay off the command line.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyData` for PDF-XChange.
+- **Secrets stay off the command line, with one exception.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyData` for PDF-XChange. `autoelevate` also accepts a `LicenseKey` package argument, which NinjaOne keeps in activity history; prefer `AE_LICENSE_KEY`.
 - **Read-only means tested.** Read-only packages are scanned for write commands or run against stubs.
 - **Changing packages say so.** Each header names what it changes, what it backs up first, and what it never does.
 - **No installs in CI.** CI runs the tests. It does not install an application.
