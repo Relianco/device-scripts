@@ -1,0 +1,6 @@
+{
+  "name": "Stale Active Directory computer report and disable",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Optional: {\"Mode\":\"Report\"} (default; read-only, Filter Stale or All, Offset from the previous nextOffset, Days default 180). {\"Mode\":\"Apply\",\"Names\":\"PC1,PC2\",\"RecipientKey\":\"<base64 RSA modulus>\",\"WhatIf\":\"true\"} disables at most 10 named stale workstations after printing an encrypted backup of their BitLocker recovery and LAPS passwords; \"Move\":\"true\" also moves them to OU=Disabled Computers. Never deletes. Base64 in PackageArguments."
+}

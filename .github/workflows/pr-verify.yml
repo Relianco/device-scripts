@@ -96,6 +96,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/eventlog-source.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-stale-computers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-group-member.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The wau package runs under Intune's Windows PowerShell 5.1.
@@ -110,4 +112,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # NinjaOne runs jobs in Windows PowerShell 5.1.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/nable-agent-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Windows PowerShell 5.1 is what the runner uses on a device: real junctions, sharing violations, registry provider and event log.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/outlook-suggestion-sources.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
