@@ -421,7 +421,8 @@ function Invoke-NableRemovalJob {
                         $packed = ConvertTo-NaPackedGuid $entry.Id
                         if (& $script:NaHasProduct $packed) {
                             $pkg = & $script:NaReadLocalPackage $packed
-                            if ($pkg -and (& $script:NaFileExists $pkg)) { $kept.Add("Installer Products $packed kept: cached package on disk") }
+                            if ($null -eq $pkg) { $kept.Add("Installer Products $packed kept: no InstallProperties, package unknown") }
+                            elseif ($pkg -and (& $script:NaFileExists $pkg)) { $kept.Add("Installer Products $packed kept: cached package on disk") }
                             else { & $script:NaDeleteProduct $packed; $log.Add("installer product removed: $packed") }
                         }
                     } catch { $kept.Add("Installer Products for $($entry.Id) kept: $($_.Exception.Message)") }

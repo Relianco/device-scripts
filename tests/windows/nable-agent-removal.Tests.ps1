@@ -388,13 +388,21 @@ Assert-True (-not ($script:Removed -contains "product $msiPacked")) 'Products en
 Assert-Same @($r.Json.left).Count 1 'the kept Products entry is reported'
 Assert-True ($r.Json.left[0] -like "*$msiPacked*cached package on disk*") 'the report names the entry and why'
 
-# An absent LocalPackage value counts as a missing package. A product with no Products entry is not an error.
+# An empty LocalPackage value counts as a missing package; no InstallProperties key does not (the state is unknown, so the entry stays and is reported). A product with no Products entry is not an error.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '' -Msi -InstallLocation 'C:\Gone\GP'))
+$script:Products.Add($msiPacked)
+$script:MsiWorks = $false
+$script:LocalPackages[$msiPacked] = ''
+$r = Invoke-Job
+Assert-True ($script:Removed -contains "product $msiPacked") 'an absent LocalPackage value counts as missing'
 Reset-Test
 $script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '' -Msi -InstallLocation 'C:\Gone\GP'))
 $script:Products.Add($msiPacked)
 $script:MsiWorks = $false
 $r = Invoke-Job
-Assert-True ($script:Removed -contains "product $msiPacked") 'an absent LocalPackage value counts as missing'
+Assert-True (-not ($script:Removed -contains "product $msiPacked")) 'a product with no InstallProperties key is kept'
+Assert-True (@($r.Json.left).Count -eq 1 -and $r.Json.left[0] -like '*unknown*') 'a product with no InstallProperties key is reported'
 Reset-Test
 $script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '' -Msi -InstallLocation 'C:\Gone\GP'))
 $script:MsiWorks = $false
