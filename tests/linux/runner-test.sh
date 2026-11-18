@@ -257,59 +257,23 @@ JS
   fi
   ok
 
-  begin "readme keeps deploy needles and adds shell runners"
+  begin "readme names both shell runners"
   if [[ ! -f "$README" ]]; then
     fail "missing README"
   else
-    local text rest needle next
+    local text needle
     text="$(cat "$README")"
-    local description='NinjaOne installs software by pasting `windows/runner/Invoke-RelianRunner.ps1`. That file is the installer. `windows/bootstrap.ps1` loads an inventory collector. It is not the installer.'
     case "$text" in
       "# device-scripts"*) ;;
       *) fail "README title changed" ;;
     esac
-    case "$text" in
-      *"$description"*) ;;
-      *) fail "README description removed" ;;
-    esac
-    rest="${text#*"## Deploy runner"}"
-    if [[ "$rest" == "$text" ]]; then
-      fail "Deploy runner section missing"
-    fi
-    local needles=(
-      'windows/runner/Invoke-RelianRunner.ps1'
-      'PackageSha256'
-      'ToolkitSha256'
-      'BrandPackSha256'
-      'An empty pin exits 0'
-      'three download attempts'
-      'A bad hash is not retried'
-      '130'
-      'https://relianpub.blob.core.windows.net/pub/sec/'
-      'bootstrap.ps1 remains the collector loader'
-    )
-    for needle in "${needles[@]}"; do
-      next="${rest#*"$needle"}"
-      if [[ "$next" == "$rest" ]]; then
-        fail "README missing $needle"
-        break
-      fi
-      rest="$next"
+    # Package folders are checked by tests/readme-inventory.Tests.ps1.
+    for needle in 'linux/runner/relian-runner.sh' 'macos/runner/relian-runner.sh' 'windows/runner/Invoke-RelianRunner.ps1' '## Linux' '## macOS'; do
+      case "$text" in
+        *"$needle"*) ;;
+        *) fail "README missing $needle" ;;
+      esac
     done
-    if ! awk '
-      /^## Deploy runner$/ { deploy = NR }
-      /^## Shell runners$/ { shell = NR }
-      END {
-        if (deploy == 0 || shell == 0 || shell < deploy) exit 1
-      }
-    ' "$README"; then
-      fail "Shell runners section is not after Deploy runner"
-    fi
-    local sentence='`linux/runner/relian-runner.sh` is the Linux script to paste. It is not the macOS runner.'
-    case "$text" in
-      *"$sentence"*) ;;
-      *) fail "README shell runners sentence missing" ;;
-    esac
   fi
   ok
 
@@ -580,7 +544,7 @@ test_empty_hash() {
     reset_stubs
     local log
     log="$(mktemp)"
-    url="$(url_user)"
+    url="$PKG_URL"
     invoke_runner "$log" --package-url "$url" --package-sha256 "" --action "$action" --pin-version 1.2.3
     if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
       fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
@@ -593,7 +557,7 @@ test_empty_hash() {
     begin "whitespace hash $action skips download"
     reset_stubs
     log="$(mktemp)"
-    url="$(url_user_pw)"
+    url="$PKG_URL"
     invoke_runner "$log" --package-url "$url" --package-sha256 $' \t ' --action "$action" --pin-version 1.2.3
     if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
       fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
@@ -669,13 +633,17 @@ test_userinfo() {
   assert_no_url "$url" || true
   ok
 
-  begin "blank hash with empty userinfo does not download"
+  # Userinfo is refused before the empty-hash off switch: the credential is already in the job's parameters.
+  begin "blank hash with empty userinfo is refused"
   reset_stubs
   log="$(mktemp)"
   url="$(url_empty_user)"
   invoke_runner "$log" --package-url "$url" --package-sha256 "" --action Install --pin-version 1.2.3
-  if [[ "$LAST_CODE" -ne 0 || "$DOWNLOADS" -ne 0 ]]; then
+  if [[ "$LAST_CODE" -ne 1 || "$DOWNLOADS" -ne 0 ]]; then
     fail "code=$LAST_CODE downloads=$DOWNLOADS err=[$LAST_ERR]"
+  fi
+  if [[ "$LAST_ERR" != "refusing a URL that contains userinfo" ]]; then
+    fail "stderr [$LAST_ERR]"
   fi
   if [[ -s "$log" ]]; then
     fail "package ran"

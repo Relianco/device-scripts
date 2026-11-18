@@ -275,7 +275,7 @@ try {
 
     # Write to NinjaOne custom field
     try {
-        Ninja-Property-Set relian_storage_health $json
+        $json | Ninja-Property-Set-Piped relian_storage_health
         Write-Status "Storage health written to relian_storage_health custom field"
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"

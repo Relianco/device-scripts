@@ -39,6 +39,15 @@ $env:RELIAN_DEPLOY_TEST = $saved
 $env:RELIAN_DEPLOY_TEST = '1'
 Set-StrictMode -Off
 . $scriptPath
+
+# Every result the package records is logged, so a test sees each one and its order.
+$realOutRnResult = ${function:Out-RnResult}
+function Out-RnResult {
+    param([System.Collections.Specialized.OrderedDictionary]$Result)
+    & $realOutRnResult $Result
+    $script:Log.Add('result')
+    $script:Fields.Add(($script:RnJson | ConvertFrom-Json))
+}
 Set-StrictMode -Version Latest
 # The real dialog blocks, before Reset-Mocks replaces them.
 $realPrompt = $script:RnPrompt
@@ -178,8 +187,6 @@ function Reset-Mocks {
     # Logged, so any flow that must not style (report only) fails on it.
     $script:RnTheme = { $script:Log.Add('theme') }
     $script:RnRestart = { $script:Log.Add('restart'); $script:MockRestart }
-    $script:RnSetField = { param($Json, $Name) $script:Log.Add('field'); $script:FieldNames.Add($Name); $script:Fields.Add(($Json | ConvertFrom-Json)); $true }
-    $script:FieldNames = [System.Collections.Generic.List[string]]::new()
     $script:MockSessions = $Sessions
     $script:RnGetSessions = { if ($script:MockUserFails) { throw 'wts down' }; $script:MockSessions }
     $script:RnGetOtherUsers = { $script:MockUsers }
@@ -189,8 +196,8 @@ function Get-Last { return $script:Fields[$script:Fields.Count - 1] }
 function Assert-NoRestart { param([string]$Label) if ($script:Log -contains 'restart') { Fail "$Label restarted" } }
 function Assert-FieldBeforeRestart {
     param([string]$Label)
-    $f = $script:Log.IndexOf('field'); $r = $script:Log.IndexOf('restart')
-    if ($r -lt 0 -or $f -lt 0 -or $f -gt $r) { Fail "$Label did not write the field before the restart" }
+    $f = $script:Log.IndexOf('result'); $r = $script:Log.IndexOf('restart')
+    if ($r -lt 0 -or $f -lt 0 -or $f -gt $r) { Fail "$Label did not record the result before the restart" }
 }
 $args60 = Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes ''
 
@@ -202,7 +209,7 @@ Assert-Same $script:Marker $null 'none clears the marker'
 Assert-NoRestart 'none'
 if ($script:Log -match '^prompt') { Fail 'none prompted' }
 
-# 2. Confirmed nobody signed in: restart now, field first.
+# 2. Confirmed nobody signed in: restart now, result first.
 Reset-Mocks -Sessions @() -Users @('NT AUTHORITY\SYSTEM')
 Assert-Same (Invoke-RnMain $args60) 0 'no user exit'
 Assert-Same (Get-Last).status 'restartedNoUser' 'no user status'
@@ -219,16 +226,16 @@ Assert-NoRestart 'unknown user'
 # dialog, then restart.
 Reset-Mocks -Sessions @($gone) -Users @() -PromptResult 'Restart now'
 Assert-Same (Invoke-RnMain $args60) 0 'disconnected exit'
-Assert-Same ($script:Log -join '|') 'field|sleep:900|field|restart' 'disconnected sequence'
+Assert-Same ($script:Log -join '|') 'result|sleep:900|result|restart' 'disconnected sequence'
 Assert-Same (Get-Last).reason 'NotShown' 'disconnected reason'
 
 # 2d. The first real run: the detector sees a user, the toolkit refuses notice 1
 # (no suitable logged on users), and a second look finds nobody: restartedNoUser,
-# the field written before the restart. The old code let the error end the run.
+# the result recorded before the restart. The old code let the error end the run.
 $noUser = { throw [NotSupportedException]::new('This deployment explicitly requires interactivity, however there are no suitable logged on users available and this process is running non-interactively.') }
 Reset-Mocks -PromptResult $null -OnPrompt { $script:MockSessions = @(); $script:MockUsers = @(); & $noUser }
 Assert-Same (Invoke-RnMain $args60) 0 'toolkit no user exit'
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|restart' 'toolkit no user sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|restart' 'toolkit no user sequence'
 Assert-Same (Get-Last).status 'restartedNoUser' 'toolkit no user status'
 Assert-Same (Get-Last).reason 'toolkitNoUser' 'toolkit no user reason'
 if ((Get-Last).message -notmatch 'toolkit saw no') { Fail "toolkit no user message $((Get-Last).message)" }
@@ -240,7 +247,7 @@ foreach ($second in @(@{ S = @($gone); U = @() }, @{ S = @(); U = @('CONTOSO\gho
     $script:Second = $second
     Reset-Mocks -PromptResult $null -OnPrompt { $script:MockSessions = $script:Second.S; $script:MockUsers = $script:Second.U; & $noUser }
     Assert-Same (Invoke-RnMain $args60) 0 'toolkit no user, person still there exit'
-    Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|sleep:900|field|restart' 'toolkit no user, person still there sequence'
+    Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|sleep:900|result|restart' 'toolkit no user, person still there sequence'
     Assert-Same (Get-Last).status 'restartedAfterCountdown' 'toolkit no user, person still there status'
     Assert-Same (Get-Last).reason 'NotShown' 'toolkit no user, person still there reason'
 }
@@ -250,19 +257,17 @@ foreach ($second in @(@{ S = @($gone); U = @() }, @{ S = @(); U = @('CONTOSO\gho
 Reset-Mocks -PromptResult 'Timeout'
 $script:RnCountdown = { param($T, $Sec) $script:Log.Add("countdown:$Sec"); & $noUser }
 Assert-Same (Invoke-RnMain $args60) 0 'countdown refused exit'
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:900|field|restart' 'countdown refused sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|countdown:900|sleep:900|result|restart' 'countdown refused sequence'
 
-# 2g. Any other error: result failed with the message, in the field, exit 1, no restart.
+# 2g. Any other error: result failed with the message, exit 1, no restart.
 Reset-Mocks -OnPrompt { throw 'dialog broke' }
 Assert-Same (Invoke-RnRun $args60) 1 'other error exit'
 Assert-Same (Get-Last).status 'failed' 'other error status'
 Assert-Same (Get-Last).message 'dialog broke' 'other error message'
-Assert-Same ($script:FieldNames -join ',') 'relianRestartNotice' 'other error field'
 Assert-NoRestart 'other error'
 Reset-Mocks
 $script:RnGetPending = { throw 'registry broke' }
 Assert-Same (Invoke-RnRun (Get-RnArgs -Message '' -SnoozeMinutes '' -PromptMinutes '' -CountdownMinutes '' -ReportOnly 'true')) 1 'report error exit'
-Assert-Same ($script:FieldNames -join ',') 'relianSessionState' 'report error field'
 Assert-Same (Get-Last).status 'failed' 'report error status'
 
 # 2h. Open-RnSession checks the toolkit's own rule first: with no active user it
@@ -298,7 +303,7 @@ Assert-Same (Test-RnNoUserError ([Management.Automation.ErrorRecord]::new([NotSu
 
 # 2i. Brand theme: Open-RnSession installs it before the toolkit session, so notice 1
 # and the countdown both get it, once per run. A theme that throws changes nothing:
-# same calls, same result, same field.
+# same calls, same result, same order.
 function Show-ADTInstallationPrompt { $script:Log.Add('showPrompt'); 'Restart now' }
 function Show-ADTInstallationRestartPrompt { $script:Log.Add('showCountdown') }
 function Get-ADTStringTable { [pscustomobject]@{ RestartPrompt = [pscustomobject]@{ ButtonRestartNow = ''; Message = [pscustomobject]@{ Install = '' }; MessageRestart = ''; MessageTime = ''; TimeRemaining = '' } } }
@@ -309,14 +314,14 @@ foreach ($themeFails in @($false, $true)) {
     $script:RnPrompt = $realPrompt
     $script:RnSessionOpen = $false
     Assert-Same (Invoke-RnRun $args60) 0 "prompt with theme (fails $themeFails) exit"
-    Assert-Same ($script:Log -join '|') 'theme|openSession|showPrompt|field|restart' "prompt with theme (fails $themeFails) sequence"
+    Assert-Same ($script:Log -join '|') 'theme|openSession|showPrompt|result|restart' "prompt with theme (fails $themeFails) sequence"
     $themeRuns["prompt$themeFails"] = ($script:Fields | ForEach-Object { $_ | Select-Object -Property * -ExcludeProperty timestamp | ConvertTo-Json -Compress }) -join '|'
     Reset-Mocks -Marker ([pscustomobject]@{ SnoozeUntil = $now.AddMinutes(-1).ToString('o'); SetAt = $now.AddMinutes(-61).ToString('o') })
     if ($themeFails) { $script:RnTheme = { $script:Log.Add('theme'); throw 'csc missing' } }
     $script:RnCountdown = $realCountdown
     $script:RnSessionOpen = $false
     Assert-Same (Invoke-RnRun $args60) 0 "countdown with theme (fails $themeFails) exit"
-    Assert-Same ($script:Log -join '|') 'field|theme|openSession|showCountdown|sleep:900|field|restart' "countdown with theme (fails $themeFails) sequence"
+    Assert-Same ($script:Log -join '|') 'result|theme|openSession|showCountdown|sleep:900|result|restart' "countdown with theme (fails $themeFails) sequence"
     $themeRuns["countdown$themeFails"] = ($script:Fields | ForEach-Object { $_ | Select-Object -Property * -ExcludeProperty timestamp | ConvertTo-Json -Compress }) -join '|'
 }
 Assert-Same $themeRuns['promptTrue'] $themeRuns['promptFalse'] 'theme failure leaves the prompt result'
@@ -330,13 +335,13 @@ Assert-Same @($script:Log | Where-Object { $_ -eq 'theme' }).Count 1 'theme inst
 $script:RnSessionOpen = $false
 
 # 2j. Restart now on the countdown: the dialog closes before the end, so the device
-# restarts at once, with the button recorded and the field written first.
+# restarts at once, with the button recorded and the result recorded first.
 # The old code slept the whole countdown and recorded no button.
 function Set-OpenSequence { param([object[]]$States) $script:OpenStates = [System.Collections.Generic.Queue[object]]::new($States); $script:RnCountdownOpen = { $v = $script:OpenStates.Dequeue(); if ($v -is [string]) { throw $v }; $v } }
 Reset-Mocks -PromptResult 'Timeout'
 Set-OpenSequence @($false, $true, $true, $false)
 Assert-Same (Invoke-RnMain $args60) 0 'countdown restart now exit'
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:1|sleep:1|sleep:1|field|restart' 'countdown restart now sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|countdown:900|sleep:1|sleep:1|sleep:1|result|restart' 'countdown restart now sequence'
 Assert-Same (Get-Last).status 'restarted' 'countdown restart now status'
 Assert-Same (Get-Last).button 'Restart now' 'countdown restart now button'
 Assert-Same (Get-Last).reason 'NoAnswer' 'countdown restart now keeps why the countdown showed'
@@ -365,7 +370,7 @@ Assert-Same (Get-Slept) 4 'quick Restart now restarts at once'
 Reset-Mocks -PromptResult 'Timeout'
 Set-OpenSequence @($true, $true, 'wmi broke')
 $null = Invoke-RnMain $args60
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:1|sleep:1|sleep:898|field|restart' 'probe failure sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|countdown:900|sleep:1|sleep:1|sleep:898|result|restart' 'probe failure sequence'
 Assert-Same (Get-Last).status 'restartedAfterCountdown' 'probe failure status'
 
 # 2k. The real countdown probe, over a mocked process list: the launcher carries
@@ -425,7 +430,7 @@ foreach ($users in @(@('CONTOSO\jdoe'), @())) {
 $used = [pscustomobject]@{ SnoozeUntil = $now.AddMinutes(-1).ToString('o'); SetAt = $now.AddMinutes(-61).ToString('o') }
 Reset-Mocks -Marker $used -PromptResult 'Snooze 1 hour'
 Assert-Same (Invoke-RnMain $args60) 0 'snooze used exit'
-Assert-Same ($script:Log -join '|') 'field|countdown:900|sleep:900|field|restart' 'snooze used sequence'
+Assert-Same ($script:Log -join '|') 'result|countdown:900|sleep:900|result|restart' 'snooze used sequence'
 Assert-Same (Get-Last).status 'restartedAfterCountdown' 'snooze used status'
 Assert-Same (Get-Last).reason 'snoozeUsed' 'snooze used reason'
 Assert-Same (Get-Last).snoozeUsed $true 'snooze used flag'
@@ -434,20 +439,20 @@ Assert-Same (Get-Last).snoozeUsed $true 'snooze used flag'
 # at once), the countdown is waited out, then restart.
 Reset-Mocks -Marker $used -CanShow $false
 $null = Invoke-RnMain $args60
-Assert-Same ($script:Log -join '|') 'field|sleep:900|field|restart' 'snooze used, no session sequence'
+Assert-Same ($script:Log -join '|') 'result|sleep:900|result|restart' 'snooze used, no session sequence'
 Assert-Same (Get-Last).reason 'NotShown' 'snooze used, no session reason'
 
 # 5b. No answer on notice 1: countdown, then restart.
 Reset-Mocks -PromptResult 'Timeout'
 $null = Invoke-RnMain $args60
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|countdown:900|sleep:900|field|restart' 'no answer sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|countdown:900|sleep:900|result|restart' 'no answer sequence'
 Assert-Same (Get-Last).reason 'NoAnswer' 'no answer reason'
 Assert-Same (Get-Last).snoozeUsed $false 'no answer snooze flag'
 
 # 5c. Prompt could not be shown: wait the countdown without the toolkit dialog, then restart.
 Reset-Mocks -PromptResult $null
 $null = Invoke-RnMain $args60
-Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|field|sleep:900|field|restart' 'not shown sequence'
+Assert-Same ($script:Log -join '|') 'prompt:Snooze 1 hour:600|result|sleep:900|result|restart' 'not shown sequence'
 
 # 6. A marker from before the last boot is cleared and notice 1 shows again.
 $old = [pscustomobject]@{ SnoozeUntil = $boot.AddMinutes(-10).ToString('o'); SetAt = $boot.AddMinutes(-70).ToString('o') }
@@ -461,21 +466,20 @@ Reset-Mocks -PromptResult 'Restart now' -RestartCode 1190
 Assert-Same (Invoke-RnMain $args60) 1 'restart failure exit'
 Assert-Same (Get-Last).status 'failed' 'restart failure status'
 
-# Report only: the same detection, nothing else. Every side effect except the
-# field write is logged, so any prompt, countdown, sleep, restart or marker change fails.
+# Report only: the same detection, nothing else. Every side effect and the
+# result are logged, so any prompt, countdown, sleep, restart or marker change fails.
 function Invoke-Report {
     param($Sessions = @(), $Users = @(), [switch]$UserProbeFails, $Marker = $null)
     Reset-Mocks -Users $Users -UserProbeFails:$UserProbeFails -Marker $Marker
     $script:MockSessions = $Sessions
     Assert-Same (Invoke-RnReport) 0 'report exit'
-    Assert-Same ($script:Log -join '|') 'field' 'report only writes the field'
-    Assert-Same ($script:FieldNames -join ',') 'relianSessionState' 'report field name'
+    Assert-Same ($script:Log -join '|') 'result' 'report only records the result'
     $j = Get-Last
     foreach ($k in @('userPresent', 'reason', 'users', 'sessions', 'pending', 'lastBoot', 'build', 'snooze', 'timestamp')) {
         if (-not $j.PSObject.Properties[$k]) { Fail "report lacks $k" }
     }
     Assert-Same ($j.pending -join ',') 'windowsUpdate' 'report pending'
-    # pwsh 7 ConvertFrom-Json turns the string into a [datetime]; the field holds the string.
+    # pwsh 7 ConvertFrom-Json turns the string into a [datetime]; the JSON holds the string.
     Assert-Same (ConvertTo-RnUtc "$(([datetime]$j.lastBoot).ToUniversalTime().ToString('o'))") $boot 'report last boot'
     Assert-Same $j.build 19045 'report build'
     return $j
@@ -580,12 +584,11 @@ try {
 
 # Pin record and README.
 $release = Get-Content -LiteralPath (Join-Path $repoRoot 'windows/releases/restart-notice.json') -Raw | ConvertFrom-Json
-Assert-Same $release.ninjaField $RnFieldName 'pin record matches script field'
+if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
 Assert-Same $release.kind 'notify' 'pin record kind'
 if ($release.packageArguments.IndexOf('"ReportOnly"', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks ReportOnly' }
-if ($release.packageArguments.IndexOf($RnReportField, [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the report field' }
-$readme = [IO.File]::ReadAllText((Join-Path $repoRoot 'README.md'))
-if ($readme.IndexOf('windows/packages/restart-notice/Invoke-RestartNotice.ps1', [StringComparison]::Ordinal) -lt 0) { Fail 'README lacks the package section' }
+if ($release.packageArguments -match 'relian[A-Z]\w*|device field') { Fail 'pin record still names a device field' }
+# The README entry is checked by tests/readme-inventory.Tests.ps1.
 
 # End to end through the runner's argument parser.
 $json = '{"Message":"Windows needs to restart. Save your work.","SnoozeMinutes":"60","PromptMinutes":"10","CountdownMinutes":"15","ReportOnly":"true"}'
@@ -599,6 +602,75 @@ Assert-Same (($pairs | ForEach-Object { $_.Name }) -join ',') 'Message,SnoozeMin
 # An early exit 0 would skip every assertion after it: the first exit 0 must be the last line.
 $self = [IO.File]::ReadAllText($PSCommandPath)
 if ($self.IndexOf("exit 0`n", [StringComparison]::Ordinal) -lt $self.IndexOf("Assert-Same ((`$pairs", [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
+
+# Maintenance restart is opt-in and preserves all default decisions.
+Assert-Same (Get-RnArgs).MaintenanceRestart $false 'maintenance default off'
+Assert-Same (Get-RnArgs -MaintenanceRestart 'true').MaintenanceRestart $true 'maintenance opt-in'
+Assert-Throws { Get-RnArgs -MaintenanceRestart 'yes' } 'invalid maintenance flag'
+Assert-Same (@(Get-RnPendingReasons -PendingRename @('C:\driver.tmp','') -MaintenanceRestart $true).Count) 1 'real pending deletion pair'
+Assert-Same (@(Get-RnPendingReasons -PendingRename @('C:\driver.tmp','')).Count) 0 'default ignores rename pair'
+Assert-Throws { Test-RnPendingRenamePairs @('C:\unpaired') } 'malformed rename pairs unknown'
+$maintenanceArgs=Get-RnArgs -MaintenanceRestart 'true'
+Reset-Mocks -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ @{Safe=$false;Reason='servicingBusy'} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'busy restart deferred'
+Assert-Same (Get-Last).status 'deferred' 'busy deferred result'
+Assert-NoRestart 'busy servicing'
+Reset-Mocks -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ throw 'failed OS probe' }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'unknown restart deferred'
+Assert-NoRestart 'unknown servicing'
+Reset-Mocks -PromptResult 'Restart now' -OnPrompt { $script:RnMaintenanceGuard={ @{Safe=$false;Reason='servicingBusy'} } }
+$script:RnMaintenanceGuard={ @{Safe=$true;Reason='clear'} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'guard flips during user prompt'
+Assert-Same (Get-Last).status 'deferred' 'prompt guard flip deferred'
+Assert-NoRestart 'guard flip'
+Reset-Mocks -PromptResult 'Timeout'
+$script:RnMaintenanceGuard={ @{Safe=$true;Reason='clear'} }
+$script:RnMaintenanceCountdown={ param($Text,$Seconds) $script:Log.Add('controlledCountdown'); $script:RnMaintenanceGuard={ @{Safe=$false;Reason='servicingBusy'} }; 'Timeout' }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'guard flips during controlled countdown'
+Assert-Same (Get-Last).status 'deferred' 'countdown guard flip deferred'
+Assert-NoRestart 'countdown flip'
+if($script:Log -match '^countdown:') { Fail 'opt-in called autonomous restart dialog' }
+
+& {
+ $oldData=$env:ProgramData; $env:ProgramData=[IO.Path]::GetTempPath()
+ try {
+  $script:guardSetup=[pscustomobject]@{SystemSetupInProgress=0;OOBEInProgress=0;SetupPhase=0;SetupType=0;RestartSetup=0}
+  $script:guardProcesses=@(); $script:guardMarker=$false; $script:guardProbeFails=$false
+  function Get-CimInstance { param($ClassName,$Filter,$OperationTimeoutSec,$ErrorAction) if($script:guardProbeFails) { throw 'probe failed' }; Assert-Same $OperationTimeoutSec 5 'guard CIM timeout'; $script:guardProcesses }
+  function Get-ItemProperty { param($LiteralPath,$ErrorAction) $script:guardSetup }
+  function Test-Path { param($LiteralPath,$ErrorAction) $script:guardMarker }
+  Assert-Same (Get-RnMaintenanceGuard).Safe $true 'clear guard evidence'
+  foreach($flag in @('SystemSetupInProgress','OOBEInProgress','SetupPhase','SetupType','RestartSetup')) {
+   $script:guardSetup.$flag=1
+   Assert-Same (Get-RnMaintenanceGuard).Safe $false "active $flag deferred"
+   $script:guardSetup.$flag=0
+  }
+  $script:guardMarker=$true
+  Assert-Same (Get-RnMaintenanceGuard).Safe $false 'native marker defers'
+  $script:guardMarker=$false; $script:guardProcesses=@([pscustomobject]@{Name='TiWorker.exe'})
+  Assert-Same (Get-RnMaintenanceGuard).Safe $false 'active servicing process defers'
+  $script:guardProcesses=@(); $script:guardProbeFails=$true
+  Assert-Same (Get-RnMaintenanceGuard).Safe $false 'CIM failure defers'
+ } finally { $env:ProgramData=$oldData }
+}
+Reset-Mocks -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ @{Safe=$true} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'clear no-user maintenance reboot'
+Assert-Same (@($script:Log | Where-Object { $_ -eq 'restart' }).Count) 1 'exactly one guarded restart'
+Reset-Mocks -Sessions @() -Users @()
+$script:guardCalls=0
+$script:RnMaintenanceGuard={ $script:guardCalls++; @{Safe=($script:guardCalls -eq 1)} }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'no-user guard flip defers'
+Assert-Same (Get-Last).status 'deferred' 'no-user final guard result'
+Assert-NoRestart 'no-user guard flip'
+
+Reset-Mocks -PromptResult 'Timeout'
+$script:RnMaintenanceGuard={ @{Safe=$true} }
+$script:RnMaintenanceCountdown={ param($Text,$Seconds) $null }
+Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'early missing countdown UI safely waited'
+if($script:Log -notcontains 'sleep:900') { Fail 'early missing UI collapsed maintenance countdown' }
 
 Write-Output 'restart-notice tests passed'
 exit 0

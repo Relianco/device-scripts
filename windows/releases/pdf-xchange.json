@@ -1,0 +1,9 @@
+{
+  "name": "PDF-XChange PRO",
+  "arch": "x64",
+  "sourceUrl": "https://downloads.pdf-xchange.com/11.1.2.0/ProV11.x64.msi",
+  "file": "ProV11.x64.msi",
+  "sha256": "1d6b02f35cd50c65029dbc780f1755f2a72700805faa553097784d77c5de3fb1",
+  "size": 453607424,
+  "version": "11.1.2.0"
+}

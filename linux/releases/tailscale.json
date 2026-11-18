@@ -2,7 +2,7 @@
   "name": "tailscale",
   "installsSoftware": true,
   "file": "tailscale.sh",
-  "sha256": "9ba95aba54e39987c54e44a3101851f2bb2cb56269f00f36abb2a951f5f42f3a",
+  "sha256": "70f3bd88340ec4226e8ed7069cfe4c73314492fd5c9d7805c470f9dfd46f82e6",
   "pinVersion": "1.104.4",
   "pinMeaning": "floor; apt installs the newest version in the stable repo",
   "repo": "https://pkgs.tailscale.com/stable/debian",

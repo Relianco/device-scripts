@@ -29,8 +29,8 @@
     Fix is "true"). Uninstall changes nothing and exits 0.
 
     The result is one line of compact JSON, printed last on stdout, with a
-    short "verdict". The JSON also goes to the NinjaOne device custom field
-    relianWuPolicy when the NinjaOne agent is present. Exit 1 when a fix was
+    short "verdict". The package writes no RMM field: the caller reads stdout and
+    the exit code. Exit 1 when a fix was
     attempted and the values are still set or a step failed.
 
 .NOTES
@@ -50,8 +50,6 @@ param(
 
 $ProgressPreference = "SilentlyContinue"
 
-# NinjaOne field names are alphanumeric only.
-$WupFieldName = "relianWuPolicy"
 $WupKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
 $WupAuKey = "$WupKey\AU"
 $WupPolPath = "$env:SystemRoot\System32\GroupPolicy\Machine\Registry.pol"
@@ -374,44 +372,15 @@ function Invoke-WupRun {
     return [ordered]@{ record = $record; exitCode = $code }
 }
 
-# Pure: quotes a value for a native command line under Windows PowerShell 5.1,
-# which passes embedded double quotes through unescaped. Backslashes before a
-# quote are doubled, then the quote is escaped (MSVCRT argument rules).
-function ConvertTo-WupNativeArg {
-    param([string]$Value)
-    return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
-}
-
-# The runner starts the package in a child powershell.exe. Ninja-Property-Set
-# there hands the value to the agent CLI as a native argument, and 5.1 strips
-# the JSON's quotes. So write through the CLI's stdin and read it back.
-function Set-WupField {
-    param([string]$Value)
-    $cli = Join-Path $env:ProgramData 'NinjaRMMAgent\ninjarmm-cli.exe'
-    if (Test-Path -LiteralPath $cli) {
-        try {
-            $null = $Value | & $cli set --stdin $WupFieldName 2>&1
-            $back = (& $cli get $WupFieldName 2>$null) -join "`n"
-            if ($back.Trim() -eq $Value) { return $true }
-        } catch { }
-    }
-    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try { Ninja-Property-Set $WupFieldName (ConvertTo-WupNativeArg $Value); return $true } catch { }
-    }
-    return $false
-}
-
 function Invoke-Main {
     param([switch]$Fix)
     try {
         Write-Status "Windows Update policy $(if ($Fix) { 'fix' } else { 'check' }) starting"
         $run = Invoke-WupRun -Fix:$Fix
-        # ponytail: no trimming like feature-update; two policy keys stay far under the ~10,000 character field.
+        # ponytail: no trimming like feature-update; two policy keys stay far under 10,000 characters.
         # ("ponytail:" is this repo's marker for a deliberate shortcut, as in feature-update; not a name.)
         $json = $run.record | ConvertTo-Json -Depth 6 -Compress
         Write-Status "Verdict: $($run.record.verdict) ($($json.Length) bytes)"
-        if (Set-WupField $json) { Write-Status "Written to $WupFieldName" }
-        else { Write-Status "Custom field not written; the JSON line below is the result" "WARN" }
         # Last stdout line is the JSON; so a log reader can find it.
         Write-Output $json
         exit $run.exitCode

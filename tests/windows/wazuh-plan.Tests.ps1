@@ -256,9 +256,14 @@ Assert-Plan -Plan $unknown -Expect (New-Expect -ExitCode 1) -Label 'unknown acti
 
 $installArgs = Get-WazuhMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\wazuh.msi' -ProductCode ''
 if ($null -eq $installArgs -or $installArgs.Count -ne 4 -or
-    $installArgs[0] -cne '/i' -or $installArgs[1] -cne 'C:\cache\wazuh.msi' -or
+    $installArgs[0] -cne '/i' -or $installArgs[1] -cne '"C:\cache\wazuh.msi"' -or
     $installArgs[2] -cne '/qn' -or $installArgs[3] -cne '/norestart') {
     Fail "install arguments $($installArgs -join ' ')"
+}
+# Start-Process joins the array with spaces, so a path with a space must stay one quoted argument.
+$spacedArgs = Get-WazuhMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\A B\wazuh.msi' -ProductCode ''
+if (($spacedArgs -join ' ') -cne '/i "C:\cache\A B\wazuh.msi" /qn /norestart') {
+    Fail "spaced installer path arguments $($spacedArgs -join ' ')"
 }
 $removeCode = '{11111111-2222-3333-4444-555555555555}'
 $removeArgs = Get-WazuhMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode $removeCode

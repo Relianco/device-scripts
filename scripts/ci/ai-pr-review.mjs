@@ -9,11 +9,17 @@ import { pathToFileURL } from 'node:url'
 
 export const INCOMPLETE_PREFIX = 'AI review incomplete:'
 
+// A docs-only PR gets a docs check. Its findings body starts with DOCS_PREFIX,
+// its clean body with DOCS_LGTM, which still starts with LGTM.
+export const DOCS_PREFIX = 'Docs review by ChatGPT'
+export const DOCS_LGTM = 'LGTM (docs review)'
+
 export const DELIVERY_PREFIXES = [
   'Code review by ChatGPT',
   'LGTM',
   'AI review skipped for this push:',
   INCOMPLETE_PREFIX,
+  DOCS_PREFIX,
 ]
 
 export const NOT_PERFORMED_PREFIX = 'AI review NOT performed:'
@@ -27,16 +33,14 @@ export const MAX_COMPLETION_TOKENS = 16000
 // A new package file is one patch. 64000 cut the printer script and its plan test.
 export const MAX_PATCH_CHARS = 96000
 
-export const PROMPT = `You review one file from a pull request of PowerShell device-deployment scripts.
-Report defects a maintainer must fix before merge. Skip style and naming.
-
-Rules for code the diff adds or changes:
-- A committed file must not contain a secret, a token, a password, a client name, a device id, or a home-directory path.
+const RULES = `- A committed file must not contain a secret, a token, a password, a client name, a device id, or a home-directory path.
 - Relian is the product name. It is not a client name. Do not report Relian in a namespace, a filename, or UI text.
 - A URL with userinfo (scheme://user@host) must exit 1 before any download.
 - An empty hash must exit 0 and must not download.
 - An empty hash exits 0 for every action, including Uninstall, and downloads nothing.
-- An empty hash exits 0 before the URL is read, including when the URL contains userinfo. Do not require that rejection when the hash is empty.
+- The four entry points (windows/runner/Invoke-RelianRunner.ps1, windows/runner/Invoke-RelianJob.ps1, linux/runner/relian-runner.sh, macos/runner/relian-runner.sh) refuse a URL with userinfo first and exit 1, even when the hash is empty. Then an empty hash exits 0.
+- Inside a package, an empty pin exits 0 before the installer URL is read, including when that URL contains userinfo. Do not require that rejection in a package when the hash is empty.
+- Exception: windows/runner/Invoke-RelianReadJob.ps1 has no off switch. Its -PackageSha256 comes from the forge allowlist, and an empty, missing or malformed hash must exit 1 and must not download. Do not ask for an empty-hash exit 0 there. Its packages live under windows/read/<job>/, not windows/packages/, and it has no job table by design: per-job argument rules live in the forge allowlist, so do not ask for them in the loader.
 - Uninstall does not download. A present hash with a userinfo URL does not block uninstall.
 - The Linux and macOS shell runners each download their one package script for every action, including Uninstall. That download is not the retained-action uninstall rule.
 - An MSI install path must be one quoted argument so a path that contains spaces is not split.
@@ -51,11 +55,35 @@ Rules for code the diff adds or changes:
 - curl and az arguments are an array, or they are written inline. Arguments stored in one scalar string are a defect, because zsh does not word-split that string.
 - The Teams package must not contain disableAutoUpdate, MsRdcWebRTCSvc, or Reset-AppxPackage.
 - A pin hash is 64 lowercase hex characters. Do not treat a placeholder hash as valid.
-- The user-check package installs nothing. It has no installer sha256. pagePin and codePin are mode labels, not pin hashes. Do not require a 64-character hash in windows/releases/user-check.json.
+- The s1-rebind package (windows/packages/s1-rebind/) binds an installed agent without an installer. Its off switch is an empty PinVersion. An empty InstallerSha256 means no installer: bind still runs, nothing is downloaded, and Reinstall does nothing and exits 0. Do not ask for an empty-InstallerSha256 exit 0 before bind. Its Action Uninstall is refused with exit 1 and removes nothing.
+- The user-check package installs nothing. It has no installer sha256. pagePin and codePin are mode labels, not pin hashes. Do not require a 64-character hash in windows/releases/user-check.json.`
+
+export const PROMPT = `You review one file from a pull request of PowerShell device-deployment scripts.
+Report defects a maintainer must fix before merge. Skip style and naming.
+
+Rules for code the diff adds or changes:
+${RULES}
 
 Reply with one JSON object and no other text:
 {"findings":[{"line":1,"body":"what happens at runtime, then the fix"}]}
 Use an empty findings array when the file has no defect.`
+
+export const DOCS_PROMPT = `You review one documentation file (markdown or LICENSE) from a pull request in a PUBLIC repository of device-deployment scripts.
+Report only what a maintainer must fix before merge. Skip style, grammar, and wording.
+
+Report a line the diff adds or changes when it contains:
+- a client or customer name. Relian is the product name. It is not a client name.
+- a device id, serial number, hostname, or tenant id of a real machine or organisation.
+- a home-directory path that names a real user, such as /home/<user>, /Users/<user>, or C:\\Users\\<name>. A placeholder such as <user> is fine.
+- a token, password, API key, or other secret.
+- a statement that contradicts the code rules below. Report a contradiction only when these rules or the diff itself show it.
+
+Code rules of this repository:
+${RULES}
+
+Reply with one JSON object and no other text:
+{"findings":[{"line":1,"body":"what is wrong, then the fix"}]}
+Use an empty findings array when the file has no such defect.`
 
 const REVIEW_EXT = new Set(['.ps1', '.json', '.yml', '.yaml', '.mjs', '.js', '.toml', '.sh'])
 const TRANSIENT = new Set([408, 409, 425, 429, 500, 502, 503, 504])
@@ -72,10 +100,19 @@ export function primaryModel(value) {
   return parseModelList(value)[0]
 }
 
+// Docs by extension or name only, never by folder: docs/x.ps1 is code.
 export function isDocsPath(filename) {
-  if (filename === 'LICENSE') return true
-  if (filename.startsWith('docs/')) return true
-  return filename.endsWith('.md')
+  if (!filename) return false
+  return filename === 'LICENSE' || filename.endsWith('.md')
+}
+
+// A rename counts both names, so x.ps1 -> x.md is still code.
+export function isDocsFile(file) {
+  return isDocsPath(file.filename) && (!file.previous_filename || isDocsPath(file.previous_filename))
+}
+
+export function isReviewableFile(file) {
+  return isReviewablePath(file.filename) || isReviewablePath(file.previous_filename)
 }
 
 export function isReviewablePath(filename) {
@@ -92,12 +129,12 @@ export function capPatch(patch, max = MAX_PATCH_CHARS) {
   return `${text.slice(0, max)}\n...[truncated]`
 }
 
-export function selectReviewFiles(files, { limit = 20, maxPatch = MAX_PATCH_CHARS } = {}) {
+export function selectReviewFiles(files, { limit = 20, maxPatch = MAX_PATCH_CHARS, include = isReviewableFile } = {}) {
   const reviewable = []
   const skipped = []
   const unread = []
   for (const file of files) {
-    if (!isReviewablePath(file.filename)) {
+    if (!include(file)) {
       skipped.push(file.filename)
       continue
     }
@@ -155,22 +192,48 @@ function coverageNotes({ omitted = [], unread = [], truncated = [] }) {
   return notes
 }
 
-export function buildReviewBody({ findings, omitted = [], unread = [], truncated = [], model }) {
+export function buildReviewBody({ findings, omitted = [], unread = [], truncated = [], model, docs = false }) {
   const notes = coverageNotes({ omitted, unread, truncated })
   const note = notes.length > 0 ? `\n\n${notes.join('\n\n')}` : ''
   if (findings.length === 0 && notes.length === 0) {
+    if (docs) return `${DOCS_LGTM} 👍\n\nDocs-only PR, no code changed. The markdown was checked with ${model} for public-repo leaks and contradictions with the code rules.`
     return `LGTM 👍\n\nReviewed with ${model}. No defects to fix before merge.`
   }
   if (findings.length === 0) {
     return `${INCOMPLETE_PREFIX} the model did not read every changed file. No defect was reported in the files it did read.${note}`
   }
   const lines = findings.map((finding) => `- ${finding.path}:${finding.line} ${finding.body}`)
-  return `Code review by ChatGPT\n\n${lines.join('\n')}${note}`
+  return `${docs ? DOCS_PREFIX : 'Code review by ChatGPT'}\n\n${lines.join('\n')}${note}`
 }
 
 export function notPerformedBody(filenames) {
   const names = filenames.length > 0 ? filenames.join(', ') : '(none)'
   return `${NOT_PERFORMED_PREFIX} no reviewable source files. Files: ${names}`
+}
+
+// Backstop for the docs check: an added line with a home-directory path that names a user.
+const HOME_PATH = /(?<![\w/.:-])(?:\/home\/|\/Users\/|[A-Za-z]:\\Users\\)([\w.-]+)/gi
+const GENERIC_HOME = /^(user|username|runner|public|default|all)$/i
+
+export function homePathFindings(patch) {
+  const findings = []
+  let line = 0
+  for (const text of String(patch || '').split('\n')) {
+    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(text)
+    if (hunk) {
+      line = Number(hunk[1])
+      continue
+    }
+    if (text.startsWith('-') || text.startsWith('\\')) continue
+    if (text.startsWith('+')) {
+      const hit = [...text.slice(1).matchAll(HOME_PATH)].find((match) => !GENERIC_HOME.test(match[1]))
+      if (hit) {
+        findings.push({ line, body: `Adds the home-directory path ${hit[0]}, which names a user in a public repo. Use a placeholder such as <user>.` })
+      }
+    }
+    line++
+  }
+  return findings
 }
 
 export function isModelUnavailable(status, body) {
@@ -292,10 +355,10 @@ async function postReview({ prNumber, headSha, body, token }) {
   })
 }
 
-export function messagesFor(file) {
+export function messagesFor(file, prompt = PROMPT) {
   return [
     { role: 'system', content: 'You reply with JSON only.' },
-    { role: 'user', content: `${PROMPT}\n\nFile: ${file.filename}\n\n${file.patch}` },
+    { role: 'user', content: `${prompt}\n\nFile: ${file.filename}\n\n${file.patch}` },
   ]
 }
 
@@ -312,7 +375,8 @@ export async function reviewPullRequest({
   post = postReview,
 }) {
   const files = await listFiles(prNumber, token)
-  const selected = selectReviewFiles(files)
+  const docs = files.length > 0 && files.every(isDocsFile)
+  const selected = selectReviewFiles(files, docs ? { include: isDocsFile } : {})
   if (selected.kept.length === 0 && selected.unread.length > 0) {
     const body = buildReviewBody({
       findings: [],
@@ -320,6 +384,7 @@ export async function reviewPullRequest({
       unread: selected.unread,
       truncated: selected.truncated,
       model,
+      docs,
     })
     await post({ prNumber, headSha, body, token })
     return body
@@ -339,7 +404,7 @@ export async function reviewPullRequest({
         endpoint,
         apiKey,
         model,
-        messages: messagesFor(file),
+        messages: messagesFor(file, docs ? DOCS_PROMPT : PROMPT),
         fetchImpl,
         sleep,
       })
@@ -348,7 +413,9 @@ export async function reviewPullRequest({
       wrapped.exitCode = error.exitCode
       throw wrapped
     }
-    for (const finding of parseFindings(content)) {
+    const found = parseFindings(content)
+    if (docs) found.push(...homePathFindings(file.patch))
+    for (const finding of found) {
       findings.push({ path: file.filename, line: finding.line, body: finding.body })
     }
   }
@@ -358,6 +425,7 @@ export async function reviewPullRequest({
     unread: selected.unread,
     truncated: selected.truncated,
     model,
+    docs,
   })
   await post({ prNumber, headSha, body, token })
   return body

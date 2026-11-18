@@ -72,6 +72,7 @@ ts_install() {
   cat "$WORK/after_install" > "$WORK/installed"
   cat "$WORK/status_after_install" > "$WORK/status"
 }
+# The package must never call this: a field read shows up in the call log and fails the test.
 ts_ninja_get() {
   printf 'field:%s\n' "$1" >> "$CALLS"
   if [[ "$(cat "$WORK/field_missing")" == 1 ]]; then
@@ -192,24 +193,18 @@ run AuthKey="$FAKE_KEY" ClientTag="$TAG"
 [[ "$LAST_CODE" -eq 0 && "$(calls)" == 'install,up,' ]] || fail "code=$LAST_CODE calls=$(calls)"
 ok
 
-begin "installed, not joined, key from the Secure custom field"
+begin "installed, not joined, no variable: a NinjaOne field is not read"
 fake_reset 1.104.4 "$(json NeedsLogin)" " $FIELD_KEY "
-run ClientTag="$TAG"
-[[ "$LAST_CODE" -eq 0 && "$(calls)" == 'field:tailscaleAuthKey,up,' ]] || fail "code=$LAST_CODE calls=$(calls) err=[$LAST_ERR]"
-[[ "$(head -n 1 "$KEYSEEN")" == "$FIELD_KEY" ]] || fail "field key not used"
+run ClientTag="$TAG" AuthKeyField=tailscaleAuthKey
+[[ "$LAST_CODE" -eq 1 && "$(calls)" == '' ]] || fail "code=$LAST_CODE calls=$(calls) err=[$LAST_ERR]"
+[[ "$LAST_ERR" == *'a join is needed and the AuthKey environment variable is empty'* ]] || fail "err=[$LAST_ERR]"
 ok
 
-begin "script variable wins over the field"
+begin "the lowercase authKey variable is read"
 fake_reset 1.104.4 "$(json NeedsLogin)" "$FIELD_KEY"
 run authKey="$FAKE_KEY" ClientTag="$TAG"
 [[ "$LAST_CODE" -eq 0 && "$(calls)" == 'up,' ]] || fail "code=$LAST_CODE calls=$(calls)"
-[[ "$(head -n 1 "$KEYSEEN")" == "$FAKE_KEY" ]] || fail "field key used"
-ok
-
-begin "AuthKeyField names another field"
-fake_reset 1.104.4 "$(json NeedsLogin)" "$FIELD_KEY"
-run ClientTag="$TAG" AuthKeyField=otherField
-[[ "$LAST_CODE" -eq 1 && "$(calls)" == 'field:otherField,' ]] || fail "code=$LAST_CODE calls=$(calls)"
+[[ "$(head -n 1 "$KEYSEEN")" == "$FAKE_KEY" ]] || fail "variable key not used"
 ok
 
 begin "already Running with the wanted tag: set only, no key read needed"
@@ -223,7 +218,7 @@ ok
 begin "stopped with the wanted tag: up without a key"
 fake_reset 1.104.4 "$(json Stopped '"tag:client-example"')"
 run ClientTag="$TAG"
-[[ "$LAST_CODE" -eq 0 && "$(calls)" == 'field:tailscaleAuthKey,up,' ]] || fail "code=$LAST_CODE calls=$(calls)"
+[[ "$LAST_CODE" -eq 0 && "$(calls)" == 'up,' ]] || fail "code=$LAST_CODE calls=$(calls)"
 if grep -qF -- 'auth-key' "$UPARGS"; then fail "a key was passed"; fi
 grep -qxF -- "--advertise-tags=$TAG" "$UPARGS" || fail "up does not restate the tag"
 ok
@@ -241,20 +236,18 @@ run AuthKey="$FAKE_KEY" ClientTag="$TAG"
 [[ "$LAST_CODE" -eq 1 && "$(calls)" == '' ]] || fail "code=$LAST_CODE calls=$(calls)"
 ok
 
-begin "no key anywhere"
+begin "no key"
 fake_reset '' '' '' 0
 run ClientTag="$TAG"
-[[ "$LAST_CODE" -eq 1 && "$(calls)" == 'field:tailscaleAuthKey,' ]] || fail "code=$LAST_CODE calls=$(calls)"
-[[ "$LAST_ERR" == *'script variable or the auth key custom field'* ]] || fail "err=[$LAST_ERR]"
-fake_reset '' '' '' 1
-run ClientTag="$TAG"
-[[ "$LAST_CODE" -eq 1 && "$LAST_ERR" == *'ninjarmm-cli was not found'* ]] || fail "missing cli not reported: [$LAST_ERR]"
+[[ "$LAST_CODE" -eq 1 && "$(calls)" == '' ]] || fail "code=$LAST_CODE calls=$(calls)"
+[[ "$LAST_ERR" == *'a join is needed and the AuthKey environment variable is empty'* ]] || fail "err=[$LAST_ERR]"
+[[ "$LAST_ERR" != *ninjarmm* ]] || fail "err names ninjarmm-cli: [$LAST_ERR]"
 ok
 
 begin "bad key shape is refused and not printed"
-fake_reset '' '' 'Field secretvalue not found' 0
-run ClientTag="$TAG"
-[[ "$LAST_CODE" -eq 1 && "$(calls)" == 'field:tailscaleAuthKey,' ]] || fail "code=$LAST_CODE calls=$(calls)"
+fake_reset '' '' '' 0
+run AuthKey='Field secretvalue not found' ClientTag="$TAG"
+[[ "$LAST_CODE" -eq 1 && "$(calls)" == '' ]] || fail "code=$LAST_CODE calls=$(calls)"
 [[ "$LAST_ERR" != *secretvalue* ]] || fail "value printed"
 run AuthKey="$KEY_PREFIX-x --ssh" ClientTag="$TAG"
 [[ "$LAST_CODE" -eq 1 && "$LAST_ERR" != *"$KEY_PREFIX-x"* ]] || fail "spaced key: code=$LAST_CODE err=[$LAST_ERR]"
@@ -270,15 +263,8 @@ run AuthKey="$FAKE_KEY"
 [[ "$LAST_CODE" -eq 1 && "$(calls)" == '' ]] || fail "no tag code=$LAST_CODE"
 ok
 
-begin "real ts_ninja_get reports a missing CLI"
-TS_NINJA_MISSING=0
-(
-  # shellcheck disable=SC1090
-  source "$PACKAGE"
-  export NINJA_DATA_PATH="$WORK/none"
-  ts_ninja_get tailscaleAuthKey > /dev/null && exit 1
-  [[ "$TS_NINJA_MISSING" -eq 1 ]]
-) || fail "missing CLI not flagged"
+begin "the package has no NinjaOne field read"
+! grep -qE 'ninjarmm|NINJA_DATA_PATH|AuthKeyField|ts_ninja_get' "$PACKAGE" || fail "package still reads a NinjaOne field"
 ok
 
 begin "key download retries only transient failures, three attempts"

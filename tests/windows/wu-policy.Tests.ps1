@@ -224,11 +224,10 @@ foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinV
     if ($source.IndexOf($need, [StringComparison]::Ordinal) -lt 0) { Fail "param block lacks $need" }
 }
 
-# Pin record and script agree on the field; the package arguments example decodes to what the script reads.
+# The pin record names no RMM field; the package arguments example decodes to what the script reads.
 $release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/wu-policy.json') | ConvertFrom-Json
 Assert-Same $release.installsSoftware $false 'pin record installsSoftware'
-Assert-Same $WupFieldName $release.ninjaField 'script field name and pin record'
-Assert-Same $WupFieldName 'relianWuPolicy' 'field name'
+if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
 if ($release.packageArguments.IndexOf('eyJGaXgiOiJ0cnVlIn0=', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the base64 example' }
 
 # End to end through the runner's argument parser: Fix reaches the package as a named pair.
