@@ -7,7 +7,7 @@
     Gathers detailed storage health data via CIM/WMI:
     Per-drive model, serial, interface, media type, SMART status,
     SSD wear level, temperature, power-on hours, partition layout.
-    Writes JSON results to the relian_storage_health NinjaOne custom field.
+    Writes JSON results to the relianStorageHealth NinjaOne custom field.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -283,11 +283,12 @@ try {
         if ($ReportOnly) {
             Write-Host "STORAGE_HEALTH_RESULT:$json"
         } else {
-            $json | Ninja-Property-Set-Piped relian_storage_health
-            Write-Status "Storage health written to relian_storage_health custom field"
+            if ($json.Length -gt 10000) { throw "Result is $($json.Length) characters; a NinjaOne multi-line text field holds 10000, so it is not written truncated" }
+            $json | Ninja-Property-Set-Piped relianStorageHealth
+            Write-Status "Storage health written to relianStorageHealth custom field"
         }
         # One short line on stdout for the job loader; the full JSON is in the field.
-        [ordered]@{ field = 'relian_storage_health'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
+        [ordered]@{ field = 'relianStorageHealth'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"
         # Still print the JSON so it can be captured from the run output, then fail the run.

@@ -158,7 +158,7 @@ Collectors: `cpu-benchmark`, `hardware-inventory`, `network-audit`, `storage-hea
 -ModuleSha256 "<module-sha256>"
 ```
 
-- **Output:** the full JSON goes to the field `relian_<name with underscores>` through `Ninja-Property-Set-Piped`, and one short JSON summary line goes to stdout.
+- **Output:** the full JSON goes to the field the collector's field (`relianHardwareInventory`, `relianCpuBenchmark`, `relianNetworkAudit`, `relianStorageHealth`; Multi-line text, script Read/Write) through `Ninja-Property-Set-Piped`, and one short JSON summary line goes to stdout.
 - **`-ReportOnly`:** collects and prints the JSON without writing the field.
 - **Failure:** a failed collection or field write exits 1.
 

@@ -6,7 +6,7 @@
 .DESCRIPTION
     Performs single-threaded and multi-threaded CPU benchmarks using a prime sieve.
     Normalizes scores to approximate Passmark scale.
-    Writes JSON results to the relian_cpu_benchmark NinjaOne custom field.
+    Writes JSON results to the relianCpuBenchmark NinjaOne custom field.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -188,11 +188,12 @@ try {
         if ($ReportOnly) {
             Write-Host "BENCHMARK_RESULT:$json"
         } else {
-            $json | Ninja-Property-Set-Piped relian_cpu_benchmark
-            Write-Status "Benchmark results written to relian_cpu_benchmark custom field"
+            if ($json.Length -gt 10000) { throw "Result is $($json.Length) characters; a NinjaOne multi-line text field holds 10000, so it is not written truncated" }
+            $json | Ninja-Property-Set-Piped relianCpuBenchmark
+            Write-Status "Benchmark results written to relianCpuBenchmark custom field"
         }
         # One short line on stdout for the job loader; the full JSON is in the field.
-        [ordered]@{ field = 'relian_cpu_benchmark'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
+        [ordered]@{ field = 'relianCpuBenchmark'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"
         # Still print the JSON so it can be captured from the run output, then fail the run.

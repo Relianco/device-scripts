@@ -28,12 +28,13 @@ function Invoke-Block {
 }
 
 $collectors = @(
-    @{ File = 'cpu-benchmark'; Field = 'relian_cpu_benchmark'; Prefix = 'BENCHMARK_RESULT' },
-    @{ File = 'hardware-inventory'; Field = 'relian_hardware_inventory'; Prefix = 'INVENTORY_RESULT' },
-    @{ File = 'network-audit'; Field = 'relian_network_audit'; Prefix = 'NETWORK_AUDIT_RESULT' },
-    @{ File = 'storage-health'; Field = 'relian_storage_health'; Prefix = 'STORAGE_HEALTH_RESULT' }
+    @{ File = 'cpu-benchmark'; Field = 'relianCpuBenchmark'; Prefix = 'BENCHMARK_RESULT' },
+    @{ File = 'hardware-inventory'; Field = 'relianHardwareInventory'; Prefix = 'INVENTORY_RESULT' },
+    @{ File = 'network-audit'; Field = 'relianNetworkAudit'; Prefix = 'NETWORK_AUDIT_RESULT' },
+    @{ File = 'storage-health'; Field = 'relianStorageHealth'; Prefix = 'STORAGE_HEALTH_RESULT' }
 )
 foreach ($c in $collectors) {
+    Assert-True ($c.Field -cmatch '^[A-Za-z][A-Za-z0-9]{0,39}$') "$($c.File): NinjaOne field names are alphanumeric"
     $path = Join-Path $repoRoot "windows/collectors/$($c.File).ps1"
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
 
@@ -67,6 +68,15 @@ foreach ($c in $collectors) {
     Assert-True ($null -eq $script:viaArg -and $null -eq $script:viaPipe) "$($c.File): -ReportOnly must not write the field"
     Assert-True ($r.Host.Contains("$($c.Prefix):$json")) "$($c.File): -ReportOnly prints the JSON"
     Assert-True ($r.Out.Count -eq 1 -and ("$($r.Out[0])" | ConvertFrom-Json).written -eq $false) "$($c.File): -ReportOnly summary [$($r.Out -join '|')]"
+
+    # Over NinjaOne's 10000-character multi-line limit: throw, write nothing, never truncate.
+    $ReportOnly = [switch]$false
+    $small = $json; $json = '{"pad":"' + ('x' * 10000) + '"}'
+    $r = Invoke-Block $block
+    $json = $small
+    Assert-True ($null -ne $r.Thrown -and "$($r.Thrown)" -match '10000') "$($c.File): an oversize result must throw naming the limit"
+    Assert-True ($null -eq $script:viaPipe) "$($c.File): an oversize result must not be written"
+    Assert-True ($r.Out.Count -eq 0) "$($c.File): no summary after an oversize result"
 
     # Piped cmdlet missing: warn, print the result, and throw so the loader exits 1. Nothing is written.
     $ReportOnly = [switch]$false
@@ -115,11 +125,11 @@ function Invoke-Child { param([string[]]$Extra)
 $r = Invoke-Child @()
 Assert-True ($r.Code -eq 0) "loader: storage-health exit [$($r.Code)] $($r.Err)"
 $summary = $r.Out[-1] | ConvertFrom-Json
-Assert-True ($summary.field -ceq 'relian_storage_health' -and $summary.written -eq $true) "loader: last stdout line is the summary [$($r.Out[-1])]"
+Assert-True ($summary.field -ceq 'relianStorageHealth' -and $summary.written -eq $true) "loader: last stdout line is the summary [$($r.Out[-1])]"
 $written = [IO.File]::ReadAllText($fieldFile)
-Assert-True ($written.StartsWith('relian_storage_health={')) "loader: field write [$written]"
-Assert-True ($null -ne ($written.Substring('relian_storage_health='.Length) | ConvertFrom-Json).totalDrives) 'loader: the field holds the full JSON'
-Assert-True ($summary.bytes -eq $written.Length - 'relian_storage_health='.Length) 'loader: summary bytes match the field'
+Assert-True ($written.StartsWith('relianStorageHealth={')) "loader: field write [$written]"
+Assert-True ($null -ne ($written.Substring('relianStorageHealth='.Length) | ConvertFrom-Json).totalDrives) 'loader: the field holds the full JSON'
+Assert-True ($summary.bytes -eq $written.Length - 'relianStorageHealth='.Length) 'loader: summary bytes match the field'
 
 Remove-Item -LiteralPath $fieldFile
 $r = Invoke-Child @('-ReportOnly')
