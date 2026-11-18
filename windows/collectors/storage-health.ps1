@@ -16,8 +16,13 @@
     Version: 1.0
 #>
 
+[CmdletBinding()]
+param([switch]$ReportOnly)
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+# Invoke-RelianJob runs this in its own StrictMode Latest scope; this collector was written without it.
+Set-StrictMode -Off
 
 function Write-Status {
     param([string]$Message, [string]$Level = "INFO")
@@ -275,17 +280,24 @@ try {
 
     # Write to NinjaOne custom field
     try {
-        $json | Ninja-Property-Set-Piped relian_storage_health
-        Write-Status "Storage health written to relian_storage_health custom field"
+        if ($ReportOnly) {
+            Write-Host "STORAGE_HEALTH_RESULT:$json"
+        } else {
+            $json | Ninja-Property-Set-Piped relian_storage_health
+            Write-Status "Storage health written to relian_storage_health custom field"
+        }
+        # One short line on stdout for the job loader; the full JSON is in the field.
+        [ordered]@{ field = 'relian_storage_health'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"
+        # Still print the JSON so it can be captured from the run output, then fail the run.
         Write-Host "STORAGE_HEALTH_RESULT:$json"
+        throw
     }
-
-    Write-Status "Storage health collection complete"
 
 } catch {
     Write-Status "Storage health error: $_" "ERROR"
     Write-Status $_.ScriptStackTrace "ERROR"
-    exit 1
+    # No exit: the job loader runs this in its own process, and exit would end it. A throw makes it exit 1.
+    throw
 }
