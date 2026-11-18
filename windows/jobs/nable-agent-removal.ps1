@@ -174,6 +174,16 @@ function Get-NaFolderKillIds {
     }
 }
 
+# True when a service still installed runs from the folder: a protected service, or one whose removal
+# was refused. Deleting the folder would leave that service broken, so the folder stays.
+function Test-NaFolderInUse {
+    param([string]$Folder, $Services)
+    foreach ($svc in @($Services)) {
+        if ((Get-NaExecutable "$($svc.Path)").StartsWith($Folder + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 # The live process to stop for a service, or 0. A stopped service has no process. A process that also
 # hosts another service is not stopped: killing it would take that service down too.
 function Get-NaServiceKillId {
@@ -257,7 +267,9 @@ function Invoke-NableRemovalJob {
             foreach ($svc in $left.Services) {
                 try { & $script:NaRemoveService $svc; $log.Add("service deleted: $($svc.Name)") } catch { $log.Add("service kept: $($svc.Name)") }
             }
+            $stillInstalled = @(& $script:NaReadServices)
             foreach ($dir in $left.Folders) {
+                if (Test-NaFolderInUse $dir $stillInstalled) { $log.Add("folder kept: $dir"); continue }
                 try { & $script:NaRemoveFolder $dir; $log.Add("folder removed: $dir") } catch { $log.Add("folder failed: $dir") }
             }
             foreach ($entry in $left.Apps) {

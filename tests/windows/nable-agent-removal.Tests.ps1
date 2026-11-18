@@ -270,4 +270,15 @@ $svcs = @([pscustomobject]@{ Name = 'Advanced Monitoring Agent'; DisplayName = '
 $ids = @(Get-NaFolderKillIds $amaDir $procs $svcs)
 Assert-Same ($ids -join ',') '10' 'only the agent process in the folder is killed'
 
+# A folder a remaining service runs from is kept: a protected service there, or a refused removal.
+Reset-Test
+Add-Agent
+$script:UninstallWorks = $false
+$script:Svcs.Add((New-Svc 'SentinelAgent' "`"$amaDir\SentinelAgent.exe`""))
+$r = Invoke-Job
+Assert-Same $r.Code 2 'a folder with a protected service fails the run'
+Assert-True (-not ($script:Removed -contains "dir $amaDir")) 'a folder with a protected service is kept'
+Assert-True (@(@($r.Json.log) -like "folder kept:*").Count -eq 1) 'a kept folder is logged'
+Assert-True (-not (Test-NaFolderInUse $amaDir @((New-Svc 'Other' "$amaDir Two\x.exe")))) 'a sibling folder with a longer name is not in use'
+
 Write-Output 'nable-agent-removal: ok'
