@@ -53,16 +53,35 @@ jobs:
             echo "Push delta is empty or too large to classify — running the full review."
             exit 0
           fi
+          # Docs by extension or name only, never by folder (docs/x.ps1 is code).
+          # Must match isDocsPath in scripts/ci/ai-pr-review.mjs.
           while IFS= read -r f; do
             case "$f" in
-              *.md|docs/*|LICENSE) ;;
+              *.md|LICENSE) ;;
               *)
                 echo "Non-doc change in push delta ($f) — running the full review."
                 exit 0 ;;
             esac
           done <<< "$files"
+          # A docs-only PR has no code verdict to keep, so every push gets the docs check.
+          pr_files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
+            --jq '.[] | .filename, (.previous_filename // empty)' 2>/dev/null) || {
+            echo "Listing the PR files failed — running the full review."
+            exit 0
+          }
+          has_code=""
+          while IFS= read -r f; do
+            case "$f" in
+              *.md|LICENSE) ;;
+              *) has_code=1; break ;;
+            esac
+          done <<< "$pr_files"
+          if [ -z "$has_code" ]; then
+            echo "Docs-only PR — running the docs check for this push."
+            exit 0
+          fi
           echo "skip=true" >> "$GITHUB_OUTPUT"
-          reason="the delta vs the previously-reviewed head (\`${baseline}\`) is docs-only (\`**/*.md\`, \`docs/**\`, \`LICENSE\`). The prior review verdict stands for the unchanged code."
+          reason="the delta vs the previously-reviewed head (\`${baseline}\`) is docs-only (\`**/*.md\`, \`LICENSE\`). The prior review verdict stands for the unchanged code."
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
             -f event=COMMENT -f commit_id="${HEAD_SHA}" \
             -f body="AI review skipped for this push: ${reason}" \
@@ -147,7 +166,8 @@ jobs:
                              and (($body | startswith("Code review by ChatGPT"))
                                   or ($body | startswith("LGTM"))
                                   or ($body | startswith("AI review skipped for this push:"))
-                                  or ($body | startswith("AI review incomplete:"))))
+                                  or ($body | startswith("AI review incomplete:"))
+                                  or ($body | startswith("Docs review by ChatGPT"))))
                     | ($body[0:60] | gsub("\n"; " "))'); then
               read_ok=1
               [ -n "$delivered" ] && break

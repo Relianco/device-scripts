@@ -239,12 +239,6 @@ if (-not (Test-IntuneTextHasIpv4 -Text "prefix $sampleAddress suffix")) {
 if (Test-IntuneTextHasIpv4 -Text 'pin 26.04.00.0') {
     Fail 'version pin was treated as an address'
 }
-$banned = @(
-    ('Le' + 'ague'),
-    ('PI' + 'LA'),
-    ('Sit' + 'ka'),
-    ('/' + 'home' + '/')
-)
 $committed = @(
     (Get-Content -LiteralPath $jsonPath -Raw -Encoding utf8),
     (Get-Content -LiteralPath $detectPath -Raw -Encoding utf8),
@@ -254,9 +248,18 @@ foreach ($text in $committed) {
     if (Test-IntuneTextHasIpv4 -Text $text) {
         Fail 'committed file contains an IPv4 address'
     }
-    foreach ($word in $banned) {
-        if ($text.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-            Fail 'committed file contains a banned marker'
+}
+foreach ($packageFile in @(
+        @{ Text = $jsonText; Label = 'intune.json' },
+        @{ Text = $detectText; Label = 'Detect-7Zip.ps1' }
+    )) {
+    # Client names come from RELIAN_CLIENT_DENYLIST (comma-separated), kept outside this public repo. Unset skips the name check.
+    foreach ($word in @(([string]$env:RELIAN_CLIENT_DENYLIST -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+        if ($packageFile.Text.IndexOf($word, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            Fail "$($packageFile.Label) contains a denylisted client name"
         }
+    }
+    if ($packageFile.Text.IndexOf((-join @('/', 'home', '/')), [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        Fail "$($packageFile.Label) contains a home path"
     }
 }
