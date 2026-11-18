@@ -15,7 +15,8 @@ $env:RELIAN_DEPLOY_TEST = '1'
 $script:Files = @(); $script:Bytes = @{}
 $script:RmList = { $script:Files }
 $script:RmReadBytes = { param($Path) , [byte[]]$script:Bytes[$Path] }
-$script:RmMachine = 'TESTBOX01'
+$machine = 'm' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+$script:RmMachine = $machine
 function New-Log { param($Name, $Text, [string]$Enc = 'utf16', [DateTime]$When = [DateTime]::UtcNow)
     $bytes = if ($Enc -eq 'utf16') { [byte[]](@(0xFF, 0xFE) + [Text.Encoding]::Unicode.GetBytes($Text)) } else { [Text.Encoding]::GetEncoding(28591).GetBytes($Text) }
     $path = "C:\fake\$Name"; $script:Bytes[$path] = $bytes
@@ -36,7 +37,7 @@ $body += @(
     'Action ended 10:00:04: RemoveAgentCA. Return value 3.',
     'Action start 10:00:05: Rollback.',
     'Action ended 10:00:06: Rollback. Return value 3.',
-    'Error 1722. There is a problem with this Windows Installer package. contact admin@example.com or 192.0.2.10 on TESTBOX01 as S-1-5-21-111-222-333-1001',
+    "Error 1722. There is a problem with this Windows Installer package. contact admin@example.com or 192.0.2.10 on $machine as S-1-5-21-111-222-333-1001",
     'Property(S): REMOVE = ALL',
     'Property(S): INSTALLLEVEL = 1',
     'Property(S): UILevel = 2',
@@ -87,7 +88,7 @@ Assert-True (-not ($names -contains 'LOGONUSER' -or $names -contains 'ADMINPASSW
 
 # Redaction across every section, and the 300-character cap.
 $all = $r.Line
-foreach ($leak in $userName, 'admin@example.com', '192.0.2.10', 'TESTBOX01', 'S-1-5-21-111', $secretA, $secretB, $otherUser) { Assert-True (-not $all.Contains($leak)) "redacted $leak" }
+foreach ($leak in $userName, 'admin@example.com', '192.0.2.10', $machine, 'S-1-5-21-111', $secretA, $secretB, $otherUser) { Assert-True (-not $all.Contains($leak)) "redacted $leak" }
 foreach ($mark in 'Users\\\\<user>', '<email>', '<ip>', '<machine>', '<sid>', 'SERVICE_TOKEN=<redacted>') { Assert-True ($all -match $mark) "mask $mark present" }
 Assert-Same (Get-RmRedacted "Property(S): ADMINPASSWORD = $secretA and more") 'Property(S): ADMINPASSWORD = <redacted>' 'secret property value'
 Assert-Same @($j.tail).Count 40 'tail of 40'
