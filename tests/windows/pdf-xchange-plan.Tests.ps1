@@ -549,26 +549,33 @@ try {
 
     # A PC with full Adobe Acrobat keeps its .pdf default: msiexec gets SET_AS_DEFAULT="0".
     foreach ($row in @(
-            @{ Acrobat = $true; Action = 'Install'; Installed = '10.6.0.396'; Expect = $true; Note = '*Acrobat found*SET_AS_DEFAULT="0"*' },
-            @{ Acrobat = $false; Action = 'Install'; Installed = '10.6.0.396'; Expect = $false; Note = '*Acrobat not found*' },
-            @{ Acrobat = $true; Action = 'Repair'; Installed = '11.1.2.0'; Expect = $true; Note = '*Acrobat found*' },
-            @{ Acrobat = 'throw'; Action = 'Install'; Installed = ''; Expect = $true; Note = '*Acrobat found*' }
+            @{ Acrobat = $true; Throws = $false; Action = 'Install'; Installed = '10.6.0.396'; Expect = $true; Note = '*Acrobat found*SET_AS_DEFAULT="0"*' },
+            @{ Acrobat = $false; Throws = $false; Action = 'Install'; Installed = '10.6.0.396'; Expect = $false; Note = '*Acrobat not found*' },
+            @{ Acrobat = $true; Throws = $false; Action = 'Repair'; Installed = '11.1.2.0'; Expect = $true; Note = '*Acrobat found*' },
+            @{ Acrobat = $false; Throws = $true; Action = 'Install'; Installed = ''; Expect = $true; Note = '*Acrobat found*' }
         )) {
         Reset-PdfXchangeCase
         $script:InstalledVersion = $row.Installed
         if ($row.Installed -ceq '11.1.2.0') {
             Set-Marker '11.1.2.0'
         }
-        if ($row.Acrobat -ceq 'throw') {
-            $script:TestFullAcrobat = { throw 'registry unreadable' }
+        # A separate flag: $true -ceq 'throw' is $true in PowerShell, so a string sentinel
+        # would send the detected-Acrobat rows down the throw path.
+        $script:FullAcrobat = $row.Acrobat
+        $script:AcrobatChecks = 0
+        if ($row.Throws) {
+            $script:TestFullAcrobat = { $script:AcrobatChecks++; throw 'registry unreadable' }
         } else {
-            $script:FullAcrobat = $row.Acrobat
+            $script:TestFullAcrobat = { $script:AcrobatChecks++; return $script:FullAcrobat }
         }
-        $label = "acrobat $($row.Acrobat) $($row.Action)"
+        $label = "acrobat $($row.Acrobat) throws $($row.Throws) $($row.Action)"
         $code = Invoke-Case -Action $row.Action -PinVersion '11.1.2.0'
         Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectMsi 1 -ExpectMarker '11.1.2.0' -Label $label
         if ($script:MsiCalls[0].KeepPdfDefault -isnot [bool] -or $script:MsiCalls[0].KeepPdfDefault -ne $row.Expect) {
             Fail "$label passed KeepPdfDefault '$($script:MsiCalls[0].KeepPdfDefault)'"
+        }
+        if ($script:AcrobatChecks -ne 1) {
+            Fail "$label checked for Acrobat $($script:AcrobatChecks) times"
         }
         if ($script:PdfXchangeNoteLog.Count -ne 1 -or $script:PdfXchangeNoteLog[0] -notlike $row.Note) {
             Fail "$label logged '$($script:PdfXchangeNoteLog -join ' | ')'"
