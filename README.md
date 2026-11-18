@@ -1,166 +1,156 @@
 # device-scripts
 
-Public scripts that a managed device downloads and runs without a login. A technician pastes one small script into NinjaOne. That script downloads a second script, checks its SHA256, and runs it.
+Public scripts that a managed device downloads and runs without a login. A technician pastes one small loader into NinjaOne; the loader downloads one script from this repo at a pinned commit and runs it.
 
-This repo is public. It holds no client name, device id, token, password, or home-directory path. A package that needs a secret reads it from an environment variable that its caller sets on the device. No package reads a NinjaOne field.
-
-## Pick your reader
-
-- **Technician:** go to [Which script do I paste?](#which-script-do-i-paste) and then your platform.
-- **Developer:** go to [Add a package](#add-a-package) and [Tests](#tests).
-- **Security reviewer:** go to [What runs as SYSTEM](#what-runs-as-system).
+The one rule: nothing runs unless its SHA256 matches the hash the caller passed. An empty hash is the off switch: the run exits 0 and downloads nothing.
 
 ## Which script do I paste?
 
-People confuse these. Each one does a different job.
+Each loader does a different job. Paste the one that matches the task.
 
-- **Install, repair or diagnose on Windows:** paste `windows/runner/Invoke-RelianRunner.ps1`. It runs one package.
-- **A recurring fix on a schedule, on Windows:** paste `windows/runner/Invoke-RelianJob.ps1`. It runs one job module.
-- **Read-only evidence from a device, on Windows:** paste `windows/runner/Invoke-RelianReadJob.ps1` as its own script. It runs one hash-pinned evidence package from `windows/read/` and writes the answer to a custom field.
-- **Inventory on Windows:** paste `windows/bootstrap.ps1`. It runs one collector. It is not an installer.
-- **Linux:** paste `linux/runner/relian-runner.sh`.
-- **macOS:** paste `macos/runner/relian-runner.sh`.
+- **Install, repair or run a package (Windows):** `windows/runner/Invoke-RelianRunner.ps1`.
+- **A recurring fix on a schedule (Windows):** `windows/runner/Invoke-RelianJob.ps1`.
+- **Read-only evidence for the forge (Windows):** `windows/runner/Invoke-RelianReadJob.ps1`.
+- **Hardware, network or storage inventory (Windows):** `windows/bootstrap.ps1`. Not an installer.
+- **Linux:** `linux/runner/relian-runner.sh`.
+- **macOS:** `macos/runner/relian-runner.sh`.
 
-The two shell runners do not source each other. Each is a complete file.
+Run every one as System (Windows) or root (Linux, macOS).
 
-## How the runner model works
+## The hash rule
 
-The same rules hold on every platform. The runner never runs code it has not hashed.
+Every loader except `bootstrap.ps1` refuses to run bytes it has not hashed.
 
-1. You give the runner a package URL and the SHA256 of that file.
-2. The runner downloads the file and compares the hash.
+1. You pass a URL at a commit and the SHA256 of that file.
+2. The loader downloads the file and compares the hash.
 3. It runs the file only when the hash matches.
 
-Rules:
+The rules, the same on every platform:
 
-- **Empty hash:** the run exits 0 and downloads nothing. This is the off switch for a deployment. A URL with userinfo is refused first, even with an empty hash.
-- **Hash mismatch:** the run exits 1 and does not retry.
-- **URL with userinfo** (`https://user@host`, including an empty name `https://@host`): the run exits 1 before any download. All four entry points check this first, even when the hash is empty: the credential is already in the job's parameters, which NinjaOne keeps in its activity history. Inside a package, an empty pin still exits 0 before the installer URL is read.
-- **Retries:** three attempts, for a timeout, a connection or DNS failure, or HTTP 408, 429, 500, 502, 503, or 504. Any other HTTP status gets one attempt.
-- **Pin a commit, not a branch.** A branch moves, and the hash then fails.
-- **Get the hash** with `git show <commit>:<path> | sha256sum`.
+- **Empty hash:** exit 0, nothing downloaded. This is how you switch a deployment off.
+- **Hash mismatch:** exit 1, no retry.
+- **URL with userinfo** (`https://user@host`, or `https://@host`): exit 1 before any download, even with an empty hash. The credential already sits in NinjaOne's activity history.
+- **Retries:** three attempts for a timeout, a connection or DNS failure, or HTTP 408, 429, 500, 502, 503 or 504. Any other status gets one attempt.
+- **Pin a commit, not a branch.** A branch moves and the hash then fails.
+- **Get the hash:** `git show <commit>:<path> | sha256sum`.
 
-### Package arguments
+In the examples below, `<raw>` means `https://raw.githubusercontent.com/Relianco/device-scripts/<commit>`. Put all flags on one line in the NinjaOne Parameters box.
 
-Some packages take extra values. Both the Windows runner and the Linux runner pass them as base64, because NinjaOne rejects these characters in the Parameters box: `& | ; $ > < \` !`. Base64 uses none of them.
+## Security rules
 
-- **Windows:** `-PackageArguments` is base64 of a JSON object. Every value is a string. Make it with `printf '%s' '{"Section":"Summary"}' | base64 -w0`.
-- **Linux:** `--package-arguments-b64` is base64 of `Name=Value` lines.
-- **macOS:** the runner takes no package arguments.
+A pasted loader can run only what you pinned. This is what each piece can and cannot do.
 
-Invalid arguments exit 1 and download nothing. An empty hash still exits 0 before the arguments are read.
+- **Pinned bytes.** A pin names exact bytes, so moving `main` cannot change what a pinned device runs.
+- **No NinjaOne calls from packages.** The runners and packages read and write no NinjaOne field and call no NinjaOne API. A package reports one JSON line on stdout and an exit code.
+- **Field writers are named.** Only `Invoke-RelianReadJob` (its result line), the inventory collectors, and `windows/collectors/runner-report-field.ps1` (the storage ProfileReport) write NinjaOne fields.
+- **One exception.** `windows/bootstrap.ps1` follows a branch, checks no hash, and may read the org field `relian_git_deploy_token`. It runs inventory collectors only. No package reads that token.
+- **Secrets stay off the command line.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyData` for PDF-XChange.
+- **Read-only means tested.** Read-only packages are scanned for write commands or run against stubs.
+- **Changing packages say so.** Each header names what it changes, what it backs up first, and what it never does.
+- **No installs in CI.** CI runs the tests. It does not install an application.
+- **No private data in the repo.** This repo is public. It holds no client name, device id, token, password or home-directory path.
 
 ## Windows
 
-All Windows paths start with `windows/`. Run every script below as **System** in NinjaOne. Windows PowerShell 5.1 is the floor.
+Every Windows path starts with `windows/`. Windows PowerShell 5.1 is the floor. Run every loader as **System** in NinjaOne.
 
-### Install, repair or diagnose: Invoke-RelianRunner
+### Install or run a package: Invoke-RelianRunner
 
-**When:** you want one package run on a device, with a progress dialog for the signed-in user.
+Use it to run one package once, with a progress dialog for the signed-in user.
 
-**Paste:** put `windows/runner/Invoke-RelianRunner.ps1` in the NinjaOne script library. Set **Run As** to System.
+Parameters (the last three are optional):
 
-**Parameters** (all required except the last three):
+- `-PackageUrl`, `-PackageSha256`: the package script and its hash.
+- `-ToolkitUrl`, `-ToolkitSha256`: the PSAppDeployToolkit 4.1.8 zip.
+- `-BrandPackUrl`, `-BrandPackSha256`: the Relian dialog pack zip.
+- `-Action`: `Install`, `Update`, `Repair`, `Reinstall` or `Uninstall`. `Reinstall` is an uninstall then an install.
+- `-PinVersion`: a version, or another pin the package defines. A package that ignores the pin accepts any text, such as `1.0.0`.
+- `-CancelPath`: a file path. If the file exists, the run exits 130. `RELIAN_DEPLOY_CANCEL=1` does the same.
+- `-PackageArguments`: base64 of a flat JSON object of string values. See [Package arguments](#package-arguments).
+- `-ReportOutputPath`: an absolute path. After a `storage-maintenance` ProfileReport run, the runner saves the report line there. Empty saves nothing.
 
-- `-PackageUrl` and `-PackageSha256`: the package script and its hash.
-- `-ToolkitUrl` and `-ToolkitSha256`: the PSAppDeployToolkit 4.1.8 zip and its hash.
-- `-BrandPackUrl` and `-BrandPackSha256`: the Relian dialog pack zip and its hash.
-- `-Action`: `Install`, `Update`, `Repair`, `Reinstall`, or `Uninstall`. `Reinstall` runs an uninstall and then an install.
-- `-PinVersion`: a version, or another pin the package defines. A package that does not use the pin accepts any version text, such as `1.0.0`.
-- `-CancelPath`: optional. A file path. If the file exists, the run exits 130. The environment variable `RELIAN_DEPLOY_CANCEL=1` does the same.
-- `-PackageArguments`: optional. Base64 JSON, described above.
-- `-ReportOutputPath`: optional. An absolute file path. After a successful `storage-maintenance` run with `ProfileReport` `true` and `Mode` `Report`, the runner saves the one report JSON line there. It calls no NinjaOne API. Empty (default) saves nothing. To put the report in a NinjaOne field, use `windows/collectors/runner-report-field.ps1` instead (see `docs/maintenance.md`).
+Exit codes: 0 success or empty hash, 1 failure (a toolkit deferral, 1602, counts as 1), 130 cancelled.
 
-The toolkit and the brand pack come from `https://relianpub.blob.core.windows.net/pub/sec/`. Run `scripts/publish-relian-packs.ps1` to print their URLs. The file name in each URL ends with the file's SHA256, so the hash is the part before `.zip`. It uploads nothing unless you pass `-Publish`. The toolkit pin is in `windows/releases/psadt.json`.
-
-**Exit codes:** 0 success or empty hash, 1 failure, 130 cancelled. A toolkit deferral (1602) is reported as 1.
-
-**Example.** Run `gpo-evidence`, Summary section, on a domain controller. Replace each placeholder with the real value.
+Example: `gpo-evidence`, Summary section, on a domain controller.
 
 ```
--PackageUrl "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/read/gpo-evidence/Invoke-GpoEvidence.ps1" -PackageSha256 "<package-sha256>" -ToolkitUrl "<toolkit-url>" -ToolkitSha256 "<toolkit-sha256>" -BrandPackUrl "<brand-pack-url>" -BrandPackSha256 "<brand-pack-sha256>" -Action "Install" -PinVersion "1.0.0" -PackageArguments "eyJTZWN0aW9uIjoiU3VtbWFyeSJ9"
+-PackageUrl "<raw>/windows/read/gpo-evidence/Invoke-GpoEvidence.ps1"
+-PackageSha256 "<package-sha256>"
+-ToolkitUrl "<toolkit-url>" -ToolkitSha256 "<toolkit-sha256>"
+-BrandPackUrl "<brand-url>" -BrandPackSha256 "<brand-sha256>"
+-Action "Install" -PinVersion "1.0.0"
+-PackageArguments "eyJTZWN0aW9uIjoiU3VtbWFyeSJ9"
 ```
 
-The base64 string above is `{"Section":"Summary"}`. Most read-only packages use `-Action "Install"` to mean "run now". `Uninstall` on a read-only package changes nothing.
+That base64 is `{"Section":"Summary"}`. A read-only package treats `Install` as "run now" and `Uninstall` as a no-op.
 
-### Recurring jobs: Invoke-RelianJob
+### Package arguments
 
-**When:** a fix must run every few hours. The runner downloads an 8.8 MB toolkit each run, so it is too heavy for a schedule. The job loader has no toolkit and no dialog. It downloads one module once, caches it, and then uses no network.
+NinjaOne rejects `& | ; $ > < \` !` in the Parameters box, so extra values travel as base64.
 
-**Paste:** put `windows/runner/Invoke-RelianJob.ps1` in the NinjaOne script library. Set **Run As** to System. It does not work as Current user, because only SYSTEM can write to the cache.
+- **Windows:** base64 of a JSON object whose values are all strings. Make it with `printf '%s' '{"Section":"Summary"}' | base64 -w0`.
+- **Linux:** base64 of `Name=Value` lines.
+- **macOS:** none.
 
-**Parameters:**
+Invalid arguments exit 1 and download nothing. An empty hash still exits 0 first.
 
-- `-ModuleUrl`: the module script, at a commit.
+### Recurring fixes: Invoke-RelianJob
+
+Use it for a fix that runs every few hours. It has no toolkit and no dialog, downloads the module once, caches it, and then uses no network.
+
+Parameters:
+
+- `-ModuleUrl`: the module under `windows/jobs/`, at a commit.
 - `-ModuleSha256`: its hash, 64 lowercase hex characters.
-- `-ReportOnly`: optional switch. Detect and change nothing.
-
-**Example.** Run `scansnap-update-prompts` in report-only mode:
+- `-ReportOnly`: optional switch. Detect drift and change nothing.
 
 ```
--ModuleUrl "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/jobs/scansnap-update-prompts.ps1" -ModuleSha256 "<module-sha256>" -ReportOnly
+-ModuleUrl "<raw>/windows/jobs/scansnap-update-prompts.ps1"
+-ModuleSha256 "<module-sha256>" -ReportOnly
 ```
 
 Drop `-ReportOnly` to let the job fix the drift.
 
-**Schedule:** in the NinjaOne policy, add an "Every N hours" row (not under 1 hour), an "On System Startup" row, and an "On User Login" row for laptops. Each row carries the same Parameters.
+How it runs:
 
-**Version bump:** commit the module, hash it, and edit the URL and hash in every row. A row you have not edited keeps running its cached version.
+- **Cache:** `%ProgramData%\Relian\Jobs\<sha256>.ps1`, SYSTEM only. Every run re-checks the owner, the ACL and the hash, then runs the bytes it hashed, in process.
+- **Refused, exit 1:** a non-`https` URL, a missing parameter, a malformed hash, a wrong cache ACL, Constrained Language Mode.
+- **Run as System only.** A row set to Current user is skipped and shows as success.
+- **Module output:** one JSON line with a `status`. Exit 0 healthy or changed and re-checked, 1 drift under `-ReportOnly`, 2 failed.
 
-**Cache:** `%ProgramData%\Relian\Jobs\<sha256>.ps1`. Its ACL allows SYSTEM only. Every run checks the ACL and the hash again, and runs the bytes it hashed, in process. A wrong ACL or a failed hash refuses the run and leaves the cache in place.
+Scheduling in a NinjaOne policy:
 
-**Also refused, exit 1:** a URL that is not `https`, a missing parameter, a hash that is not 64 lowercase hex characters, and Constrained Language Mode.
+- Add an "Every N hours" row (1 hour minimum), an "On System Startup" row, and an "On User Login" row for laptops, all with the same Parameters.
+- NinjaOne does not replay a run missed while the device was off. The startup and login rows narrow that gap.
+- A failed run shows as FAILURE in activity and raises no alert.
+- To bump a version, commit the module, hash it, and edit every row. An unedited row keeps its cached version.
 
-**A module** prints one JSON line of at most 1024 characters and ends with `exit`:
+### Read-only evidence: Invoke-RelianReadJob
 
-- Status `compliant`: healthy, nothing changed. Exit 0.
-- Status `fixed`: drift fixed and a second check passed. Exit 0.
-- Status `drift`: `-ReportOnly` found drift. Exit 1.
-- Status `failed`: could not read, could not fix, or still wrong after the fix. Exit 2.
+Use it when the forge must ask a device a question and must not be able to change it. The loader holds no job table: the forge passes a URL and hash from its reviewed allowlist.
 
-**Limits:**
+Paste it as a new library script, separate from `Invoke-RelianJob`. Parameters, in this order:
 
-- NinjaOne does not replay a schedule missed while a device is off. The startup and login rows narrow the gap.
-- A row set to Current user is skipped and reported as success. Do not use one.
-- A failing job shows as FAILURE in activity rows and raises no alert.
-
-### Read-only evidence jobs: Invoke-RelianReadJob
-
-**When:** something must ask a device for evidence and must not be able to change it. The loader is static: it holds no job table. The forge executor passes the package URL and SHA256 from its reviewed allowlist (`business/bmcp/device-jobs-read.json` in the forge), and the loader only validates, fetches, verifies and runs. A new read job is a package under `windows/read/<job>/` plus a forge allowlist entry, never a new paste of this file.
-
-**Paste** as a **new** NinjaOne library script (do not replace `Invoke-RelianJob`). Set **Run As** to System. No preset parameters.
-
-**Parameters**, in this order:
-
-- `-PackageUrl`: `https://raw.githubusercontent.com/Relianco/device-scripts/<40-hex commit>/windows/read/<job>/Invoke-<Name>.ps1`, matched case-sensitively. No userinfo, branch name, query, fragment, `%` escape, `..`, backslash or whitespace.
-- `-PackageSha256`: the package's SHA256, 64 lowercase hex characters.
-- `-Job`: lowercase letters, digits and `-`, at most 64 characters, and equal to the `<job>` directory in the URL.
-- `-JobArguments`: base64 (at most 2048 characters, no BOM) of a flat JSON object of string values, for example `{"Section":"Summary"}`. Empty, or `{}`, means none. At most 16 keys. A key is a letter then letters or digits (at most 32), with no duplicate ignoring case, and no key that is a case-insensitive prefix of `DeploymentType`, `Action`, `PinVersion`, `Fix`, `Apply`, `Mode`, `ReportOnly` or a common parameter (PowerShell binds a prefix). A value is 1 to 64 of `A-Z a-z 0-9 { } . -`, not starting with `-`. Which keys and values a job takes is the forge allowlist's rule.
+- `-PackageUrl`: `<raw>/windows/read/<job>/Invoke-<Name>.ps1`, with a 40-hex commit. No branch, query, fragment, `%`, `..`, backslash or whitespace.
+- `-PackageSha256`: 64 lowercase hex characters.
+- `-Job`: the `<job>` folder name from the URL.
+- `-JobArguments`: base64 of a flat JSON object of strings, at most 16 keys. Keys that PowerShell could bind to `Action`, `Fix`, `Mode`, `ReportOnly` and similar are refused.
 - `-RequestId`: 32 lowercase hex characters, echoed in the result.
 
-**Refused, exit 1:** any of the above, a hash mismatch (the download is deleted), a package over 1 MiB, a redirect, a cache with the wrong owner or ACL. There is no empty-hash off switch.
+How it runs:
 
-**Run:** the package is cached like `Invoke-RelianJob` does (SYSTEM-only, owner, ACL and hash re-checked on every run), then runs in a child `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File` with `-DeploymentType Install -Action Install -PinVersion 1.0.0` and the validated arguments sorted by key, without the toolkit. The child is killed after 120 seconds.
+- **Refused, exit 1:** any invalid parameter, a hash mismatch, a package over 1 MiB, a redirect, a bad cache ACL. There is no empty-hash off switch.
+- **Child process:** the cached package runs in a child `powershell` with `-Action Install`, no toolkit, and a 120-second kill timer.
+- **Result:** one JSON line, at most 8000 bytes, printed and written to the device field `relianJobResult` (multi-line text).
+- **One job at a time per device.** The field holds only the latest line, so match `requestId` before you trust it.
 
-**Result:** NinjaOne cuts a script run's activity text to about 40 characters, so the loader prints one JSON line and writes the same line to the device custom field `relianJobResult` (Multi-line text, script Read/Write, API Read-only) with `Ninja-Property-Set-Piped`:
-
-```
-{"schemaVersion":1,"requestId":"<32 hex>","job":"<name>","loaderSha256":"<hash or null>","exitCode":0,"result":{...},"error":null}
-```
-
-The line is at most 8000 UTF-8 bytes; a larger result is dropped and `error` is `result too large`. `exitCode` is -1 when the package did not run or did not finish. `error` is a fixed string; the URL and the arguments are never echoed. The field holds only the latest line, so run **one job at a time per device** and match `requestId` before you trust a line. A refusal writes its line too, so an old result never answers a new request (an invalid `-RequestId` writes nothing). If the field or the cmdlet is missing, the loader prints one line naming only the field and exits 1.
-
-**Change or add a job:** commit the package under `windows/read/<job>/`, take its SHA256 at a commit already on `main`, and pin that URL and hash in the forge allowlist. Review the package like any script that runs as SYSTEM. The loader itself changes only for a loader fix, and then needs a new paste.
-
-**Tests:** `tests/windows/read-job.Tests.ps1`: no table and the exact parameters, every URL, hash and argument refusal with nothing downloaded, the 1 MiB cap, `-MaximumRedirection 0`, an AST scan that lists the only write commands (the cache and the one field write), the piped field write, the 8000-byte cap, and a real child killed at the timeout.
+To add a read job, commit a package under `windows/read/<job>/`, hash it at a commit on `main`, and add that pin to the forge allowlist. The loader itself is pasted again only for a loader fix.
 
 ### Inventory: bootstrap.ps1 and collectors
 
-**When:** you want hardware, network, or storage inventory written to NinjaOne fields.
+Use it to write hardware, network or storage inventory to NinjaOne fields. It is not an installer and checks no hash.
 
-`windows/bootstrap.ps1` downloads one collector from `windows/collectors/` and runs it. It follows a branch (default `main`) and checks no hash. It can read an optional git token from the org custom field `relian_git_deploy_token`. It is the only script here that does. Do not use it to install software.
-
-Parameter: `-ScriptName`, the collector path without the extension.
+`windows/bootstrap.ps1` downloads one collector from `windows/collectors/` on a branch and runs it. Parameters: `-ScriptName` (required), `-RepoUrl`, `-Branch` (default `main`).
 
 ```
 -ScriptName "windows/collectors/hardware-inventory"
@@ -168,167 +158,182 @@ Parameter: `-ScriptName`, the collector path without the extension.
 
 Collectors: `cpu-benchmark`, `hardware-inventory`, `network-audit`, `storage-health`.
 
-`runner-report-field.ps1` in the same folder is not run through bootstrap. Paste it directly: it runs the hash-pinned runner and writes the `storage-maintenance` ProfileReport JSON to a device custom field. Steps are in `docs/maintenance.md`.
+`runner-report-field.ps1` in the same folder is pasted on its own, not run through bootstrap. It runs the hash-pinned runner and writes the `storage-maintenance` ProfileReport to a device field. Steps are in `docs/maintenance.md`.
+
+### Toolkit, brand pack and pins
+
+The runner needs two zips besides the package. Both are content-addressed, so the hash is in the file name.
+
+- **Where:** `https://relianpub.blob.core.windows.net/pub/sec/`. Each file name ends with its SHA256 before `.zip`.
+- **URLs:** `scripts/publish-relian-packs.ps1` prints them. It uploads only with `-Publish`.
+- **Toolkit pin:** `windows/releases/psadt.json` (PSAppDeployToolkit 4.1.8).
+- **Brand pack source:** `windows/brand/relian/`, built by `windows/brand/build-relian-pack.ps1`.
+- **Pin records:** `windows/releases/<name>.json` holds the source URL, file name, SHA256, size and version of each vendor installer. A device never reads it; the same values are inlined in the script, and tests fail when the two disagree.
 
 ### TLS
 
-Windows PowerShell 5.1 on an older host (Server 2016) defaults to TLS 1.0 and 1.1, and Azure Storage refuses those. Every script that downloads adds TLS 1.2 to the session when the host offers neither TLS 1.2 nor TLS 1.3. A host on the system default, or one that already offers TLS 1.2 or 1.3, is left alone, so modern hosts keep TLS 1.3. The change lasts for the process and writes nothing to the registry.
+Old hosts (Server 2016 on Windows PowerShell 5.1) default to TLS 1.0 and 1.1, which Azure Storage refuses. Every script that downloads adds TLS 1.2 for the process when the host offers neither 1.2 nor 1.3. It writes nothing to the registry.
 
-### Packages
+### Applications
 
-One folder per package under `windows/packages/`. The read jobs that `Invoke-RelianReadJob` runs (`diagnose-feature-upgrade`, `diagnose-windows-update`, `maintenance-evidence`, `gpo-evidence`, `wake-device`) are under `windows/read/` instead; the runner can run them too. Each is a single script. In the lists below, "read-only" means the package changes nothing on the device.
+Each downloads a hash-pinned vendor installer, pinned in the script and in `windows/releases/<name>.json`. Most also carry `Detect-<Name>.ps1` and `intune.json` for Intune.
 
-**Applications.** Each downloads a hash-pinned installer from the vendor. The pin is in the script and in `windows/releases/<name>.json`.
+- `7-zip`: 7-Zip.
+- `acrobat`: Adobe Acrobat. `Edition` picks the edition.
+- `adobe-reader`: Adobe Acrobat Reader.
+- `autoelevate`: installs or upgrades the AutoElevate agent and stops its services before an upgrade. A fresh install needs `CompanyName`, `LocationName` and the license key (`LicenseKey` argument or `AE_LICENSE_KEY` variable). `Section` `Evidence` is read-only. See `docs/autoelevate.md`.
+- `chrome`: Google Chrome.
+- `edge`: Microsoft Edge.
+- `everything`: Everything, the file search tool.
+- `firefox`: Mozilla Firefox.
+- `git`: Git for Windows.
+- `global-secure-access`: replaces older Global Secure Access clients with a verified Microsoft bundle. Install and Update only. See [the notes](windows/packages/global-secure-access/README.md).
+- `microsoft-365`: Microsoft 365 Apps with the Office Deployment Tool and a pinned `configuration.xml`. The Office payloads download at install time and are not pinned.
+- `notepadpp`: Notepad++.
+- `pdf-xchange`: PDF-XChange PRO, or an in-place upgrade of V10 or V11. The licence comes only from the `PdfXchangeKeyData` variable; the vendor updater is turned off.
+- `putty`: PuTTY.
+- `quicklook`: QuickLook.
+- `sysmon`: Sysmon.
+- `tailscale`: the Tailscale client, joined with `ClientTag`. The auth key comes only from the `AuthKey` variable.
+- `teams`: Microsoft Teams from a pinned bootstrapper and MSIX.
+- `vlc`: VLC.
+- `wau`: Winget-AutoUpdate. Updates only the app IDs in the allow list at `ListUrl`; self-update is off. Install `winget` first, or it exits 1618.
+- `wazuh`: the Wazuh agent. `Enroll` (for Intune) enrolls a fresh install from `RELIAN_WAZUH_*` variables and never re-enrolls or downgrades.
+- `winget`: Microsoft App Installer (winget) only.
+- `wireguard-client`: WireGuard and one split tunnel as a service. The private key is made and kept on the device; the run prints the public key. See `docs/wireguard-client.md`.
+- `zoom`: Zoom.
 
-- `7-zip`: installs 7-Zip.
-- `acrobat`: installs Adobe Acrobat. Parameter `Edition` picks the edition.
-- `adobe-reader`: installs Adobe Acrobat Reader.
-- `autoelevate`: installs or upgrades the AutoElevate agent. Before an upgrade it stops the agent's services, or exits 1 without running msiexec if one will not stop. An upgrade keeps the stored registration. A fresh install, or a device with no stored registration, needs `CompanyName` and `LocationName` (optional `CompanyInitials`, `ElevationMode` `audit`, `live` or `policy`) in package arguments and the license key, as the `LicenseKey` package argument or the `AE_LICENSE_KEY` environment variable (the argument wins when not empty). The argument way is kept in NinjaOne activity history. `Section` `Evidence` is a read-only report. See `docs/autoelevate.md`.
-- `chrome`: installs Google Chrome.
-- `edge`: installs Microsoft Edge.
-- `everything`: installs Everything, the file search tool.
-- `firefox`: installs Mozilla Firefox.
-- `global-secure-access` — replace older clients with a verified Microsoft bundle. Install and Update only; see [package notes](windows/packages/global-secure-access/README.md).
-- `git`: installs Git for Windows.
-- `microsoft-365`: installs Microsoft 365 Apps with the Office Deployment Tool and a pinned `configuration.xml`. The Office payloads download at install time and are not pinned.
-- `notepadpp`: installs Notepad++.
-- `pdf-xchange`: installs PDF-XChange PRO from a pinned MSI, or upgrades an older V10 or V11 in place with its settings. The licence key never goes on the runner's command line or in this repo. It comes only from the `PdfXchangeKeyData` environment variable, which the caller sets. `PdfXchangeOrganization` and `PdfXchangeUserMail` are optional. After msiexec, `XCVault.exe /AddKeyData /M /S` stores the key for every user. The package turns off the vendor updater and sets the vendor policy that activates the key for each user at first start.
-- `putty`: installs PuTTY.
-- `quicklook`: installs QuickLook.
-- `sysmon`: installs Sysmon.
-- `tailscale`: installs the Tailscale client and joins it with a tag. `ClientTag` comes in package arguments. The auth key never goes on a command line. It comes only from the `AuthKey` environment variable, which the caller sets before it starts the runner. The package reads no NinjaOne field.
-- `teams`: installs Microsoft Teams from a pinned bootstrapper and MSIX.
-- `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
-- `vlc`: installs VLC.
-- `wau`: installs Winget-AutoUpdate from a pinned MSI. It runs winget as SYSTEM once a day (and at logon, except on multi-session hosts) and updates only the app IDs in the allow list it reads from `ListUrl`, a ring folder under `https://relianpub.blob.core.windows.net/pub/wau/`. WAU self-update and the user-context run are off. Exits 1618 (retry) until winget is installed; use the `winget` package first.
-- `wazuh`: installs the Wazuh agent. With `-Enroll` (Intune) it also enrolls a fresh install from the `RELIAN_WAZUH_MANAGER`, `RELIAN_WAZUH_GROUP`, `RELIAN_WAZUH_PREFIX` and `RELIAN_WAZUH_AUTHD_PASS` environment variables, never re-enrolls an agent that has keys, and never downgrades; detection needs the agent at or above the floor, `WazuhSvc`, and a non-empty `client.keys`.
-- `winget`: installs Microsoft App Installer (winget). It does not install other apps.
-- `zoom`: installs Zoom.
-- `browser-extension`: sets browser policy to force-install one extension in Chrome, Edge, Brave, or Firefox. The pin is `<browser>-<extension id>`. It does not download the extension.
-- `printer-tcp`: adds a TCP/IP printer. Parameters `PrinterName`, `PrinterAddress`, and `PrinterModel`. Two driver models are built in: Brother HL-L2370DW and KONICA MINOLTA Universal PCL. Empty values exit 0.
-- `user-check`: installs nothing. It shows a dialog that asks the person for a code, or opens Microsoft sign-in. The pin is the code, or `microsoft-sign-in`.
+### Settings and policy
 
-**Windows maintenance.** These change the device only when you ask.
+These change settings when you ask, and most have a read-only mode.
 
-- `storage-maintenance`: reports disk use and cleanup candidates. `Mode` is `Report` (default) or `Cleanup`. Profile removal is a separate opt-in, off by default: shared devices only, after two reviewed report runs, at most 5 profiles per run, with a cooldown and a hash-chained audit log on the device. `ProfileReport=true` adds a report-only per-profile census. `Tier=Safe` (or `Aggressive`) with `Mode=Cleanup` frees disk space from caches, old temp files and Windows leftovers, never user files or profiles. It never reboots.
-- `update-maintenance`: reports update services, policy, and servicing state. `Mode` is `Report` (default) or `Repair`. It never reboots and never starts Setup.
-- `feature-update`: read-only check of why Windows Update has not offered the next feature update. `Fix` set to `true` repairs only the compatibility appraiser tasks (the main task and its Exp sibling, both of which VDOT disables).
-- `feature-upgrade`: runs an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task, so the job returns quickly. It changes the device.
-- `restart-notice`: restarts a device that has a restart pending, after a notice to the signed-in user. `ReportOnly` set to `true` reports who is signed in and restarts nothing.
-- `outlook-autocomplete`: counts, and with `Fix` set to `true` removes, matching rows in Classic Outlook autocomplete caches. It is read-only by default.
-
-**Diagnostics and evidence.** All read-only. Each prints bounded JSON.
-
-- `outlook-suggestion-sources`: looks for what on a PC could hold or surface one address in Classic Outlook suggestions when the nickname cache has no matching row. `Match` is one ASCII email address (required). `Hours` sets the event log window (default 72, cap 720). `Scope` is `all` (default), `browser`, `outlook` or `office`. `Sections` is `all`, `none`, or a comma list of `processes`, `config`, `roots`, `inventory`, `roamcache`. Every value is a JSON string. An invalid value exits 1; any completed run exits 0 and lists partial failures. An empty pin exits 0 and runs nothing. It writes no file, registry value or custom field, does not load `NTUSER.DAT`, and never prints `Match`, matched text or Outlook event text. Each root stops at 5000 files, the whole scan at 150 seconds, and PST, OST, NST and files over 64 MB are skipped. Output stays under 9500 characters, with the first line `RELIAN_SOURCES_JSON: {...}` at most 4000 UTF-8 bytes. Zero hits in a compressed store is not proof of absence.
-- `diagnose-feature-upgrade`: evidence for a failed or running feature upgrade. `Section` is `Summary` (default), `Rollback`, `Servicing`, `Setup`, `Boot`, or `Maintenance`.
-- `diagnose-windows-update`: Windows Update evidence, at most 7,600 bytes of JSON. `Section` is `Summary` (default: services, pending reboot, policy flags, recent client errors), `History` (update history with failed HRESULTs, last search and install, hotfixes), `Events` (WindowsUpdateClient error digest over 120 days and log coverage), `Policy` (WSUS, WUfB, MDM and pause values; a server URL keeps only its host), `Service` (services, UpdateOrchestrator and WaaSMedic tasks, log file metadata) or `ServicingHistory` (every line of CBS.log, dism.log and the CbsPersist logs, reduced to distinct error codes with first and last seen and counts; stops at 75 s or 1 GiB and says so). Never scans, downloads, installs, starts a service or writes anything.
-- `maintenance-evidence`: reads back the stored reports of the two maintenance packages in pages.
-- `gpo-evidence`: Group Policy state for a domain, at most 8,000 bytes of JSON. `Section` is `Summary` (default), `Gpos`, `Policy`, or `Rsop`. `Gpo` selects one GPO. A `cpassword` is counted and never printed.
-- `wake-device`: sends a Wake-on-LAN magic packet from an online peer to one sleeping device on the same subnet. `Mac` (`AA-BB-CC-DD-EE-FF`, unicast) and `Broadcast` (an RFC 1918 address or `255.255.255.255`) are validated before any socket opens; `Port` is `9` (default) or `7`. Sends 3 UDP packets, writes nothing, prints one JSON line with only the last three MAC octets. A sent packet does not mean the target woke: the caller checks.
-- `net-path-test`: before/after network timings for a remote-access change, measured as the signed-in user. Install arms a one-shot task under `\Relian\` that runs `DelayMinutes` (default 10) after the next logon. It times DNS, TCP connects (median of 10), SMB directory lists and file reads for two scenarios: Global Secure Access Private Access on and off, or, with a WireGuard tunnel (`TunnelName`) away from the office (`OfficePrefixes`), Private Access against the tunnel. It changes the user's `IsPrivateAccessDisabledByUser` value, the tunnel state, the tunnel's NRPT rules and the network guard task only during the run, and restores them. It skips file reads on a metered connection. Results go to `%ProgramData%\Relian\NetTest\results-<run>.json`. `Mode` `Report` prints a summary; `Page` 1 and up prints the raw JSON. Uninstall restores any leftover change and removes the tasks; results stay. Not read-only: it may write one test file into each `WriteTestDirs` folder.
-- `endpoint-evidence`: device and signed-in user state that Intune or a script should have set, at most 8,000 bytes of JSON. Silent: no dialog. `Sections` is `all` (default) or a comma list of `Start`, `Outlook`, `Edge`, `Session`, `Cis`, `Apps`, `Intune`, and the Managed-experience checks `Edition`, `Taskbar`, `DefaultApps`, `QuietWindows`, `Notifications`, `Acrobat`, `EdgeExtras`, `OneDrive`, `Drives`. Run the two groups separately so neither is cut to fit. `AppRegex`, `ShortcutRegex`, `ClickOnceRegex` and `Paths` (`|`-separated) choose what `Apps` and `Intune` look for. Each section is one function, so a new check is one function.
-- `action-probe`: a test package. It writes a marker file under `%ProgramData%\Relian\action-probe` so you can prove the runner passed the right action and pin.
-
-**Policy and configuration.** These change settings.
-
-- `ad-group-member`: adds one AD user to one AD group on a domain controller, optionally until an expiry. Parameters `User` (userPrincipalName, else sAMAccountName), `Group`, and `ExpiresInDays` or `ExpiresOn`. An expiry registers a one-shot task that removes the membership and deletes itself. Uninstall removes the membership. Privileged groups and cloud-only users are refused. `Section` set to `Evidence` is read-only.
-- `eventlog-source`: registers one Windows event log source as SYSTEM so a program that creates its own source stops asking for admin rights. Parameters `Source` (required), `LogName` (default `Application`), and `CreateLog`. `Section` set to `Evidence` is read-only. Uninstall removes only that source and never a log.
-- `ad-stale-computers`: lists stale workstation computer accounts in Active Directory (`Mode` `Report`, the default, read-only). `Mode` `Apply` disables at most 10 computers named in `Names`, sets their Description, and with `Move` set to `true` moves them to `OU=Disabled Computers`. It refuses a server, a domain controller, a cluster object, the Entra Seamless SSO account (`AZUREADSSOACC`) or a computer that is not stale. Before any change it prints the BitLocker recovery and LAPS passwords encrypted to `RecipientKey`, a base64 RSA modulus. `WhatIf` set to `true` changes nothing. It never deletes.
-- `gpo-baseline`: applies an embedded Group Policy definition on the PDC emulator. Plan-only unless `Apply` is `true`. It backs up an existing GPO first. Definitions: `cis-ws2022-dc-low-risk` and `comet-vss-provider-qemu`.
-- `wu-policy`: finds local policy values that turn off automatic Windows Update. `Fix` set to `true` removes them, after a backup. It does nothing on a WSUS-managed device.
+- `ad-group-member`: adds one AD user to one group on a domain controller, optionally until `ExpiresInDays` or `ExpiresOn`. Privileged groups are refused. `Section` `Evidence` is read-only.
+- `ad-stale-computers`: lists stale AD workstations (`Mode` `Report`, the default). `Mode` `Apply` disables at most 10 named in `Names`, after printing their BitLocker and LAPS secrets encrypted to `RecipientKey`. It never deletes.
 - `apply-action`: applies one registry action from `windows/actions/<id>.json`. The pin is `<id>:<sha256 of that file>`.
-- `unity`: [Unity Accounting / esiLaw](windows/packages/unity/README.md) evidence and guarded repairs for repeated event-log and SAP prerequisite elevation prompts. Includes the causes, version limits, verification, and rollback scope.
+- `browser-extension`: force-installs one extension in Chrome, Edge, Brave or Firefox through policy. The pin is `<browser>-<extension id>`.
+- `comet-vss-provider`: keeps `COMET_FORCE_VSS_PROVIDER=system` for Comet Backup on QEMU guests. See `docs/comet-vss-provider.md`.
+- `eventlog-source`: registers one event log `Source` as SYSTEM, so a program stops asking for admin rights. Uninstall removes only that source.
+- `gpo-baseline`: applies an embedded GPO `Definition` on the PDC emulator, after a backup. Plan-only unless `Apply` is `true`.
+- `msi-repair`: repairs one installed MSI product (`msiexec /f`) by `ProductCode` or `DisplayName`. `Section` `Evidence` is read-only.
+- `printer-tcp`: adds a TCP/IP printer from `PrinterName`, `PrinterAddress` and `PrinterModel`. Empty values exit 0.
+- `s1-rebind`: re-binds a SentinelOne agent that lost its console with `SiteToken`, or reinstalls a signed installer when `Reinstall` is `true`. `Section` `Report` is read-only. It never reboots.
+- `thin-manager`: adds or removes one Startup shortcut. It installs nothing.
+- `unity`: Unity Accounting and esiLaw elevation prompt evidence and guarded repairs. See [the notes](windows/packages/unity/README.md).
+- `user-check`: a dialog that asks the person for a code, or opens Microsoft sign-in. The pin is the code, or `microsoft-sign-in`.
+- `wireguard-network-guard`: stops WireGuard tunnels on a trusted office network and starts them off it. See `docs/wireguard-network-guard.md`.
+- `wu-policy`: finds local policy values that turn off automatic Windows Update. `Fix` `true` removes them after a backup. Skips WSUS-managed devices.
 
-- `msi-repair`: repairs one installed Windows Installer product machine-wide (`msiexec /f`). Give `ProductCode` or an exact `DisplayName`. `RepairMode` is `/fa` (default) or `/fomus`. It refuses when the cached MSI is missing unless `SourcePath` is an MSI with the same ProductCode. `Section` set to `Evidence` is read-only. It downloads nothing.
-- `s1-rebind`: re-attaches an installed SentinelOne agent whose console address is `http://localhost` with `SentinelCtl.exe bind <SiteToken>`, then checks `server.mgmtServer` and `server.site`. `Section` set to `Report` is read-only and needs no token. The token is never printed. It never unloads, disables or reboots. When bind does not bind, or at once with `Reinstall` `true` (an agent too old for its console, or a missing agent), it runs a SentinelOne-signed installer from `InstallerPath` or `InstallerUrl` (a `.zip` with one `.exe` is unpacked) matching `InstallerSha256`. It upgrades in place first, so the old agent protects until the new one replaces it. Only with `AllowUninstall` `true` does a refused upgrade fall back to clean (`-c`) and a fresh install. Exit 100, 103 or 104 means reboot to finish.
-- `comet-vss-provider`: keeps `COMET_FORCE_VSS_PROVIDER=system` in Comet Backup's service environment on QEMU guests. `Section` set to `Evidence` is read-only. See [the runbook](docs/comet-vss-provider.md).
-- `wireguard-client`: installs WireGuard for Windows (pinned MSI, x64 or ARM64) and one split tunnel as a service. The private key is generated on the device, kept in a folder only SYSTEM and Administrators can read, and never printed; the run reports the public key for the server peer. Optional NRPT rules and Global Secure Access Private Access off switch. See [the runbook](docs/wireguard-client.md).
-- `wireguard-network-guard`: stops WireGuard tunnel services on a trusted office network and starts them when the laptop leaves. `Check` is read-only. See [the runbook](docs/wireguard-network-guard.md).
+### Maintenance
 
-**Actions** for `apply-action` are in `windows/actions/`: `avd-logon-timeouts`, `azure-ad-sso-zone`, `cloud-kerberos-ticket`, `edge-startup-boost-off`, `fast-startup-off`, `fslogix-cleanup-invalid-sessions`, `fslogix-no-roam-recycle-bin`, `long-paths`, `mapped-drive-reconnect`, `onedrive-dehydrate-team-sites`, and `teams-avd-media`. Each sets one or a few registry values.
+These report by default and change the device only when you ask. None reboots unless named.
+
+- `storage-maintenance`: disk use and cleanup candidates. `Mode` `Cleanup` with `Tier` `Safe` or `Aggressive` frees caches and leftovers, never user files. `ProfileReport` `true` adds a per-profile census. Profile removal is a separate, gated opt-in. See `docs/maintenance.md`.
+- `update-maintenance`: update services, policy and servicing state. `Mode` `Repair` repairs them. Never starts Setup.
+- `feature-update`: why Windows Update has not offered the next feature update. `Fix` `true` re-enables only the appraiser tasks.
+- `feature-upgrade`: an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task.
+- `restart-notice`: restarts a device with a pending restart after a notice. `ReportOnly` `true` restarts nothing.
+- `outlook-autocomplete`: counts matching rows in Classic Outlook autocomplete caches. `Fix` `true` removes them.
+
+### Diagnostics and evidence
+
+All read-only, and each prints bounded JSON. The five under `windows/read/` also run through `Invoke-RelianReadJob`.
+
+- `diagnose-feature-upgrade` (read): a failed or running feature upgrade. `Section` is `Summary`, `Rollback`, `Servicing`, `Setup`, `Boot` or `Maintenance`.
+- `diagnose-windows-update` (read): Windows Update state. `Section` is `Summary`, `History`, `Events`, `Policy`, `Service` or `ServicingHistory` (a CBS and DISM error digest).
+- `gpo-evidence` (read): Group Policy state for a domain. `Section` is `Summary`, `Gpos`, `Policy` or `Rsop`; `Gpo` picks one. A `cpassword` is counted, never printed.
+- `maintenance-evidence` (read): reads back stored storage and update maintenance reports, in pages.
+- `wake-device` (read): sends a Wake-on-LAN packet from an online peer to `Mac` on the same subnet. A sent packet does not prove the target woke.
+- `endpoint-evidence`: device and user state that Intune or a script should have set. `Sections` picks the checks. Silent.
+- `outlook-suggestion-sources`: where on a PC one address (`Match`) could surface in Classic Outlook suggestions. Never prints the address or matched text.
+- `net-path-test`: before and after network timings for a remote-access change, run as the signed-in user. Not strictly read-only: it toggles Private Access or a tunnel during the run and restores it.
+- `action-probe`: a test package that writes a marker file to prove the runner passed the right action and pin.
+
+### Registry actions
+
+`apply-action` reads these from `windows/actions/`. Each sets one or a few registry values.
+
+`avd-logon-timeouts`, `azure-ad-sso-zone`, `cloud-kerberos-ticket`, `edge-startup-boost-off`, `fast-startup-off`, `fslogix-cleanup-invalid-sessions`, `fslogix-no-roam-recycle-bin`, `long-paths`, `mapped-drive-reconnect`, `onedrive-dehydrate-team-sites`, `teams-avd-media`.
 
 ### Jobs
 
-One module per file under `windows/jobs/`.
+One module per file under `windows/jobs/`, run by `Invoke-RelianJob`.
 
-- `scansnap-update-prompts`: stops ScanSnap Online Update from prompting staff who cannot install updates. It marks the watcher's startup entry disabled and stops a running watcher. A machine without ScanSnap reports `compliant`.
-- `nable-agent-removal`: removes the retired N-able N-sight agent (Advanced Monitoring Agent, its GP installer, Web Protection, Network Management, File Cache, patch and Take Control parts). It runs the vendor uninstallers first, then deletes the services, folders and Add/Remove Programs keys they leave. It refuses anything that names NinjaOne, SentinelOne, Global Secure Access, WireGuard or Wazuh. A machine without the agent reports `compliant`. A Group Policy software installation assignment can put the agent back; remove that assignment first.
-- `reset-windowsupdate-auto-policy`: removes only `NoAutoUpdate` and `AUOptions` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU`. First it writes the whole WindowsUpdate policy key to a new JSON file under `%ProgramData%\Relian\WuAutoPolicyBackup` (SYSTEM only, never overwritten); a backup that fails stops the run with nothing deleted. Absent values: nothing changes, status `unchanged`. `-ReportOnly` changes nothing. `-Restore` (optional `-BackupName`) writes the two values back from the newest backup; the job loader forwards only `-ReportOnly`, so `-Restore` needs the module run directly.
-- `restore-windowsupdate-auto-policy`: the undo for `reset-windowsupdate-auto-policy`, runnable through the job loader. It writes `NoAutoUpdate` and `AUOptions` back from the newest backup, only those the backup held, and deletes nothing. `-ReportOnly` names the backup it would use and writes nothing. No backup: exit 2, nothing changed.
-
-### Pin records
-
-`windows/releases/<name>.json` records what was hashed: source URL, file name, SHA256, size, and version. A device never reads it. The runner downloads the package script and nothing else from this repo, so the URL and hash are copied into the script. Tests fail when the script and the JSON disagree.
-
-### Maintenance runbook
-
-`docs/maintenance.md` covers runner parameters and report interpretation for storage and update maintenance.
+- `scansnap-update-prompts`: stops ScanSnap Online Update from prompting staff who cannot install updates.
+- `nable-agent-removal`: removes the retired N-able N-sight agent and its parts, vendor uninstallers first. It refuses anything that names NinjaOne, SentinelOne, Global Secure Access, WireGuard or Wazuh. Remove any GPO that reinstalls the agent first.
+- `reset-windowsupdate-auto-policy`: backs up the WindowsUpdate policy key, then removes only `NoAutoUpdate` and `AUOptions`. A failed backup deletes nothing.
+- `restore-windowsupdate-auto-policy`: the undo. Writes those two values back from the newest backup and deletes nothing.
 
 ## Linux
 
-**Paste:** put `linux/runner/relian-runner.sh` in the NinjaOne script library as a shell script. Run it as root. It downloads one package script, checks its hash, and runs it.
+Paste `linux/runner/relian-runner.sh` as a shell script and run it as root. It follows the hash rule above.
 
-**Parameters** (all but the last are required):
+Parameters (the last is optional):
 
-- `--package-url` and `--package-sha256`
-- `--action`: `Install`, `Update`, `Repair`, `Reinstall`, or `Uninstall`
+- `--package-url`, `--package-sha256`
+- `--action`: `Install`, `Update`, `Repair`, `Reinstall` or `Uninstall`
 - `--pin-version`
-- `--package-arguments-b64`: optional. Base64 of `Name=Value` lines, at most 4,096 bytes. A name must start with a letter. The runner refuses names that change how a process runs, such as `PATH` or anything starting `LD_`. The values reach the package as environment variables. They are not secret, because they sit on the command line.
+- `--package-arguments-b64`: base64 of `Name=Value` lines, at most 4096 bytes. Values reach the package as environment variables. Names like `PATH` or `LD_*` are refused.
 
-An unknown parameter, or a missing one, exits 1. The runner prints no trace, so the arguments do not reach the log.
-
-**Example.** Install Tailscale with a client tag:
+An unknown or missing parameter exits 1. The runner prints no trace, so arguments stay out of the log.
 
 ```
---package-url "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/linux/packages/tailscale/tailscale.sh" --package-sha256 "<package-sha256>" --action "Install" --pin-version "1.104.4" --package-arguments-b64 "Q2xpZW50VGFnPXRhZzpjbGllbnQtZXhhbXBsZQ=="
+--package-url "<raw>/linux/packages/tailscale/tailscale.sh"
+--package-sha256 "<package-sha256>"
+--action "Install" --pin-version "1.104.4"
+--package-arguments-b64 "Q2xpZW50VGFnPXRhZzpjbGllbnQtZXhhbXBsZQ=="
 ```
 
-That base64 string is `ClientTag=tag:client-example`. Set the auth key in the `AuthKey` environment variable of the runner process. Do not put it in package arguments: they are kept in the job's activity history.
+That base64 is `ClientTag=tag:client-example`. Put the auth key in the runner's `AuthKey` environment variable, never in package arguments: those are kept in activity history.
 
-Packages in `linux/packages/`:
+Packages in `linux/packages/`, pinned in `linux/releases/<name>.json`:
 
-- `tailscale`: installs Tailscale from the signed apt repo on Debian and Proxmox VE (bookworm and trixie) and joins it with a tag. The pin version is a floor. It must run as root. It never changes the firewall, sshd, or Proxmox config. The key is read from a `0600` file, not a command line.
-- `wazuh`: installs the Wazuh agent from the official apt (or dnf) repo, key pinned by fingerprint, on Debian, Ubuntu and Proxmox VE. The pin version is a floor (default 4.14.3): a newer agent is never downgraded, and the package is held so the manager's WPK upgrades own versions. It reads `WazuhManager`, `WazuhGroup`, `WazuhNamePrefix` and `WazuhPasswordFile` (a root-only file) from the environment, refuses if one is empty, and never re-enrols while `client.keys` has content. The password is copied from the file, never put on a command line.
-- `diagnose-pve`: read-only diagnostics for Proxmox VE and Debian hosts. It prints plain text: host, kernel, uptime, load, CPU, memory pressure, swap, ZFS ARC, block devices, file systems, RAID, ZFS and LVM state, and disk activity sampled twice (`Sample`, 1 to 10 seconds, default 5). Every command runs under `timeout`. It writes nothing, and exits 0 even when a command is missing.
-- `noop`: installs nothing and exits 0. Use it to prove that the runner, the hash pin, and the NinjaOne wiring work on a host before a real package.
-
-Pin records are in `linux/releases/<name>.json`.
+- `tailscale`: Tailscale from the signed apt repo on Debian and Proxmox VE, joined with a tag. The pin is a floor. The key reaches tailscale through a `0600` file. It never touches the firewall, sshd or Proxmox config.
+- `wazuh`: the Wazuh agent from the official repo, key pinned by fingerprint. The pin is a floor and is never downgraded. Reads `WazuhManager`, `WazuhGroup`, `WazuhNamePrefix` and `WazuhPasswordFile` from the environment.
+- `diagnose-pve`: read-only plain-text diagnostics for Proxmox VE and Debian hosts: memory, ZFS, RAID, LVM and sampled disk activity.
+- `noop`: installs nothing and exits 0. Proves the runner, the pin and the NinjaOne wiring work.
 
 ## macOS
 
-**Paste:** put `macos/runner/relian-runner.sh` in the NinjaOne script library as a shell script. Run it as root. It follows the same rules as the Linux runner, with two differences: it takes no `--package-arguments-b64`, and it hashes with `shasum -a 256`.
+Paste `macos/runner/relian-runner.sh` as a shell script and run it as root. It matches the Linux runner, but takes no `--package-arguments-b64` and hashes with `shasum -a 256`.
 
-**Parameters** (all required): `--package-url`, `--package-sha256`, `--action`, `--pin-version`.
-
-**Example.** Prove the wiring with the `noop` package:
+Parameters, all required: `--package-url`, `--package-sha256`, `--action`, `--pin-version`.
 
 ```
---package-url "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/macos/packages/noop/noop.sh" --package-sha256 "<package-sha256>" --action "Install" --pin-version "1.0.0"
+--package-url "<raw>/macos/packages/noop/noop.sh"
+--package-sha256 "<package-sha256>"
+--action "Install" --pin-version "1.0.0"
 ```
 
-Packages in `macos/packages/`:
+Packages in `macos/packages/`, pinned in `macos/releases/<name>.json`:
 
-- `noop`: installs nothing and exits 0. It exists to test the runner.
+- `noop`: installs nothing and exits 0. It tests the runner.
 
-Pin records are in `macos/releases/<name>.json`.
+## CI and review gates
 
-## What runs as SYSTEM
+A pull request into `main` needs four green checks: `PowerShell tests`, `Windows maintenance regressions`, `Secret scan (betterleaks)` and `review`.
 
-For a security reviewer. This is what a pasted script can and cannot do.
+- **PR verify** (`pr-verify.yml`): on Ubuntu, the PowerShell suite, the reviewer tests and the Linux and macOS runner tests. On `windows-2022`, the tests that need real NTFS ACLs or Windows PowerShell 5.1.
+- **Secret scan** (`secret-scan.yml`): betterleaks scans the PR's commits with the policy from the base commit, so a PR cannot weaken it.
+- **AI PR review** (`ai-pr-review.yml`): a model reviews each changed file and posts one review. It passes when the body starts with `LGTM`.
 
-- **The PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. `Invoke-RelianReadJob` downloads only a package under `windows/read/` of this repo at a 40-hex commit, with no redirect, and the hash it is given. They check each SHA256 before they run anything.
-- **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
-- **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
-- **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. `autoelevate` takes its license key from the `LicenseKey` package argument or the `AE_LICENSE_KEY` environment variable. No package reads `relian_git_deploy_token`.
-- **Read-only packages** are tested for it. The tests scan their source for write commands, or run them against stubs.
-- **Changing packages** say so in their header: what they change, what they back up first, and what they never do (reboot, start Setup, change firewall rules).
-- **Hash pins and the repo.** A pin names exact bytes. Moving `main` cannot change what a pinned device runs.
-- **Secrets.** A secret scan runs before push and in CI. No secret belongs in a command, a commit, or a PR.
-- **Never installed by CI.** CI runs the tests. It does not install an application.
+How the review treats a PR:
 
-## Add a package
+- **Code PR:** reviewed in full, at most 20 files. Keep a PR under 20 files, or the review says "AI review incomplete", which is not a pass. A later push that changes only docs keeps the earlier verdict.
+- **Docs-only PR:** a docs check for client names, device ids, home paths, secrets and contradictions of the code rules. Clean is `LGTM (docs review)`. Findings start with `Docs review by ChatGPT` and block until fixed.
+- **What counts as docs:** `*.md` and `LICENSE`, by extension only. `docs/x.ps1` is code.
 
-Layout for Windows, one folder per package:
+## Contribute and test
+
+New work is a branch from `origin/main` and a pull request into `main`. Never force-push `main`.
+
+1. Once per clone, run `git config core.hooksPath .githooks`. The pre-push hook scans your commits with betterleaks.
+2. Commit as `Relian Technologies <112814130+Relianco@users.noreply.github.com>`.
+3. Stage files by name. Keep client names, device ids, tokens and home-directory paths out of files and PR text.
+4. Do not run an installer on a device unless the maintainer asks.
+
+### Add a package
+
+A Windows package is one folder with one script, a pin record and a test.
 
 ```
 windows/packages/<name>/Invoke-<Name>.ps1
@@ -336,53 +341,34 @@ windows/releases/<name>.json
 tests/windows/<name>-plan.Tests.ps1
 ```
 
-Application packages also carry `Detect-<Name>.ps1` and `intune.json`, so Intune can deploy them. Detect exits 0 when the app is present. `intune.json` holds the install and uninstall command lines.
+An application also carries `Detect-<Name>.ps1` (exit 0 when present) and `intune.json` (install and uninstall lines). A read job goes under `windows/read/<job>/` instead.
 
-Rules for a package script:
+Rules for the script:
 
-1. **The runner copies the script alone.** Inline every URL, hash, and setting. Do not read a sibling file.
-2. **Parameters are not `Mandatory`.** A mandatory parameter prompts when a test dot-sources the file. Take `DeploymentType`, `Action`, `PinVersion`, and your own names as plain strings.
-3. **Check the hash before you run a download.** Exit 1 on a mismatch, and do not retry. Exit 1 on a URL with userinfo. If the script downloads, carry the TLS guard line that the other packages carry.
-4. **Do not call NinjaOne.** Report through stdout and the exit code. `tests/windows/ninja-agnostic.Tests.ps1` fails on a custom-field read or write, `ninjarmm-cli`, the NinjaOne API, or the deploy token.
-5. **Keep it Windows PowerShell 5.1 compatible.**
-6. **Keep PowerShell output bounded.** NinjaOne truncates long output. Print one JSON line.
+1. **It runs alone.** The runner copies only this file, so inline every URL, hash and setting.
+2. **No `Mandatory` parameters.** They prompt when a test dot-sources the file. Take `DeploymentType`, `Action`, `PinVersion` and your own values as strings.
+3. **Hash before you run a download.** Exit 1 on a mismatch or a userinfo URL. Carry the TLS guard line.
+4. **No NinjaOne.** `tests/windows/ninja-agnostic.Tests.ps1` fails on a field read or write, `ninjarmm-cli`, the API or the deploy token.
+5. **Windows PowerShell 5.1 compatible.**
+6. **Bounded output.** NinjaOne truncates long output, so print one JSON line.
 
-For Linux and macOS, add `<platform>/packages/<name>/<name>.sh` and `<platform>/releases/<name>.json`. The JSON records the file name and its SHA256.
+Linux and macOS packages are `<platform>/packages/<name>/<name>.sh` plus `<platform>/releases/<name>.json`.
 
-Then add the package to this README, in its platform section, as a list item that starts with the folder name in backticks. A test fails when you do not.
+Then list it in this README, in its platform section, as a bullet that starts with the folder name in backticks. `tests/readme-inventory.Tests.ps1` fails otherwise.
 
-## Tests
+### Run the tests
 
-Tests are plain scripts. There is no Pester, and no test uses the network.
+Tests are plain scripts with no Pester and no network.
 
 ```
 pwsh -NoProfile -File tests/run-all.ps1
 bash tests/linux/run-tests.sh
 bash tests/macos/run-tests.sh
-node --test tests/ai-pr-review.test.mjs tests/secret-scan.test.mjs
+node --test tests/ai-pr-review.test.mjs \
+  tests/secret-scan.test.mjs
 scripts/scan-secrets.sh
 ```
 
-- `tests/run-all.ps1` runs every `tests/windows/*.Tests.ps1` and every `tests/*.Tests.ps1`. A test exits non-zero to fail.
-- `tests/windows/` holds the PowerShell tests.
-- `tests/readme-inventory.Tests.ps1` fails when a package or job folder on any platform is missing from this README, or when the README lists one that does not exist.
-- `tests/linux/` and `tests/macos/` hold the shell tests. Each `run-tests.sh` runs the platform's test files in order.
-- The Node tests cover the review script and the secret scan.
-
-To test a PowerShell script, set `RELIAN_DEPLOY_TEST=1` and dot-source it. The script then defines its functions and runs nothing. Write the failing test first, then the code.
-
-## CI
-
-Three workflows run on a pull request:
-
-- **PR verify** (`.github/workflows/pr-verify.yml`). On Ubuntu: the PowerShell suite, the reviewer unit tests, the Linux runner tests, and the macOS runner tests. On `windows-2022`: the maintenance, job loader, and ScanSnap tests, which need real NTFS ACLs, and the Comet test under Windows PowerShell 5.1.
-- **Secret scan** (`.github/workflows/secret-scan.yml`). betterleaks scans the commits in the pull request, with a pinned binary. It uses the policy in `.betterleaks.toml` from the base commit, so a pull request cannot weaken it.
-- **AI PR review** (`.github/workflows/ai-pr-review.yml`). A model reads each changed file and posts one review. It starts with `LGTM` when it finds nothing to fix. It reads at most 20 files, so keep each pull request under 20 changed files. When it cannot read every file, it posts "AI review incomplete", and that is not an approval. A push that changes only docs skips a new review.
-
-## Contribute
-
-1. Once per clone: `git config core.hooksPath .githooks`. The pre-push hook scans the commits you push with betterleaks. CI is the hard gate.
-2. Branch from `origin/main`. New work is a pull request into `main`. Do not force-push `main`.
-3. Commit as `Relian Technologies <112814130+Relianco@users.noreply.github.com>`.
-4. Keep client names, device ids, tokens, and home-directory paths out of every file and every PR text.
-5. Stage files by name. Do not run an installer on a device unless the maintainer asks.
+- `tests/run-all.ps1` runs `tests/*.Tests.ps1` and `tests/windows/*.Tests.ps1`. A test exits non-zero to fail.
+- To test a PowerShell script, set `RELIAN_DEPLOY_TEST=1` and dot-source it. It defines its functions and runs nothing.
+- Write the failing test first, then the code.
