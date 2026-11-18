@@ -285,6 +285,66 @@ $spacedArgs = Get-PdfXchangeMsiArgumentList -Mode 'install' -InstallerPath 'C:\P
 if ($null -eq $spacedArgs -or $spacedArgs[1] -cne '"C:\Program Files\PDF X\pdfx.msi"') {
     Fail "spaced installer path was $($spacedArgs -join ' ')"
 }
+# Acrobat PCs: SET_AS_DEFAULT="0" on install and repair. Others: the list above, unchanged.
+foreach ($mode in @('install', 'repair')) {
+    $keepArgs = Get-PdfXchangeMsiArgumentList -Mode $mode -InstallerPath 'C:\cache\pdfx.msi' -ProductCode '' -KeepPdfDefault $true
+    if ($null -eq $keepArgs -or @($keepArgs | Where-Object { $_ -ceq 'SET_AS_DEFAULT="0"' }).Count -ne 1) {
+        Fail "$mode with Acrobat arguments $($keepArgs -join ' ')"
+    }
+    $plainArgs = Get-PdfXchangeMsiArgumentList -Mode $mode -InstallerPath 'C:\cache\pdfx.msi' -ProductCode ''
+    if (@($plainArgs | Where-Object { $_ -like '*SET_AS_DEFAULT*' }).Count -ne 0) {
+        Fail "$mode without Acrobat passed SET_AS_DEFAULT"
+    }
+}
+if ($null -eq (Get-PdfXchangeMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode '{11111111-2222-3333-4444-555555555555}' -KeepPdfDefault $true) -or
+    (Get-PdfXchangeMsiArgumentList -Mode 'uninstall' -InstallerPath '' -ProductCode '{11111111-2222-3333-4444-555555555555}' -KeepPdfDefault $true) -ccontains 'SET_AS_DEFAULT="0"') {
+    Fail 'uninstall carried SET_AS_DEFAULT'
+}
+
+# Full Acrobat, not Reader. The unified 64-bit name is decided by SCAPackageLevel.
+foreach ($row in @(
+        @{ Names = @(); Levels = @(); Expect = $false; Label = 'nothing installed' },
+        @{ Names = @('Adobe Acrobat Reader DC'); Levels = @('1'); Expect = $false; Label = 'Reader DC 32-bit' },
+        @{ Names = @('Adobe Acrobat Reader - English'); Levels = @(); Expect = $false; Label = 'Reader 32-bit' },
+        @{ Names = @('Adobe Acrobat (64-bit)'); Levels = @('1'); Expect = $false; Label = 'unified 64-bit in Reader mode' },
+        @{ Names = @('Adobe Acrobat (64-bit)'); Levels = @('3'); Expect = $true; Label = 'unified 64-bit in Acrobat mode' },
+        @{ Names = @('Adobe Acrobat (64-bit)'); Levels = @(); Expect = $true; Label = 'unified 64-bit with no level' },
+        @{ Names = @('Adobe Acrobat DC'); Levels = @('1'); Expect = $true; Label = 'Acrobat DC 32-bit beside 64-bit Reader' },
+        @{ Names = @('Adobe Acrobat 2020'); Levels = @(); Expect = $true; Label = 'Acrobat 2020' },
+        @{ Names = @('Adobe Acrobat XI Pro'); Levels = @(); Expect = $true; Label = 'Acrobat XI Pro' },
+        @{ Names = @('', 'Adobe Creative Cloud', 'PDF-XChange PRO'); Levels = @('', 'x'); Expect = $false; Label = 'other Adobe and PDF apps' },
+        @{ Names = @(); Levels = @('2'); Expect = $true; Label = 'level 2 without an uninstall name' }
+    )) {
+    $got = Test-PdfXchangeFullAcrobat -DisplayNames $row.Names -PackageLevels $row.Levels
+    if ($got -isnot [bool] -or $got -ne $row.Expect) {
+        Fail "full Acrobat check '$($row.Label)' returned $got"
+    }
+}
+
+# A registry read error must reach the caller, which then keeps the .pdf default.
+# Script-scope functions shadow the cmdlets for this block only.
+function Test-Path { param([string]$LiteralPath) return $LiteralPath -like 'HKLM:*' }
+function Get-ChildItem {
+    [CmdletBinding()]
+    param([string]$LiteralPath)
+    Write-Error 'Requested registry access is not allowed.'
+}
+function Get-ItemProperty {
+    [CmdletBinding()]
+    param([string]$LiteralPath)
+    Write-Error 'Requested registry access is not allowed.'
+}
+$readThrew = $false
+try {
+    [void](Find-PdfXchangeFullAcrobat)
+} catch {
+    $readThrew = $true
+}
+Remove-Item -LiteralPath 'Function:\Test-Path', 'Function:\Get-ChildItem', 'Function:\Get-ItemProperty'
+if (-not $readThrew) {
+    Fail 'a registry read error in the Acrobat check was swallowed'
+}
+
 # A registration value with spaces is one quoted msiexec token.
 $regArgs = Get-PdfXchangeMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\pdfx.msi' -ProductCode '' -Organization 'Example and Partners' -UserMail 'it@example.invalid'
 if ($null -eq $regArgs -or $regArgs.Count -ne 8 -or
@@ -398,8 +458,13 @@ function Reset-PdfXchangeCase {
     $script:SetPdfXchangePolicy = {
         $script:PolicyCalls++
     }
+    $script:PdfXchangeNoteLog = [System.Collections.Generic.List[string]]::new()
+    $script:FullAcrobat = $false
+    $script:TestFullAcrobat = {
+        return $script:FullAcrobat
+    }
     $script:InvokeMsiExec = {
-        param($Mode, $InstallerPath, $ProductCode, $Organization, $UserMail)
+        param($Mode, $InstallerPath, $ProductCode, $Organization, $UserMail, $KeepPdfDefault)
         $existed = $false
         if (-not [string]::IsNullOrWhiteSpace($InstallerPath)) {
             $existed = Test-Path -LiteralPath $InstallerPath
@@ -408,6 +473,7 @@ function Reset-PdfXchangeCase {
                 Mode             = [string]$Mode
                 ProductCode      = [string]$ProductCode
                 InstallerExisted = [bool]$existed
+                KeepPdfDefault   = $KeepPdfDefault
             })
         return 0
     }
@@ -503,6 +569,52 @@ try {
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectMsi 1 -ExpectMarker '11.1.2.0' -Label 'upgrade from V10'
     if ($script:MsiCalls[0].Mode -cne 'install') {
         Fail 'upgrade did not run msiexec /i'
+    }
+
+    # A PC with full Adobe Acrobat keeps its .pdf default: msiexec gets SET_AS_DEFAULT="0".
+    foreach ($row in @(
+            @{ Acrobat = $true; Throws = $false; Action = 'Install'; Installed = '10.6.0.396'; Expect = $true; Note = '*Acrobat found*SET_AS_DEFAULT="0"*' },
+            @{ Acrobat = $false; Throws = $false; Action = 'Install'; Installed = '10.6.0.396'; Expect = $false; Note = '*Acrobat not found*' },
+            @{ Acrobat = $true; Throws = $false; Action = 'Repair'; Installed = '11.1.2.0'; Expect = $true; Note = '*Acrobat found*' },
+            @{ Acrobat = $false; Throws = $true; Action = 'Install'; Installed = ''; Expect = $true; Note = '*Acrobat found*' }
+        )) {
+        Reset-PdfXchangeCase
+        $script:InstalledVersion = $row.Installed
+        if ($row.Installed -ceq '11.1.2.0') {
+            Set-Marker '11.1.2.0'
+        }
+        # A separate flag: $true -ceq 'throw' is $true in PowerShell, so a string sentinel
+        # would send the detected-Acrobat rows down the throw path.
+        $script:FullAcrobat = $row.Acrobat
+        $script:AcrobatChecks = 0
+        if ($row.Throws) {
+            $script:TestFullAcrobat = { $script:AcrobatChecks++; throw 'registry unreadable' }
+        } else {
+            $script:TestFullAcrobat = { $script:AcrobatChecks++; return $script:FullAcrobat }
+        }
+        $label = "acrobat $($row.Acrobat) throws $($row.Throws) $($row.Action)"
+        $code = Invoke-Case -Action $row.Action -PinVersion '11.1.2.0'
+        Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectMsi 1 -ExpectMarker '11.1.2.0' -Label $label
+        if ($script:MsiCalls[0].KeepPdfDefault -isnot [bool] -or $script:MsiCalls[0].KeepPdfDefault -ne $row.Expect) {
+            Fail "$label passed KeepPdfDefault '$($script:MsiCalls[0].KeepPdfDefault)'"
+        }
+        if ($script:AcrobatChecks -ne 1) {
+            Fail "$label checked for Acrobat $($script:AcrobatChecks) times"
+        }
+        if ($script:PdfXchangeNoteLog.Count -ne 1 -or $script:PdfXchangeNoteLog[0] -notlike $row.Note) {
+            Fail "$label logged '$($script:PdfXchangeNoteLog -join ' | ')'"
+        }
+    }
+
+    # No msiexec run, no Acrobat check and no note: an up-to-date PC is left alone.
+    Reset-PdfXchangeCase
+    $script:InstalledVersion = '11.1.2.0'
+    Set-Marker '11.1.2.0'
+    $script:TestFullAcrobat = { Fail 'up-to-date install checked for Acrobat' }
+    $code = Invoke-Case -Action 'Install' -PinVersion '11.1.2.0'
+    Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 0 -ExpectSleeps 0 -ExpectMsi 0 -ExpectMarker '11.1.2.0' -Label 'up to date with Acrobat'
+    if ($script:PdfXchangeNoteLog.Count -ne 0) {
+        Fail 'up-to-date install logged an Acrobat branch'
     }
 
     # XCVault failure fails the run, so Intune retries; no marker.

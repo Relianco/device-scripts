@@ -11,7 +11,7 @@ Each loader does a different job. Paste the one that matches the task.
 - **Install, repair or run a package (Windows):** `windows/runner/Invoke-RelianRunner.ps1`.
 - **A recurring fix on a schedule (Windows):** `windows/runner/Invoke-RelianJob.ps1`.
 - **Read-only evidence for the forge (Windows):** `windows/runner/Invoke-RelianReadJob.ps1`.
-- **Hardware, network or storage inventory (Windows):** `windows/bootstrap.ps1`. Not an installer.
+- **CPU, hardware, network or storage inventory (Windows):** `Invoke-RelianJob.ps1`, with a collector from `windows/collectors/`.
 - **Linux:** `linux/runner/relian-runner.sh`.
 - **macOS:** `macos/runner/relian-runner.sh`.
 
@@ -19,7 +19,7 @@ Run every one as System (Windows) or root (Linux, macOS).
 
 ## The hash rule
 
-Every loader except `bootstrap.ps1` refuses to run bytes it has not hashed.
+Every loader refuses to run bytes it has not hashed.
 
 1. You pass a URL at a commit and the SHA256 of that file.
 2. The loader downloads the file and compares the hash.
@@ -43,7 +43,6 @@ A pasted loader can run only what you pinned. This is what each piece can and ca
 - **Pinned bytes.** A pin names exact bytes, so moving `main` cannot change what a pinned device runs.
 - **No NinjaOne calls from packages.** The runners and packages read and write no NinjaOne field and call no NinjaOne API. A package reports one JSON line on stdout and an exit code.
 - **Field writers are named.** Only `Invoke-RelianReadJob` (its result line), the inventory collectors, and `windows/collectors/runner-report-field.ps1` (the storage ProfileReport) write NinjaOne fields.
-- **One exception.** `windows/bootstrap.ps1` follows a branch, checks no hash, and may read the org field `relian_git_deploy_token`. It runs inventory collectors only. No package reads that token.
 - **Secrets stay off the command line, with one exception.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyData` for PDF-XChange. `autoelevate` also accepts a `LicenseKey` package argument, which NinjaOne keeps in activity history; prefer `AE_LICENSE_KEY`.
 - **Read-only means tested.** Read-only packages are scanned for write commands or run against stubs.
 - **Changing packages say so.** Each header names what it changes, what it backs up first, and what it never does.
@@ -102,7 +101,7 @@ Use it for a fix that runs every few hours. It has no toolkit and no dialog, dow
 
 Parameters:
 
-- `-ModuleUrl`: the module under `windows/jobs/`, at a commit.
+- `-ModuleUrl`: a job under `windows/jobs/` or a collector under `windows/collectors/`, at a commit.
 - `-ModuleSha256`: its hash, 64 lowercase hex characters.
 - `-ReportOnly`: optional switch. Detect drift and change nothing.
 
@@ -118,7 +117,7 @@ How it runs:
 - **Cache:** `%ProgramData%\Relian\Jobs\<sha256>.ps1`, SYSTEM only. Every run re-checks the owner, the ACL and the hash, then runs the bytes it hashed, in process.
 - **Refused, exit 1:** a non-`https` URL, a missing parameter, a malformed hash, a wrong cache ACL, Constrained Language Mode.
 - **Run as System only.** A row set to Current user is skipped and shows as success.
-- **Module output:** one JSON line with a `status`. Exit 0 healthy or changed and re-checked, 1 drift under `-ReportOnly`, 2 failed.
+- **Job output:** one JSON line with a `status`. Exit 0 healthy or changed and re-checked, 1 drift under `-ReportOnly`, 2 failed. Collectors differ; see [Inventory](#inventory-collectors).
 
 Scheduling in a NinjaOne policy:
 
@@ -148,19 +147,22 @@ How it runs:
 
 To add a read job, commit a package under `windows/read/<job>/`, hash it at a commit on `main`, and add that pin to the forge allowlist. The loader itself is pasted again only for a loader fix.
 
-### Inventory: bootstrap.ps1 and collectors
+### Inventory: collectors
 
-Use it to write hardware, network or storage inventory to NinjaOne fields. It is not an installer and checks no hash.
-
-`windows/bootstrap.ps1` downloads one collector from `windows/collectors/` on a branch and runs it. Parameters: `-ScriptName` (required), `-RepoUrl`, `-Branch` (default `main`).
-
-```
--ScriptName "windows/collectors/hardware-inventory"
-```
+Collectors are job modules. Schedule each one with `Invoke-RelianJob`, a commit URL and its SHA256, like any other job. There is no pin record, as with the other jobs.
 
 Collectors: `cpu-benchmark`, `hardware-inventory`, `network-audit`, `storage-health`.
 
-`runner-report-field.ps1` in the same folder is pasted on its own, not run through bootstrap. It runs the hash-pinned runner and writes the `storage-maintenance` ProfileReport to a device field. Steps are in `docs/maintenance.md`.
+```
+-ModuleUrl "<raw>/windows/collectors/hardware-inventory.ps1"
+-ModuleSha256 "<module-sha256>"
+```
+
+- **Output:** the full JSON goes to the field `relian_<name with underscores>` through `Ninja-Property-Set-Piped`, and one short JSON summary line goes to stdout.
+- **`-ReportOnly`:** collects and prints the JSON without writing the field.
+- **Failure:** a failed collection or field write exits 1.
+
+`runner-report-field.ps1` in the same folder is not a job module. Paste it on its own: it runs the hash-pinned runner and writes the `storage-maintenance` ProfileReport to a device field. Steps are in `docs/maintenance.md`.
 
 ### Toolkit, brand pack and pins
 
@@ -192,7 +194,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `global-secure-access`: replaces older Global Secure Access clients with a verified Microsoft bundle. Install and Update only. See [the notes](windows/packages/global-secure-access/README.md).
 - `microsoft-365`: Microsoft 365 Apps with the Office Deployment Tool and a pinned `configuration.xml`. The Office payloads download at install time and are not pinned.
 - `notepadpp`: Notepad++.
-- `pdf-xchange`: PDF-XChange PRO, or an in-place upgrade of V10 or V11. The licence comes only from the `PdfXchangeKeyData` variable; the vendor updater is turned off.
+- `pdf-xchange`: PDF-XChange PRO, or an in-place upgrade of V10 or V11. The licence comes only from the `PdfXchangeKeyData` variable; the vendor updater is turned off. On a PC with full Adobe Acrobat it leaves the `.pdf` default alone.
 - `putty`: PuTTY.
 - `quicklook`: QuickLook.
 - `sysmon`: Sysmon.
@@ -264,7 +266,8 @@ Test tools. These write to the device.
 One module per file under `windows/jobs/`, run by `Invoke-RelianJob`.
 
 - `scansnap-update-prompts`: stops ScanSnap Online Update from prompting staff who cannot install updates.
-- `nable-agent-removal`: removes the retired N-able N-sight agent and its parts, vendor uninstallers first. It refuses anything that names NinjaOne, SentinelOne, Global Secure Access, WireGuard or Wazuh. Remove any GPO that reinstalls the agent first.
+- `nable-agent-removal`: removes the retired N-able N-sight agent and its parts, vendor uninstallers first. Leftover uninstall keys are deleted only after a backup under `%ProgramData%\Relian\NableUninstallKeyBackup`. It refuses anything that names NinjaOne, SentinelOne, Global Secure Access, WireGuard or Wazuh. Remove any GPO that reinstalls the agent first.
+- `inspect-nable-uninstall-keys`: read-only report of leftover N-able uninstall keys and services, for when `nable-agent-removal` keeps one. Writes nothing; `-ReportOnly` is accepted and ignored.
 - `reset-windowsupdate-auto-policy`: backs up the WindowsUpdate policy key, then removes only `NoAutoUpdate` and `AUOptions`. A failed backup deletes nothing.
 - `restore-windowsupdate-auto-policy`: the undo. Writes those two values back from the newest backup and deletes nothing.
 

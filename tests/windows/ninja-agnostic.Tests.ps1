@@ -1,6 +1,6 @@
 # Packages and jobs are RMM-agnostic: they report through stdout and the exit code only.
 # They must not read or write NinjaOne custom fields, call the agent CLI or the NinjaOne API,
-# or read the deploy token. bootstrap.ps1 and collectors/ are the Ninja inventory layer and
+# or read the deploy token. collectors/ are the Ninja inventory layer and
 # are not scanned. No network.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest

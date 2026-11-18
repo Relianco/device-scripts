@@ -5,6 +5,10 @@
 # Only names and folders on the lists below are touched. Anything naming NinjaOne, SentinelOne, Global
 # Secure Access, WireGuard or Wazuh is refused even if it matches. A machine without the agent reports
 # compliant. Exit 0 compliant or removed, 1 drift with -ReportOnly, 2 failed. Prints one JSON line.
+# An Add/Remove Programs key whose software is gone (no uninstaller, or the uninstaller failed and its files
+# are gone, and no agent service remains) is deleted after its values are backed up to a new JSON file under
+# C:\ProgramData\Relian\NableUninstallKeyBackup. No backup, no delete. For an MSI entry the matching
+# Installer\Products registration goes too, but only when the cached package is missing; else it is reported.
 [CmdletBinding()]
 param([switch]$ReportOnly)
 
@@ -17,6 +21,10 @@ Set-StrictMode -Version Latest
 $script:NaNamePattern = '(?i)\A(Advanced Monitoring Agent\b.*|Take Control Agent\b.*|N-able Take Control\b.*|BeAnywhere Support Express\b.*)\z'
 $script:NaPartPattern = '(?i)\A(Request Handler Agent|File Cache Service Agent|Patch Management Service Controller)\z'
 $script:NaPublisherPattern = '(?i)\A(Remote Monitoring Services|SolarWinds MSP|N-able Technologies|LogicNow( Ltd)?|BeAnywhere)\z'
+# The signer's common name on the vendor's own bootstrapper (Agent.exe): the vendor names with any company suffix.
+$script:NaSignerPattern = '(?i)\A(SolarWinds MSP\b.*|N-able\b.*|LogicNow\b.*|Remote Monitoring Services\b.*)\z'
+# The vendor bootstrapper, C:\ProgramData\{GUID}\Agent.exe, which an agent entry can name as its uninstaller.
+$script:NaBootstrapPattern = '(?i)\AC:\\ProgramData\\\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}\\Agent\.exe\z'
 # Agent folders, as a path under Program Files (either view) or ProgramData. The vendor roots hold
 # other products too (backup, for one), so only the agent's own subfolders of them match, never the root.
 $script:NaVendorRoots = @('SolarWinds MSP', 'N-able Technologies')
@@ -50,7 +58,7 @@ $script:NaReadUninstall = {
                     [pscustomobject]@{
                         Key = "$root\$sub"; Id = $sub
                         Name = [string]$key.GetValue('DisplayName'); Publisher = [string]$key.GetValue('Publisher')
-                        Uninstall = [string]$key.GetValue('UninstallString')
+                        Uninstall = [string]$key.GetValue('UninstallString'); InstallLocation = [string]$key.GetValue('InstallLocation')
                         Msi = ([string]$key.GetValue('WindowsInstaller') -eq '1')
                     }
                 } finally { $key.Dispose() }
@@ -58,6 +66,51 @@ $script:NaReadUninstall = {
         } finally { $parent.Dispose() }
     }
 }
+
+$script:NaBackupDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\NableUninstallKeyBackup'
+$script:NaProductsRoot = 'SOFTWARE\Classes\Installer\Products'
+$script:NaUserDataRoot = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products'
+
+# Every value of one key as @{ name; kind; data }. Binary is base64. A key with subkeys throws: the backup
+# would not hold it all. A denied or missing key throws too, so nothing is deleted on a blind read.
+$script:NaReadKeyValues = {
+    param($Path)
+    $key = (Open-NaHklm).OpenSubKey($Path)
+    if (-not $key) { throw 'key not found' }
+    try {
+        if ($key.SubKeyCount) { throw 'key has subkeys' }
+        foreach ($name in $key.GetValueNames()) {
+            $data = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            if ($data -is [byte[]]) { $data = [Convert]::ToBase64String($data) }
+            @{ name = $name; kind = [string]$key.GetValueKind($name); data = $data }
+        }
+    } finally { $key.Dispose() }
+}
+
+$script:NaProtectDir = {
+    param($Path)
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)')
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+# The cached package path of a product, '' when the value is absent, $null when the product has no
+# InstallProperties key.
+$script:NaReadLocalPackage = {
+    param($Packed)
+    $key = (Open-NaHklm).OpenSubKey("$script:NaUserDataRoot\$Packed\InstallProperties")
+    if (-not $key) { return $null }
+    try { return [string]$key.GetValue('LocalPackage') } finally { $key.Dispose() }
+}
+
+$script:NaHasProduct = {
+    param($Packed)
+    $key = (Open-NaHklm).OpenSubKey("$script:NaProductsRoot\$Packed")
+    if ($key) { $key.Dispose(); return $true }
+    return $false
+}
+
+$script:NaDeleteProduct = { param($Packed) (Open-NaHklm).DeleteSubKeyTree("$script:NaProductsRoot\$Packed", $false) }
 
 $script:NaDeleteKey = { param($Path) (Open-NaHklm).DeleteSubKeyTree($Path, $false) }
 
@@ -130,7 +183,53 @@ $script:NaRun = {
 # The Inno uninstaller finishes in a child copy; give it a moment before the re-detect.
 $script:NaSettle = { Start-Sleep -Seconds 10 }
 
+# A subfolder of Relian: its own ACL can be made SYSTEM-only, which the shared root's cannot.
+$script:NaMsiLogDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\NableMsiLogs'
+# Created SYSTEM-only when missing. An existing folder must pass the same trust check as a bootstrapper folder
+# (real folder, privileged owner, no unprivileged writer), else the job stops before msiexec runs.
+$script:NaPrepareLogDir = {
+    param($Dir)
+    if (-not (Test-Path -LiteralPath $Dir)) { $null = New-Item -ItemType Directory -Path $Dir -Force; & $script:NaProtectDir $Dir; return }
+    if (-not (& $script:NaDirTrusted $Dir)) { throw 'msi log folder not trusted' }
+}
+$script:NaReadLogTail = { param($Path) @(Get-Content -LiteralPath $Path -Tail 20) }
+$script:NaDeleteFile = { param($Path) Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+# Status and signer subject of a file's Authenticode signature.
+$script:NaGetSignature = {
+    param($Path)
+    $s = Get-AuthenticodeSignature -LiteralPath $Path
+    [pscustomobject]@{ Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }) }
+}
+# True when one file or folder has a privileged owner and no ACL rule, inherited included, that lets anyone
+# else write, create or delete. SIDs, not names, so a localized Windows reads the same. Any doubt is false.
+$script:NaPathTrusted = {
+    param($Path)
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+        if ($script:NaTrustedSids -notcontains [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
+            [pscustomobject]@{ Identity = [string]$_.IdentityReference.Value; Allow = ($_.AccessControlType -eq 'Allow'); Rights = [int]$_.FileSystemRights } })
+        return (Test-NaAclClosed $rules)
+    } catch { return $false }
+}
+
+# True only for a real folder, and every file and folder in it, that passes NaPathTrusted and holds no link:
+# a user-writable folder or file could hold a planted DLL beside a signed Agent.exe, or redirect a log.
+$script:NaDirTrusted = {
+    param($Dir)
+    try {
+        $items = @(Get-Item -LiteralPath $Dir -Force) + @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -ErrorAction Stop)
+        foreach ($item in $items) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+            if (-not (& $script:NaPathTrusted $item.FullName)) { return $false }
+        }
+        return $true
+    } catch { return $false }
+}
+
 $script:NaFileExists = { param($Path) Test-Path -LiteralPath $Path -PathType Leaf }
+# A path that cannot be tested counts as present: the key is then kept.
+$script:NaPathExists = { param($Path) try { Test-Path -LiteralPath $Path } catch { $true } }
 
 function Test-NaAppEntry {
     param($Entry)
@@ -246,26 +345,138 @@ function Test-NaOrphanKey {
     return $exe -and (Test-NaInAgentFolder $exe) -and -not (& $script:NaFileExists $exe)
 }
 
+# Windows Installer's packed GUID: the first three groups reversed, the rest with each byte's two digits swapped.
+function ConvertTo-NaPackedGuid {
+    param([string]$Guid)
+    $m = [regex]::Match($Guid, '\A\{([0-9A-Fa-f]{8})-([0-9A-Fa-f]{4})-([0-9A-Fa-f]{4})-([0-9A-Fa-f]{4})-([0-9A-Fa-f]{12})\}\z')
+    if (-not $m.Success) { throw "not a product code: $Guid" }
+    $rev = { param($t) $a = $t.ToCharArray(); [Array]::Reverse($a); -join $a }
+    $tail = ($m.Groups[4].Value + $m.Groups[5].Value) -replace '(.)(.)', '$2$1'
+    return ((& $rev $m.Groups[1].Value) + (& $rev $m.Groups[2].Value) + (& $rev $m.Groups[3].Value) + $tail).ToUpperInvariant()
+}
+
+# Why a key left after the removal steps is proven orphaned, or $null when it is not. The key may be the
+# only sign the software is still installed, so any doubt keeps it.
+function Get-NaOrphanReason {
+    param($Entry, $Attempted, $Services)
+    if (Test-NaProtected "$($Entry.Name) $($Entry.Publisher) $($Entry.Uninstall)") { return $null }
+    if (@($Services).Count) { return $null }
+    if (Test-NaOrphanKey $Entry) { return 'uninstaller gone' }
+    $isMsi = $Entry.Msi -and $Entry.Id -match '\A\{[0-9A-Fa-f-]{36}\}\z'
+    if (-not $Entry.Uninstall -and -not $isMsi) { return 'no uninstaller' }
+    if (-not (@($Attempted) -contains $Entry.Key)) { return $null }
+    $prop = $Entry.PSObject.Properties['InstallLocation']
+    $paths = @(if ($prop -and $prop.Value) { ([string]$prop.Value).TrimEnd('\') })
+    $exe = Get-NaExecutable "$($Entry.Uninstall)"
+    if ($exe -and $exe -notmatch '(?i)(\A|\\)msiexec(\.exe)?\z') { $paths += $exe }
+    foreach ($path in $paths) { if (& $script:NaPathExists $path) { return $null } }
+    if ($paths.Count) { return 'uninstall failed, files gone' }
+    return $null
+}
+
+# Writes the key's values to a new file and reads it back. CreateNew: nothing is overwritten. Throws on failure.
+function Write-NaBackup {
+    param([string]$KeyPath, $Values)
+    $null = New-Item -ItemType Directory -Path $script:NaBackupDir -Force
+    & $script:NaProtectDir $script:NaBackupDir
+    $name = 'backup-{0}-{1}.json' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), [Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $path = Join-Path $script:NaBackupDir $name
+    $want = @($Values)
+    $doc = [ordered]@{ schemaVersion = 1; createdUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); key = "HKLM\$KeyPath"; values = $want }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($doc | ConvertTo-Json -Depth 5))
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
+    $back = (Get-Content -LiteralPath $path -Raw -Encoding UTF8) | ConvertFrom-Json
+    $got = @($back.values)
+    $flat = { param($v) "$($v.name)|$($v.kind)|$(@($v.data) -join [char]0)" }
+    if ($back.key -ne $doc.key -or $got.Count -ne $want.Count) { throw 'backup read-back differs' }
+    for ($i = 0; $i -lt $want.Count; $i++) { if ((& $flat $want[$i]) -ne (& $flat $got[$i])) { throw 'backup read-back differs' } }
+    return $name
+}
+
+# Bootstrapper folders (C:\ProgramData\{GUID}) that an agent key names as its uninstaller and that still exist.
+function Get-NaBootstrapFolders {
+    param($Apps)
+    foreach ($a in @($Apps)) { $d = Get-NaBootstrapperDir $a; if ($d -and (& $script:NaPathExists $d)) { $d } }
+}
+
 function Get-NaState {
+    $apps = @(& $script:NaReadUninstall | Where-Object { Test-NaAppEntry $_ })
     [pscustomobject]@{
-        Apps = @(& $script:NaReadUninstall | Where-Object { Test-NaAppEntry $_ })
+        Apps = $apps
         Services = @(& $script:NaReadServices | Where-Object { Test-NaServiceEntry $_ })
-        Folders = @(@(foreach ($parent in & $script:NaFolderParents) { & $script:NaListFolders $parent }) |
+        Folders = @(@(foreach ($parent in & $script:NaFolderParents) { & $script:NaListFolders $parent }) + @(Get-NaBootstrapFolders $apps) |
                 Where-Object { $_ -and -not (Test-NaProtected $_) } | Sort-Object -Unique)
     }
 }
 
 function Test-NaClean { param($State) return ($State.Apps.Count + $State.Services.Count + $State.Folders.Count) -eq 0 }
 
-# The vendor command for one entry: msiexec /x for an MSI, else the Inno uninstaller, silently.
+# SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER.
+$script:NaTrustedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
+
+# True when no Allow rule gives write data, append, delete, delete child, change permissions or take ownership
+# (FileSystemRights bits) to anyone but the trusted SIDs. An allowlist: an unlisted user or group refuses.
+function Test-NaAclClosed {
+    param($Rules)
+    $risky = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000
+    foreach ($r in @($Rules)) {
+        if ($r.Allow -and $script:NaTrustedSids -notcontains $r.Identity -and ($r.Rights -band $risky)) { return $false }
+    }
+    return $true
+}
+
+# The folder of the vendor bootstrapper an N-able entry names as its uninstaller, or $null. Only the exact
+# C:\ProgramData\{GUID}\Agent.exe shape, and only for an entry on the name list that is not protected.
+function Get-NaBootstrapperDir {
+    param($Entry)
+    if (Test-NaProtected "$($Entry.Name) $($Entry.Publisher) $($Entry.Uninstall)") { return $null }
+    if ($Entry.Name -notmatch $script:NaNamePattern -and $Entry.Id -notmatch $script:NaNamePattern) { return $null }
+    $exe = Get-NaExecutable "$($Entry.Uninstall)"
+    if ($exe -notmatch $script:NaBootstrapPattern) { return $null }
+    return $exe.Substring(0, $exe.LastIndexOf([char]92))
+}
+
+# The vendor's own uninstall for a key-1 style entry, run with exactly the arguments of its UninstallString
+# (KEY=TRUE or KEY=FALSE only). $null when the entry is not that shape; Refused is set when any check fails.
+function Get-NaBootstrapperCommand {
+    param($Entry)
+    $dir = Get-NaBootstrapperDir $Entry
+    if (-not $dir) { return $null }
+    $exe = "$dir\Agent.exe"
+    $refuse = { param($Why) [pscustomobject]@{ File = $null; Arguments = @(); Log = $null; Refused = $Why } }
+    if ($Entry.Msi) { return & $refuse 'MSI entry' }
+    $rest = ("$($Entry.Uninstall)".Trim() -replace '\A"[^"]+"', '' -replace '\A\S+?\.exe(?=\s|\z)', '').Trim()
+    $argv = @(if ($rest) { $rest -split '\s+' })
+    foreach ($a in $argv) { if ($a -notmatch '\A[A-Za-z]+=(TRUE|FALSE)\z') { return & $refuse 'unexpected arguments' } }
+    if (-not (& $script:NaFileExists $exe)) { return & $refuse 'file missing' }
+    if (-not (& $script:NaDirTrusted $dir)) { return & $refuse 'folder not trusted' }
+    $sig = & $script:NaGetSignature $exe
+    if ("$($sig.Status)" -ne 'Valid') { return & $refuse 'signature not valid' }
+    $cn = [regex]::Match("$($sig.Subject)", '(?:\A|,\s*)CN=(?:"(?<c>[^"]+)"|(?<c>[^,]+))').Groups['c'].Value.Trim()
+    if (-not $cn -or (Test-NaProtected $sig.Subject) -or $cn -notmatch $script:NaSignerPattern) { return & $refuse 'publisher not N-able' }
+    return [pscustomobject]@{ File = $exe; Arguments = $argv; Log = $null; Refused = $null }
+}
+
+function Get-NaMsiLogPath { "$($script:NaMsiLogDir.TrimEnd('\'))\nable-msi-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')).log" }
+
+# One MSI log line with user profile paths, emails and SIDs masked, cut to 300 characters.
+function Get-NaRedactedLine {
+    param([AllowEmptyString()][string]$Line)
+    $t = $Line -replace '(?i)([A-Z]:\\Users\\)[^\\]+', '${1}USER' -replace '[\w.+-]+@[\w-]+(\.[\w-]+)+', 'EMAIL' -replace '(?i)\bS-1-\d+(-\d+)+', 'SID'
+    return $t.Substring(0, [Math]::Min($t.Length, 300))
+}
+
+# The vendor command for one entry: msiexec /x for an MSI (with a verbose log), else the Inno uninstaller, silently.
 function Get-NaUninstallCommand {
     param($Entry)
     if ($Entry.Id -match '\A\{[0-9A-Fa-f-]{36}\}\z' -and ($Entry.Msi -or $Entry.Uninstall -match '(?i)msiexec')) {
-        return [pscustomobject]@{ File = 'msiexec.exe'; Arguments = @('/x', $Entry.Id, '/qn', '/norestart') }
+        $logPath = Get-NaMsiLogPath
+        return [pscustomobject]@{ File = 'msiexec.exe'; Arguments = @('/x', $Entry.Id, '/qn', '/norestart', '/l*v', $logPath); Log = $logPath }
     }
     $m = [regex]::Match("$($Entry.Uninstall)", '\A\s*(?:"(?<e>[^"]+)"|(?<e>.+?\.exe)(?=\s|\z))')
     if ($m.Success -and $m.Groups['e'].Value -match '(?i)\\unins\d{3}\.exe\z') {
-        return [pscustomobject]@{ File = $m.Groups['e'].Value; Arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') }
+        return [pscustomobject]@{ File = $m.Groups['e'].Value; Arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'); Log = $null }
     }
     return $null
 }
@@ -275,6 +486,7 @@ function Invoke-NableRemovalJob {
     $log = [Collections.Generic.List[string]]::new()
     $state = [pscustomobject]@{ Apps = @(); Services = @(); Folders = @() }
     $status = 'failed'; $exitCode = 2; $problem = ''
+    $kept = @(); $backups = @(); $msiTail = @()
     try {
         $state = Get-NaState
         if (Test-NaClean $state) {
@@ -282,28 +494,79 @@ function Invoke-NableRemovalJob {
         } elseif ($ReportOnly) {
             $status = 'drift'; $exitCode = 1
         } else {
+            $attempted = [Collections.Generic.List[string]]::new()
+            $kept = [Collections.Generic.List[string]]::new()
+            $backups = [Collections.Generic.List[string]]::new()
+            $msiTail = [Collections.Generic.List[string]]::new()
             # 1. Vendor uninstallers. The re-detect below decides the result, not their exit codes.
             foreach ($entry in $state.Apps) {
                 $cmd = Get-NaUninstallCommand $entry
+                if (-not $cmd) {
+                    $cmd = Get-NaBootstrapperCommand $entry
+                    if ($cmd -and $cmd.Refused) { $log.Add("bootstrapper uninstall refused: $($entry.Name) ($($cmd.Refused))"); continue }
+                }
                 if (-not $cmd) { $log.Add("no uninstaller: $($entry.Name)"); continue }
                 if ($cmd.File -ne 'msiexec.exe' -and -not (& $script:NaFileExists $cmd.File)) { $log.Add("uninstaller missing: $($entry.Name)"); continue }
+                if ($cmd.Log) { & $script:NaPrepareLogDir ($cmd.Log.Substring(0, $cmd.Log.LastIndexOf([char]92))) }
                 $code = & $script:NaRun $cmd.File $cmd.Arguments
+                $attempted.Add($entry.Key)
                 $log.Add("uninstall $($entry.Name) exit $code")
+                if (-not $cmd.Log) { continue }
+                if (@(0, 1605, 3010) -contains $code) { & $script:NaDeleteFile $cmd.Log; continue }
+                # Any other code keeps the log; its tail goes into the output.
+                $log.Add("msi log kept: $($cmd.Log)")
+                $msiTail.Add("-- $($entry.Id)")
+                try { foreach ($l in @(& $script:NaReadLogTail $cmd.Log | Select-Object -Last 20)) { $msiTail.Add((Get-NaRedactedLine "$l")) } }
+                catch { $msiTail.Add('msi log unreadable') }
             }
             if ($state.Apps.Count) { & $script:NaSettle }
             # 2. Whatever the uninstallers left: services, then folders, then Add/Remove Programs keys.
             $left = Get-NaState
+            # The bootstrapper folders the keys named go too, even when the uninstall dropped the key, but never
+            # while a key still names one: a failed uninstall must not lose its uninstaller, or the key looks orphaned.
+            $named = @($left.Apps | ForEach-Object { Get-NaBootstrapperDir $_ })
+            $folders = @(@($left.Folders) + @(Get-NaBootstrapFolders $state.Apps) | Where-Object { $named -notcontains $_ } | Sort-Object -Unique)
             foreach ($svc in $left.Services) {
                 try { & $script:NaRemoveService $svc; $log.Add("service deleted: $($svc.Name)") } catch { $log.Add("service kept: $($svc.Name)") }
             }
             $stillInstalled = @(& $script:NaReadServices)
-            foreach ($dir in $left.Folders) {
+            foreach ($dir in $folders) {
                 if (Test-NaFolderInUse $dir $stillInstalled) { $log.Add("folder kept: $dir"); continue }
                 try { & $script:NaRemoveFolder $dir; $log.Add("folder removed: $dir") } catch { $log.Add("folder failed: $dir") }
             }
+            # Services are read again: a service the steps above could not remove blocks every key delete.
+            $svcNow = @(& $script:NaReadServices | Where-Object { Test-NaServiceEntry $_ })
             foreach ($entry in $left.Apps) {
-                if (Test-NaOrphanKey $entry) { & $script:NaDeleteKey $entry.Key; $log.Add("uninstall key removed: $($entry.Name)") }
-                else { $log.Add("uninstall key kept: $($entry.Name)") }
+                $why = Get-NaOrphanReason $entry $attempted $svcNow
+                if (-not $why) {
+                    $log.Add("uninstall key kept: $($entry.Name)")
+                    # An MSI still registered with its cached package is reported, never edited by hand.
+                    if ($entry.Msi -and $entry.Id -match '\A\{[0-9A-Fa-f-]{36}\}\z') {
+                        try {
+                            $packed = ConvertTo-NaPackedGuid $entry.Id
+                            $pkg = & $script:NaReadLocalPackage $packed
+                            if ((& $script:NaHasProduct $packed) -and $pkg -and (& $script:NaFileExists $pkg)) { $kept.Add("MSI $($entry.Id) still registered: cached package on disk") }
+                        } catch { }
+                    }
+                    continue
+                }
+                try {
+                    $backups.Add((Write-NaBackup $entry.Key @(& $script:NaReadKeyValues $entry.Key)))
+                    & $script:NaDeleteKey $entry.Key
+                    $log.Add("uninstall key removed: $($entry.Name) ($why)")
+                } catch { $log.Add("uninstall key kept: $($entry.Name) (backup or delete failed)"); continue }
+                if ($entry.Msi -and $entry.Id -match '\A\{[0-9A-Fa-f-]{36}\}\z') {
+                    try {
+                        $packed = ConvertTo-NaPackedGuid $entry.Id
+                        # Not backed up on purpose: this registration is deleted only when the cached package is missing or unrecorded, so Windows Installer could not repair or uninstall from it anyway. The Add/Remove Programs key, which names the product, is backed up above.
+                        if (& $script:NaHasProduct $packed) {
+                            $pkg = & $script:NaReadLocalPackage $packed
+                            if ($null -eq $pkg) { $kept.Add("Installer Products $packed kept: no InstallProperties, package unknown") }
+                            elseif ($pkg -and (& $script:NaFileExists $pkg)) { $kept.Add("Installer Products $packed kept: cached package on disk") }
+                            else { & $script:NaDeleteProduct $packed; $log.Add("installer product removed: $packed") }
+                        }
+                    } catch { $kept.Add("Installer Products for $($entry.Id) kept: $($_.Exception.Message)") }
+                }
             }
             $after = Get-NaState
             if (Test-NaClean $after) {
@@ -319,7 +582,7 @@ function Invoke-NableRemovalJob {
     [pscustomobject]@{
         ExitCode = $exitCode; Status = $status; ReportOnly = [bool]$ReportOnly
         Apps = @($state.Apps | ForEach-Object { $_.Name }); Services = @($state.Services | ForEach-Object { $_.Name })
-        Folders = @($state.Folders); Log = @($log); Error = $problem
+        Folders = @($state.Folders); Log = @($log); Left = @($kept); Backups = @($backups); MsiLogTail = @($msiTail); Error = $problem
     }
 }
 
@@ -336,7 +599,7 @@ function ConvertTo-NableJobLine {
     [ordered]@{
         job = 'nable-agent-removal'; status = $Result.Status; reportOnly = $Result.ReportOnly
         apps = @(& $cut $Result.Apps 10 64); services = @(& $cut $Result.Services 10 64); folders = @(& $cut $Result.Folders 10 100)
-        log = @(& $cut $Result.Log 30 100); error = Get-NaSafeText $Result.Error 200
+        log = @(& $cut $Result.Log 30 100); left = @(& $cut $Result.Left 10 100); backups = @(& $cut $Result.Backups 10 64); msiLogTail = @(& $cut $Result.MsiLogTail 42 300); error = Get-NaSafeText $Result.Error 200
     } | ConvertTo-Json -Compress
 }
 

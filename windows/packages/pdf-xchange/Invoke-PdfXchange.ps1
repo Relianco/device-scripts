@@ -178,6 +178,7 @@ function Get-PdfXchangePlan {
 }
 
 $script:PdfXchangeErrorLog = [System.Collections.Generic.List[string]]::new()
+$script:PdfXchangeNoteLog = [System.Collections.Generic.List[string]]::new()
 
 function Add-PdfXchangeError {
     param([string]$Message)
@@ -572,13 +573,91 @@ function Get-PdfXchangeRegistryProduct {
     }
 }
 
+# Full Adobe Acrobat (Standard or Pro), not Reader. Reader is a free viewer: a PC with only
+# Reader gets the normal install. The 64-bit unified app registers as "Adobe Acrobat (64-bit)"
+# in both Reader and Acrobat mode, so that name is decided by SCAPackageLevel under
+# HKLM\SOFTWARE\Adobe\Adobe Acrobat\DC\Installer: 1 is Reader, above 1 is Acrobat.
+# Other names count when they start with "Adobe Acrobat" and not "Adobe Acrobat Reader"
+# (Acrobat DC, 2020, XI Pro). A 64-bit name with no level counts: leaving the default alone is
+# the safe side.
+function Test-PdfXchangeFullAcrobat {
+    param(
+        [string[]]$DisplayNames = @(),
+        [string[]]$PackageLevels = @()
+    )
+    $levels = @($PackageLevels | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    foreach ($level in $levels) {
+        $parsed = 0
+        if ([int]::TryParse($level.Trim(), [ref]$parsed) -and $parsed -gt 1) {
+            return $true
+        }
+    }
+    foreach ($raw in $DisplayNames) {
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            continue
+        }
+        $name = $raw.Trim()
+        if (-not $name.StartsWith('Adobe Acrobat', [System.StringComparison]::Ordinal) -or
+            $name.StartsWith('Adobe Acrobat Reader', [System.StringComparison]::Ordinal)) {
+            continue
+        }
+        if ($name -notmatch '64-bit') {
+            return $true
+        }
+        if ($levels.Count -eq 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Read errors stop here, so the caller keeps the .pdf default. A missing key is not an error.
+function Find-PdfXchangeFullAcrobat {
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($root in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+        )) {
+        if (-not (Test-Path -LiteralPath $root)) {
+            continue
+        }
+        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+            $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+            $names.Add((Get-PdfXchangePropertyText -Object $props -Name 'DisplayName'))
+        }
+    }
+    $levels = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in @(
+            'HKLM:\SOFTWARE\Adobe\Adobe Acrobat\DC\Installer',
+            'HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe Acrobat\DC\Installer'
+        )) {
+        if (Test-Path -LiteralPath $path) {
+            $props = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
+            $levels.Add((Get-PdfXchangePropertyText -Object $props -Name 'SCAPackageLevel'))
+        }
+    }
+    return Test-PdfXchangeFullAcrobat -DisplayNames $names.ToArray() -PackageLevels $levels.ToArray()
+}
+
+function Write-PdfXchangeNote {
+    param([string]$Message)
+    if ($null -eq $script:PdfXchangeNoteLog) {
+        $script:PdfXchangeNoteLog = [System.Collections.Generic.List[string]]::new()
+    }
+    $script:PdfXchangeNoteLog.Add($Message)
+    if ($env:RELIAN_DEPLOY_TEST -ne '1') {
+        [Console]::Out.WriteLine($Message)
+    }
+}
+
 function Get-PdfXchangeMsiArgumentList {
     param(
         [string]$Mode,
         [string]$InstallerPath,
         [string]$ProductCode,
         [string]$Organization = '',
-        [string]$UserMail = ''
+        [string]$UserMail = '',
+        [bool]$KeepPdfDefault = $false
     )
     # msiexec /i installs and /x uninstalls. /qn is no UI. /norestart does not reboot.
     # Property names are from the PDF-XChange V11 SysAdmin manual, Product Specific Properties.
@@ -601,6 +680,12 @@ function Get-PdfXchangeMsiArgumentList {
     }
     if (-not [string]::IsNullOrWhiteSpace($UserMail)) {
         $list += ('USERMAIL="{0}"' -f $UserMail)
+    }
+    if ($KeepPdfDefault) {
+        # SysAdmin manual, "Installing without Changing File Associations": SET_AS_DEFAULT="0"
+        # stops the install from making the Editor the .pdf default. The 11.1.2 MSI already
+        # defaults it to 0 when no UI runs; saying it here keeps that if a later MSI flips it.
+        $list += 'SET_AS_DEFAULT="0"'
     }
     if ($Mode -eq 'repair') {
         # Reinstall every feature and overwrite damaged or missing files, registry and shortcuts.
@@ -697,10 +782,14 @@ $script:GetPdfXchangeProductCode = {
     return [string](Get-PdfXchangeRegistryProduct).ProductCode
 }
 
+$script:TestFullAcrobat = {
+    return [bool](Find-PdfXchangeFullAcrobat)
+}
+
 # msiexec is only started from this hook. It is waited on and never killed.
 $script:InvokeMsiExec = {
-    param($Mode, $InstallerPath, $ProductCode, $Organization, $UserMail)
-    $argumentList = Get-PdfXchangeMsiArgumentList -Mode $Mode -InstallerPath $InstallerPath -ProductCode $ProductCode -Organization $Organization -UserMail $UserMail
+    param($Mode, $InstallerPath, $ProductCode, $Organization, $UserMail, $KeepPdfDefault = $false)
+    $argumentList = Get-PdfXchangeMsiArgumentList -Mode $Mode -InstallerPath $InstallerPath -ProductCode $ProductCode -Organization $Organization -UserMail $UserMail -KeepPdfDefault ([bool]$KeepPdfDefault)
     if ($null -eq $argumentList) {
         return 1
     }
@@ -834,7 +923,19 @@ function Invoke-PdfXchangeAction {
             if (Test-PdfXchangeCancelled -CancelPath $CancelPath) {
                 return 130
             }
-            $result = & $script:InvokeMsiExec -Mode $plan.RunInstaller -InstallerPath $installerPath -ProductCode '' -Organization $organization -UserMail $userMail
+            # Owner rule: a PC with Adobe Acrobat keeps its .pdf default. A failed check keeps it too.
+            $keepPdfDefault = $true
+            try {
+                $keepPdfDefault = [bool](& $script:TestFullAcrobat)
+            } catch {
+                $keepPdfDefault = $true
+            }
+            if ($keepPdfDefault) {
+                Write-PdfXchangeNote -Message 'Adobe Acrobat found: msiexec gets SET_AS_DEFAULT="0" and the .pdf default is left alone'
+            } else {
+                Write-PdfXchangeNote -Message 'Adobe Acrobat not found: msiexec uses the MSI association defaults'
+            }
+            $result = & $script:InvokeMsiExec -Mode $plan.RunInstaller -InstallerPath $installerPath -ProductCode '' -Organization $organization -UserMail $userMail -KeepPdfDefault $keepPdfDefault
             if ($null -eq $result -or -not (Test-PdfXchangeMsiSucceeded -Code ([int]$result))) {
                 Add-PdfXchangeError -Message 'installer failed'
                 return 1
