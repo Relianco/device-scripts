@@ -611,6 +611,7 @@ function Test-PdfXchangeFullAcrobat {
     return $false
 }
 
+# Read errors stop here, so the caller keeps the .pdf default. A missing key is not an error.
 function Find-PdfXchangeFullAcrobat {
     $names = [System.Collections.Generic.List[string]]::new()
     foreach ($root in @(
@@ -620,8 +621,8 @@ function Find-PdfXchangeFullAcrobat {
         if (-not (Test-Path -LiteralPath $root)) {
             continue
         }
-        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
-            $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
+        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+            $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
             $names.Add((Get-PdfXchangePropertyText -Object $props -Name 'DisplayName'))
         }
     }
@@ -631,7 +632,7 @@ function Find-PdfXchangeFullAcrobat {
             'HKLM:\SOFTWARE\WOW6432Node\Adobe\Adobe Acrobat\DC\Installer'
         )) {
         if (Test-Path -LiteralPath $path) {
-            $props = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+            $props = Get-ItemProperty -LiteralPath $path -ErrorAction Stop
             $levels.Add((Get-PdfXchangePropertyText -Object $props -Name 'SCAPackageLevel'))
         }
     }

@@ -321,6 +321,30 @@ foreach ($row in @(
     }
 }
 
+# A registry read error must reach the caller, which then keeps the .pdf default.
+# Script-scope functions shadow the cmdlets for this block only.
+function Test-Path { param([string]$LiteralPath) return $LiteralPath -like 'HKLM:*' }
+function Get-ChildItem {
+    [CmdletBinding()]
+    param([string]$LiteralPath)
+    Write-Error 'Requested registry access is not allowed.'
+}
+function Get-ItemProperty {
+    [CmdletBinding()]
+    param([string]$LiteralPath)
+    Write-Error 'Requested registry access is not allowed.'
+}
+$readThrew = $false
+try {
+    [void](Find-PdfXchangeFullAcrobat)
+} catch {
+    $readThrew = $true
+}
+Remove-Item -LiteralPath 'Function:\Test-Path', 'Function:\Get-ChildItem', 'Function:\Get-ItemProperty'
+if (-not $readThrew) {
+    Fail 'a registry read error in the Acrobat check was swallowed'
+}
+
 # A registration value with spaces is one quoted msiexec token.
 $regArgs = Get-PdfXchangeMsiArgumentList -Mode 'install' -InstallerPath 'C:\cache\pdfx.msi' -ProductCode '' -Organization 'Example and Partners' -UserMail 'it@example.invalid'
 if ($null -eq $regArgs -or $regArgs.Count -ne 8 -or
