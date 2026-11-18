@@ -750,6 +750,8 @@ function Get-OssOutput {
 
 
 if ($env:RELIAN_DEPLOY_TEST -ne '1') {
+ # An empty pin turns the package off for every action, before any option is read.
+ if ([string]::IsNullOrWhiteSpace($PinVersion)) { Write-Output 'No pin. Nothing was run.'; exit 0 }
  try { $ossOptions = Get-OssOptions -Action $Action -Match $Match -Hours $Hours -Scope $Scope -Sections $Sections }
  catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
  if ($ossOptions.Mode -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }

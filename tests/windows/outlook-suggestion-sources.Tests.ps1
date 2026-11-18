@@ -46,6 +46,8 @@ function Invoke-Package {
   $exe = (Get-Process -Id $PID).Path
   # Windows PowerShell wraps a child's stderr as an error record, which Stop would turn fatal.
   $ErrorActionPreference = 'Continue'
+  # The runner always passes a pin; an empty one disables the package, so default it on.
+  if ($PackageArgs -notcontains '-PinVersion') { $PackageArgs = @('-PinVersion', '1') + $PackageArgs }
   $output = @(& $exe -NoProfile -File $scriptPath @PackageArgs 2>&1 | ForEach-Object { [string]$_ })
   return [pscustomobject]@{ Code = $LASTEXITCODE; Output = $output }
  } finally { $env:RELIAN_DEPLOY_TEST = $saved }
@@ -120,6 +122,11 @@ try {
  $run = Invoke-Package @('-Action', 'Uninstall')
  Assert-Same $run.Code 0 'Uninstall exits 0'
  Assert-True (-not (($run.Output -join "`n") -like '*RELIAN_SOURCES_JSON*')) 'Uninstall does not scan'
+ foreach ($act in 'Install', 'Uninstall') {
+  $run = Invoke-Package @('-PinVersion', '', '-Action', $act, '-Match', 'not-an-address')
+  Assert-Same $run.Code 0 "empty pin exits 0 for $act, before option validation"
+  Assert-True (-not (($run.Output -join "`n") -like '*RELIAN_SOURCES_JSON*')) "empty pin does not scan for $act"
+ }
 
  # 3. Scanner: every split point across a small buffer, in both encodings, with exact counts.
  $scanner = New-OssScanner $address
