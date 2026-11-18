@@ -17,8 +17,10 @@ Set-StrictMode -Version Latest
 $script:NaNamePattern = '(?i)\A(Advanced Monitoring Agent\b.*|Take Control Agent\b.*|N-able Take Control\b.*|BeAnywhere Support Express\b.*)\z'
 $script:NaPartPattern = '(?i)\A(Request Handler Agent|File Cache Service Agent|Patch Management Service Controller)\z'
 $script:NaPublisherPattern = '(?i)\A(Remote Monitoring Services|SolarWinds MSP|N-able Technologies|LogicNow( Ltd)?|BeAnywhere)\z'
-# Agent folders: a direct child of Program Files (either view) or ProgramData with one of these names.
-$script:NaFolderPattern = '(?i)\A(Advanced Monitoring Agent[^\\]*|BeAnywhere Support Express|Take Control Agent|MspPlatform|SolarWinds MSP|N-able Technologies|GetSupportService[^\\]*)\z'
+# Agent folders, as a path under Program Files (either view) or ProgramData. The vendor roots hold
+# other products too (backup, for one), so only the agent's own subfolders of them match, never the root.
+$script:NaVendorRoots = @('SolarWinds MSP', 'N-able Technologies')
+$script:NaFolderPattern = '(?i)\A(Advanced Monitoring Agent[^\\]*|BeAnywhere Support Express|Take Control Agent|MspPlatform|GetSupportService[^\\]*|(SolarWinds MSP|N-able Technologies)\\(Ecosystem Agent|PME|Cache Service|RpcServer|Take Control Agent))\z'
 $script:NaServicePattern = '(?i)\A(Advanced Monitoring Agent.*|BASupportExpress.*|GetSupportService.*)\z'
 # Never touched, whatever else matches.
 $script:NaProtectedPattern = '(?i)ninja|sentinel|global secure access|wireguard|wazuh'
@@ -68,7 +70,9 @@ $script:NaReadServices = {
 $script:NaRemoveService = {
     param($Service)
     Stop-Service -Name $Service.Name -Force -ErrorAction SilentlyContinue
-    if ($Service.ProcessId -gt 0) { Stop-Process -Id $Service.ProcessId -Force -ErrorAction SilentlyContinue }
+    # The PID is read again after the stop, never taken from the earlier snapshot.
+    $killId = Get-NaServiceKillId $Service.Name @(& $script:NaReadServices)
+    if ($killId -gt 0) { Stop-Process -Id $killId -Force -ErrorAction SilentlyContinue }
     $null = & sc.exe delete $Service.Name
 }
 
@@ -78,11 +82,15 @@ $script:NaFolderParents = {
 
 $script:NaListFolders = {
     param($Parent)
-    if (-not (Test-Path -LiteralPath $Parent)) { return }
-    # A reparse point is not followed: it could lead outside the agent's folder.
-    Get-ChildItem -LiteralPath $Parent -Directory -Force -ErrorAction Stop |
-        Where-Object { $_.Name -match $script:NaFolderPattern -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
-        ForEach-Object { $_.FullName }
+    $base = $Parent.TrimEnd('\')
+    foreach ($dir in @($base) + @($script:NaVendorRoots | ForEach-Object { "$base\$_" })) {
+        $item = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+        # A reparse point is not followed: it could lead outside the agent's folder.
+        if (-not $item -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+        Get-ChildItem -LiteralPath $dir -Directory -Force -ErrorAction Stop |
+            Where-Object { $_.FullName.Substring($base.Length + 1) -match $script:NaFolderPattern -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
+            ForEach-Object { $_.FullName }
+    }
 }
 
 $script:NaRemoveFolder = {
@@ -113,18 +121,28 @@ function Test-NaAppEntry {
     return ($Entry.Name -match $script:NaNamePattern) -or ($Entry.Name -match $script:NaPartPattern -and $Entry.Publisher -match $script:NaPublisherPattern)
 }
 
-# True when the path sits inside an agent folder: a direct child of Program Files or ProgramData
-# with an agent folder name. A same-named folder anywhere else is another product's.
+# True when the path sits inside an agent folder under Program Files or ProgramData. A same-named
+# folder anywhere else is another product's.
 function Test-NaInAgentFolder {
     param([AllowEmptyString()][string]$Path)
     foreach ($parent in & $script:NaFolderParents) {
         $prefix = $parent.TrimEnd('\') + '\'
         if (-not $Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
-        $rest = $Path.Substring($prefix.Length)
-        $cut = $rest.IndexOf('\')
-        if ($cut -gt 0 -and $rest.Substring(0, $cut) -match $script:NaFolderPattern) { return $true }
+        $parts = $Path.Substring($prefix.Length).Split('\')
+        if ($parts.Count -ge 2 -and $parts[0] -match $script:NaFolderPattern) { return $true }
+        if ($parts.Count -ge 3 -and "$($parts[0])\$($parts[1])" -match $script:NaFolderPattern) { return $true }
     }
     return $false
+}
+
+# The live process to stop for a service, or 0. A stopped service has no process. A process that also
+# hosts another service is not stopped: killing it would take that service down too.
+function Get-NaServiceKillId {
+    param([string]$Name, $Services)
+    $live = @($Services | Where-Object { $_.Name -eq $Name })
+    if ($live.Count -ne 1 -or $live[0].ProcessId -le 0) { return 0 }
+    if (@($Services | Where-Object { $_.ProcessId -eq $live[0].ProcessId }).Count -ne 1) { return 0 }
+    return $live[0].ProcessId
 }
 
 function Get-NaExecutable {

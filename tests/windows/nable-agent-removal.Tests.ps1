@@ -40,7 +40,7 @@ function Reset-Test {
 $script:NaReadUninstall = { $script:Apps.ToArray() }
 $script:NaReadServices = { $script:Svcs.ToArray() }
 $script:NaFolderParents = { @($pf86, 'C:\ProgramData') }
-$script:NaListFolders = { param($Parent) @($script:Dirs | Where-Object { (Get-Parent $_) -eq $Parent -and (Split-Path -Leaf $_) -match $script:NaFolderPattern }) }
+$script:NaListFolders = { param($Parent) @($script:Dirs | Where-Object { $_.StartsWith("$Parent\") -and $_.Substring($Parent.Length + 1) -match $script:NaFolderPattern }) }
 $script:NaSettle = { }
 $script:NaFileExists = { param($Path) $script:Dirs -contains (Get-Parent $Path) }
 $script:NaRun = { param($File, $Arguments)
@@ -221,5 +221,31 @@ Assert-True (-not (Test-NaAppEntry (New-App 'x' 'Advanced Monitoring Agent' '' '
 Assert-True (-not (Test-NaServiceEntry (New-Svc 'Advanced Monitoring Agent Ninja' "$amaDir\x.exe"))) 'a protected service name wins'
 Assert-True (-not (Test-NaServiceEntry (New-Svc 'SentinelAgent' "$amaDir\SentinelAgent.exe"))) 'a protected service in an agent folder wins'
 Assert-Same (Get-NaUninstallCommand (New-App 'NoUninstaller' 'Advanced Monitoring Agent' '' 'C:\x\setup.exe /remove')) $null 'unknown uninstaller is not run'
+
+# A vendor root holds other products: only the agent's own subfolder of it is a target.
+Reset-Test
+$script:Dirs.Add("$pf86\N-able Technologies")
+$script:Dirs.Add("$pf86\N-able Technologies\Backup Manager")
+$r = Invoke-Job
+Assert-Same $r.Json.status 'compliant' 'a vendor root with another product is not a target'
+Reset-Test
+Add-Agent
+$script:UninstallWorks = $false
+$script:Dirs.Add("$pf86\SolarWinds MSP")
+$script:Dirs.Add("$pf86\SolarWinds MSP\Ecosystem Agent")
+$r = Invoke-Job
+Assert-True ($script:Removed -contains "dir $pf86\SolarWinds MSP\Ecosystem Agent") 'the agent subfolder of a vendor root is removed'
+Assert-True (-not ($script:Removed -contains "dir $pf86\SolarWinds MSP")) 'the vendor root is kept'
+Assert-True (-not (Test-NaServiceEntry (New-Svc 'Backup' "$pf86\N-able Technologies\Backup Manager\x.exe"))) 'a service of another vendor product does not match'
+Assert-True (Test-NaServiceEntry (New-Svc 'PME' "$pf86\SolarWinds MSP\PME\x.exe")) 'a service in an agent subfolder of a vendor root matches'
+
+# The process to stop is read live: a stopped service or a shared host process is never killed.
+$live = @([pscustomobject]@{ Name = 'Agent'; ProcessId = 0 }, [pscustomobject]@{ Name = 'Other'; ProcessId = 40 })
+Assert-Same (Get-NaServiceKillId 'Agent' $live) 0 'a stopped service kills nothing, even if its old PID now runs something else'
+$live = @([pscustomobject]@{ Name = 'Agent'; ProcessId = 40 }, [pscustomobject]@{ Name = 'Other'; ProcessId = 40 })
+Assert-Same (Get-NaServiceKillId 'Agent' $live) 0 'a process hosting another service is not killed'
+$live = @([pscustomobject]@{ Name = 'Agent'; ProcessId = 40 }, [pscustomobject]@{ Name = 'Other'; ProcessId = 41 })
+Assert-Same (Get-NaServiceKillId 'Agent' $live) 40 'a hung service alone in its process is killed'
+Assert-Same (Get-NaServiceKillId 'Gone' $live) 0 'a missing service kills nothing'
 
 Write-Output 'nable-agent-removal: ok'
