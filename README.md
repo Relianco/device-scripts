@@ -250,6 +250,7 @@ One folder per package under `windows/packages/`. The read jobs that `Invoke-Rel
 One module per file under `windows/jobs/`.
 
 - `scansnap-update-prompts`: stops ScanSnap Online Update from prompting staff who cannot install updates. It marks the watcher's startup entry disabled and stops a running watcher. A machine without ScanSnap reports `compliant`.
+- `reset-windowsupdate-auto-policy`: removes only `NoAutoUpdate` and `AUOptions` under `HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU`. First it writes the whole WindowsUpdate policy key to a new JSON file under `%ProgramData%\Relian\WuAutoPolicyBackup` (SYSTEM only, never overwritten); a backup that fails stops the run with nothing deleted. Absent values: nothing changes, status `unchanged`. `-ReportOnly` changes nothing. `-Restore` (optional `-BackupName`) writes the two values back from the newest backup; the job loader forwards only `-ReportOnly`, so `-Restore` needs the module run directly.
 
 ### Pin records
 
