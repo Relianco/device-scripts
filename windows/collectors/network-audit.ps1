@@ -255,8 +255,10 @@ try {
         if ($ReportOnly) {
             Write-Host "NETWORK_AUDIT_RESULT:$json"
         } else {
-            if ($json.Length -gt 10000) { throw "Result is $($json.Length) characters; a NinjaOne multi-line text field holds 10000, so it is not written truncated" }
-            $json | Ninja-Property-Set-Piped relianNetworkAudit
+            # The field is WYSIWYG: wrap the JSON so it shows as preformatted text.
+            $html = '<pre>' + [System.Net.WebUtility]::HtmlEncode($json) + '</pre>'
+            if ($html.Length -gt 200000) { throw "Result is $($html.Length) characters; a NinjaOne WYSIWYG field holds 200000, so it is not written truncated" }
+            $html | Ninja-Property-Set-Piped relianNetworkAudit
             Write-Status "Network audit written to relianNetworkAudit custom field"
         }
         # One short line on stdout for the job loader; the full JSON is in the field.
