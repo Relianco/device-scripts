@@ -137,6 +137,22 @@ Assert-True (-not ($script:Log -match 'delete')) 'backup failure deletes nothing
 Assert-Same (Names 'AU') 'NoAutoUpdate,AUOptions,ScheduledInstallDay,Blob' 'backup failure keeps every value'
 Assert-True ($r.Error.Length -gt 0) 'backup failure names an error'
 
+# A target that changes between the snapshot and the delete aborts the run: nothing deleted, backup holds the snapshot.
+Reset-Test -Au $auAll
+$script:ReadCount = 0
+$script:WuReadTree = {
+    $script:ReadCount++
+    if ($script:ReadCount -eq 2) { $script:Fake['AU'][0] = (New-V 'NoAutoUpdate' 'DWord' 0) }
+    @(@{ path = ''; values = @($script:Fake[''].ToArray()) }, @{ path = 'AU'; values = @($script:Fake['AU'].ToArray()) })
+}
+$r = Invoke-WuJob
+Assert-Same $r.ExitCode 2 'changed target exit'
+Assert-Same $r.Status 'failed' 'changed target status'
+Assert-True (-not ($script:Log -match 'delete')) 'changed target deletes nothing'
+Assert-Same (Names 'AU') 'NoAutoUpdate,AUOptions,ScheduledInstallDay,Blob' 'changed target keeps every value'
+Assert-Same $script:ReadCount 2 'the tree is read once for the snapshot, once to re-check'
+$script:WuReadTree = $savedRead
+
 # A failed delete is reported, not hidden.
 Reset-Test -Au $auAll
 $script:DeleteThrows = $true

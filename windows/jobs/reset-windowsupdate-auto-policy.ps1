@@ -139,7 +139,8 @@ function Invoke-WuJob {
     $mode = $(if ($Restore) { 'restore' } elseif ($ReportOnly) { 'report' } else { 'run' })
     $r = @{ ExitCode = 2; Status = 'failed'; Mode = $mode; Before = $null; After = $null; Backup = $null; Error = '' }
     try {
-        $before = Get-WuTargets (& $script:WuReadTree)
+        $tree = @(& $script:WuReadTree)   # one snapshot: the backup and the delete list both come from it
+        $before = Get-WuTargets $tree
         $r.Before = Get-WuSummary $before
         if ($Restore) {
             $b = Read-WuBackup $BackupName
@@ -161,7 +162,14 @@ function Invoke-WuJob {
             $r.After = $r.Before; $r.Status = 'drift'; $r.ExitCode = 1
         } else {
             # Fail closed: a throw here, before the delete, leaves the registry as it was.
-            $r.Backup = Write-WuBackup (& $script:WuReadTree) $before
+            $r.Backup = Write-WuBackup $tree $before
+            # Group Policy can rewrite a value after the snapshot; deleting then would leave a stale backup.
+            $live = Get-WuTargets (& $script:WuReadTree)
+            $same = ($live.Count -eq $before.Count)
+            foreach ($n in @($before.Keys)) {
+                if (-not $live.Contains($n) -or $live[$n].kind -ne $before[$n].kind -or "$($live[$n].data)" -ne "$($before[$n].data)") { $same = $false }
+            }
+            if (-not $same) { throw 'policy values changed after the snapshot, nothing deleted' }
             foreach ($n in @($before.Keys)) { & $script:WuDeleteValue 'AU' $n }
             $after = Get-WuTargets (& $script:WuReadTree)
             $r.After = Get-WuSummary $after
