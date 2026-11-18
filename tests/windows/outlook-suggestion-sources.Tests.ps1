@@ -122,8 +122,9 @@ try {
  $run = Invoke-Package @('-Action', 'Uninstall')
  Assert-Same $run.Code 0 'Uninstall exits 0'
  Assert-True (-not (($run.Output -join "`n") -like '*RELIAN_SOURCES_JSON*')) 'Uninstall does not scan'
+ # A blank, not '': Windows PowerShell 5.1 drops an empty argument on a native call.
  foreach ($act in 'Install', 'Uninstall') {
-  $run = Invoke-Package @('-PinVersion', '', '-Action', $act, '-Match', 'not-an-address')
+  $run = Invoke-Package @('-PinVersion', ' ', '-Action', $act, '-Match', 'not-an-address')
   Assert-Same $run.Code 0 "empty pin exits 0 for $act, before option validation"
   Assert-True (-not (($run.Output -join "`n") -like '*RELIAN_SOURCES_JSON*')) "empty pin does not scan for $act"
  }
