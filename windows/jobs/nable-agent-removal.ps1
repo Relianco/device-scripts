@@ -116,7 +116,7 @@ $script:NaRemoveFolder = {
     foreach ($id in @(Get-NaFolderKillIds $Path @(& $script:NaReadProcesses) @(& $script:NaReadServices))) {
         Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    Remove-NaTree $Path
 }
 
 # Runs an uninstaller and waits up to 10 minutes. Returns the exit code, or -1 on a timeout.
@@ -165,6 +165,22 @@ function Get-NaAllDependents {
         }
     }
     return @($seen)
+}
+
+# Deletes a folder tree without following links: Remove-Item -Recurse in Windows PowerShell 5.1
+# walks into a junction and deletes its target's files. A linked folder inside loses only the link.
+function Remove-NaTree {
+    param([string]$Path)
+    foreach ($item in ([IO.DirectoryInfo]::new($Path)).GetFileSystemInfos()) {
+        if ($item -is [IO.DirectoryInfo]) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($item.FullName, $false) }
+            else { Remove-NaTree $item.FullName }
+        } else {
+            $item.Attributes = [IO.FileAttributes]::Normal
+            $item.Delete()
+        }
+    }
+    [IO.Directory]::Delete($Path, $false)
 }
 
 # True when every dependent service name is an agent service.

@@ -287,4 +287,22 @@ $script:NaReadDependents = { param($Name) @{ 'A' = @('B'); 'B' = @('C', 'A'); 'C
 Assert-Same ((@(Get-NaAllDependents 'A') | Sort-Object) -join ',') 'B,C,D' 'an indirect dependent is collected and a cycle ends'
 $script:NaReadDependents = $savedDeps
 
+# Folder removal deletes a link inside the folder, never the files the link points to.
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ("na-tree-" + [guid]::NewGuid().ToString('N'))
+$agent = Join-Path $tmp 'agent'; $outside = Join-Path $tmp 'outside'
+$null = New-Item -ItemType Directory -Path (Join-Path $agent 'sub'), $outside
+Set-Content -LiteralPath (Join-Path $outside 'keep.txt') -Value 'x'
+$readOnly = Join-Path (Join-Path $agent 'sub') 'a.txt'
+Set-Content -LiteralPath $readOnly -Value 'x'
+Set-ItemProperty -LiteralPath $readOnly -Name IsReadOnly -Value $true
+$linkType = if ([IO.Path]::DirectorySeparatorChar -eq [char]92) { 'Junction' } else { 'SymbolicLink' }
+$null = New-Item -ItemType $linkType -Path (Join-Path $agent 'link') -Target $outside
+try {
+    Remove-NaTree $agent
+    Assert-True (-not (Test-Path -LiteralPath $agent)) 'the agent folder is removed, read-only files too'
+    Assert-True (Test-Path -LiteralPath (Join-Path $outside 'keep.txt')) 'a file behind a link inside the folder survives'
+} finally {
+    [IO.Directory]::Delete($tmp, $true)
+}
+
 Write-Output 'nable-agent-removal: ok'
