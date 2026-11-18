@@ -6,7 +6,7 @@
 .DESCRIPTION
     Gathers comprehensive hardware data via WMI/CIM queries:
     CPU, Memory DIMMs, Storage, Motherboard, GPU, Network, Battery.
-    Writes JSON results to the relian_hardware_inventory NinjaOne custom field.
+    Writes JSON results to the relianHardwareInventory NinjaOne custom field.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+
@@ -302,11 +302,12 @@ try {
         if ($ReportOnly) {
             Write-Host "INVENTORY_RESULT:$json"
         } else {
-            $json | Ninja-Property-Set-Piped relian_hardware_inventory
-            Write-Status "Hardware inventory written to relian_hardware_inventory custom field"
+            if ($json.Length -gt 10000) { throw "Result is $($json.Length) characters; a NinjaOne multi-line text field holds 10000, so it is not written truncated" }
+            $json | Ninja-Property-Set-Piped relianHardwareInventory
+            Write-Status "Hardware inventory written to relianHardwareInventory custom field"
         }
         # One short line on stdout for the job loader; the full JSON is in the field.
-        [ordered]@{ field = 'relian_hardware_inventory'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
+        [ordered]@{ field = 'relianHardwareInventory'; written = -not $ReportOnly; bytes = $json.Length } | ConvertTo-Json -Compress
     } catch {
         Write-Status "Could not write to custom field: $_" "WARN"
         # Still print the JSON so it can be captured from the run output, then fail the run.
