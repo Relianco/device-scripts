@@ -47,6 +47,7 @@ Assert ((Get-AscExclusion (New-Pc 'DC1' -Uac 8192 -Group 516)) -eq 'domainContro
 Assert ((Get-AscExclusion (New-Pc 'SV1' -Os 'Windows Server 2022 Standard')) -eq 'server') 'server excluded'
 Assert ((Get-AscExclusion (New-Pc 'CNO' -Spn @('MSClusterVirtualServer/CNO'))) -eq 'cluster') 'cluster excluded'
 Assert ((Get-AscExclusion (New-Pc 'X' -Ou 'OU=Member Servers,DC=example,DC=invalid')) -eq 'serversOu') 'servers OU excluded'
+Assert ((Get-AscExclusion (New-Pc 'X' -Ou 'OU=Workstations\, Servers,DC=example,DC=invalid')) -eq 'serversOu') 'servers OU with escaped comma excluded'
 Assert ((Get-AscExclusion (New-Pc 'OLDDC' -Os $null -Ou 'OU=Domain Controllers,DC=example,DC=invalid')) -eq 'domainController') 'leftover DC object excluded'
 Assert ((Get-AscExclusion (New-Pc 'AZUREADSSOACC' -Os $null -Ou 'CN=Computers,DC=example,DC=invalid')) -eq 'entraSeamlessSso') 'seamless SSO account excluded'
 Assert ($null -eq (Get-AscExclusion (New-Pc 'PC1'))) 'workstation in scope'

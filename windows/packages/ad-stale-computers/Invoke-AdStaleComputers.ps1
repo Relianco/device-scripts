@@ -120,7 +120,7 @@ function Get-AscExclusion {
     foreach ($spn in @($Computer.servicePrincipalName)) {
         if ([string]$spn -like 'MSClusterVirtualServer/*') { return 'cluster' }
     }
-    if ((Get-AscParentDn ([string]$Computer.DistinguishedName)) -match '(?i)(\A|,)OU=[^,]*Server') { return 'serversOu' }
+    if ((Get-AscParentDn ([string]$Computer.DistinguishedName)) -match '(?i)(\A|,)OU=(?:\\.|[^,\\])*Server') { return 'serversOu' }
     return $null
 }
 
