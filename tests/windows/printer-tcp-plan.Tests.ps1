@@ -1534,7 +1534,7 @@ try {
     Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $readyPrinter -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -PrinterTray 'Tray1') -Expect (New-Expect -ConfigureDefaults $true) -Label 'existing ready queue with tray default'
     Assert-Plan -Plan (Get-Plan -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true -PrinterColor 'Monochrome') -Expect (New-Expect -ExitCode 1) -Label 'unmanaged queue with defaults still refused'
 
-    $monoSpec = Get-PrinterTcpDefaultsSpec -Color 'Monochrome' -Duplex 'OneSided' -Tray 'Tray1'
+    $monoSpec = Get-PrinterTcpDefaultsSpec -Color 'Monochrome' -Duplex 'OneSided' -Tray 'Tray1' -ModelId 'KonicaUniversalPcl'
     if (-not $monoSpec.HasColor -or $monoSpec.ColorEnabled -or [int]$monoSpec.DmColor -ne 1) {
         Fail 'Monochrome spec wrong'
     }
@@ -1544,44 +1544,53 @@ try {
     if (-not $monoSpec.HasTray -or $monoSpec.Tray -cne 'Tray1' -or [int]$monoSpec.DefaultSourceId -ne 257) {
         Fail 'Tray1 spec wrong'
     }
-    $colorSpec = Get-PrinterTcpDefaultsSpec -Color 'Color' -Duplex 'TwoSidedLongEdge' -Tray 'Auto'
+    $colorSpec = Get-PrinterTcpDefaultsSpec -Color 'Color' -Duplex 'TwoSidedLongEdge' -Tray 'Auto' -ModelId 'KonicaUniversalPcl'
     if (-not $colorSpec.HasColor -or -not $colorSpec.ColorEnabled -or [int]$colorSpec.DmColor -ne 2) {
         Fail 'Color spec wrong'
     }
     if ([int]$colorSpec.DmDuplex -ne 2 -or [int]$colorSpec.DefaultSourceId -ne 7) {
         Fail 'TwoSidedLongEdge/Auto spec wrong'
     }
-    $graySpec = Get-PrinterTcpDefaultsSpec -Color 'Grayscale' -Duplex 'TwoSidedShortEdge' -Tray 'Manual'
+    $graySpec = Get-PrinterTcpDefaultsSpec -Color 'Grayscale' -Duplex 'TwoSidedShortEdge' -Tray 'Manual' -ModelId 'BrotherHlL2370Dw'
     if (-not $graySpec.HasColor -or $graySpec.ColorEnabled -or [int]$graySpec.DmColor -ne 1 -or [int]$graySpec.DmDuplex -ne 3 -or [int]$graySpec.DefaultSourceId -ne 4) {
         Fail 'Grayscale/TwoSidedShortEdge/Manual spec wrong'
     }
 
     $konicaBins = @(7, 257, 258, 259, 260, 4, 261)
     $konicaNames = @('Auto', 'Tray 1', 'Tray 2', 'Tray 3', 'Tray 4', 'Bypass Tray', 'LCT')
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $konicaBins -BinNames $konicaNames) -ne 257) {
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $konicaBins -BinNames $konicaNames -ModelId 'KonicaUniversalPcl') -ne 257) {
         Fail 'Konica Tray 1 bin did not resolve to 257'
     }
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Manual' -BinIds $konicaBins -BinNames $konicaNames) -ne 4) {
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Manual' -BinIds $konicaBins -BinNames $konicaNames -ModelId 'KonicaUniversalPcl') -ne 4) {
         Fail 'Konica Bypass Tray did not resolve to 4'
     }
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Lct' -BinIds $konicaBins -BinNames $konicaNames) -ne 261) {
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Lct' -BinIds $konicaBins -BinNames $konicaNames -ModelId 'KonicaUniversalPcl') -ne 261) {
         Fail 'Konica LCT did not resolve to 261'
     }
     $brotherBins = @(7, 1, 4)
     $brotherNames = @('Auto Select', 'Tray1', 'Manual')
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $brotherBins -BinNames $brotherNames) -ne 1) {
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $brotherBins -BinNames $brotherNames -ModelId 'BrotherHlL2370Dw') -ne 1) {
         Fail 'Brother Tray1 bin did not resolve to 1'
     }
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray2' -BinIds $brotherBins -BinNames $brotherNames) -ne 0) {
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray2' -BinIds $brotherBins -BinNames $brotherNames -ModelId 'BrotherHlL2370Dw') -ne 0) {
         Fail 'Brother unsupported Tray2 did not return 0'
     }
     $localizedBins = @(7, 257, 4)
     $localizedNames = @('Auto-Auswahl', 'Kassette A', 'Einzelblatt')
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $localizedBins -BinNames $localizedNames) -ne 257) {
-        Fail 'localized Konica Tray1 bin did not resolve via advertised ID 257'
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $localizedBins -BinNames $localizedNames -ModelId 'KonicaUniversalPcl') -ne 257) {
+        Fail 'localized Konica Tray1 bin did not resolve via model mapping 257'
     }
-    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1') -ne 257) {
-        Fail 'fallback Tray1 bin did not resolve to 257'
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $localizedBins -BinNames $localizedNames) -ne 0) {
+        Fail 'unmatched bin names without model mapping should return 0'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -ModelId 'KonicaUniversalPcl') -ne 257) {
+        Fail 'Konica model fallback Tray1 bin did not resolve to 257'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -ModelId 'BrotherHlL2370Dw') -ne 1) {
+        Fail 'Brother model fallback Tray1 bin did not resolve to 1'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1') -ne 0) {
+        Fail 'unknown model fallback Tray1 should return 0'
     }
 
     $dmBytes = New-Object byte[] 220

@@ -241,39 +241,40 @@ function Test-PrinterTcpTray {
     return @('Auto', 'Tray1', 'Tray2', 'Tray3', 'Tray4', 'Manual', 'Lct') -ccontains $Tray
 }
 
-function Get-PrinterTcpTrayFallbackId {
-    param([string]$Tray)
-    switch -Exact ($Tray) {
-        'Auto'   { return 7 }
-        'Tray1'  { return 257 }
-        'Tray2'  { return 258 }
-        'Tray3'  { return 259 }
-        'Tray4'  { return 260 }
-        'Manual' { return 4 }
-        'Lct'    { return 261 }
+function Get-PrinterTcpModelTrayId {
+    param(
+        [string]$ModelId = '',
+        [string]$Tray = ''
+    )
+    if ($ModelId -ceq 'KonicaUniversalPcl') {
+        switch -Exact ($Tray) {
+            'Auto'   { return 7 }
+            'Tray1'  { return 257 }
+            'Tray2'  { return 258 }
+            'Tray3'  { return 259 }
+            'Tray4'  { return 260 }
+            'Manual' { return 4 }
+            'Lct'    { return 261 }
+        }
+        return 0
+    }
+    if ($ModelId -ceq 'BrotherHlL2370Dw') {
+        switch -Exact ($Tray) {
+            'Auto'   { return 7 }
+            'Tray1'  { return 1 }
+            'Manual' { return 4 }
+        }
+        return 0
     }
     return 0
-}
-
-function Get-PrinterTcpTrayCandidateIds {
-    param([string]$Tray)
-    switch -Exact ($Tray) {
-        'Auto'   { return @(7, 15) }
-        'Tray1'  { return @(257, 1) }
-        'Tray2'  { return @(258, 2) }
-        'Tray3'  { return @(259, 3) }
-        'Tray4'  { return @(260) }
-        'Manual' { return @(4, 6) }
-        'Lct'    { return @(261, 11) }
-    }
-    return @()
 }
 
 function Resolve-PrinterTcpTraySourceId {
     param(
         [string]$Tray,
         [int[]]$BinIds = @(),
-        [string[]]$BinNames = @()
+        [string[]]$BinNames = @(),
+        [string]$ModelId = ''
     )
     if ([string]::IsNullOrEmpty($Tray)) {
         return 0
@@ -297,23 +298,22 @@ function Resolve-PrinterTcpTraySourceId {
             }
         }
     }
+    $modelSourceId = [int](Get-PrinterTcpModelTrayId -ModelId $ModelId -Tray $Tray)
     if ($count -gt 0) {
-        $advertised = @($BinIds[0..($count - 1)])
-        foreach ($candidateId in @(Get-PrinterTcpTrayCandidateIds -Tray $Tray)) {
-            if ($advertised -contains [int]$candidateId) {
-                return [int]$candidateId
-            }
+        if ($modelSourceId -gt 0 -and @($BinIds[0..($count - 1)]) -contains $modelSourceId) {
+            return $modelSourceId
         }
         return 0
     }
-    return [int](Get-PrinterTcpTrayFallbackId -Tray $Tray)
+    return $modelSourceId
 }
 
 function Get-PrinterTcpDefaultsSpec {
     param(
         [string]$Color = '',
         [string]$Duplex = '',
-        [string]$Tray = ''
+        [string]$Tray = '',
+        [string]$ModelId = ''
     )
     $hasColor = -not [string]::IsNullOrEmpty($Color)
     $colorEnabled = $Color -ceq 'Color'
@@ -333,7 +333,7 @@ function Get-PrinterTcpDefaultsSpec {
         'TwoSidedShortEdge' { $dmDuplex = 3 }
     }
     $hasTray = -not [string]::IsNullOrEmpty($Tray)
-    $defaultSourceId = Get-PrinterTcpTrayFallbackId -Tray $Tray
+    $defaultSourceId = Get-PrinterTcpModelTrayId -ModelId $ModelId -Tray $Tray
     return [pscustomobject]@{
         HasColor        = $hasColor
         Color           = $Color
@@ -2005,11 +2005,11 @@ namespace Relian {
 }
 
 $script:SetPrinterDefaults = {
-    param($Name, $Color, $Duplex, $Tray)
+    param($Name, $Color, $Duplex, $Tray, $Model = '')
     if ($env:RELIAN_DEPLOY_TEST -eq '1') {
         throw 'refusing to configure printer defaults while a test is running'
     }
-    $spec = Get-PrinterTcpDefaultsSpec -Color ([string]$Color) -Duplex ([string]$Duplex) -Tray ([string]$Tray)
+    $spec = Get-PrinterTcpDefaultsSpec -Color ([string]$Color) -Duplex ([string]$Duplex) -Tray ([string]$Tray) -ModelId ([string]$Model)
     if (-not $spec.HasColor -and -not $spec.HasDuplex -and -not $spec.HasTray) {
         return
     }
@@ -2019,7 +2019,7 @@ $script:SetPrinterDefaults = {
         $binIds = [int[]]@()
         $binNames = [string[]]@()
         [Relian.PrinterTcpWinSpool]::GetDriverBins([string]$Name, [ref]$binIds, [ref]$binNames)
-        $sourceId = [int](Resolve-PrinterTcpTraySourceId -Tray ([string]$Tray) -BinIds $binIds -BinNames $binNames)
+        $sourceId = [int](Resolve-PrinterTcpTraySourceId -Tray ([string]$Tray) -BinIds $binIds -BinNames $binNames -ModelId ([string]$Model))
         if ($sourceId -le 0) {
             throw "printer tray $Tray is not available for $Name"
         }
@@ -2353,7 +2353,7 @@ function Invoke-PrinterTcpAction {
             $createdQueue = $true
         }
         if ($plan.ConfigureDefaults) {
-            [void](& $script:SetPrinterDefaults -Name $PrinterName -Color $PrinterColor -Duplex $PrinterDuplex -Tray $PrinterTray)
+            [void](& $script:SetPrinterDefaults -Name $PrinterName -Color $PrinterColor -Duplex $PrinterDuplex -Tray $PrinterTray -Model $PrinterModel)
         }
         if ($plan.RemovePort) {
             [void](& $script:RemovePrinterPort -Name ([string]$plan.RemovePortName))
