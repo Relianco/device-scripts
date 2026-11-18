@@ -118,7 +118,8 @@ function ConvertTo-IkPackedGuid {
 function Get-IkExists {
     param([string]$Path)
     if (-not $Path) { return 'none' }
-    try { if (& $script:IkTestPath $Path) { return 'true' } else { return 'false' } } catch { return 'unknown' }
+    # Registry values are read unexpanded; the file system needs the expanded path.
+    try { if (& $script:IkTestPath ([Environment]::ExpandEnvironmentVariables($Path))) { return 'true' } else { return 'false' } } catch { return 'unknown' }
 }
 
 function Get-IkPathCheck {

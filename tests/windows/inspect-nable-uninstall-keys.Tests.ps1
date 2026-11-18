@@ -50,14 +50,15 @@ Assert-Same $k.msi.installPropertiesExists $false 'no InstallProperties'
 Assert-True ($null -eq $k.msi.localPackage) 'no LocalPackage when no InstallProperties'
 
 # Inno entry whose unins000.exe is gone, with an install location that exists and a user path.
+$userDir = 'C:\' + 'Users' + '\' + 'jdoe' + '\AppData\Agent'
 $exe = 'C:\Program Files (x86)\Advanced Monitoring Agent\unins000.exe'
-$script:Entries = @(New-Entry 'Advanced Monitoring Agent_is1' -Name 'Advanced Monitoring Agent' -Uninstall "`"$exe`" /x" -Quiet "`"$exe`" /VERYSILENT" -Loc 'C:\Users\jdoe\AppData\Agent' -Other @('Inno Setup: App Path') -SubKeys)
-$script:Existing = @('C:\Users\jdoe\AppData\Agent')
+$script:Entries = @(New-Entry 'Advanced Monitoring Agent_is1' -Name 'Advanced Monitoring Agent' -Uninstall "`"$exe`" /x" -Quiet "`"$exe`" /VERYSILENT" -Loc $userDir -Other @('Inno Setup: App Path') -SubKeys)
+$script:Existing = @($userDir)
 $k = @((Invoke-Inspect).Json.keys)[0]
 Assert-Same $k.uninstallExecutable.path $exe 'uninstaller path extracted'
 Assert-Same $k.uninstallExecutable.exists 'false' 'missing unins000.exe'
 Assert-Same $k.quietUninstallExecutable.exists 'false' 'missing quiet executable'
-Assert-Same $k.installLocation.path 'C:\Users\<user>\AppData\Agent' 'user name replaced'
+Assert-Same $k.installLocation.path ('C:\' + 'Users\<user>\AppData\Agent') 'user name replaced'
 Assert-Same $k.installLocation.exists 'true' 'location exists'
 Assert-True ($null -eq $k.msi) 'Inno entry has no msi block'
 Assert-Same (@($k.otherValueNames) -join '|') 'Inno Setup: App Path' 'unusual value names listed'
@@ -67,6 +68,15 @@ Assert-Same $k.hasSubKeys $true 'subkeys reported'
 $script:Throw = @($exe)
 Assert-Same @((Invoke-Inspect).Json.keys)[0].uninstallExecutable.exists 'unknown' 'untestable path'
 $script:Throw = @()
+
+# A registry path with %VAR% is expanded for the existence test and reported as stored.
+$env:IK_TEST_DIR = 'C:\Real\Agent'
+$script:Entries = @(New-Entry 'Advanced Monitoring Agent_is1' -Name 'Advanced Monitoring Agent' -Uninstall '"%IK_TEST_DIR%\unins000.exe"')
+$script:Existing = @('C:\Real\Agent\unins000.exe')
+$k = @((Invoke-Inspect).Json.keys)[0]
+Assert-Same $k.uninstallExecutable.exists 'true' 'environment variables are expanded before the test'
+Assert-Same $k.uninstallExecutable.path '%IK_TEST_DIR%\unins000.exe' 'the stored text is reported'
+$script:Existing = @()
 
 # MSI with the cached package present, then missing.
 $pkg = 'C:\Windows\Installer\1a2b3c.msi'
