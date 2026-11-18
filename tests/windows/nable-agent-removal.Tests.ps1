@@ -62,6 +62,7 @@ $script:NaListFolders = { param($Parent) @($script:Dirs | Where-Object { $_.Star
 $script:NaSettle = { }
 $script:NaMsiLogDir = 'C:\ProgramData\Relian\NableMsiLogs'
 $realPrepare = $script:NaPrepareLogDir
+$realDirTrustedSaved = $script:NaDirTrusted
 $script:NaPrepareLogDir = { param($Dir) $script:BackupDirs.Add("log:$Dir") }
 $script:NaReadLogTail = { param($Path) $script:LogLines }
 $script:NaDeleteFile = { param($Path) $script:DeletedFiles.Add($Path) }
@@ -661,6 +662,20 @@ $r = Invoke-Job
 Assert-Same $r.Code 2 'an untrusted log folder exit'
 Assert-Same $script:Runs.Count 0 'an untrusted log folder runs nothing'
 $script:NaPrepareLogDir = { param($Dir) $script:BackupDirs.Add("log:$Dir") }
+
+# The folder check covers every file and folder inside it, not only the folder itself.
+$treeDir = Join-Path $script:TmpRoot 'tree'
+$null = New-Item -ItemType Directory -Path "$treeDir\sub" -Force
+Set-Content -LiteralPath "$treeDir\Agent.exe" -Value 'x'
+Set-Content -LiteralPath "$treeDir\sub\helper.dll" -Value 'x'
+$realDirTrusted = (Get-Variable -Scope Script -Name realDirTrustedSaved -ValueOnly)
+$script:NaPathTrusted = { param($Path) $true }
+Assert-True (& $realDirTrusted $treeDir) 'a tree of trusted items is trusted'
+$script:NaPathTrusted = { param($Path) -not $Path.EndsWith('helper.dll') }
+Assert-True (-not (& $realDirTrusted $treeDir)) 'one untrusted file deep in the tree refuses the folder'
+$script:NaPathTrusted = { param($Path) -not $Path.EndsWith('Agent.exe') }
+Assert-True (-not (& $realDirTrusted $treeDir)) 'an untrusted Agent.exe refuses the folder'
+Assert-True (-not (& $realDirTrusted (Join-Path $script:TmpRoot 'missing'))) 'a missing folder is not trusted'
 
 # StrictMode: an entry with no Publisher or InstallLocation property is read safely.
 $bare = [pscustomobject]@{ Key = "$u32\Advanced Monitoring Agent GP"; Id = 'Advanced Monitoring Agent GP'; Name = 'Advanced Monitoring Agent GP'; Publisher = ''; Uninstall = "`"$bootExe`" REMOVE=TRUE"; Msi = $false }

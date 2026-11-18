@@ -200,20 +200,30 @@ $script:NaGetSignature = {
     $s = Get-AuthenticodeSignature -LiteralPath $Path
     [pscustomobject]@{ Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }) }
 }
-# True only for a real folder owned by SYSTEM, Administrators or TrustedInstaller whose DACL, inherited rules
-# included, lets no one else write, create or delete in it: a user-writable folder could hold a planted DLL
-# beside a signed Agent.exe, or redirect a log. SIDs, not names, so a localized Windows reads the same. Any doubt is false.
-$script:NaDirTrusted = {
-    param($Dir)
+# True when one file or folder has a privileged owner and no ACL rule, inherited included, that lets anyone
+# else write, create or delete. SIDs, not names, so a localized Windows reads the same. Any doubt is false.
+$script:NaPathTrusted = {
+    param($Path)
     try {
-        $item = Get-Item -LiteralPath $Dir -Force
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
-        $acl = Get-Acl -LiteralPath $Dir
-        $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        if ($script:NaTrustedSids -notcontains $owner) { return $false }
+        $acl = Get-Acl -LiteralPath $Path
+        if ($script:NaTrustedSids -notcontains [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value) { return $false }
         $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
             [pscustomobject]@{ Identity = [string]$_.IdentityReference.Value; Allow = ($_.AccessControlType -eq 'Allow'); Rights = [int]$_.FileSystemRights } })
         return (Test-NaAclClosed $rules)
+    } catch { return $false }
+}
+
+# True only for a real folder, and every file and folder in it, that passes NaPathTrusted and holds no link:
+# a user-writable folder or file could hold a planted DLL beside a signed Agent.exe, or redirect a log.
+$script:NaDirTrusted = {
+    param($Dir)
+    try {
+        $items = @(Get-Item -LiteralPath $Dir -Force) + @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -ErrorAction Stop)
+        foreach ($item in $items) {
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+            if (-not (& $script:NaPathTrusted $item.FullName)) { return $false }
+        }
+        return $true
     } catch { return $false }
 }
 
