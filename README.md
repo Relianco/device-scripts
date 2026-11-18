@@ -159,7 +159,7 @@ Collectors: `cpu-benchmark`, `hardware-inventory`, `network-audit`, `storage-hea
 ```
 
 - **Output:** the full JSON goes to the collector's field (`relianHardwareInventory`, `relianCpuBenchmark`, `relianNetworkAudit`, `relianStorageHealth`; WYSIWYG, script Read/Write) through `Ninja-Property-Set-Piped`, and one short JSON summary line goes to stdout.
-- **Field format:** the value is `<pre>` plus the HTML-encoded JSON plus `</pre>`. The field shows it as preformatted text, and the field's `text` is the JSON with entities still encoded.
+- **Field format:** the value is `<pre>` plus the HTML-encoded JSON plus `</pre>`. The field shows it as preformatted text, and `text` from the API is the plain JSON, which parses directly.
 - **Size limit:** the field holds 200000 characters, measured on the whole HTML string. A larger result is not truncated: the run throws and exits 1, and the JSON is printed to the run output.
 - **`-ReportOnly`:** collects and prints the JSON without writing the field.
 - **Failure:** a failed collection or field write exits 1.
