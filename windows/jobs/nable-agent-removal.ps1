@@ -419,6 +419,7 @@ function Invoke-NableRemovalJob {
                 if ($entry.Msi -and $entry.Id -match '\A\{[0-9A-Fa-f-]{36}\}\z') {
                     try {
                         $packed = ConvertTo-NaPackedGuid $entry.Id
+                        # Not backed up on purpose: this registration is deleted only when the cached package is missing or unrecorded, so Windows Installer could not repair or uninstall from it anyway. The Add/Remove Programs key, which names the product, is backed up above.
                         if (& $script:NaHasProduct $packed) {
                             $pkg = & $script:NaReadLocalPackage $packed
                             if ($null -eq $pkg) { $kept.Add("Installer Products $packed kept: no InstallProperties, package unknown") }
