@@ -116,3 +116,6 @@ jobs:
           # Windows PowerShell 5.1 is what the runner uses on a device: real junctions, sharing violations, registry provider and event log.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/outlook-suggestion-sources.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Collectors are job modules under NinjaOne's Windows PowerShell 5.1: storage-health runs real CIM through the loader.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/collectors-piped-field.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

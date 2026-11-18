@@ -17,7 +17,7 @@ People confuse these. Each one does a different job.
 - **Install, repair or diagnose on Windows:** paste `windows/runner/Invoke-RelianRunner.ps1`. It runs one package.
 - **A recurring fix on a schedule, on Windows:** paste `windows/runner/Invoke-RelianJob.ps1`. It runs one job module.
 - **Read-only evidence from a device, on Windows:** paste `windows/runner/Invoke-RelianReadJob.ps1` as its own script. It runs one hash-pinned evidence package from `windows/read/` and writes the answer to a custom field.
-- **Inventory on Windows:** paste `windows/bootstrap.ps1`. It runs one collector. It is not an installer.
+- **Inventory on Windows:** run a collector from `windows/collectors/` with `Invoke-RelianJob.ps1`. It writes one NinjaOne field.
 - **Linux:** paste `linux/runner/relian-runner.sh`.
 - **macOS:** paste `macos/runner/relian-runner.sh`.
 
@@ -154,21 +154,17 @@ The line is at most 8000 UTF-8 bytes; a larger result is dropped and `error` is 
 
 **Tests:** `tests/windows/read-job.Tests.ps1`: no table and the exact parameters, every URL, hash and argument refusal with nothing downloaded, the 1 MiB cap, `-MaximumRedirection 0`, an AST scan that lists the only write commands (the cache and the one field write), the piped field write, the 8000-byte cap, and a real child killed at the timeout.
 
-### Inventory: bootstrap.ps1 and collectors
+### Inventory: collectors
 
-**When:** you want hardware, network, or storage inventory written to NinjaOne fields.
+**When:** you want CPU, hardware, network, or storage inventory written to NinjaOne fields.
 
-`windows/bootstrap.ps1` downloads one collector from `windows/collectors/` and runs it. It follows a branch (default `main`) and checks no hash. It can read an optional git token from the org custom field `relian_git_deploy_token`. It is the only script here that does. Do not use it to install software.
-
-Parameter: `-ScriptName`, the collector path without the extension.
+Collectors: `cpu-benchmark`, `hardware-inventory`, `network-audit`, `storage-health`. Each runs as a job module under `Invoke-RelianJob` (see Recurring jobs), writes its full JSON to the field `relian_<collector name with underscores>`, and prints one short JSON summary line. `-ReportOnly` collects and prints the JSON without writing the field. A failed collection or field write exits 1.
 
 ```
--ScriptName "windows/collectors/hardware-inventory"
+-ModuleUrl "https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/collectors/hardware-inventory.ps1" -ModuleSha256 "<module-sha256>"
 ```
 
-Collectors: `cpu-benchmark`, `hardware-inventory`, `network-audit`, `storage-health`.
-
-`runner-report-field.ps1` in the same folder is not run through bootstrap. Paste it directly: it runs the hash-pinned runner and writes the `storage-maintenance` ProfileReport JSON to a device custom field. Steps are in `docs/maintenance.md`.
+`runner-report-field.ps1` in the same folder is not a job module. Paste it directly: it runs the hash-pinned runner and writes the `storage-maintenance` ProfileReport JSON to a device custom field. Steps are in `docs/maintenance.md`.
 
 ### TLS
 
@@ -318,7 +314,6 @@ For a security reviewer. This is what a pasted script can and cannot do.
 
 - **The PowerShell loaders** (`Invoke-RelianRunner`, `Invoke-RelianJob`) download only the files you pin. `Invoke-RelianReadJob` downloads only a package under `windows/read/` of this repo at a 40-hex commit, with no redirect, and the hash it is given. They check each SHA256 before they run anything.
 - **The job loader** runs a module in process from the bytes it hashed. Its cache directory is SYSTEM-only, and it re-checks the owner, the ACL, and the hash on every run.
-- **`windows/bootstrap.ps1` is the exception.** It follows a branch, checks no hash, and may read a git token. It runs inventory collectors only. Do not use it to install anything.
 - **Neither runner calls the NinjaOne API.** Packages read and write no NinjaOne field: they report one JSON line on stdout and an exit code. `tailscale` takes its auth key only from the `AuthKey` environment variable, on Windows and Linux. `autoelevate` takes its license key from the `LicenseKey` package argument or the `AE_LICENSE_KEY` environment variable. No package reads `relian_git_deploy_token`.
 - **Read-only packages** are tested for it. The tests scan their source for write commands, or run them against stubs.
 - **Changing packages** say so in their header: what they change, what they back up first, and what they never do (reboot, start Setup, change firewall rules).
