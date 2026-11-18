@@ -2,6 +2,8 @@
 
 Status: proposed architecture, 2026-11-02. This document specifies future behavior; it does not establish production support. Evidence baseline is main `40fb716`, PSAppDeployToolkit (PSADT) 4.1.8, and the separate, unmerged GSA proposal [PR 84](https://github.com/Relianco/device-scripts/pull/84), commit `db87fa6`. No Windows installation, reboot, session, or Intune pilot was performed for this design.
 
+> **Note, 2026-11-17.** Main has moved since this baseline; the design itself is unchanged. PR 84 closed unmerged. [PR 110](https://github.com/Relianco/device-scripts/pull/110) put its GSA package on main at the same 2.34.222 pin and hash. It is still replace-only, deletes its staging cache on exit, and has no durable recovery, so the GSA specimen remains a proposal. The PSADT 4.1.8 pin and the 7-Zip 26.04 pin are unchanged. Runner and 7-Zip line anchors below were taken at `40fb716` and have drifted: the runner gained TLS 1.2 setup (PR 97) and a report-field path (PR 124). Main also added `Invoke-RelianJob.ps1` and `Invoke-RelianReadJob.ps1`, which each load one hash-pinned module, so delivery is still one file per call. No P1 engine (`windows/installer/`) is on main.
+
 The proposed foundation is a small orchestration engine, typed package recipes, and thin delivery adapters. It should give standalone, RMM, and Intune deployments the same discovery, version policy, postconditions, and recovery semantics. PSADT remains the process and interaction toolkit. [Recipe specimens](../../design/unified-installer/recipes.md) and [acceptance scenarios](../../design/unified-installer/scenarios.md) are part of this proposal.
 
 ## Purpose and scope

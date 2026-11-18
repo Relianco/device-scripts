@@ -10,6 +10,8 @@ The release builder must resolve primitives, OS floor, identity fixtures, releas
 
 The unmerged [GSA proposal at db87fa6](https://github.com/Relianco/device-scripts/blob/db87fa6/windows/packages/global-secure-access/Invoke-GlobalSecureAccess.ps1#L1-L186) records version 2.34.222 and its SHA256, matches Microsoft bundle registration, rejects mixed old/current clients, validates cached uninstallers, and uses `/quiet /norestart`. It currently deletes temporary staging on exit, including intermediate reboot. This specimen proposes durable retention and re-entry; it does not claim the old script already provides them.
 
+> **Note, 2026-11-17.** PR 84 closed unmerged. [PR 110](https://github.com/Relianco/device-scripts/pull/110) merged the GSA package to main as `windows/packages/global-secure-access/Invoke-GlobalSecureAccess.ps1` with the same version and SHA256. It still deletes its staging cache on exit and stops for a caller-managed reboot, so this specimen's durable retention and re-entry remain unimplemented.
+
 ```json
 {
   "schemaVersion": 1,

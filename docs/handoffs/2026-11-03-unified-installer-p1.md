@@ -2,6 +2,8 @@
 
 This is the resume guide for a new implementation conversation. Planning and review do not establish Windows support. No engine has been implemented and no P1 implementation task is complete.
 
+> **Note, 2026-11-17.** Three facts below are out of date. PR 85 no longer edits `docs/STATUS.md`, which the lead owns, so the main status file does not name this plan; start from this handoff and the plan. PR 84 closed; [PR 110](https://github.com/Relianco/device-scripts/pull/110) merged the GSA package to main. Since PR 151, a documentation-only PR gets a docs review instead of the failing AI review described under "Review and CI interpretation".
+
 ## Start here
 
 1. Read `docs/STATUS.md` in the design lane. It identifies the current reviewed plan and next task; trust it over a pasted historical commit.
