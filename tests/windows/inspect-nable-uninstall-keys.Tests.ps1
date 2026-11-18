@@ -50,7 +50,7 @@ Assert-Same $k.msi.installPropertiesExists $false 'no InstallProperties'
 Assert-True ($null -eq $k.msi.localPackage) 'no LocalPackage when no InstallProperties'
 
 # Inno entry whose unins000.exe is gone, with an install location that exists and a user path.
-$userDir = 'C:\' + 'Users' + '\' + 'jdoe' + '\AppData\Agent'
+$userDir = 'C:\Users\' + ('u' + [guid]::NewGuid().ToString('N').Substring(0, 8)) + '\AppData\Agent'
 $exe = 'C:\Program Files (x86)\Advanced Monitoring Agent\unins000.exe'
 $script:Entries = @(New-Entry 'Advanced Monitoring Agent_is1' -Name 'Advanced Monitoring Agent' -Uninstall "`"$exe`" /x" -Quiet "`"$exe`" /VERYSILENT" -Loc $userDir -Other @('Inno Setup: App Path') -SubKeys)
 $script:Existing = @($userDir)
