@@ -192,7 +192,7 @@ One folder per package under `windows/packages/`. The read jobs that `Invoke-Rel
 - `git`: installs Git for Windows.
 - `microsoft-365`: installs Microsoft 365 Apps with the Office Deployment Tool and a pinned `configuration.xml`. The Office payloads download at install time and are not pinned.
 - `notepadpp`: installs Notepad++.
-- `pdf-xchange`: installs PDF-XChange PRO from a pinned MSI, or upgrades an older V10 or V11 in place with its settings. The licence key never goes on the runner's command line or in this repo. It comes only from the `PdfXchangeKeyData` environment variable, which the caller sets. `PdfXchangeOrganization` and `PdfXchangeUserMail` are optional. After msiexec, `XCVault.exe /AddKeyData /M /S` stores the key for every user. The package turns off the vendor updater and sets the vendor policy that activates the key for each user at first start.
+- `pdf-xchange`: installs PDF-XChange PRO from a pinned MSI, or upgrades an older V10 or V11 in place with its settings. The licence key never goes on the runner's command line or in this repo. It comes only from the `PdfXchangeKeyData` environment variable, which the caller sets. `PdfXchangeOrganization` and `PdfXchangeUserMail` are optional. After msiexec, `XCVault.exe /AddKeyData /M /S` stores the key for every user. The package turns off the vendor updater and sets the vendor policy that activates the key for each user at first start. On a PC with full Adobe Acrobat (not Reader), msiexec gets `SET_AS_DEFAULT="0"`, so the install leaves the `.pdf` default alone.
 - `putty`: installs PuTTY.
 - `quicklook`: installs QuickLook.
 - `sysmon`: installs Sysmon.
