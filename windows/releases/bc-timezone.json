@@ -1,0 +1,6 @@
+{
+  "name": "BC permanent UTC-7 time zone",
+  "kind": "check",
+  "installsSoftware": false,
+  "packageArguments": "Optional. {\"Fix\":\"true\"} (base64 eyJGaXgiOiJ0cnVlIn0=) switches Pacific Standard Time (or Yukon Standard Time once British Columbia Standard Time is installed) to British Columbia Standard Time when available, else Yukon Standard Time. Travellers on other time zones are left alone. Without Fix the run is read-only."
+}
