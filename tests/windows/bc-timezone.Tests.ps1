@@ -175,16 +175,19 @@ $run = Invoke-BctzRun -Fix
 Assert-Same $run.exitCode 1 'set did not stick exit'
 Assert-Same $run.record.verdict 'fix incomplete: still on Pacific Standard Time (wanted Yukon Standard Time)' 'set did not stick verdict'
 
-# 10. Runner Action and Fix mapping.
+# 10. Runner Action, Fix, and empty PinVersion mapping.
 foreach ($a in @('Install', 'Update', 'Repair', 'Reinstall')) {
     Assert-Same (Get-BctzMode $a '') 'check' "$a is a read-only check"
     Assert-Same (Get-BctzMode $a 'false') 'check' "$a with Fix false"
     Assert-Same (Get-BctzMode $a 'true') 'fix' "$a with Fix true"
+    Assert-Same (Get-BctzMode $a 'true' '') 'none' "$a with empty PinVersion is disabled"
+    Assert-Same (Get-BctzMode $a 'yes' '   ') 'none' "$a with whitespace PinVersion exits before validation"
 }
 Assert-Same (Get-BctzMode 'Uninstall' 'true') 'none' 'Uninstall ignores Fix'
+Assert-Same (Get-BctzMode 'Bogus' 'yes' '') 'none' 'empty PinVersion disables even invalid Action/Fix'
 foreach ($bad in @(@('Bogus', ''), @('', ''), @('Install', 'yes'), @('Install', '1'))) {
     $threw = $false
-    try { $null = Get-BctzMode $bad[0] $bad[1] } catch { $threw = $true }
+    try { $null = Get-BctzMode $bad[0] $bad[1] '1.0.0' } catch { $threw = $true }
     if (-not $threw) { Fail "Get-BctzMode accepted [$($bad[0])] [$($bad[1])]" }
 }
 

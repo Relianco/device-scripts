@@ -83,9 +83,11 @@ function Get-BctzNow {
     return (Get-Date)
 }
 
-# Pure: 'check', 'fix' or 'none' for a runner Action and Fix string. Throws on bad input.
+# Pure: 'check', 'fix' or 'none' for a runner Action, Fix string, and PinVersion. Throws on bad input.
+# An empty PinVersion is the off switch: returns 'none' before validating Action or Fix.
 function Get-BctzMode {
-    param([string]$Action, [string]$Fix)
+    param([string]$Action, [string]$Fix, [string]$PinVersion = '1.0.0')
+    if ([string]::IsNullOrWhiteSpace($PinVersion)) { return 'none' }
     if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) {
         throw 'Action must be Install, Update, Repair, Reinstall, or Uninstall.'
     }
@@ -225,7 +227,7 @@ function Invoke-Main {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -ne '1') {
-    try { $bctzMode = Get-BctzMode -Action $Action -Fix $Fix }
+    try { $bctzMode = Get-BctzMode -Action $Action -Fix $Fix -PinVersion $PinVersion }
     catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     if ($bctzMode -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
     Invoke-Main -Fix:($bctzMode -eq 'fix')
