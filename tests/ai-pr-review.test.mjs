@@ -22,6 +22,7 @@ import {
   reviewPullRequest,
   selectReviewFiles,
 } from '../scripts/ci/ai-pr-review.mjs'
+import * as review from '../scripts/ci/ai-pr-review.mjs'
 
 test('an empty MODEL pin is gpt-6.1-sol and a second name is not the primary', () => {
   assert.deepEqual(parseModelList(''), [DEFAULT_MODEL])
@@ -290,4 +291,138 @@ test('an empty completion fails immediately and a text part is accepted', async 
     }),
   })
   assert.match(content, /findings/)
+})
+
+// New symbols come through the namespace so each test fails on its own against the old script.
+const H = '/' + 'home/'
+const homePath = `${H}exampleuser/x`
+
+function fakeModel(reply = '{"findings":[]}') {
+  const prompts = []
+  const fetchImpl = async (_url, init) => {
+    prompts.push(JSON.parse(init.body).messages[1].content)
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: reply } }] }) }
+  }
+  return { prompts, fetchImpl }
+}
+
+async function runReview(files, model = fakeModel()) {
+  const posted = []
+  let error = null
+  try {
+    await reviewPullRequest({
+      prNumber: 1,
+      headSha: 'abc',
+      token: 't',
+      endpoint: 'https://example.test/v1',
+      apiKey: 'k',
+      model: DEFAULT_MODEL,
+      sleep: async () => {},
+      fetchImpl: model.fetchImpl,
+      listFiles: async () => files,
+      post: async ({ body }) => { posted.push(body) },
+    })
+  } catch (caught) {
+    error = caught
+  }
+  return { posted, error, prompts: model.prompts }
+}
+
+const patch = '@@ -0,0 +1 @@\n+text'
+
+test('docs are classified by extension or name, never by folder', () => {
+  const table = [
+    ['README.md', true, false],
+    ['docs/x.md', true, false],
+    ['.github/x.md', true, false],
+    ['LICENSE', true, false],
+    ['docs/x.ps1', false, true],
+    ['docs/x.sh', false, true],
+    ['docs/plans/x.json', false, true],
+  ]
+  for (const [filename, docs, reviewable] of table) {
+    assert.equal(isDocsPath(filename), docs, filename)
+    assert.equal(isReviewablePath(filename), reviewable, filename)
+  }
+})
+
+test('a docs-only PR gets the docs prompt and a docs verdict; code PRs keep the code prompt', async () => {
+  const table = [
+    { name: 'README.md only', files: [{ filename: 'README.md', patch }], docs: true, sent: ['README.md'] },
+    { name: 'docs/x.md only', files: [{ filename: 'docs/x.md', patch }], docs: true, sent: ['docs/x.md'] },
+    { name: '.github/x.md and LICENSE', files: [{ filename: '.github/x.md', patch }, { filename: 'LICENSE', patch }], docs: true, sent: ['.github/x.md', 'LICENSE'] },
+    { name: 'docs/x.ps1', files: [{ filename: 'docs/x.ps1', patch }], docs: false, sent: ['docs/x.ps1'] },
+    { name: 'mixed docs and code', files: [{ filename: 'README.md', patch }, { filename: 'windows/a.ps1', patch }], docs: false, sent: ['windows/a.ps1'] },
+    { name: 'rename .ps1 to .md', files: [{ filename: 'docs/x.md', previous_filename: 'windows/x.ps1', status: 'renamed', changes: 1, patch }], docs: false, sent: ['docs/x.md'] },
+  ]
+  for (const row of table) {
+    const { posted, error, prompts } = await runReview(row.files)
+    assert.equal(error, null, row.name)
+    assert.equal(posted.length, 1, row.name)
+    assert.deepEqual(prompts.map((p) => p.split('\nFile: ')[1].split('\n')[0]), row.sent, row.name)
+    for (const prompt of prompts) {
+      assert.equal(prompt.startsWith(row.docs ? review.DOCS_PROMPT : PROMPT), true, row.name)
+    }
+    if (row.docs) {
+      assert.equal(posted[0].startsWith(review.DOCS_LGTM), true, row.name)
+      assert.equal(posted[0].startsWith('LGTM'), true, row.name)
+    } else {
+      assert.equal(posted[0].startsWith('LGTM 👍'), true, row.name)
+    }
+    assert.equal(posted[0].startsWith(NOT_PERFORMED_PREFIX), false, row.name)
+  }
+})
+
+test('the docs prompt names the public-repo leaks and the code rules', () => {
+  const prompt = review.DOCS_PROMPT
+  assert.equal(typeof prompt, 'string')
+  assert.match(prompt, /PUBLIC/)
+  assert.match(prompt, /client or customer name/)
+  assert.match(prompt, /device id/)
+  assert.match(prompt, /home-directory path/)
+  assert.match(prompt, /C:\\Users\\<name>/)
+  assert.match(prompt, /token, password/)
+  assert.match(prompt, /contradicts the code rules/)
+  assert.match(prompt, /A URL with userinfo/)
+  assert.match(prompt, /JSON/)
+})
+
+test('docs findings are not LGTM and use the docs prefix', async () => {
+  const model = fakeModel('{"findings":[{"line":2,"body":"Names a client."}]}')
+  const { posted, error } = await runReview([{ filename: 'docs/x.md', patch }], model)
+  assert.equal(error, null)
+  assert.equal(posted[0].startsWith(review.DOCS_PREFIX), true)
+  assert.equal(posted[0].startsWith('LGTM'), false)
+  assert.match(posted[0], /docs\/x\.md:2 Names a client\./)
+  assert.equal(DELIVERY_PREFIXES.includes(review.DOCS_PREFIX), true)
+})
+
+test('a home-directory path on an added docs line is flagged even when the model says clean', async () => {
+  const win = 'C:' + '\\Users\\' + 'Jane'
+  const planted = `@@ -1,2 +1,4 @@\n ctx\n-${H}gone/x\n+see ${homePath}\n+ok ${H}<user>/x and ${H}runner/work https://x.test${H}site\n+${win}\\a`
+  assert.deepEqual(review.homePathFindings(planted).map((f) => f.line), [2, 4])
+  const { posted } = await runReview([{ filename: 'README.md', patch: planted }])
+  assert.equal(posted[0].startsWith(review.DOCS_PREFIX), true)
+  assert.match(posted[0], /README\.md:2 /)
+  assert.match(posted[0], /exampleuser/)
+})
+
+test('a docs-only PR with the model unavailable stays red, and nothing reviewable is still NOT performed', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 404, text: async () => '{"error":{"code":"model_not_found"}}' })
+  const { posted, error } = await runReview([{ filename: 'README.md', patch }], { prompts: [], fetchImpl })
+  assert.match(String(error?.message), /model_not_found/)
+  assert.equal(posted.length, 0)
+
+  const binary = await runReview([{ filename: 'brand/logo.png', changes: 0, patch: null }])
+  assert.equal(binary.error?.exitCode, 1)
+  assert.equal(binary.posted[0].startsWith(NOT_PERFORMED_PREFIX), true)
+})
+
+test('the workflow gate classifies docs by extension and verify accepts the docs prefix', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/ai-pr-review.yml', import.meta.url), 'utf8')
+  assert.doesNotMatch(workflow, /docs\/\*/)
+  assert.match(workflow, /\*\.md\|LICENSE\) ;;/)
+  assert.match(workflow, /pulls\/\$\{PR_NUMBER\}\/files/)
+  assert.equal(workflow.includes(`startswith("${review.DOCS_PREFIX}")`), true)
+  assert.equal(workflow.includes('startswith("AI review NOT performed:")'), true)
 })
