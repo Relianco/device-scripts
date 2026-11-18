@@ -1,10 +1,13 @@
 # Intune runs this file with no arguments.
-# Exit 0 when Wazuh Agent is installed at or above 4.14.9.
+# Exit 0 when Wazuh Agent is installed at or above the floor, WazuhSvc exists, and client.keys is not empty.
+# The floor is the one $RelianWazuhFloor line below; a template builder may replace that line.
+# A stopped service still detects, so a manager (WPK) upgrade restart never triggers a reinstall.
 # The display name match is the installer's whole-string check.
 # Version keys apply only when no Wazuh Agent uninstall entry has a version or a product code.
 # A missing key is not installed. This file does not run setup.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+$RelianWazuhFloor = '4.14.3'
 
 function Format-RelianWazuhVersion {
     param([version]$Version)
@@ -194,13 +197,43 @@ function Get-RelianWazuhVersionValue {
     return ''
 }
 
+# Enrolled means the agent holds a key from the manager.
+function Test-RelianWazuhEnrolled {
+    param(
+        [string]$ServiceStatus,
+        [int64]$KeysLength
+    )
+    return -not [string]::IsNullOrWhiteSpace($ServiceStatus) -and $KeysLength -gt 0
+}
+
+function Get-RelianWazuhKeysLength {
+    foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+        $path = Join-Path $root 'ossec-agent\client.keys'
+        if (Test-Path -LiteralPath $path) {
+            return [int64](Get-Item -LiteralPath $path).Length
+        }
+    }
+    return [int64]0
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1') {
     return
 }
 
 $present = $false
 try {
-    $present = [bool](Test-RelianWazuhInstalled -Entries @(Get-RelianWazuhUninstallEntries) -VersionValue ([string](Get-RelianWazuhVersionValue)) -PinVersion '4.14.9')
+    $present = [bool](Test-RelianWazuhInstalled -Entries @(Get-RelianWazuhUninstallEntries) -VersionValue ([string](Get-RelianWazuhVersionValue)) -PinVersion $RelianWazuhFloor)
+    if ($present) {
+        $service = Get-Service -Name 'WazuhSvc' -ErrorAction SilentlyContinue
+        $status = ''
+        if ($null -ne $service) {
+            $status = [string]$service.Status
+        }
+        $present = [bool](Test-RelianWazuhEnrolled -ServiceStatus $status -KeysLength (Get-RelianWazuhKeysLength))
+    }
 } catch {
     $present = $false
 }

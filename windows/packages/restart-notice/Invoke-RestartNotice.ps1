@@ -20,17 +20,18 @@
          (reason toolkitNoUser); otherwise the countdown without a notice.
       Any other error: result failed, exit 1.
 
-    The result is written to the NinjaOne device field relianRestartNotice before
-    any restart, because nothing runs after it, and printed last on stdout.
+    The result is printed last on stdout. The package writes no RMM field. A run
+    that restarts the device prints its line after shutdown.exe returns, before
+    Windows ends the process; a later ReportOnly run shows lastBoot either way.
 
     PackageArguments (all optional strings):
       Message           Body of notice 1. Default: a plain "needs to restart" line.
       SnoozeMinutes     5 to 240, default 60. The one snooze; never extended.
       PromptMinutes     1 to 55, default 10. How long notice 1 waits for an answer.
       CountdownMinutes  1 to 60, default 15. Countdown on notice 2.
-      ReportOnly        true or false, default false. true: detection only, written
-                        to the device field relianSessionState. No notice, no
-                        snooze marker change, no restart.
+      ReportOnly        true or false, default false. true: detection only, one
+                        JSON line on stdout. No notice, no snooze marker change,
+                        no restart.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM. Uninstall exits 0.
@@ -53,8 +54,6 @@ param(
 
 $ProgressPreference = 'SilentlyContinue'
 
-$RnFieldName = 'relianRestartNotice'
-$RnReportField = 'relianSessionState'
 $RnMarkerKey = 'HKLM:\SOFTWARE\Relian\RestartNotice'
 $RnFupState = [IO.Path]::Combine("$env:ProgramData", 'Relian', 'FeatureUpgrade', 'state.json')
 $RnDefaultMessage = 'Windows needs to restart to finish an update. Save your work.'
@@ -260,36 +259,10 @@ function ConvertTo-RnJson {
     return ($Result | ConvertTo-Json -Depth 4 -Compress)
 }
 
-# Pure: quotes a value for a native command line under Windows PowerShell 5.1.
-function ConvertTo-RnNativeArg {
-    param([string]$Value)
-    return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
-}
-
-# Same write as the feature-upgrade package: the agent CLI's stdin, then a read-back.
-function Set-RnField {
-    param([string]$Value, [string]$Name = $RnFieldName)
-    $cli = Join-Path $env:ProgramData 'NinjaRMMAgent\ninjarmm-cli.exe'
-    if (Test-Path -LiteralPath $cli) {
-        try {
-            $null = $Value | & $cli set --stdin $Name 2>&1
-            $back = (& $cli get $Name 2>$null) -join "`n"
-            if ($back.Trim() -eq $Value) { return $true }
-        } catch { }
-    }
-    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try { Ninja-Property-Set $Name (ConvertTo-RnNativeArg $Value); return $true } catch { }
-    }
-    return $false
-}
-
-# Writes the field and keeps the JSON for the caller to print last.
+# Keeps the JSON for the caller to print last. A later call replaces it.
 function Out-RnResult {
-    param([System.Collections.Specialized.OrderedDictionary]$Result, [string]$Field = $RnFieldName)
-    $json = ConvertTo-RnJson $Result (& $script:RnNow)
-    if (& $script:RnSetField $json $Field) { Write-Status "Written to $Field" }
-    else { Write-Status 'Custom field not written; the JSON line below is the result' 'WARN' }
-    $script:RnJson = $json
+    param([System.Collections.Specialized.OrderedDictionary]$Result)
+    $script:RnJson = ConvertTo-RnJson $Result (& $script:RnNow)
 }
 
 function New-RnResult {
@@ -517,8 +490,7 @@ function Wait-RnCountdown {
     }
 }
 
-# Report only: the same probes and rules as Invoke-RnMain, written to
-# relianSessionState. Reads only: no prompt, no snooze marker change (a stale
+# Report only: the same probes and rules as Invoke-RnMain. Reads only: no prompt, no snooze marker change (a stale
 # marker is reported, not cleared), no restart. Returns the exit code.
 function Invoke-RnReport {
     $now = (& $script:RnNow).ToUniversalTime()
@@ -534,7 +506,7 @@ function Invoke-RnReport {
         build       = [int](& $script:RnBuild)
         snooze      = Get-RnSnoozeState -Marker (& $script:RnGetSnooze) -Now $now -LastBoot $boot
     }
-    Out-RnResult $r $RnReportField
+    Out-RnResult $r
     return 0
 }
 
@@ -548,8 +520,7 @@ function Invoke-RnRun {
         return (Invoke-RnMain $A)
     } catch {
         Write-Status "$($_.Exception.Message) $($_.ScriptStackTrace)" 'ERROR'
-        $outField = if ($A.ReportOnly) { $RnReportField } else { $RnFieldName }
-        Out-RnResult (New-RnResult 'failed' "$($_.Exception.Message)" @()) $outField
+        Out-RnResult (New-RnResult 'failed' "$($_.Exception.Message)" @())
         return 1
     }
 }
@@ -572,7 +543,6 @@ $script:RnMaintenanceCountdown={
     return 'Timeout'
 }
 $script:RnNow = { (Get-Date).ToUniversalTime() }
-$script:RnSetField = { param($Json, $Name) Set-RnField $Json $Name }
 $script:RnSleep = { param($Seconds) Start-Sleep -Seconds $Seconds }
 # /f: apps with unsaved work would otherwise block the restart and let it be cancelled.
 $script:RnRestart = { & shutdown.exe /r /f /t 0; $LASTEXITCODE }

@@ -2,6 +2,5 @@
   "name": "Windows Update policy",
   "kind": "check",
   "installsSoftware": false,
-  "ninjaField": "relianWuPolicy",
   "packageArguments": "Optional. {\"Fix\":\"true\"} (base64 eyJGaXgiOiJ0cnVlIn0=) removes NoAutoUpdate, AUOptions below 3, DisableWindowsUpdateAccess and SetDisableUXWUAccess when they turn automatic updates off, after a backup to C:\\relian. Without it the run is read-only."
 }

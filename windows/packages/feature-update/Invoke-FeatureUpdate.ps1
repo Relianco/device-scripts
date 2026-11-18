@@ -12,7 +12,8 @@
     registry value, changes no policy, and starts no upgrade.
 
     With -Fix true it repairs only what keeps the compatibility appraiser from
-    running: it enables the "Microsoft Compatibility Appraiser" task and,
+    running: it enables the "Microsoft Compatibility Appraiser" task and its
+    "Microsoft Compatibility Appraiser Exp" sibling where disabled and,
     when the appraiser data is
     stale, starts that task without waiting (it runs 5 to 30 minutes; run the
     check again later to read the result). It never reboots, never starts the
@@ -27,8 +28,8 @@
     Fix is "true"). Uninstall changes nothing and exits 0: nothing was installed.
 
     The result is one line of compact JSON, printed last on stdout, with a
-    short "verdict". The JSON also goes to the NinjaOne device custom field
-    relianFeatureUpdate when the NinjaOne agent is present.
+    short "verdict". The package writes no RMM field: the caller reads stdout and
+    the exit code.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM
@@ -48,9 +49,8 @@ param(
 
 $ProgressPreference = "SilentlyContinue"
 
-# NinjaOne field names are alphanumeric only, so a relian_<name> field cannot be written.
-$FurFieldName = "relianFeatureUpdate"
-# ponytail: NinjaOne text fields hold about 10,000 characters; trim to stay under.
+# ponytail: the JSON line is trimmed to stay under about 10,000 characters, so an RMM's
+# output view or a text field can hold all of it.
 $FurMaxJson = 9500
 $FurSearchSeconds = 150
 # Build -> UBR of the last Home/Pro cumulative update after end of servicing:
@@ -464,33 +464,6 @@ function Get-SetupInfo {
     return $info
 }
 
-# Pure: quotes a value for a native command line under Windows PowerShell 5.1,
-# which passes embedded double quotes through unescaped. Backslashes before a
-# quote are doubled, then the quote is escaped (MSVCRT argument rules).
-function ConvertTo-FurNativeArg {
-    param([string]$Value)
-    return [regex]::Replace($Value, '(\\*)"', { param($m) $m.Groups[1].Value + $m.Groups[1].Value + '\"' })
-}
-
-# The runner starts the package in a child powershell.exe. Ninja-Property-Set
-# there hands the value to the agent CLI as a native argument, and 5.1 strips
-# the JSON's quotes. So write through the CLI's stdin and read it back.
-function Set-FurField {
-    param([string]$Value)
-    $cli = Join-Path $env:ProgramData 'NinjaRMMAgent\ninjarmm-cli.exe'
-    if (Test-Path -LiteralPath $cli) {
-        try {
-            $null = $Value | & $cli set --stdin $FurFieldName 2>&1
-            $back = (& $cli get $FurFieldName 2>$null) -join "`n"
-            if ($back.Trim() -eq $Value) { return $true }
-        } catch { }
-    }
-    if (Get-Command Ninja-Property-Set -ErrorAction SilentlyContinue) {
-        try { Ninja-Property-Set $FurFieldName (ConvertTo-FurNativeArg $Value); return $true } catch { }
-    }
-    return $false
-}
-
 # Hints at which tool turned the appraiser off. VDOT (Virtual Desktop
 # Optimization Tool) disables the appraiser task and DiagTrack, unpacks into
 # C:\Optimize and keeps its own event log. O&O ShutUp10 leaves OOSU10.exe or
@@ -538,6 +511,9 @@ function Get-FurFixPlan {
     $task = if ($a.Contains('task')) { $a.task } else { $null }
     $state = if ($task -and $task.Contains('state')) { "$($task.state)" } else { '' }
     if ($state -eq 'Disabled') { $plan.Add('EnableAppraiserTask') }
+    # VDOT disables the Exp task together with the main one. Get-FurExpTaskState is the
+    # existing pure helper defined further down in this file (the verdict uses it too).
+    if ("$(Get-FurExpTaskState $a)" -eq 'Disabled') { $plan.Add('EnableAppraiserExpTask') }
     if ($state -eq 'Running' -or $state -eq 'missing' -or $state -eq '') { return @($plan) }
 
     # Stale: the newest evaluation is missing or over 30 days old (a task run is
@@ -565,6 +541,7 @@ function Invoke-FurFix {
         try {
             switch ($step) {
                 'EnableAppraiserTask' { $null = Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
+                'EnableAppraiserExpTask' { $null = Enable-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser Exp' -ErrorAction Stop }
                 'RunAppraiser' {
                     # Asynchronous: the scan outlives the run.
                     try { Start-ScheduledTask -TaskPath '\Microsoft\Windows\Application Experience\' -TaskName 'Microsoft Compatibility Appraiser' -ErrorAction Stop }
@@ -630,8 +607,6 @@ function Invoke-Main {
 
         $json = ConvertTo-FurJson $record
         Write-Status "Verdict: $($record.verdict) ($($json.Length) bytes)"
-        if (Set-FurField $json) { Write-Status "Written to $FurFieldName" }
-        else { Write-Status "Custom field not written; the JSON line below is the result" "WARN" }
         # Last stdout line is the JSON; so a log reader can find it.
         Write-Output $json
     } catch {

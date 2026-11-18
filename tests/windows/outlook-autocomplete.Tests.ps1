@@ -309,8 +309,7 @@ foreach ($bad in @('Restart-Computer', 'shutdown', 'setup.exe', 'Set-Service', '
 # 8. Release metadata and runner PackageArguments round-trip.
 $release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/outlook-autocomplete.json') | ConvertFrom-Json
 Assert-Same $release.installsSoftware $false 'pin record installsSoftware is false'
-Assert-Same $release.ninjaField 'relianOutlookAutocomplete' 'pin record ninjaField matches'
-Assert-Same $OaFieldName $release.ninjaField 'script field name matches release JSON'
+if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
 
 Set-StrictMode -Off
 . (Join-Path $repoRoot 'windows/runner/Invoke-RelianRunner.ps1')

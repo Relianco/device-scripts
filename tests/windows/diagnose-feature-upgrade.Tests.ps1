@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 function Assert($Condition, $Label) { if (-not $Condition) { throw "FAIL $Label" } }
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$path = Join-Path $root 'windows/packages/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1'
+$path = Join-Path $root 'windows/read/diagnose-feature-upgrade/Invoke-DiagnoseFeatureUpgrade.ps1'
 $env:RELIAN_DEPLOY_TEST = '1'
 . $path
 $script:sensitiveValue = [guid]::NewGuid().ToString('n')

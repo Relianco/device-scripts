@@ -42,12 +42,9 @@ $scriptText = Get-Content -LiteralPath $scriptPath -Raw -Encoding utf8
 if ($scriptText -match 'Mandatory\s*=') {
     Fail 'a parameter is Mandatory'
 }
-# The only Ninja call is the read of the auth key field.
-if ($scriptText -match 'Ninja-Property-Set|Ninja-Property-Options|Ninja-Property-Docs') {
-    Fail 'script calls a Ninja cmdlet other than Ninja-Property-Get'
-}
-if ($AuthKeyField -cne 'tailscaleAuthKey') {
-    Fail "default AuthKeyField '$AuthKeyField'"
+# RMM-agnostic: the key comes only from the AuthKey environment variable.
+if ($scriptText -match 'Ninja-Property|ninjarmm|AuthKeyField') {
+    Fail 'script reads the auth key from a NinjaOne field'
 }
 if ($scriptText -notmatch [regex]::Escape("Join-Path `$cache '$($release.file)'")) {
     Fail 'cache file name does not match the release file'
@@ -154,23 +151,14 @@ $script:InvokeTailscaleUp = {
     $script:UpArgs = @($ArgumentList)
     return 0
 }
-# The custom field is faked. Field reads are counted so precedence can be checked.
-$script:FieldValue = ''
-$script:FieldReads = 0
-$script:GetNinjaProperty = {
-    param($Name)
-    $script:FieldReads++
-    if ($Name -cne 'tailscaleAuthKey') {
-        return ''
-    }
-    return $script:FieldValue
-}
+# A Ninja cmdlet in the session must never be used as a key source.
+$script:NinjaReads = 0
+function Ninja-Property-Get { param($Name) $script:NinjaReads++; return 'from-ninja' }
 function Run {
-    param($Key = $fakeKey, $Sha = $payloadSha, $Field = 'tailscaleAuthKey')
+    param($Key = $fakeKey, $Sha = $payloadSha)
     $script:Calls.Clear()
     $script:TailscaleErrorLog.Clear()
-    $script:FieldReads = 0
-    return [int](Invoke-TailscaleAction -Action 'Install' -PinVersion '1.104.4' -InstallerUrl 'https://example.invalid/t.msi' -InstallerSha256 $Sha -CancelPath '' -ClientTag $tag -AuthKey $Key -AuthKeyField $Field -HostName 'TESTHOST')
+    return [int](Invoke-TailscaleAction -Action 'Install' -PinVersion '1.104.4' -InstallerUrl 'https://example.invalid/t.msi' -InstallerSha256 $Sha -CancelPath '' -ClientTag $tag -AuthKey $Key -HostName 'TESTHOST')
 }
 
 try {
@@ -192,48 +180,27 @@ try {
         }
     }
 
-    if ($script:FieldReads -ne 0) {
-        Fail 'the custom field was read although the script variable was set'
-    }
-
-    # Script variable empty: the Secure custom field supplies the key.
-    $fieldKey = @($keyPrefix, 'auth', 'field') -join '-'
-    $script:FieldValue = " $fieldKey "
+    # Surrounding whitespace in the variable is trimmed.
     $script:FakeInstalled = '1.104.4'
     $script:FakeState = [pscustomobject]@{ BackendState = 'NeedsLogin'; Tags = @() }
-    $code = Run -Key ''
-    if ($code -ne 0 -or ($script:Calls -join ',') -cne 'up' -or $script:FieldReads -ne 1) {
-        Fail "field key run: code $code calls $($script:Calls -join ',') reads $($script:FieldReads)"
-    }
-    if (@($script:UpArgs) -cnotcontains "--authkey=$fieldKey") {
-        Fail 'the field key did not reach --authkey'
+    $code = Run -Key " $fakeKey "
+    if ($code -ne 0 -or ($script:Calls -join ',') -cne 'up' -or @($script:UpArgs) -cnotcontains "--authkey=$fakeKey") {
+        Fail "trimmed key run: code $code calls $($script:Calls -join ',')"
     }
 
-    # Both set: the script variable wins.
-    $code = Run -Key $fakeKey
-    if ($code -ne 0 -or @($script:UpArgs) -cnotcontains "--authkey=$fakeKey" -or $script:FieldReads -ne 0) {
-        Fail 'the script variable did not take precedence over the field'
-    }
-
-    # A field that holds something other than a key (an error text, say) is refused and not printed.
-    $script:FieldValue = 'Unable to find field secretvalue'
-    $code = Run -Key ''
+    # A value that is not a key (an error text, say) is refused and not printed.
+    $code = Run -Key 'Unable to find field secretvalue'
     if ($code -ne 1 -or $script:Calls.Count -ne 0 -or ($script:TailscaleErrorLog -join ' ') -match 'secretvalue') {
-        Fail 'a non-key field value was used or printed'
+        Fail 'a non-key value was used or printed'
     }
 
-    # Missing everywhere: exit 1 before any download, naming both sources.
-    $script:FieldValue = ''
+    # No key: exit 1 before any download, naming the variable. NinjaOne is not asked.
     $code = Run -Key ''
-    if ($code -ne 1 -or $script:Calls.Count -ne 0 -or $script:FieldReads -ne 1) {
-        Fail "missing everywhere: code $code calls $($script:Calls -join ',')"
+    if ($code -ne 1 -or $script:Calls.Count -ne 0 -or $script:NinjaReads -ne 0) {
+        Fail "missing key: code $code calls $($script:Calls -join ',') ninja reads $($script:NinjaReads)"
     }
-    if (($script:TailscaleErrorLog -join ' ') -notmatch 'script variable or the auth key custom field') {
-        Fail 'the missing-key error does not name both sources'
-    }
-    $code = Run -Key '' -Field ''
-    if ($code -ne 1 -or $script:FieldReads -ne 0) {
-        Fail 'an empty field name was read'
+    if (($script:TailscaleErrorLog -join ' ') -notmatch 'AuthKey environment variable') {
+        Fail 'the missing-key error does not name the AuthKey environment variable'
     }
 
     $script:FakeState = [pscustomobject]@{ BackendState = 'Running'; Tags = @($tag) }
@@ -338,27 +305,6 @@ try {
 } finally {
     Remove-Item -LiteralPath $payloadDir -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-# The real field hook with no Ninja cmdlet present (as on this host) returns '' and flags it.
-. $scriptPath
-if (-not (Get-Command -Name 'Ninja-Property-Get' -ErrorAction SilentlyContinue)) {
-    $value = & $script:GetNinjaProperty -Name 'tailscaleAuthKey'
-    if ($value -cne '' -or -not $script:NinjaCmdletMissing) {
-        Fail 'missing Ninja-Property-Get was not reported'
-    }
-}
-
-# A faked Ninja-Property-Get is called with the field name.
-function Ninja-Property-Get {
-    param([string]$Name)
-    if ($Name -ceq 'tailscaleAuthKey') { return 'from-cmdlet' }
-    return ''
-}
-$value = & $script:GetNinjaProperty -Name 'tailscaleAuthKey'
-if ($value -cne 'from-cmdlet') {
-    Fail "real field hook returned '$value'"
-}
-Remove-Item -LiteralPath 'Function:Ninja-Property-Get'
 
 # The real InvokeTailscaleUp hook redacts the key; check that text is in place.
 if ($scriptText -notmatch "Replace\(\[string\]\`$AuthKey, '\[redacted\]'\)") {
