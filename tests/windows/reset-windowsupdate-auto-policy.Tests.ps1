@@ -108,6 +108,17 @@ Assert-Same (@(Backups).Count) 0 'absent writes no backup'
 Reset-Test
 Assert-Same (Invoke-WuJob).Status 'unchanged' 'no policy key at all'
 
+# The real reader emits nothing for an absent policy key: the tree is $null, and that is clean, not a failure.
+$savedRead = $script:WuReadTree
+$script:WuReadTree = { return @() }
+Reset-Test
+$r = Invoke-WuJob
+Assert-Same $r.ExitCode 0 'absent key exit'
+Assert-Same $r.Status 'unchanged' 'absent key status'
+Assert-Same $r.Error '' 'absent key has no error'
+Assert-Same (Invoke-WuJob -ReportOnly).Status 'unchanged' 'absent key report-only'
+$script:WuReadTree = $savedRead
+
 # One value present: only that one is removed.
 Reset-Test -Au @((New-V 'AUOptions' 'DWord' 1), (New-V 'Keep' 'DWord' 5))
 $r = Invoke-WuJob

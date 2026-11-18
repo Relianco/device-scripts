@@ -75,7 +75,8 @@ function Get-WuTargets {
     param($Tree)
     $found = [ordered]@{}
     foreach ($node in @($Tree)) {
-        if ($node.path -ne 'AU') { continue }
+        # An absent policy key makes WuReadTree emit nothing, so $Tree is $null here.
+        if ($null -eq $node -or $node.path -ne 'AU') { continue }
         foreach ($v in @($node.values)) {
             if ($script:WuTargets -contains $v.name) { $found[$v.name] = @{ kind = $v.kind; data = $v.data } }
         }
