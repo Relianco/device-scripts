@@ -67,8 +67,6 @@ $script:NaReadServices = {
     }
 }
 
-# DependentServices wraps Win32 EnumDependentServices, which lists direct and indirect dependents
-# (in reverse start order), so this is the whole set -Force would stop, not just the first level.
 $script:NaReadDependents = {
     param($Name)
     @((Get-Service -Name $Name -ErrorAction Stop).DependentServices | ForEach-Object { $_.Name })
@@ -77,7 +75,7 @@ $script:NaReadDependents = {
 $script:NaRemoveService = {
     param($Service)
     # -Force stops dependent services too, so every one of them must be an agent service.
-    if (-not (Test-NaStopAllowed @(& $script:NaReadDependents $Service.Name) @(& $script:NaReadServices))) {
+    if (-not (Test-NaStopAllowed @(Get-NaAllDependents $Service.Name) @(& $script:NaReadServices))) {
         throw "a service outside the agent depends on $($Service.Name)"
     }
     Stop-Service -Name $Service.Name -Force -ErrorAction SilentlyContinue
@@ -152,6 +150,21 @@ function Test-NaInAgentFolder {
         if ($parts.Count -ge 3 -and "$($parts[0])\$($parts[1])" -match $script:NaFolderPattern) { return $true }
     }
     return $false
+}
+
+# Every service -Force would stop, at any depth. EnumDependentServices may already list indirect ones;
+# walking the graph here does not rely on that. A cycle stops at a name already seen.
+function Get-NaAllDependents {
+    param([string]$Name)
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $queue = [Collections.Generic.Queue[string]]::new()
+    $queue.Enqueue($Name)
+    while ($queue.Count) {
+        foreach ($dep in @(& $script:NaReadDependents $queue.Dequeue())) {
+            if ($dep -and $dep -ne $Name -and $seen.Add($dep)) { $queue.Enqueue($dep) }
+        }
+    }
+    return @($seen)
 }
 
 # True when every dependent service name is an agent service.

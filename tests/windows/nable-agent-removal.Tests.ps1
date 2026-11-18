@@ -281,4 +281,10 @@ Assert-True (-not ($script:Removed -contains "dir $amaDir")) 'a folder with a pr
 Assert-True (@(@($r.Json.log) -like "folder kept:*").Count -eq 1) 'a kept folder is logged'
 Assert-True (-not (Test-NaFolderInUse $amaDir @((New-Svc 'Other' "$amaDir Two\x.exe")))) 'a sibling folder with a longer name is not in use'
 
+# Dependents are collected at every depth, and a cycle ends.
+$savedDeps = $script:NaReadDependents
+$script:NaReadDependents = { param($Name) @{ 'A' = @('B'); 'B' = @('C', 'A'); 'C' = @('B', 'D') }[$Name] }
+Assert-Same ((@(Get-NaAllDependents 'A') | Sort-Object) -join ',') 'B,C,D' 'an indirect dependent is collected and a cycle ends'
+$script:NaReadDependents = $savedDeps
+
 Write-Output 'nable-agent-removal: ok'
