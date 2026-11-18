@@ -248,4 +248,26 @@ $live = @([pscustomobject]@{ Name = 'Agent'; ProcessId = 40 }, [pscustomobject]@
 Assert-Same (Get-NaServiceKillId 'Agent' $live) 40 'a hung service alone in its process is killed'
 Assert-Same (Get-NaServiceKillId 'Gone' $live) 0 'a missing service kills nothing'
 
+# A service another product depends on is not force-stopped: -Force would stop that product too.
+$svcs = @((New-Svc 'Advanced Monitoring Agent' "$amaDir\winagent.exe"), (New-Svc 'AMA Helper' "$amaDir\helper.exe"), (New-Svc 'SentinelAgent' 'C:\Program Files\SentinelOne\s.exe'))
+Assert-True (Test-NaStopAllowed @('AMA Helper') $svcs) 'an agent dependent allows the stop'
+Assert-True (-not (Test-NaStopAllowed @('AMA Helper', 'SentinelAgent') $svcs)) 'a protected dependent refuses the stop'
+Assert-True (-not (Test-NaStopAllowed @('Unknown') $svcs)) 'an unknown dependent refuses the stop'
+Reset-Test
+Add-Agent
+$script:UninstallWorks = $false
+$script:NaRemoveService = { param($Service) throw 'dependent' }
+$r = Invoke-Job
+Assert-Same $r.Code 2 'a refused service stop fails the run'
+Assert-True (@($r.Json.log) -contains 'service kept: Advanced Monitoring Agent') 'a refused service stop is logged'
+$script:NaRemoveService = { param($Service) $script:Removed.Add("svc $($Service.Name)"); [void]$script:Svcs.Remove($Service) }
+
+# Folder cleanup spares a process that hosts a non-agent service.
+$procs = @([pscustomobject]@{ Id = 10; Path = "$amaDir\winagent.exe" }, [pscustomobject]@{ Id = 11; Path = "$amaDir\shared.exe" },
+    [pscustomobject]@{ Id = 12; Path = 'C:\Windows\other.exe' }, [pscustomobject]@{ Id = 13; Path = '' })
+$svcs = @([pscustomobject]@{ Name = 'Advanced Monitoring Agent'; DisplayName = ''; Path = "$amaDir\winagent.exe"; ProcessId = 10 },
+    [pscustomobject]@{ Name = 'WazuhSvc'; DisplayName = ''; Path = "$amaDir\shared.exe"; ProcessId = 11 })
+$ids = @(Get-NaFolderKillIds $amaDir $procs $svcs)
+Assert-Same ($ids -join ',') '10' 'only the agent process in the folder is killed'
+
 Write-Output 'nable-agent-removal: ok'

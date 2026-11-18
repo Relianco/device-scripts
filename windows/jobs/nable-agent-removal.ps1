@@ -67,8 +67,17 @@ $script:NaReadServices = {
     }
 }
 
+$script:NaReadDependents = {
+    param($Name)
+    @((Get-Service -Name $Name -ErrorAction Stop).DependentServices | ForEach-Object { $_.Name })
+}
+
 $script:NaRemoveService = {
     param($Service)
+    # -Force stops dependent services too, so every one of them must be an agent service.
+    if (-not (Test-NaStopAllowed @(& $script:NaReadDependents $Service.Name) @(& $script:NaReadServices))) {
+        throw "a service outside the agent depends on $($Service.Name)"
+    }
     Stop-Service -Name $Service.Name -Force -ErrorAction SilentlyContinue
     # The PID is read again after the stop, never taken from the earlier snapshot.
     $killId = Get-NaServiceKillId $Service.Name @(& $script:NaReadServices)
@@ -93,12 +102,20 @@ $script:NaListFolders = {
     }
 }
 
+$script:NaReadProcesses = {
+    foreach ($p in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $path = try { [string]$p.Path } catch { '' }
+        [pscustomobject]@{ Id = $p.Id; Path = $path }
+    }
+}
+
 $script:NaRemoveFolder = {
     param($Path)
-    # Processes running from the folder hold their files open.
-    Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        try { $_.Path -and $_.Path.StartsWith($Path + '\', [StringComparison]::OrdinalIgnoreCase) } catch { $false }
-    } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    # Processes running from the folder hold their files open. One that hosts a non-agent service is
+    # spared; its open files then make Remove-Item fail, and the folder is reported.
+    foreach ($id in @(Get-NaFolderKillIds $Path @(& $script:NaReadProcesses) @(& $script:NaReadServices))) {
+        Stop-Process -Id $id -Force -ErrorAction SilentlyContinue
+    }
     Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
 }
 
@@ -133,6 +150,26 @@ function Test-NaInAgentFolder {
         if ($parts.Count -ge 3 -and "$($parts[0])\$($parts[1])" -match $script:NaFolderPattern) { return $true }
     }
     return $false
+}
+
+# True when every dependent service name is an agent service.
+function Test-NaStopAllowed {
+    param($Dependents, $Services)
+    foreach ($name in @($Dependents)) {
+        $svc = @($Services | Where-Object { $_.Name -eq $name })
+        if ($svc.Count -ne 1 -or -not (Test-NaServiceEntry $svc[0])) { return $false }
+    }
+    return $true
+}
+
+# Processes running from the folder that host no service outside the agent.
+function Get-NaFolderKillIds {
+    param([string]$Folder, $Processes, $Services)
+    foreach ($p in @($Processes)) {
+        if (-not $p.Path -or -not $p.Path.StartsWith($Folder + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if (@($Services | Where-Object { $_.ProcessId -eq $p.Id -and -not (Test-NaServiceEntry $_) }).Count) { continue }
+        $p.Id
+    }
 }
 
 # The live process to stop for a service, or 0. A stopped service has no process. A process that also
@@ -215,7 +252,9 @@ function Invoke-NableRemovalJob {
             if ($state.Apps.Count) { & $script:NaSettle }
             # 2. Whatever the uninstallers left: services, then folders, then Add/Remove Programs keys.
             $left = Get-NaState
-            foreach ($svc in $left.Services) { & $script:NaRemoveService $svc; $log.Add("service deleted: $($svc.Name)") }
+            foreach ($svc in $left.Services) {
+                try { & $script:NaRemoveService $svc; $log.Add("service deleted: $($svc.Name)") } catch { $log.Add("service kept: $($svc.Name)") }
+            }
             foreach ($dir in $left.Folders) {
                 try { & $script:NaRemoveFolder $dir; $log.Add("folder removed: $dir") } catch { $log.Add("folder failed: $dir") }
             }
