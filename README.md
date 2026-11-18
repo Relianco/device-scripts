@@ -2,7 +2,7 @@
 
 Public scripts that a managed device downloads and runs without a login. A technician pastes one small loader into NinjaOne; the loader downloads one script from this repo at a pinned commit and runs it.
 
-The one rule: nothing runs unless its SHA256 matches the hash the caller passed. An empty hash is the off switch: the run exits 0 and downloads nothing.
+The one rule: nothing runs unless its SHA256 matches the hash the caller passed. On the runners and the job loader, an empty hash is the off switch: the run exits 0 and downloads nothing.
 
 ## Which script do I paste?
 
@@ -27,9 +27,9 @@ Every loader except `bootstrap.ps1` refuses to run bytes it has not hashed.
 
 The rules, the same on every platform:
 
-- **Empty hash:** exit 0, nothing downloaded. This is how you switch a deployment off.
+- **Empty hash:** exit 0, nothing downloaded. This is how you switch a deployment off. `Invoke-RelianReadJob` has no off switch: it refuses an empty hash with exit 1.
 - **Hash mismatch:** exit 1, no retry.
-- **URL with userinfo** (`https://user@host`, or `https://@host`): exit 1 before any download, even with an empty hash. The credential already sits in NinjaOne's activity history.
+- **URL with userinfo** (`https://user@host`, or `https://@host`): exit 1 before any download. All four entry points check this before the empty-hash exit, because the credential already sits in NinjaOne's activity history.
 - **Retries:** three attempts for a timeout, a connection or DNS failure, or HTTP 408, 429, 500, 502, 503 or 504. Any other status gets one attempt.
 - **Pin a commit, not a branch.** A branch moves and the hash then fails.
 - **Get the hash:** `git show <commit>:<path> | sha256sum`.
@@ -56,7 +56,7 @@ Every Windows path starts with `windows/`. Windows PowerShell 5.1 is the floor. 
 
 ### Install or run a package: Invoke-RelianRunner
 
-Use it to run one package once, with a progress dialog for the signed-in user.
+Use it to run one package once, with a progress dialog for the signed-in user. Paste `windows/runner/Invoke-RelianRunner.ps1` into the NinjaOne script library.
 
 Parameters (the last three are optional):
 
@@ -68,6 +68,8 @@ Parameters (the last three are optional):
 - `-CancelPath`: a file path. If the file exists, the run exits 130. `RELIAN_DEPLOY_CANCEL=1` does the same.
 - `-PackageArguments`: base64 of a flat JSON object of string values. See [Package arguments](#package-arguments).
 - `-ReportOutputPath`: an absolute path. After a `storage-maintenance` ProfileReport run, the runner saves the report line there. Empty saves nothing.
+
+The toolkit and brand pack zips come from `https://relianpub.blob.core.windows.net/pub/sec/`. See [Toolkit, brand pack and pins](#toolkit-brand-pack-and-pins).
 
 Exit codes: 0 success or empty hash, 1 failure (a toolkit deferral, 1602, counts as 1), 130 cancelled.
 
@@ -236,7 +238,7 @@ These report by default and change the device only when you ask. None reboots un
 
 ### Diagnostics and evidence
 
-All read-only, and each prints bounded JSON. The five under `windows/read/` also run through `Invoke-RelianReadJob`.
+All read-only, and each prints bounded JSON. The five under `windows/read/` also run through `Invoke-RelianReadJob`. The two test tools at the end are not read-only.
 
 - `diagnose-feature-upgrade` (read): a failed or running feature upgrade. `Section` is `Summary`, `Rollback`, `Servicing`, `Setup`, `Boot` or `Maintenance`.
 - `diagnose-windows-update` (read): Windows Update state. `Section` is `Summary`, `History`, `Events`, `Policy`, `Service` or `ServicingHistory` (a CBS and DISM error digest).
@@ -245,8 +247,11 @@ All read-only, and each prints bounded JSON. The five under `windows/read/` also
 - `wake-device` (read): sends a Wake-on-LAN packet from an online peer to `Mac` on the same subnet. A sent packet does not prove the target woke.
 - `endpoint-evidence`: device and user state that Intune or a script should have set. `Sections` picks the checks. Silent.
 - `outlook-suggestion-sources`: where on a PC one address (`Match`) could surface in Classic Outlook suggestions. Never prints the address or matched text.
-- `net-path-test`: before and after network timings for a remote-access change, run as the signed-in user. Not strictly read-only: it toggles Private Access or a tunnel during the run and restores it.
-- `action-probe`: a test package that writes a marker file to prove the runner passed the right action and pin.
+
+Test tools. These write to the device.
+
+- `net-path-test`: before and after network timings for a remote-access change, run as the signed-in user. It toggles Private Access or a tunnel during the run, restores them, and keeps results under `%ProgramData%\Relian\NetTest`.
+- `action-probe`: writes a marker file to prove the runner passed the right action and pin.
 
 ### Registry actions
 
@@ -347,7 +352,7 @@ Rules for the script:
 
 1. **It runs alone.** The runner copies only this file, so inline every URL, hash and setting.
 2. **No `Mandatory` parameters.** They prompt when a test dot-sources the file. Take `DeploymentType`, `Action`, `PinVersion` and your own values as strings.
-3. **Hash before you run a download.** Exit 1 on a mismatch or a userinfo URL. Carry the TLS guard line.
+3. **Off switch first, then hash.** An empty pin exits 0 before the installer URL is read. On the download path, exit 1 on a hash mismatch or a userinfo URL. Carry the TLS guard line.
 4. **No NinjaOne.** `tests/windows/ninja-agnostic.Tests.ps1` fails on a field read or write, `ninjarmm-cli`, the API or the deploy token.
 5. **Windows PowerShell 5.1 compatible.**
 6. **Bounded output.** NinjaOne truncates long output, so print one JSON line.
