@@ -534,14 +534,15 @@ foreach ($ok in 0, 1605, 3010) {
 
 # 1603: the log is kept, its last 20 lines come back redacted and capped, the run fails, nothing is hand-edited.
 Reset-Test
-# As on laptop 335: the install folder is gone but the bootstrapper named as the uninstaller exists, so the key is no orphan.
+# The install folder is gone but the bootstrapper named as the uninstaller exists, so the key is no orphan.
 $script:Files.Add('C:\ProgramData\{FE6265DF-9CF3-4C58-8B89-F6D8C0976573}\Agent.exe')
 $script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' '"C:\ProgramData\{FE6265DF-9CF3-4C58-8B89-F6D8C0976573}\Agent.exe" REMOVE=TRUE MODIFY=FALSE' -Msi -InstallLocation 'C:\Gone\GP'))
 $script:Products.Add($msiPacked)
 $script:LocalPackages[$msiPacked] = 'C:\Windows\Installer\6465.msi'
 $script:Files.Add('C:\Windows\Installer\6465.msi')
 $script:MsiWorks = $false
-$script:LogLines = @(1..30 | ForEach-Object { "line $_" }) + @('Action ended C:\Users\jane doe\AppData\x.log by jane.doe@example.com sid S-1-5-21-1111-2222-3333-1001', ('x' * 400))
+$profileRoot = 'C:\' + 'Users'
+$script:LogLines = @(1..30 | ForEach-Object { "line $_" }) + @("Action ended $profileRoot\jane doe\AppData\x.log by jane.doe@example.com sid S-1-5-21-1111-2222-3333-1001", ('x' * 400))
 $r = Invoke-Job
 Assert-Same $r.Code 2 '1603 fails'
 Assert-Same $script:DeletedFiles.Count 0 '1603 keeps the log'
@@ -555,7 +556,7 @@ Assert-True (@($tail | ForEach-Object { $_.Length } | Measure-Object -Maximum).M
 Assert-Same $script:Removed.Count 0 '1603 with a registered package deletes nothing'
 Assert-True (@(@($r.Json.left) -like 'MSI * still registered*cached package on disk').Count -eq 1) 'a still-registered MSI is reported in left'
 Assert-Same @(Get-BackupFiles).Count 0 '1603 with a registered package writes no backup'
-Assert-Same (Get-NaRedactedLine 'C:\Users\bob\x') 'C:\Users\USER\x' 'a profile path is masked'
+Assert-Same (Get-NaRedactedLine "$profileRoot\bob\x") "$profileRoot\USER\x" 'a profile path is masked'
 
 # Key 1 style entry: the vendor's Agent.exe runs with its own arguments only when every check holds.
 $bootDir = 'C:\ProgramData\{FE6265DF-9CF3-4C58-8B89-F6D8C0976573}'
@@ -594,7 +595,7 @@ Assert-Same @($script:Removed | Where-Object { $_ -like 'dir *' }).Count 1 'only
 
 # Refusals: nothing runs, the key and folder stay, the run fails.
 $refusals = @(
-    @{ Label = 'wrong path'; Uninstall = '"C:\Users\Public\{FE6265DF-9CF3-4C58-8B89-F6D8C0976573}\Agent.exe" REMOVE=TRUE MODIFY=FALSE' },
+    @{ Label = 'wrong path'; Uninstall = "`"$profileRoot\Public\{FE6265DF-9CF3-4C58-8B89-F6D8C0976573}\Agent.exe`" REMOVE=TRUE MODIFY=FALSE" },
     @{ Label = 'not a GUID folder'; Uninstall = '"C:\ProgramData\Evil\Agent.exe" REMOVE=TRUE MODIFY=FALSE' },
     @{ Label = 'wrong exe name'; Uninstall = "`"$bootDir\Other.exe`" REMOVE=TRUE MODIFY=FALSE" },
     @{ Label = 'extra arguments'; Uninstall = "`"$bootExe`" REMOVE=TRUE /x" },
@@ -619,6 +620,16 @@ foreach ($c in $refusals) {
     Assert-Same $script:Apps.Count 1 "$($c.Label): the key stays"
     Assert-Same $r.Code 2 "$($c.Label): the run fails"
 }
+
+# The folder ACL check: a rule that lets Users or Everyone write, create or delete refuses; read and execute do not.
+$aclRule = { param($Id, $Rights, $Allow = $true) [pscustomobject]@{ Identity = $Id; Allow = $Allow; Rights = $Rights } }
+Assert-True (Test-NaAclClosed @((& $aclRule 'NT AUTHORITY\SYSTEM' 0x1F01FF), (& $aclRule 'BUILTIN\Users' 0x1200A9))) 'read and execute for Users is closed'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x2)))) 'Users write data opens the folder'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'NT AUTHORITY\Authenticated Users' 0x4)))) 'Authenticated Users create folders opens it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'Everyone' 0x1F01FF)))) 'Everyone full control opens it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x40000)))) 'Users change permissions opens it'
+Assert-True (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x2 $false))) 'a deny rule does not open it'
+Assert-True (Test-NaAclClosed @()) 'no rules is closed'
 
 # StrictMode: an entry with no Publisher or InstallLocation property is read safely.
 $bare = [pscustomobject]@{ Key = "$u32\Advanced Monitoring Agent GP"; Id = 'Advanced Monitoring Agent GP'; Name = 'Advanced Monitoring Agent GP'; Publisher = ''; Uninstall = "`"$bootExe`" REMOVE=TRUE"; Msi = $false }

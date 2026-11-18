@@ -197,14 +197,19 @@ $script:NaGetSignature = {
     $s = Get-AuthenticodeSignature -LiteralPath $Path
     [pscustomobject]@{ Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }) }
 }
-# True only for a real folder owned by SYSTEM, Administrators or TrustedInstaller: a folder a user made could
-# hold a signed Agent.exe next to a planted DLL. Any doubt is false.
+# True only for a real folder owned by SYSTEM, Administrators or TrustedInstaller whose DACL, inherited rules
+# included, lets no unprivileged group write, create or delete in it: a user-writable folder could hold a
+# planted DLL beside a signed Agent.exe. Any doubt is false.
 $script:NaBootstrapDirTrusted = {
     param($Dir)
     try {
         $item = Get-Item -LiteralPath $Dir -Force
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
-        return ([string](Get-Acl -LiteralPath $Dir).Owner) -match '\A(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller)\z'
+        $acl = Get-Acl -LiteralPath $Dir
+        if (([string]$acl.Owner) -notmatch '\A(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller)\z') { return $false }
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.NTAccount]) | ForEach-Object {
+            [pscustomobject]@{ Identity = [string]$_.IdentityReference; Allow = ($_.AccessControlType -eq 'Allow'); Rights = [int]$_.FileSystemRights } })
+        return (Test-NaAclClosed $rules)
     } catch { return $false }
 }
 
@@ -392,6 +397,17 @@ function Get-NaState {
 }
 
 function Test-NaClean { param($State) return ($State.Apps.Count + $State.Services.Count + $State.Folders.Count) -eq 0 }
+
+# True when no Allow rule gives an unprivileged group write data, append, delete, delete child, change
+# permissions or take ownership (FileSystemRights bits).
+function Test-NaAclClosed {
+    param($Rules)
+    $risky = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000
+    foreach ($r in @($Rules)) {
+        if ($r.Allow -and $r.Identity -match '(?i)\A(Everyone|BUILTIN\\Users|NT AUTHORITY\\Authenticated Users|NT AUTHORITY\\INTERACTIVE|.*\\Domain Users)\z' -and ($r.Rights -band $risky)) { return $false }
+    }
+    return $true
+}
 
 # The folder of the vendor bootstrapper an N-able entry names as its uninstaller, or $null. Only the exact
 # C:\ProgramData\{GUID}\Agent.exe shape, and only for an entry on the name list that is not protected.
