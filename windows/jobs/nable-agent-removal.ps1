@@ -67,6 +67,8 @@ $script:NaReadServices = {
     }
 }
 
+# DependentServices wraps Win32 EnumDependentServices, which lists direct and indirect dependents
+# (in reverse start order), so this is the whole set -Force would stop, not just the first level.
 $script:NaReadDependents = {
     param($Name)
     @((Get-Service -Name $Name -ErrorAction Stop).DependentServices | ForEach-Object { $_.Name })
