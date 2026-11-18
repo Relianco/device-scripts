@@ -51,12 +51,13 @@ foreach ($c in $collectors) {
     function Ninja-Property-Set { param($Name, $Value) $script:viaArg = @($Name, $Value) }
     function Ninja-Property-Set-Piped { param([Parameter(Position = 0)]$Name, [Parameter(ValueFromPipeline = $true)]$Value) process { $script:viaPipe = @($Name, $Value) } }
 
-    # Write: the JSON is piped unchanged, and stdout gets one short summary line.
+    # Write: the JSON is HTML-encoded inside <pre> (the field is WYSIWYG) and piped, and stdout gets one short summary line.
     $ReportOnly = [switch]$false
+    $html = '<pre>' + [System.Net.WebUtility]::HtmlEncode($json) + '</pre>'
     $r = Invoke-Block $block
     if ($r.Thrown) { Fail "$($c.File): the write threw: $($r.Thrown)" }
     if ($null -ne $script:viaArg) { Fail "$($c.File): Ninja-Property-Set must not receive the value as an argument" }
-    if ($null -eq $script:viaPipe -or $script:viaPipe[0] -cne $c.Field -or $script:viaPipe[1] -cne $json) { Fail "$($c.File): the JSON must reach Ninja-Property-Set-Piped for $($c.Field) unchanged" }
+    if ($null -eq $script:viaPipe -or $script:viaPipe[0] -cne $c.Field -or $script:viaPipe[1] -cne $html) { Fail "$($c.File): the HTML-encoded JSON in <pre> must reach Ninja-Property-Set-Piped for $($c.Field)" }
     Assert-True ($r.Out.Count -eq 1) "$($c.File): one summary line on stdout, got $($r.Out.Count)"
     $summary = "$($r.Out[0])" | ConvertFrom-Json
     Assert-True ($summary.field -ceq $c.Field -and $summary.written -eq $true -and $summary.bytes -eq $json.Length) "$($c.File): summary [$($r.Out[0])]"
@@ -69,12 +70,19 @@ foreach ($c in $collectors) {
     Assert-True ($r.Host.Contains("$($c.Prefix):$json")) "$($c.File): -ReportOnly prints the JSON"
     Assert-True ($r.Out.Count -eq 1 -and ("$($r.Out[0])" | ConvertFrom-Json).written -eq $false) "$($c.File): -ReportOnly summary [$($r.Out -join '|')]"
 
-    # Over NinjaOne's 10000-character multi-line limit: throw, write nothing, never truncate.
+    # A 60000-character result is within the WYSIWYG field limit and is written.
     $ReportOnly = [switch]$false
-    $small = $json; $json = '{"pad":"' + ('x' * 10000) + '"}'
+    $small = $json; $json = '{"pad":"' + ('x' * 60000) + '"}'
     $r = Invoke-Block $block
     $json = $small
-    Assert-True ($null -ne $r.Thrown -and "$($r.Thrown)" -match '10000') "$($c.File): an oversize result must throw naming the limit"
+    if ($r.Thrown) { Fail "$($c.File): a 60000-character result must be written: $($r.Thrown)" }
+
+    # Over the 200000-character limit, measured on the full HTML: throw, write nothing, never truncate.
+    $script:viaPipe = $null
+    $small = $json; $json = '{"pad":"' + ('x' * 200000) + '"}'
+    $r = Invoke-Block $block
+    $json = $small
+    Assert-True ($null -ne $r.Thrown -and "$($r.Thrown)" -match '200000') "$($c.File): an oversize result must throw naming the limit"
     Assert-True ($null -eq $script:viaPipe) "$($c.File): an oversize result must not be written"
     Assert-True ($r.Out.Count -eq 0) "$($c.File): no summary after an oversize result"
 
@@ -127,9 +135,12 @@ Assert-True ($r.Code -eq 0) "loader: storage-health exit [$($r.Code)] $($r.Err)"
 $summary = $r.Out[-1] | ConvertFrom-Json
 Assert-True ($summary.field -ceq 'relianStorageHealth' -and $summary.written -eq $true) "loader: last stdout line is the summary [$($r.Out[-1])]"
 $written = [IO.File]::ReadAllText($fieldFile)
-Assert-True ($written.StartsWith('relianStorageHealth={')) "loader: field write [$written]"
-Assert-True ($null -ne ($written.Substring('relianStorageHealth='.Length) | ConvertFrom-Json).totalDrives) 'loader: the field holds the full JSON'
-Assert-True ($summary.bytes -eq $written.Length - 'relianStorageHealth='.Length) 'loader: summary bytes match the field'
+Assert-True ($written.StartsWith('relianStorageHealth=<pre>')) "loader: field write [$written]"
+$fieldHtml = $written.Substring('relianStorageHealth='.Length)
+Assert-True ($fieldHtml.StartsWith('<pre>') -and $fieldHtml.EndsWith('</pre>')) 'loader: the field holds <pre>-wrapped HTML'
+$fieldJson = [System.Net.WebUtility]::HtmlDecode($fieldHtml.Substring(5, $fieldHtml.Length - 11))
+Assert-True ($null -ne ($fieldJson | ConvertFrom-Json).totalDrives) 'loader: the field holds the full JSON'
+Assert-True ($summary.bytes -eq $fieldJson.Length) 'loader: summary bytes match the JSON'
 
 Remove-Item -LiteralPath $fieldFile
 $r = Invoke-Child @('-ReportOnly')
