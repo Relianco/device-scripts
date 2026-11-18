@@ -183,11 +183,14 @@ $script:NaRun = {
 # The Inno uninstaller finishes in a child copy; give it a moment before the re-detect.
 $script:NaSettle = { Start-Sleep -Seconds 10 }
 
-$script:NaMsiLogDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian'
-# The MSI log folder is created SYSTEM-only when missing; an existing folder keeps its ACL.
+# A subfolder of Relian: its own ACL can be made SYSTEM-only, which the shared root's cannot.
+$script:NaMsiLogDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\NableMsiLogs'
+# Created SYSTEM-only when missing. An existing folder must pass the same trust check as a bootstrapper folder
+# (real folder, privileged owner, no unprivileged writer), else the job stops before msiexec runs.
 $script:NaPrepareLogDir = {
     param($Dir)
-    if (-not (Test-Path -LiteralPath $Dir)) { $null = New-Item -ItemType Directory -Path $Dir -Force; & $script:NaProtectDir $Dir }
+    if (-not (Test-Path -LiteralPath $Dir)) { $null = New-Item -ItemType Directory -Path $Dir -Force; & $script:NaProtectDir $Dir; return }
+    if (-not (& $script:NaDirTrusted $Dir)) { throw 'msi log folder not trusted' }
 }
 $script:NaReadLogTail = { param($Path) @(Get-Content -LiteralPath $Path -Tail 20) }
 $script:NaDeleteFile = { param($Path) Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
@@ -198,17 +201,18 @@ $script:NaGetSignature = {
     [pscustomobject]@{ Status = [string]$s.Status; Subject = $(if ($s.SignerCertificate) { [string]$s.SignerCertificate.Subject } else { '' }) }
 }
 # True only for a real folder owned by SYSTEM, Administrators or TrustedInstaller whose DACL, inherited rules
-# included, lets no unprivileged group write, create or delete in it: a user-writable folder could hold a
-# planted DLL beside a signed Agent.exe. Any doubt is false.
-$script:NaBootstrapDirTrusted = {
+# included, lets no one else write, create or delete in it: a user-writable folder could hold a planted DLL
+# beside a signed Agent.exe, or redirect a log. SIDs, not names, so a localized Windows reads the same. Any doubt is false.
+$script:NaDirTrusted = {
     param($Dir)
     try {
         $item = Get-Item -LiteralPath $Dir -Force
         if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
         $acl = Get-Acl -LiteralPath $Dir
-        if (([string]$acl.Owner) -notmatch '\A(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller)\z') { return $false }
-        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.NTAccount]) | ForEach-Object {
-            [pscustomobject]@{ Identity = [string]$_.IdentityReference; Allow = ($_.AccessControlType -eq 'Allow'); Rights = [int]$_.FileSystemRights } })
+        $owner = [string]$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($script:NaTrustedSids -notcontains $owner) { return $false }
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
+            [pscustomobject]@{ Identity = [string]$_.IdentityReference.Value; Allow = ($_.AccessControlType -eq 'Allow'); Rights = [int]$_.FileSystemRights } })
         return (Test-NaAclClosed $rules)
     } catch { return $false }
 }
@@ -398,13 +402,16 @@ function Get-NaState {
 
 function Test-NaClean { param($State) return ($State.Apps.Count + $State.Services.Count + $State.Folders.Count) -eq 0 }
 
+# SYSTEM, Administrators, TrustedInstaller, CREATOR OWNER.
+$script:NaTrustedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-0')
+
 # True when no Allow rule gives write data, append, delete, delete child, change permissions or take ownership
-# (FileSystemRights bits) to anyone but the privileged trustees. An allowlist: an unlisted user or group refuses.
+# (FileSystemRights bits) to anyone but the trusted SIDs. An allowlist: an unlisted user or group refuses.
 function Test-NaAclClosed {
     param($Rules)
     $risky = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000
     foreach ($r in @($Rules)) {
-        if ($r.Allow -and $r.Identity -notmatch '\A(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller|CREATOR OWNER)\z' -and ($r.Rights -band $risky)) { return $false }
+        if ($r.Allow -and $script:NaTrustedSids -notcontains $r.Identity -and ($r.Rights -band $risky)) { return $false }
     }
     return $true
 }
@@ -433,7 +440,7 @@ function Get-NaBootstrapperCommand {
     $argv = @(if ($rest) { $rest -split '\s+' })
     foreach ($a in $argv) { if ($a -notmatch '\A[A-Za-z]+=(TRUE|FALSE)\z') { return & $refuse 'unexpected arguments' } }
     if (-not (& $script:NaFileExists $exe)) { return & $refuse 'file missing' }
-    if (-not (& $script:NaBootstrapDirTrusted $dir)) { return & $refuse 'folder not trusted' }
+    if (-not (& $script:NaDirTrusted $dir)) { return & $refuse 'folder not trusted' }
     $sig = & $script:NaGetSignature $exe
     if ("$($sig.Status)" -ne 'Valid') { return & $refuse 'signature not valid' }
     $cn = [regex]::Match("$($sig.Subject)", '(?:\A|,\s*)CN=(?:"(?<c>[^"]+)"|(?<c>[^,]+))').Groups['c'].Value.Trim()

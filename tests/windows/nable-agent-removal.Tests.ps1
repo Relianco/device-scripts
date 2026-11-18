@@ -60,12 +60,13 @@ $script:NaReadServices = { $script:Svcs.ToArray() }
 $script:NaFolderParents = { @($pf86, 'C:\ProgramData') }
 $script:NaListFolders = { param($Parent) @($script:Dirs | Where-Object { $_.StartsWith("$Parent\") -and $_.Substring($Parent.Length + 1) -match $script:NaFolderPattern }) }
 $script:NaSettle = { }
-$script:NaMsiLogDir = 'C:\ProgramData\Relian'
+$script:NaMsiLogDir = 'C:\ProgramData\Relian\NableMsiLogs'
+$realPrepare = $script:NaPrepareLogDir
 $script:NaPrepareLogDir = { param($Dir) $script:BackupDirs.Add("log:$Dir") }
 $script:NaReadLogTail = { param($Path) $script:LogLines }
 $script:NaDeleteFile = { param($Path) $script:DeletedFiles.Add($Path) }
 $script:NaGetSignature = { param($Path) $script:Sig }
-$script:NaBootstrapDirTrusted = { param($Dir) $script:DirTrusted }
+$script:NaDirTrusted = { param($Dir) $script:DirTrusted }
 $script:NaFileExists = { param($Path) ($script:Dirs -contains (Get-Parent $Path)) -or ($script:Files -contains $Path) }
 $script:NaRun = { param($File, $Arguments)
     $script:Runs.Add("$File $($Arguments -join ' ')")
@@ -146,8 +147,8 @@ $r = Invoke-Job
 Assert-Same $r.Code 0 'vendor exit'
 Assert-Same $r.Json.status 'removed' 'vendor status'
 Assert-True ($script:Runs -contains "$amaDir\unins000.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART") 'inno uninstaller ran silently'
-Assert-True (@($script:Runs | Where-Object { $_ -match "\Amsiexec\.exe /x $([regex]::Escape($gpCode)) /qn /norestart /l\*v C:\\ProgramData\\Relian\\nable-msi-\d{8}T\d{9}Z\.log\z" }).Count -eq 1) 'GP MSI removed by product code with a verbose log'
-Assert-True (@($script:BackupDirs) -contains 'log:C:\ProgramData\Relian') 'the log folder is prepared before the run'
+Assert-True (@($script:Runs | Where-Object { $_ -match "\Amsiexec\.exe /x $([regex]::Escape($gpCode)) /qn /norestart /l\*v C:\\ProgramData\\Relian\\NableMsiLogs\\nable-msi-\d{8}T\d{9}Z\.log\z" }).Count -eq 1) 'GP MSI removed by product code with a verbose log'
+Assert-True (@($script:BackupDirs) -contains 'log:C:\ProgramData\Relian\NableMsiLogs') 'the log folder is prepared before the run'
 Assert-Same $script:DeletedFiles.Count 1 'the log of a successful uninstall is deleted'
 Assert-Same @($r.Json.msiLogTail).Count 0 'no log tail on success'
 Assert-Same $script:Runs.Count 2 'only the two agent uninstallers ran'
@@ -624,16 +625,42 @@ foreach ($c in $refusals) {
 
 # The folder ACL check: a rule that lets Users or Everyone write, create or delete refuses; read and execute do not.
 $aclRule = { param($Id, $Rights, $Allow = $true) [pscustomobject]@{ Identity = $Id; Allow = $Allow; Rights = $Rights } }
-Assert-True (Test-NaAclClosed @((& $aclRule 'NT AUTHORITY\SYSTEM' 0x1F01FF), (& $aclRule 'BUILTIN\Users' 0x1200A9))) 'read and execute for Users is closed'
-Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x2)))) 'Users write data opens the folder'
-Assert-True (-not (Test-NaAclClosed @((& $aclRule 'NT AUTHORITY\Authenticated Users' 0x4)))) 'Authenticated Users create folders opens it'
-Assert-True (-not (Test-NaAclClosed @((& $aclRule 'Everyone' 0x1F01FF)))) 'Everyone full control opens it'
-Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x40000)))) 'Users change permissions opens it'
-Assert-True (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x2 $false))) 'a deny rule does not open it'
-Assert-True (-not (Test-NaAclClosed @((& $aclRule 'CONTOSO\alice' 0x2)))) 'an unlisted user with write opens it'
-Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Power Users' 0x2)))) 'an unlisted group with write opens it'
-Assert-True (Test-NaAclClosed @((& $aclRule 'NT SERVICE\TrustedInstaller' 0x1F01FF), (& $aclRule 'BUILTIN\Administrators' 0x1F01FF), (& $aclRule 'CONTOSO\alice' 0x1200A9))) 'privileged trustees may write, others may read'
+Assert-True (Test-NaAclClosed @((& $aclRule 'S-1-5-18' 0x1F01FF), (& $aclRule 'S-1-5-32-545' 0x1200A9))) 'read and execute for Users is closed'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'S-1-5-32-545' 0x2)))) 'Users write data opens the folder'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'S-1-5-11' 0x4)))) 'Authenticated Users create folders opens it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'S-1-1-0' 0x1F01FF)))) 'Everyone full control opens it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'S-1-5-32-545' 0x40000)))) 'Users change permissions opens it'
+Assert-True (Test-NaAclClosed @((& $aclRule 'S-1-5-32-545' 0x2 $false))) 'a deny rule does not open it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'S-1-5-21-1-2-3-1001' 0x2)))) 'an unlisted user with write opens it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'S-1-5-32-547' 0x2)))) 'an unlisted group with write opens it'
+Assert-True (Test-NaAclClosed @((& $aclRule 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' 0x1F01FF), (& $aclRule 'S-1-5-32-544' 0x1F01FF), (& $aclRule 'S-1-5-21-1-2-3-1001' 0x1200A9))) 'privileged trustees may write, others may read'
 Assert-True (Test-NaAclClosed @()) 'no rules is closed'
+
+# The log folder: created SYSTEM-only when missing; an existing one must be trusted, else the job stops.
+$logDir = Join-Path $script:TmpRoot 'logs'
+Reset-Test
+$script:NaProtectDir = { param($Path) $script:BackupDirs.Add("protect:$Path") }
+$script:NaDirTrusted = { param($Dir) $script:DirTrusted }
+& $realPrepare $logDir
+Assert-True (Test-Path -LiteralPath $logDir) 'a missing log folder is created'
+Assert-True (@($script:BackupDirs) -contains "protect:$logDir") 'a created log folder is made SYSTEM-only'
+$script:BackupDirs.Clear()
+& $realPrepare $logDir
+Assert-Same $script:BackupDirs.Count 0 'a trusted existing log folder is left alone'
+$script:DirTrusted = $false
+$threw = $false
+try { & $realPrepare $logDir } catch { $threw = $true }
+Assert-True $threw 'an untrusted existing log folder stops the job'
+$script:NaProtectDir = { param($Path) $script:BackupDirs.Add($Path) }
+
+# An untrusted existing log folder fails the run before msiexec runs.
+Reset-Test
+$script:Apps.Add((New-App $msiCode 'Advanced Monitoring Agent GP' 'Remote Monitoring Services' "MsiExec.exe /I$msiCode" -Msi))
+$script:NaPrepareLogDir = { param($Dir) throw 'msi log folder not trusted' }
+$r = Invoke-Job
+Assert-Same $r.Code 2 'an untrusted log folder exit'
+Assert-Same $script:Runs.Count 0 'an untrusted log folder runs nothing'
+$script:NaPrepareLogDir = { param($Dir) $script:BackupDirs.Add("log:$Dir") }
 
 # StrictMode: an entry with no Publisher or InstallLocation property is read safely.
 $bare = [pscustomobject]@{ Key = "$u32\Advanced Monitoring Agent GP"; Id = 'Advanced Monitoring Agent GP'; Name = 'Advanced Monitoring Agent GP'; Publisher = ''; Uninstall = "`"$bootExe`" REMOVE=TRUE"; Msi = $false }
