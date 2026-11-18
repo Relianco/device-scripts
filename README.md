@@ -226,6 +226,7 @@ These change settings when you ask, and most have a read-only mode.
 - `user-check`: a dialog that asks the person for a code, or opens Microsoft sign-in. The pin is the code, or `microsoft-sign-in`.
 - `wireguard-network-guard`: stops WireGuard tunnels on a trusted office network and starts them off it. See `docs/wireguard-network-guard.md`.
 - `wu-policy`: finds local policy values that turn off automatic Windows Update. `Fix` `true` removes them after a backup. Skips WSUS-managed devices.
+- `bc-timezone`: checks whether a device is still on `Pacific Standard Time` (or on the `Yukon Standard Time` fallback once the `British Columbia Standard Time` update is installed). `Fix` `true` switches it to `British Columbia Standard Time` when available, else `Yukon Standard Time` (both permanent UTC-7). Devices on other time zones are left alone.
 
 ### Maintenance
 
