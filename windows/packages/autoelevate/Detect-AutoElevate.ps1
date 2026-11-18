@@ -1,5 +1,7 @@
-# Intune runs this file with no arguments.
-# Exit 0 when the trimmed display name is AutoElevate and the version is at or above the pin.
+# Intune runs this file with no arguments, as SYSTEM, in 64-bit PowerShell.
+# Exit 0 when the trimmed display name is AutoElevate, the version is at or above the pin,
+# the agent is registered and the AutoElevateAgent service exists. Otherwise Intune runs the
+# install again, so an unregistered agent or one with its service missing is not counted as installed.
 # ProductVersion 2.11.1959 and file version 2.11.1959.0 are the same build.
 # A missing uninstall key is not installed.
 $ErrorActionPreference = 'Stop'
@@ -119,13 +121,56 @@ function Get-RelianAutoElevateUninstallEntries {
     return $found.ToArray()
 }
 
+# Registered means the same as Test-AutoElevateRegistered in the install package:
+# a stored license key, a company name and a location name.
+function Test-RelianAutoElevateRegistration {
+    param($Values)
+    if ($null -eq $Values) {
+        return $false
+    }
+    foreach ($name in @('LicenseKey', 'CompanyName', 'LocationName')) {
+        if ([string]::IsNullOrWhiteSpace([string]$Values[$name])) {
+            return $false
+        }
+    }
+    return $true
+}
+
+# HKLM\SOFTWARE\AutoElevate in the 64-bit view, where the MSI keeps it. Nothing read here is written out.
+function Get-RelianAutoElevateRegistrationValues {
+    $values = @{}
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey('SOFTWARE\AutoElevate')
+        if ($null -eq $key) {
+            return $values
+        }
+        try {
+            foreach ($name in @('LicenseKey', 'CompanyName', 'LocationName')) {
+                $values[$name] = [string]$key.GetValue($name, '')
+            }
+        } finally {
+            $key.Dispose()
+        }
+    } finally {
+        $base.Dispose()
+    }
+    return $values
+}
+
+function Test-RelianAutoElevateService {
+    return $null -ne (Get-Service -Name 'AutoElevateAgent' -ErrorAction SilentlyContinue)
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1') {
     return
 }
 
 $present = $false
 try {
-    $present = [bool](Test-RelianAutoElevateInstalled -Entries @(Get-RelianAutoElevateUninstallEntries))
+    $present = [bool](Test-RelianAutoElevateInstalled -Entries @(Get-RelianAutoElevateUninstallEntries)) -and
+        [bool](Test-RelianAutoElevateRegistration -Values (Get-RelianAutoElevateRegistrationValues)) -and
+        [bool](Test-RelianAutoElevateService)
 } catch {
     $present = $false
 }
