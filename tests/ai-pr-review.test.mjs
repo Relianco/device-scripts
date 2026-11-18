@@ -407,17 +407,15 @@ test('a home-directory path on an added docs line is flagged even when the model
   assert.match(posted[0], /exampleuser/)
 })
 
-test('a docs-only PR with the model unavailable posts nothing and fails', async () => {
+test('a docs-only PR with the model unavailable stays red, and nothing reviewable is still NOT performed', async () => {
   const fetchImpl = async () => ({ ok: false, status: 404, text: async () => '{"error":{"code":"model_not_found"}}' })
   const { posted, error } = await runReview([{ filename: 'README.md', patch }], { prompts: [], fetchImpl })
   assert.match(String(error?.message), /model_not_found/)
   assert.equal(posted.length, 0)
-})
 
-test('only binary or unknown files is still NOT performed', async () => {
-  const { posted, error } = await runReview([{ filename: 'brand/logo.png', changes: 0, patch: null }])
-  assert.equal(error?.exitCode, 1)
-  assert.equal(posted[0].startsWith(NOT_PERFORMED_PREFIX), true)
+  const binary = await runReview([{ filename: 'brand/logo.png', changes: 0, patch: null }])
+  assert.equal(binary.error?.exitCode, 1)
+  assert.equal(binary.posted[0].startsWith(NOT_PERFORMED_PREFIX), true)
 })
 
 test('the workflow gate classifies docs by extension and verify accepts the docs prefix', () => {
