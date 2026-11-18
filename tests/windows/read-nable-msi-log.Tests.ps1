@@ -91,6 +91,10 @@ $all = $r.Line
 foreach ($leak in $userName, 'admin@example.com', '192.0.2.10', $machine, 'S-1-5-21-111', $secretA, $secretB, $otherUser) { Assert-True (-not $all.Contains($leak)) "redacted $leak" }
 foreach ($mark in 'Users\\\\<user>', '<email>', '<ip>', '<machine>', '<sid>', 'SERVICE_TOKEN=<redacted>') { Assert-True ($all -match $mark) "mask $mark present" }
 Assert-Same (Get-RmRedacted "Property(S): ADMINPASSWORD = $secretA and more") 'Property(S): ADMINPASSWORD = <redacted>' 'secret property value'
+# Property-change messages carry the value in quotes after the property name.
+Assert-Same (Get-RmRedacted "PROPERTY CHANGE: Adding ADMINPASSWORD property. Its value is '$secretA'.") 'PROPERTY CHANGE: Adding ADMINPASSWORD property. <redacted>' 'adding message'
+Assert-True (-not (Get-RmRedacted "PROPERTY CHANGE: Modifying API_TOKEN property. Its current value is '$secretA'. Its new value: '$secretB'.").Contains($secretB)) 'modifying message'
+Assert-Same (Get-RmRedacted "PROPERTY CHANGE: Adding REMOVE property. Its value is 'ALL'.") "PROPERTY CHANGE: Adding REMOVE property. Its value is 'ALL'." 'other property kept'
 Assert-Same @($j.tail).Count 40 'tail of 40'
 Assert-Same @($j.tail)[39].Length 300 'line cap'
 

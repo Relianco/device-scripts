@@ -51,7 +51,8 @@ function Get-RmDecoded {
 # One line with secrets, user names, emails, SIDs, IPs and the machine name masked, cut to 300 characters.
 function Get-RmRedacted {
     param([AllowEmptyString()][string]$Line)
-    $t = $Line -replace '(?i)(Property\(.\):\s*\w*(?:PASSWORD|PASSWD|PWD|TOKEN|KEY|SECRET)\w*\s*=\s*).*', '${1}<redacted>'
+    $t = $Line -replace '(?i)(PROPERTY CHANGE: \w+ \w*(?:PASSWORD|PASSWD|PWD|TOKEN|KEY|SECRET)\w* property\.).*', '${1} <redacted>'
+    $t = $t -replace '(?i)(Property\(.\):\s*\w*(?:PASSWORD|PASSWD|PWD|TOKEN|KEY|SECRET)\w*\s*=\s*).*', '${1}<redacted>'
     $t = $t -replace '(?i)(\b\w*(?:PASSWORD|PASSWD|PWD|TOKEN|KEY|SECRET)\w*\s*=\s*)("[^"]*"|\S+)', '${1}<redacted>'
     $t = $t -replace '(?i)C:\\Users\\[^\\]+', 'C:\Users\<user>'
     $t = $t -replace '[\w.+-]+@[\w-]+(\.[\w-]+)+', '<email>'
