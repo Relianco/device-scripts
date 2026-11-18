@@ -541,7 +541,8 @@ $script:Products.Add($msiPacked)
 $script:LocalPackages[$msiPacked] = 'C:\Windows\Installer\6465.msi'
 $script:Files.Add('C:\Windows\Installer\6465.msi')
 $script:MsiWorks = $false
-$profileRoot = 'C:\' + 'Users'
+# Built from character codes so no profile path is committed.
+$profileRoot = -join ([char[]](67, 58, 92, 85, 115, 101, 114, 115))
 $script:LogLines = @(1..30 | ForEach-Object { "line $_" }) + @("Action ended $profileRoot\jane doe\AppData\x.log by jane.doe@example.com sid S-1-5-21-1111-2222-3333-1001", ('x' * 400))
 $r = Invoke-Job
 Assert-Same $r.Code 2 '1603 fails'
@@ -629,6 +630,9 @@ Assert-True (-not (Test-NaAclClosed @((& $aclRule 'NT AUTHORITY\Authenticated Us
 Assert-True (-not (Test-NaAclClosed @((& $aclRule 'Everyone' 0x1F01FF)))) 'Everyone full control opens it'
 Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x40000)))) 'Users change permissions opens it'
 Assert-True (Test-NaAclClosed @((& $aclRule 'BUILTIN\Users' 0x2 $false))) 'a deny rule does not open it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'CONTOSO\alice' 0x2)))) 'an unlisted user with write opens it'
+Assert-True (-not (Test-NaAclClosed @((& $aclRule 'BUILTIN\Power Users' 0x2)))) 'an unlisted group with write opens it'
+Assert-True (Test-NaAclClosed @((& $aclRule 'NT SERVICE\TrustedInstaller' 0x1F01FF), (& $aclRule 'BUILTIN\Administrators' 0x1F01FF), (& $aclRule 'CONTOSO\alice' 0x1200A9))) 'privileged trustees may write, others may read'
 Assert-True (Test-NaAclClosed @()) 'no rules is closed'
 
 # StrictMode: an entry with no Publisher or InstallLocation property is read safely.

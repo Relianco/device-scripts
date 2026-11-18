@@ -398,13 +398,13 @@ function Get-NaState {
 
 function Test-NaClean { param($State) return ($State.Apps.Count + $State.Services.Count + $State.Folders.Count) -eq 0 }
 
-# True when no Allow rule gives an unprivileged group write data, append, delete, delete child, change
-# permissions or take ownership (FileSystemRights bits).
+# True when no Allow rule gives write data, append, delete, delete child, change permissions or take ownership
+# (FileSystemRights bits) to anyone but the privileged trustees. An allowlist: an unlisted user or group refuses.
 function Test-NaAclClosed {
     param($Rules)
     $risky = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000
     foreach ($r in @($Rules)) {
-        if ($r.Allow -and $r.Identity -match '(?i)\A(Everyone|BUILTIN\\Users|NT AUTHORITY\\Authenticated Users|NT AUTHORITY\\INTERACTIVE|.*\\Domain Users)\z' -and ($r.Rights -band $risky)) { return $false }
+        if ($r.Allow -and $r.Identity -notmatch '\A(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller|CREATOR OWNER)\z' -and ($r.Rights -band $risky)) { return $false }
     }
     return $true
 }
