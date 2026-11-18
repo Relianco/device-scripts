@@ -211,7 +211,10 @@ $env:RELIAN_DEPLOY_TEST = '1'
 foreach ($command in @(
         'Convert-RelianAutoElevateVersionText',
         'Test-RelianAutoElevateEntry',
-        'Test-RelianAutoElevateInstalled'
+        'Test-RelianAutoElevateInstalled',
+        'Test-RelianAutoElevateRegistration',
+        'Get-RelianAutoElevateRegistrationValues',
+        'Test-RelianAutoElevateService'
     )) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         Fail "$command was not defined"
@@ -257,6 +260,41 @@ if (-not (Test-RelianAutoElevateInstalled -Entries $mixed)) {
 }
 if (Test-RelianAutoElevateInstalled -Entries @()) {
     Fail 'no entries was present'
+}
+
+$registered = @{ LicenseKey = 'k'; CompanyName = 'Example Company'; LocationName = 'Main Office' }
+if (-not (Test-RelianAutoElevateRegistration -Values $registered)) {
+    Fail 'a full registration was not registered'
+}
+foreach ($name in @('LicenseKey', 'CompanyName', 'LocationName')) {
+    $partial = $registered.Clone()
+    $partial[$name] = ' '
+    if (Test-RelianAutoElevateRegistration -Values $partial) {
+        Fail "registration with a blank $name was registered"
+    }
+    $partial.Remove($name)
+    if (Test-RelianAutoElevateRegistration -Values $partial) {
+        Fail "registration missing $name was registered"
+    }
+}
+if (Test-RelianAutoElevateRegistration -Values $null) {
+    Fail 'no registry key was registered'
+}
+if (Test-RelianAutoElevateRegistration -Values @{}) {
+    Fail 'an empty registry key was registered'
+}
+# The success path needs all three checks, so a stuck or unregistered agent is installed again.
+$presentBlock = [regex]::Match($detectText, '(?s)\$present = \[bool\]\(Test-RelianAutoElevateInstalled.*?\n\} catch')
+if (-not $presentBlock.Success -or
+    -not $presentBlock.Value.Contains('Test-RelianAutoElevateRegistration -Values (Get-RelianAutoElevateRegistrationValues)') -or
+    -not $presentBlock.Value.Contains('Test-RelianAutoElevateService')) {
+    Fail 'detection does not require registration and the service'
+}
+if (-not $detectText.Contains("Get-Service -Name 'AutoElevateAgent'")) {
+    Fail 'detection does not look for the AutoElevateAgent service'
+}
+if (-not $detectText.Contains('[Microsoft.Win32.RegistryView]::Registry64')) {
+    Fail 'detection does not read the 64-bit registry view'
 }
 
 $sampleAddress = (@(10, 1, 2, 3) -join '.')

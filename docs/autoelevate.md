@@ -80,6 +80,14 @@ It is separate from normal installation and requires review before reuse.
   `Settings` only as `present` or `absent`), both services with their state
   and recovery actions, the AutoElevate processes, and up to 20 MsiInstaller
   events from the last 30 days that mention AutoElevate.
+- **Intune detection** (`Detect-AutoElevate.ps1`) counts the agent as
+  installed only when all three hold: the version is at or above the pin, the
+  device is registered (the same rule as above), and the `AutoElevateAgent`
+  service exists. Otherwise Intune runs the install again. `Install` does
+  nothing for an agent already at the pin, so a deployment that must
+  re-register one runs `Uninstall` and then `Install` with the key and names.
+  An agent whose service will not stop still fails with exit 1 and no msiexec
+  run. Recover it by hand with the reference above.
 
 ## Runner package arguments
 
