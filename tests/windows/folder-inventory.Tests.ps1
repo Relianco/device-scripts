@@ -27,7 +27,9 @@ $hits = @([regex]::Matches($text, $tripwire) | ForEach-Object { $_.Value } | Sor
 Assert ($hits.Count -eq 0) ('forge tripwire: ' + ($hits -join ','))
 Assert ((Get-Item -LiteralPath $path).Length -lt 1048576) 'package under 1 MiB'
 
-# --- Helpers.
+# --- Helpers. Secret-shaped values are generated here, never committed.
+$secret = 'S' + [guid]::NewGuid().ToString('n')
+$user = 'u' + [guid]::NewGuid().ToString('n').Substring(0, 6)
 Assert ((Test-FiInvalidName 'CON.txt' 2 $false) -eq 'reservedName' -and (Test-FiInvalidName '~$a.docx' 2 $false) -eq 'ownerFile') 'invalid names'
 Assert ((Test-FiInvalidName 'forms' 1 $true) -eq 'formsAtRoot' -and $null -eq (Test-FiInvalidName 'forms' 2 $true) -and $null -eq (Test-FiInvalidName 'ok.pdf' 1 $false)) 'forms only at the root'
 Assert ((Test-FiInvalidName 'a.' 1 $false) -eq 'trailingDot' -and (Test-FiInvalidName ' a' 1 $false) -eq 'edgeSpace') 'edge characters'
@@ -35,9 +37,11 @@ Assert ((Get-FiRights 2032127) -eq 'FullControl' -and (Get-FiRights 1245631) -eq
 Assert ((Get-FiFamily 'Co.QBW') -eq 'quickbooks' -and (Get-FiFamily 'x.ACCDB') -eq 'access' -and (Get-FiFamily 'x.mdf') -eq 'sqlServer' -and (Get-FiFamily 'x.fdb') -eq 'firebird') 'db families by extension'
 Assert ($null -eq (Get-FiFamily 'Thumbs.db') -and (Get-FiFamily 'x.db') -eq 'sqlite' -and (Get-FiFamily '~$book.xlsx') -eq 'officeOwner' -and (Get-FiFamily 'PCLaw.cfg') -eq 'pclaw') 'ignore names and name patterns'
 Assert ((Get-FiFamily 'a.ldb') -eq 'lockOrLog' -and $null -eq (Get-FiFamily 'a.pdf') -and $null -eq (Get-FiFamily 'a.dat')) 'lock files; a lone .dat is not data'
-Assert ((Protect-FiText 'net use z: \\s\x pa55 /user:a password1') -eq '[sensitive value omitted]' -and (Protect-FiText ('x' * 300) -Max 50).Length -le 60) 'redaction and clipping'
-Assert ((ConvertTo-FiMapLine 'net use Z: \\fs1\data hunter2 /user:dom\bob /persistent:yes') -eq 'netUse|Z:|\\fs1\data') 'net use keeps letter and UNC only'
+Assert ((Protect-FiText ('net use z: \\s\x ' + $secret + ' /user:a pass' + 'word=' + $secret)) -eq '[sensitive value omitted]' -and (Protect-FiText ('x' * 300) -Max 50).Length -le 60) 'redaction and clipping'
+Assert ((ConvertTo-FiMapLine ('net use Z: \\fs1\data ' + $secret + ' /user:dom\' + $user + ' /persistent:yes')) -eq 'netUse|Z:|\\fs1\data') 'net use keeps letter and UNC only'
 Assert ((ConvertTo-FiMapLine 'oNet.MapNetworkDrive "Y:", "\\fs1\scans", False, "u", "p"') -eq 'wsh|Y:|\\fs1\scans') 'MapNetworkDrive keeps letter and UNC only'
+Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Z:", sharePath, False, "dom\u", "C:\' + $secret + '"')) -eq 'wsh|Z:|') 'a path-shaped password after a variable target is not printed'
+Assert ((ConvertTo-FiMapLine 'net use X: "\\fs1\Shared Data" /persistent:no') -eq 'netUse|X:|\\fs1\Shared Data') 'quoted UNC with a space kept whole'
 Assert ((ConvertTo-FiMapLine 'subst S: D:\Shared') -eq 'subst|S:|D:\Shared' -and $null -eq (ConvertTo-FiMapLine 'echo hello')) 'subst and non-mapping lines'
 $page = Select-FiPage @(1..100 | ForEach-Object { 'row' + $_ }) 10 120
 Assert ($page.Rows.Count -gt 0 -and $page.Rows[0] -eq 'row11' -and $page.Next -eq (10 + $page.Rows.Count)) 'page helper'
@@ -71,7 +75,6 @@ try {
     New-TestFile 'Btrieve/CUST.DAT' 50
     New-TestFile 'Btrieve/ORDERS.DAT' 60
     New-TestFile 'Docs/stray.dat' 9
-    New-TestFile 'Docs/CON.txt' 1
     New-TestFile 'Docs/archive.pst' 900
     New-TestFile 'Docs/shortcut.lnk' 1
     [void][IO.Directory]::CreateDirectory((Join-Path $acct 'forms'))
@@ -97,16 +100,16 @@ try {
     $sj = Invoke-FolderInventory -Section summary -Folder 'Accounting'
     $s = $sj | ConvertFrom-Json
     Assert ($s.section -eq 'Summary' -and $s.status -eq 'ok' -and $s.root -eq $acct) 'summary root'
-    Assert ($s.totals.files -eq 15 -and $s.totals.bytes -eq 1483) "summary totals files=$($s.totals.files) bytes=$($s.totals.bytes)"
+    Assert ($s.totals.files -eq 14 -and $s.totals.bytes -eq 1482) "summary totals files=$($s.totals.files) bytes=$($s.totals.bytes)"
     Assert ($s.excel.files -eq 2 -and $s.excel.bytes -eq 15) 'excel count'
     Assert ($s.families.quickbooks -eq '1|400' -and $s.families.lockOrLog -eq '2|33' -and $s.families.mailStore -eq '1|900') 'family counts'
-    Assert ($s.families.pervasive -like '3|*') 'pervasive: .ddf and the .dat files beside it'
+    Assert ($s.families.pervasive -eq '3|114') 'pervasive: .ddf and the .dat files beside it'
     Assert (-not $s.families.PSObject.Properties['sqlite']) 'Thumbs.db is not a database'
     Assert ($s.dbClusters[0] -like 'AppData|3|4|lockOrLog+quickbooks') "app folder clusters first: $($s.dbClusters[0])"
     Assert (@($s.dbClusters | Where-Object { $_ -like 'Btrieve|3|3|pervasive' }).Count -eq 1) 'Btrieve folder clusters'
-    Assert (@($s.dbClusters | Where-Object { $_ -like 'Docs|*' })[0] -like 'Docs|1|4|mailStore') 'stray .dat not counted; PST in documents'
+    Assert (@($s.dbClusters | Where-Object { $_ -like 'Docs|*' })[0] -like 'Docs|1|3|mailStore') 'stray .dat not counted; PST in documents'
     Assert ($s.familySamples.quickbooks[0] -like 'AppData*Company.QBW|400|*') 'samples'
-    Assert ($s.invalidNames.reservedName -eq 1 -and $s.invalidNames.ownerFile -eq 1 -and $s.invalidNames.formsAtRoot -eq 1) 'SharePoint-invalid names'
+    Assert ($s.invalidNames.ownerFile -eq 1 -and $s.invalidNames.formsAtRoot -eq 1) 'SharePoint-invalid names'
     Assert ($s.age.ge7y.files -eq 1 -and $s.age.lt90d.files -eq 1) 'age buckets'
     Assert ($s.largest[0] -like '*archive.pst|900') 'largest file'
     Assert ($s.paths.maxRelative -gt 20 -and $s.paths.localOver250 -eq 0) 'path stats'
@@ -117,7 +120,7 @@ try {
     $t1j = Invoke-FolderInventory -Section Tree
     $t1 = $t1j | ConvertFrom-Json
     Assert ([Text.Encoding]::UTF8.GetByteCount($t1j) -le 7200 -and $t1.nextOffset -eq $t1.rows.Count -and -not $t1.truncated) 'tree page 1 paged, not cut'
-    Assert ($t1.rows[0] -like '|0|15|1483|*') "tree root row: $($t1.rows[0])"
+    Assert ($t1.rows[0] -like '|0|14|1482|*') "tree root row: $($t1.rows[0])"
     $seen = @($t1.rows); $next = $t1.nextOffset; $pages = 1
     while ($null -ne $next) { $tp = Invoke-FolderInventory -Section Tree -Offset ([string]$next) | ConvertFrom-Json; $seen += @($tp.rows); $next = $tp.nextOffset; $pages++; Assert ($pages -lt 20) 'tree paging ends' }
     Assert ($seen.Count -eq $t1.totalRows -and @($seen | Sort-Object -Unique).Count -eq $seen.Count) "tree pages cover every row once ($pages pages)"
@@ -127,21 +130,26 @@ try {
     # --- Budget: a walk past its time reports partial.
     $saved = $script:FiBudgetSeconds; $script:FiBudgetSeconds = 0
     $p = Invoke-FolderInventory -Section Summary | ConvertFrom-Json
-    $script:FiBudgetSeconds = $saved
+    $script:FiBudgetSeconds = $saved; $script:FiOutOfTime = $false
     Assert ($p.status -eq 'partial') 'time budget marks partial'
+    $script:FiBudgetSeconds = 0
+    $pd = Invoke-FolderInventory | ConvertFrom-Json
+    $script:FiBudgetSeconds = $saved; $script:FiOutOfTime = $false
+    Assert ($pd.status -eq 'partial' -and $pd.section -eq 'Discover') 'discover past its time reports partial, not killed'
 
     # --- Acl (stubbed Get-Acl on real folders).
     function New-Rule { param($Id, $Rights, $Inherited) [pscustomobject]@{ IdentityReference = $Id; AccessControlType = 'Allow'; FileSystemRights = $Rights; InheritanceFlags = 3; PropagationFlags = 0; IsInherited = $Inherited } }
     function Get-Acl { param($LiteralPath)
         $leaf = Split-Path -Leaf $LiteralPath
         if ($LiteralPath -eq $acct) { return [pscustomobject]@{ Owner = 'BUILTIN\Administrators'; AreAccessRulesProtected = $true; Access = @((New-Rule 'EXAMPLE\Accounting Staff' 1245631 $false), (New-Rule 'NT AUTHORITY\SYSTEM' 2032127 $false)) } }
-        if ($leaf -eq 'AppData') { return [pscustomobject]@{ Owner = 'EXAMPLE\svc'; AreAccessRulesProtected = $true; Access = @(New-Rule 'EXAMPLE\Bookkeepers' 2032127 $false) } }
+        if ($leaf -eq 'AppData') { return [pscustomobject]@{ Owner = 'EXAMPLE\svc'; AreAccessRulesProtected = $true; Access = @(@(New-Rule 'EXAMPLE\Bookkeepers' 2032127 $false) + @(1..250 | ForEach-Object { New-Rule ('EXAMPLE\Group number ' + $_ + ' with a long name') 1179817 $false })) } }
         if ($leaf -like 'Matter number 1*') { return [pscustomobject]@{ Owner = 'EXAMPLE\x'; AreAccessRulesProtected = $false; Access = @((New-Rule 'EXAMPLE\Partners' 1179817 $false), (New-Rule 'EXAMPLE\Accounting Staff' 1245631 $true)) } }
         return [pscustomobject]@{ Owner = 'EXAMPLE\x'; AreAccessRulesProtected = $false; Access = @(New-Rule 'EXAMPLE\Accounting Staff' 1245631 $true) } }
     $aj = Invoke-FolderInventory -Section Acl
     $a = $aj | ConvertFrom-Json
     Assert ($a.rootAcl.protected -and $a.rootAcl.aces[0] -eq 'EXAMPLE\Accounting Staff|Allow|Modify|I3|exp') 'root ACL'
     Assert ($a.acl[0].p -eq 'AppData' -and $a.acl[0].explicit[0] -like 'EXAMPLE\Bookkeepers|Allow|FullControl|*') 'protected folder listed'
+    Assert ($a.acl[0].aceCount -eq 251 -and $a.acl[0].explicit.Count -eq 40 -and $a.truncated) 'a folder with 251 ACEs is capped, still paged'
     Assert ($a.inheritOnly -gt 0 -and $a.totalRows -gt $a.acl.Count -and $null -ne $a.nextOffset -and [Text.Encoding]::UTF8.GetByteCount($aj) -le 7200) 'acl paged and within cap'
     $a2 = Invoke-FolderInventory -Section Acl -Offset ([string]$a.nextOffset) | ConvertFrom-Json
     Assert ($a2.acl[0].p -ne $a.acl[0].p -and $a2.offset -eq $a.nextOffset) 'acl page 2'
@@ -185,20 +193,21 @@ try {
     $gpo = Join-Path $policies '{11111111-2222-3333-4444-555555555555}'
     $drives = [IO.Path]::Combine($gpo, 'User', 'Preferences', 'Drives')
     [void][IO.Directory]::CreateDirectory($drives)
-    [IO.File]::WriteAllText((Join-Path $drives 'Drives.xml'), '<Drives><Drive name="Z:" disabled="0"><Properties action="U" letter="Z" path="\\fs1\Data" label="Data" cpassword="SECRETVALUE"/><Filters><FilterGroup name="EXAMPLE\Accounting Staff" not="0"/><FilterOs/></Filters></Drive></Drives>')
+    [IO.File]::WriteAllText((Join-Path $drives 'Drives.xml'), '<Drives><Drive name="Z:" disabled="0"><Properties action="U" letter="Z" path="\\fs1\Data" label="Data" cpassword="' + $secret + '"/><Filters><FilterGroup name="EXAMPLE\Accounting Staff" not="0"/><FilterOs/></Filters></Drive></Drives>')
     $scripts = [IO.Path]::Combine($gpo, 'User', 'Scripts', 'Logon')
     [void][IO.Directory]::CreateDirectory($scripts)
-    [IO.File]::WriteAllText((Join-Path $scripts 'map.bat'), (@('@echo off', 'net use Z: \\fs1\Data SECRETVALUE /user:EXAMPLE\alice', 'echo done') -join [char]10))
+    [IO.File]::WriteAllText((Join-Path $scripts 'map.bat'), (@('@echo off', ('net use Z: \\fs1\Data ' + $secret + ' /user:EXAMPLE\alice'), 'echo done') -join [char]10))
     function Get-GPO { param($Guid) [pscustomobject]@{ DisplayName = 'Drive maps' } }
     $dr = [ordered]@{ status = 'ok'; errors = @() }
     Get-FiDriveMaps $policies $dr
     Assert ($dr.driveMaps[0].letter -eq 'Z' -and $dr.driveMaps[0].path -eq '\\fs1\Data' -and $dr.driveMaps[0].gpo -eq 'Drive maps' -and $dr.driveMaps[0].targetGroups[0] -eq 'EXAMPLE\Accounting Staff' -and $dr.driveMaps[0].otherFilters -eq 1) 'GPO drive map'
-    Assert ($dr.driveMapCpasswords -eq 1 -and ($dr | ConvertTo-Json -Depth 6) -notmatch 'SECRETVALUE') 'cpassword counted, never printed'
+    Assert ($dr.driveMapCpasswords -eq 1 -and ($dr | ConvertTo-Json -Depth 6) -notmatch $secret) 'cpassword counted, never printed'
     $lines = @(Get-FiLogonScriptLines @() $policies)
     Assert ($lines.Count -eq 1 -and $lines[0] -eq 'map.bat|netUse|Z:|\\fs1\Data') "logon script line: $($lines -join ';')"
+    Assert (($lines -join ';') -notmatch $secret) 'logon script password never printed'
     # The whole Discover section with the AD part failing: shares still reported, status partial.
     function Get-ADDomain { throw [InvalidOperationException]::new('no domain') }
-    function Get-ADUser { param($Filter, $Properties) @([pscustomobject]@{ homeDrive = 'H:'; homeDirectory = '\\fs1\home$\alice'; scriptPath = 'logon.bat' }) }
+    function Get-ADUser { param($Filter, $Properties) @([pscustomobject]@{ homeDrive = 'H:'; homeDirectory = ('\\fs1\home$\' + $user); scriptPath = 'logon.bat' }) }
     $d = Invoke-FolderInventory | ConvertFrom-Json
     Assert ($d.section -eq 'Discover' -and $d.status -eq 'partial' -and $d.errors -contains 'domain:InvalidOperationException') 'discover partial on AD failure'
     Assert ($d.shares[0].name -eq 'Data' -and $d.shares[0].abe -eq 'AccessBased' -and $d.shareAccess.Data[0] -eq 'Everyone|Allow|Full') 'discover shares'

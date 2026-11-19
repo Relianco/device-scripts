@@ -64,6 +64,7 @@ $script:FiBudgetSeconds = 85
 $script:FiMaxBytes = 7200
 $script:FiPageBytes = 6600
 $script:FiMaxDepth = 4
+$script:FiOutOfTime = $false
 
 # File families: extend by adding a row. ext matches the lower-case extension, pattern is a regex on the file name.
 # cluster marks database and sidecar families: their folders are listed in dbClusters.
@@ -113,7 +114,12 @@ function Protect-FiText {
     return $t
 }
 
-function Test-FiOverBudget { return $script:FiClock.Elapsed.TotalSeconds -gt $script:FiBudgetSeconds }
+# True once the time budget is spent; the dispatcher then reports status partial.
+function Test-FiOverBudget {
+    if ($script:FiClock.Elapsed.TotalSeconds -le $script:FiBudgetSeconds) { return $false }
+    $script:FiOutOfTime = $true
+    return $true
+}
 
 function Get-FiJsonBytes { param($Value) return [Text.Encoding]::UTF8.GetByteCount(($Value | ConvertTo-Json -Compress -Depth 8)) }
 
@@ -232,7 +238,7 @@ function Initialize-FiWalkState {
         ext = @{}; fam = @{}; samples = @{}; largest = [Collections.Generic.List[object]]::new(); excel = @{ files = 0; bytes = [int64]0 }
         maxLocal = 0; maxRel = 0; over250 = 0; over400 = 0; relOver250 = 0; relOver400 = 0; longest = ''
         invalid = @{}; invalidSamples = [Collections.Generic.List[string]]::new()
-        age = [ordered]@{}; folders = @{}; dirFiles = @{}; dirFam = @{}; dirDat = @{}; ddfDirs = @{}
+        age = [ordered]@{}; folders = @{}; dirFiles = @{}; dirFam = @{}; dirDat = @{}; dirDatBytes = @{}; ddfDirs = @{}
     }
     foreach ($b in $script:FiAgeBuckets) { $w.age[$b[0]] = [ordered]@{ files = 0; bytes = [int64]0 } }
     return $w
@@ -298,7 +304,7 @@ function Invoke-FiWalk {
             if ($script:FiExcel -contains $x -and -not $e.Name.StartsWith('~$')) { $w.excel.files++; $w.excel.bytes += $len }
             $parent = ''; if ($depth -gt 1) { $parent = $segs[0..($depth - 2)] -join '\' }
             $w.dirFiles[$parent] = 1 + [int]$w.dirFiles[$parent]
-            if ($x -eq $script:FiPervasiveData) { $w.dirDat[$parent] = 1 + [int]$w.dirDat[$parent] }
+            if ($x -eq $script:FiPervasiveData) { $w.dirDat[$parent] = 1 + [int]$w.dirDat[$parent]; $w.dirDatBytes[$parent] = $len + [int64]$w.dirDatBytes[$parent] }
             if ($x -eq '.ddf') { $w.ddfDirs[$parent] = $true }
             $fam = Get-FiFamily $e.Name
             if ($fam) {
@@ -329,6 +335,7 @@ function Invoke-FiWalk {
         $n = [int]$w.dirDat[$dir]
         if (-not $w.fam.ContainsKey('pervasive')) { $w.fam['pervasive'] = @{ n = 0; b = [int64]0 } }
         $w.fam['pervasive'].n += $n
+        $w.fam['pervasive'].b += [int64]$w.dirDatBytes[$dir]
         Merge-FiDirFamily $w $dir 'pervasive' $n
     }
     return $w
@@ -342,6 +349,7 @@ function Get-FiChildFolders {
     for ($d = 1; $d -le $Depth; $d++) {
         $next = @()
         foreach ($p in $level) {
+            if (Test-FiOverBudget) { break }
             try { foreach ($c in [IO.DirectoryInfo]::new($p).EnumerateDirectories()) { if (-not ($c.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $out.Add($c.FullName); $next += $c.FullName } } }
             catch { if ($Report) { $Report['unreadable'] = 1 + [int]$Report['unreadable'] } }
         }
@@ -364,6 +372,7 @@ function Get-FiCandidates {
     foreach ($s in $shares) { & $add ([IO.Path]::Combine([string]$s.Path, $Name)) }
     $volumes = @(); try { $volumes = @(Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' -OperationTimeoutSec 10) } catch { }
     foreach ($v in $volumes) {
+        if (Test-FiOverBudget) { break }
         $root = [string]$v.DeviceID + '\'
         & $add ([IO.Path]::Combine($root, $Name))
         foreach ($d in @(Get-FiChildFolders $root 1)) { & $add ([IO.Path]::Combine($d, $Name)) }
@@ -405,6 +414,7 @@ function Get-FiDiscoverSection {
         $Report.shareAccess = [ordered]@{}
         $Report.shareChildren = [ordered]@{}
         foreach ($s in @($shares | Where-Object { -not $_.Special })) {
+            if (Test-FiOverBudget) { break }
             $key = Protect-FiText $s.Name -Max 60
             try { $Report.shareAccess[$key] = @(Get-FiShareAccess $s.Name) } catch { $Report.shareAccess[$key] = 'unavailable' }
             # Names only, so a folder whose real name has a space (not passable as Folder) is still seen.
@@ -430,6 +440,7 @@ function Get-FiDriveMaps {
     param([string]$Policies, $Report)
     $maps = @(); $cpw = 0
     foreach ($g in @(Get-FiChildFolders $Policies 1)) {
+        if (Test-FiOverBudget) { break }
         foreach ($side in @('User', 'Machine')) {
             $file = [IO.Path]::Combine($g, $side, 'Preferences', 'Drives', 'Drives.xml')
             if (-not [IO.File]::Exists($file)) { continue }
@@ -457,8 +468,11 @@ function ConvertTo-FiMapLine {
     if ($Line -match '(?i)MapNetworkDrive') { $kind = 'wsh' } elseif ($Line -match '(?i)New-(PSDrive|SmbMapping)') { $kind = 'powershell' } elseif ($Line -match '(?i)\bsubst\s') { $kind = 'subst' }
     $letter = ''; if ($Line -match '(?<![A-Za-z0-9\\])([A-Za-z]:)(?![\\/A-Za-z0-9])') { $letter = $Matches[1].ToUpperInvariant() }
     $target = ''
-    if ($Line -match '(\\\\[^\s"'',;)]+)') { $target = $Matches[1] }
-    elseif ($Line -match '(?<![A-Za-z0-9])([A-Za-z]:\\[^\s"'',;)]*)') { $target = $Matches[1] }
+    # A quoted target may hold spaces; an unquoted one ends at the first space.
+    if ($Line -match '"(\\\\[^"]+)"') { $target = $Matches[1] }
+    elseif ($Line -match '(\\\\[^\s"'',;)]+)') { $target = $Matches[1] }
+    # A local path only for subst: in other commands a later argument (user, password) can look like one.
+    elseif ($kind -eq 'subst' -and $Line -match '(?<![A-Za-z0-9])([A-Za-z]:\\[^\s"'',;)]*)') { $target = $Matches[1] }
     return $kind + '|' + $letter + '|' + (Protect-FiText $target -Max 120)
 }
 
@@ -467,6 +481,7 @@ function Get-FiLogonScriptLines {
     $dirs = @($Roots) + @(Get-FiChildFolders $Policies 1 | ForEach-Object { [IO.Path]::Combine($_, 'User', 'Scripts') })
     $lines = @()
     foreach ($r in $dirs) {
+        if (Test-FiOverBudget) { break }
         if (-not [IO.Directory]::Exists($r)) { continue }
         $files = @(Get-ChildItem -LiteralPath $r -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(bat|cmd|vbs|ps1|kix)$' -and $_.Length -lt 262144 } | Select-Object -First 60)
         foreach ($f in $files) {
@@ -535,7 +550,9 @@ function Get-FiTreeSection {
 function Get-FiAclSection {
     param([string]$Root, [int]$Start, $Report)
     $acl = Get-Acl -LiteralPath $Root
-    $Report.rootAcl = [ordered]@{ owner = (Protect-FiText ([string]$acl.Owner) -Max 60); protected = [bool]$acl.AreAccessRulesProtected; aces = @($acl.Access | ForEach-Object { (Format-FiAce $_) + '|' + $(if ($_.IsInherited) { 'inh' } else { 'exp' }) }) }
+    $rootAces = @($acl.Access)
+    $Report.rootAcl = [ordered]@{ owner = (Protect-FiText ([string]$acl.Owner) -Max 60); protected = [bool]$acl.AreAccessRulesProtected; aceCount = $rootAces.Count; aces = @($rootAces | Select-Object -First 60 | ForEach-Object { (Format-FiAce $_) + '|' + $(if ($_.IsInherited) { 'inh' } else { 'exp' }) }) }
+    if ($rootAces.Count -gt 60) { $Report.truncated = $true }
     $dirs = @(Get-FiChildFolders $Root 2 $Report)
     $Report.foldersChecked = $dirs.Count
     $rows = @(); $same = 0
@@ -545,7 +562,9 @@ function Get-FiAclSection {
         try { $a = Get-Acl -LiteralPath $dir } catch { $rows += [ordered]@{ p = $p; error = 'unreadable' }; continue }
         $exp = @($a.Access | Where-Object { -not $_.IsInherited })
         if (-not $a.AreAccessRulesProtected -and $exp.Count -eq 0) { $same++; continue }
-        $rows += [ordered]@{ p = $p; protected = [bool]$a.AreAccessRulesProtected; owner = (Protect-FiText ([string]$a.Owner) -Max 60); explicit = @($exp | ForEach-Object { Format-FiAce $_ }) }
+        # At most 40 ACEs a row, so one folder always fits a page; aceCount says how many it has.
+        if ($exp.Count -gt 40) { $Report.truncated = $true }
+        $rows += [ordered]@{ p = $p; protected = [bool]$a.AreAccessRulesProtected; owner = (Protect-FiText ([string]$a.Owner) -Max 60); aceCount = $exp.Count; explicit = @($exp | Select-Object -First 40 | ForEach-Object { Format-FiAce $_ }) }
     }
     $Report.inheritOnly = $same
     $Report.totalRows = $rows.Count
@@ -647,6 +666,7 @@ function Invoke-FolderInventory {
             'Open' { Get-FiOpenSection $root $report }
         }
     }
+    if ($script:FiOutOfTime -and $report.status -eq 'ok') { $report.status = 'partial' }
     return ConvertTo-FiLine $report
 }
 #endregion
