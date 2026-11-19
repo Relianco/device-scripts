@@ -383,29 +383,20 @@ function Set-PrinterTcpDevModeBytes {
         return
     }
     $dmFields = [System.BitConverter]::ToUInt32($Bytes, 72)
-    $changed = $false
     if ([bool]$Spec.HasTray -and $SourceId -gt 0) {
         $dmFields = $dmFields -bor [uint32]0x0200
         $srcBytes = [System.BitConverter]::GetBytes([int16]$SourceId)
         [System.Array]::Copy($srcBytes, 0, $Bytes, 88, 2)
-        $changed = $true
     }
     if ([bool]$Spec.HasColor -and [int]$Spec.DmColor -gt 0) {
         $dmFields = $dmFields -bor [uint32]0x0800
         $colBytes = [System.BitConverter]::GetBytes([int16]$Spec.DmColor)
         [System.Array]::Copy($colBytes, 0, $Bytes, 92, 2)
-        $changed = $true
     }
     if ([bool]$Spec.HasDuplex -and [int]$Spec.DmDuplex -gt 0) {
         $dmFields = $dmFields -bor [uint32]0x1000
         $dupBytes = [System.BitConverter]::GetBytes([int16]$Spec.DmDuplex)
         [System.Array]::Copy($dupBytes, 0, $Bytes, 94, 2)
-        $changed = $true
-    }
-    if ($changed) {
-        $dmFields = $dmFields -bor [uint32]0x0001
-        $oriBytes = [System.BitConverter]::GetBytes([int16]1)
-        [System.Array]::Copy($oriBytes, 0, $Bytes, 76, 2)
     }
     $fieldBytes = [System.BitConverter]::GetBytes([uint32]$dmFields)
     [System.Array]::Copy($fieldBytes, 0, $Bytes, 72, 4)

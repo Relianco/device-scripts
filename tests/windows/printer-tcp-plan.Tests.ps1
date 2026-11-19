@@ -1688,18 +1688,16 @@ try {
     }
 
     $dmBytes = New-Object byte[] 220
-    [System.Array]::Copy([System.BitConverter]::GetBytes([int16]2), 0, $dmBytes, 76, 2)
     Set-PrinterTcpDevModeBytes -Bytes $dmBytes -Spec $monoSpec -SourceId 257
     $dmFields = [System.BitConverter]::ToUInt32($dmBytes, 72)
-    $dmOrientation = [System.BitConverter]::ToInt16($dmBytes, 76)
     $dmDefaultSource = [System.BitConverter]::ToInt16($dmBytes, 88)
     $dmColor = [System.BitConverter]::ToInt16($dmBytes, 92)
     $dmDuplex = [System.BitConverter]::ToInt16($dmBytes, 94)
-    if (($dmFields -band 0x1A01) -ne 0x1A01) {
-        Fail "dmFields 0x$($dmFields.ToString('X')) did not set DM_ORIENTATION|DM_DEFAULTSOURCE|DM_COLOR|DM_DUPLEX"
+    if (($dmFields -band 0x1A00) -ne 0x1A00) {
+        Fail "dmFields 0x$($dmFields.ToString('X')) did not set DM_DEFAULTSOURCE|DM_COLOR|DM_DUPLEX"
     }
-    if ($dmOrientation -ne 1 -or $dmDefaultSource -ne 257 -or $dmColor -ne 1 -or $dmDuplex -ne 1) {
-        Fail "DEVMODEW bytes orientation=$dmOrientation source=$dmDefaultSource color=$dmColor duplex=$dmDuplex"
+    if ($dmDefaultSource -ne 257 -or $dmColor -ne 1 -or $dmDuplex -ne 1) {
+        Fail "DEVMODEW bytes source=$dmDefaultSource color=$dmColor duplex=$dmDuplex"
     }
 
     Reset-Case
