@@ -13,9 +13,15 @@
     HKLM\SOFTWARE\WOW6432Node\NinjaRMM LLC key (agent settings and the device identity). Then it installs the
     generic agent MSI with TOKENID.
 
+    The installer is the versioned generic MSI on NinjaOne's resources CDN (the public generic-installer link
+    redirects there), pinned by InstallerUrl and InstallerSha256 from windows/releases/ninja-reset.json. It is a
+    plain download with no login. An empty InstallerSha256 is the off switch: nothing is downloaded or changed.
+    The agent updates itself after install, so an older pinned MSI is fine.
+
     Report-only by default: it lists what it found and changes nothing. With -Apply true, as SYSTEM:
-      1. validates the token and downloads the generic MSI, checking its Authenticode signer is NinjaOne,
-         before anything is removed (no token or a bad download = nothing removed);
+      1. validates the token, downloads the MSI (3 attempts on a timeout, a connection failure or HTTP 408, 429,
+         500, 502, 503, 504) and checks its SHA256 and its NinjaOne Authenticode signer, before anything is
+         removed (no token, a failed download or a mismatch = nothing removed, no retry on a mismatch);
       2. removes the leftovers and checks they are gone (a service marked for deletion needs a restart: exit 1);
       3. installs the MSI and waits for the NinjaRMMAgent service;
       4. writes C:\ProgramData\Relian\ninja-reset\done.txt. The detection script looks only for that file,
@@ -38,12 +44,13 @@ param(
     [string]$DeploymentType,
     [string]$Action,
     [string]$PinVersion,
-    [string]$Apply = ''
+    [string]$Apply = '',
+    [string]$InstallerUrl = 'https://resources.ninjarmm.com/Agent/20261116b/NinjaOneAgent-x86.msi',
+    [string]$InstallerSha256 = 'ad2f476a9db4208714e6eae73aa4947dcb30c1a220a16e2c5201a07b315c3ce4'
 )
 
 $ProgressPreference = 'SilentlyContinue'
 
-$NrMsiUrl = 'https://ca.ninjarmm.com/ws/api/v2/generic-installer/NinjaOneAgent-x86.msi'
 $NrAgentName = 'NinjaRMMAgent'
 $NrServices = @('NinjaRMMAgent', 'nmsmanager', 'lockhart', 'ncstreamer')
 $NrProcesses = @('NinjaRMMAgent', 'NinjaRMMAgentPatcher', 'njbar', 'NinjaRMMProxyProcess64', 'ncstreamer')
@@ -67,10 +74,11 @@ function Write-NrLog {
     } catch { Write-Host "log write failed: $_" }
 }
 
-# Pure: 'report', 'apply' or 'none'. Throws on bad input. An empty PinVersion is the off switch.
+# Pure: 'report', 'apply' or 'none'. Throws on bad input. An empty PinVersion or InstallerSha256 is the off switch.
 function Get-NrMode {
-    param([string]$Action, [string]$Apply, [string]$PinVersion = '1.0.0')
-    if ([string]::IsNullOrWhiteSpace($PinVersion)) { return 'none' }
+    param([string]$Action, [string]$Apply, [string]$PinVersion = '1.0.0', [string]$InstallerSha256 = ('0' * 64))
+    if ([string]::IsNullOrWhiteSpace($PinVersion) -or [string]::IsNullOrEmpty($InstallerSha256)) { return 'none' }
+    if ($InstallerSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'InstallerSha256 must be 64 lowercase hex characters.' }
     if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) {
         throw 'Action must be Install, Update, Repair, Reinstall, or Uninstall.'
     }
@@ -82,6 +90,9 @@ function Get-NrMode {
 
 # Pure: a CIPP variable that the tenant lacks stays literal (%ninjatoken%), which fails this.
 function Test-NrToken { param([string]$Token) return ($Token -match $NrTokenPattern) }
+
+# Pure: a download failure worth another attempt. Status 0 = no HTTP response (timeout, DNS, connection).
+function Test-NrRetryable { param([int]$Status) return ($Status -eq 0 -or @(408, 429, 500, 502, 503, 504) -contains $Status) }
 
 # Pure: the signer must be NinjaOne and the signature valid.
 function Test-NrSigner {
@@ -180,6 +191,12 @@ function Save-NrMsi {
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
 }
+function Get-NrHttpStatus {
+    param($ErrorRecord)
+    try { return [int]$ErrorRecord.Exception.Response.StatusCode } catch { return 0 }
+}
+function Get-NrFileSha256 { param([string]$Path) (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
+function Wait-NrRetry { Start-Sleep -Seconds 15 }
 function Get-NrSignature {
     param([string]$Path)
     $s = Get-AuthenticodeSignature -FilePath $Path
@@ -262,8 +279,22 @@ function Invoke-NrRun {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $msi = Join-Path $dir ('NinjaOneAgent-{0}.msi' -f [guid]::NewGuid().ToString('N'))
     try {
-        try { Save-NrMsi -Url $NrMsiUrl -Path $msi }
-        catch { return @{ exitCode = 1; record = (New-NrRecord $mode $found $found '' $false "MSI download failed, nothing changed: $($_.Exception.Message)") } }
+        $downloadError = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try { Save-NrMsi -Url $InstallerUrl -Path $msi; $downloadError = $null; break }
+            catch {
+                $downloadError = $_.Exception.Message
+                $status = Get-NrHttpStatus $_
+                Write-NrLog "download attempt $attempt failed (HTTP $status)"
+                if (-not (Test-NrRetryable $status) -or $attempt -eq 3) { break }
+                Wait-NrRetry
+            }
+        }
+        if ($downloadError) { return @{ exitCode = 1; record = (New-NrRecord $mode $found $found '' $false "MSI download failed, nothing changed: $downloadError") } }
+        $hash = Get-NrFileSha256 -Path $msi
+        if ($hash -ne $InstallerSha256) {
+            return @{ exitCode = 1; record = (New-NrRecord $mode $found $found '' $false "MSI SHA256 $hash is not the pin, nothing changed") }
+        }
         $sig = Get-NrSignature -Path $msi
         if (-not (Test-NrSigner -Status $sig.Status -Subject $sig.Subject)) {
             return @{ exitCode = 1; record = (New-NrRecord $mode $found $found '' $false "MSI signature check failed ($($sig.Status) $($sig.Subject)), nothing changed") }
@@ -309,7 +340,7 @@ function Invoke-NrRun {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -ne '1') {
-    try { $nrMode = Get-NrMode -Action $Action -Apply $Apply -PinVersion $PinVersion }
+    try { $nrMode = Get-NrMode -Action $Action -Apply $Apply -PinVersion $PinVersion -InstallerSha256 $InstallerSha256 }
     catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     if ($nrMode -eq 'none') { Write-Output 'Nothing to change.'; exit 0 }
     $nrToken = [string]$env:RELIAN_NINJA_TOKENID

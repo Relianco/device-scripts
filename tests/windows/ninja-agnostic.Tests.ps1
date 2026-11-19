@@ -38,10 +38,15 @@ if (@($files).Count -lt 10) { Fail "only $(@($files).Count) files scanned" }
 $found = @()
 foreach ($file in $files) {
     $rel = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
-    # ninja-reset removes and reinstalls the NinjaOne agent itself: naming its paths and installer is its job, not a coupling.
-    if ($rel.StartsWith('windows/packages/ninja-reset/') -or $rel -eq 'windows/releases/ninja-reset.json') { continue }
-    $hits = @(Select-String -LiteralPath $file.FullName -Pattern $regex.ToString() -AllMatches:$false)
-    foreach ($h in $hits) { $found += "${rel}:$($h.LineNumber): $($h.Line.Trim())" }
+    # ninja-reset removes and reinstalls the NinjaOne agent itself: it may name the agent (NinjaRMMAgent) and the
+    # pinned installer on the public resources CDN. Every other pattern (CLI, fields, API, deploy token) still applies.
+    $allowed = if ($rel.StartsWith('windows/packages/ninja-reset/') -or $rel -eq 'windows/releases/ninja-reset.json') {
+        [regex]::new('NinjaRMMAgent|https://resources\.ninjarmm\.com/Agent/[0-9a-z]+/NinjaOneAgent-x86\.msi', 'IgnoreCase')
+    } else { $null }
+    foreach ($line in @(Get-Content -LiteralPath $file.FullName)) {
+        $text = if ($allowed) { $allowed.Replace($line, '') } else { $line }
+        if ($regex.IsMatch($text)) { $found += "${rel}: $($line.Trim())" }
+    }
 }
 if ($found.Count) { Fail ("NinjaOne coupling in packages:`n" + ($found -join "`n")) }
 

@@ -2,7 +2,8 @@
   "name": "NinjaOne agent reset",
   "kind": "repair",
   "installsSoftware": true,
-  "installerUrl": "https://ca.ninjarmm.com/ws/api/v2/generic-installer/NinjaOneAgent-x86.msi",
-  "installerCheck": "Authenticode signature Valid with signer O=NinjaOne LLC (or O=NinjaRMM LLC). The generic MSI always serves the current agent, so there is no hash to pin; the agent updates itself after install.",
-  "packageArguments": "Optional. {\"Apply\":\"true\"} (base64 eyJBcHBseSI6InRydWUifQ==) removes the old agent and installs the new one. Without Apply the run is read-only. The location token comes from the environment variable RELIAN_NINJA_TOKENID, never from the arguments."
+  "installerUrl": "https://resources.ninjarmm.com/Agent/20261116b/NinjaOneAgent-x86.msi",
+  "installerSha256": "ad2f476a9db4208714e6eae73aa4947dcb30c1a220a16e2c5201a07b315c3ce4",
+  "installerCheck": "SHA256 above, then Authenticode signature Valid with signer O=NinjaOne LLC. Versioned generic agent MSI (no token inside; the public generic-installer link redirects here). The agent updates itself after install.",
+  "packageArguments": "Optional. {\"Apply\":\"true\"} (base64 eyJBcHBseSI6InRydWUifQ==) removes the old agent and installs the pinned one. Without Apply the run is read-only. The location token comes from the environment variable RELIAN_NINJA_TOKENID, never from the arguments."
 }

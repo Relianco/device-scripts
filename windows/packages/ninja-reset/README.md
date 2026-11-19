@@ -32,10 +32,15 @@ Not removed (cosmetic, from the same vendor script): the Ninja Remote printer an
 
 ## Install
 
-The generic MSI `https://ca.ninjarmm.com/ws/api/v2/generic-installer/NinjaOneAgent-x86.msi` with `TOKENID=<location token>`.
-It always serves the current agent, so there is no hash to pin; the package checks the Authenticode signer
-(`O=NinjaOne LLC`) before it removes anything. The token is read from `RELIAN_NINJA_TOKENID` and never printed. No
-MSI log is written, because a verbose MSI log records `TOKENID`.
+The generic agent MSI with `TOKENID=<location token>`. NinjaOne's public generic-installer link redirects to a
+versioned file on its resources CDN; the package pins that file (`InstallerUrl`, `InstallerSha256`, defaults from
+`windows/releases/ninja-reset.json`). It is a plain download with no login and no token inside. The package checks
+the SHA256 and the Authenticode signer (`O=NinjaOne LLC`) before it removes anything; a mismatch is not retried. An
+empty `InstallerSha256` turns the package off. The agent updates itself after install, so an older pin still works;
+re-pin when NinjaOne retires the file.
+
+The token is read from `RELIAN_NINJA_TOKENID` and never printed. No MSI log is written, because a verbose MSI log
+records `TOKENID`.
 
 ## Run
 

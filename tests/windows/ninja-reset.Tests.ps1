@@ -21,6 +21,18 @@ Assert-Same (Get-NrMode -Action Uninstall -Apply 'true') 'none' 'Uninstall chang
 Assert-Same (Get-NrMode -Action Install -Apply 'true' -PinVersion '') 'none' 'empty pin is off'
 $threw = $false; try { Get-NrMode -Action Install -Apply 'yes' } catch { $threw = $true }; Assert-True $threw 'Apply yes throws'
 $threw = $false; try { Get-NrMode -Action Bogus -Apply '' } catch { $threw = $true }; Assert-True $threw 'bad Action throws'
+foreach ($a in @('Install', 'Uninstall')) { Assert-Same (Get-NrMode -Action $a -Apply 'true' -InstallerSha256 '') 'none' "empty installer hash is off ($a)" }
+foreach ($bad in @('ABC', ('A' * 64), ('a' * 63))) {
+    $threw = $false; try { Get-NrMode -Action Install -Apply 'true' -InstallerSha256 $bad } catch { $threw = $true }; Assert-True $threw "hash [$bad] throws"
+}
+foreach ($s in @(0, 408, 429, 500, 502, 503, 504)) { Assert-True (Test-NrRetryable $s) "status $s retried" }
+foreach ($s in @(400, 401, 403, 404, 501)) { Assert-True (-not (Test-NrRetryable $s)) "status $s not retried" }
+
+# Param defaults are the release pin.
+$release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/ninja-reset.json') | ConvertFrom-Json
+Assert-Same $InstallerUrl $release.installerUrl 'InstallerUrl default is the release pin'
+Assert-Same $InstallerSha256 $release.installerSha256 'InstallerSha256 default is the release pin'
+Assert-Same $release.installsSoftware $true 'release installsSoftware'
 
 $token = '00000000-0000-0000-0000-000000000000'  # fake, low entropy so the secret scan passes
 Assert-True (Test-NrToken $token) 'uuid token ok'
@@ -32,8 +44,8 @@ Assert-True (-not (Test-NrSigner 'NotSigned' 'CN=NinjaOne LLC, O=NinjaOne LLC'))
 Assert-True (-not (Test-NrSigner 'Valid' 'CN=Evil, O=Evil Corp')) 'other signer rejected'
 
 $roots = @('C:\Program Files (x86)', 'C:\Program Files')
-Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\sitkalaw-victoria' $roots) 'org-location folder is safe'
-Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\sitkalaw-victoria\' $roots) 'trailing slash is safe'
+Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\contoso-main' $roots) 'org-location folder is safe'
+Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\contoso-main\' $roots) 'trailing slash is safe'
 foreach ($bad in @('C:\Program Files (x86)', 'C:\Program Files (x86)\', 'C:\Program Files (x86)\a\b', 'C:\Program Files (x86)evil', 'C:\Windows\System32', '')) {
     Assert-True (-not (Test-NrSafeFolder $bad $roots)) "folder [$bad] refused"
 }
@@ -43,7 +55,7 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ninja-reset-' + [guid]::NewGuid().
 $null = New-Item -ItemType Directory -Path $tmp
 $env:ProgramData = 'C:\ProgramData'
 $env:ProgramFiles = 'C:\Program Files'
-$agentDir = 'C:\Program Files (x86)\sitkalaw-victoria'
+$agentDir = 'C:\Program Files (x86)\contoso-main'
 $agentExe = "$agentDir\NinjaRMMAgent.exe"
 $dataDir = 'C:\ProgramData\NinjaRMMAgent'
 $uKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{817AF559-0C8C-4539-94D8-3096AF4B08D9}'
@@ -55,7 +67,7 @@ function Reset-Fake {
     $script:fakeKeys = [System.Collections.Generic.List[object]]::new()
     $script:fakePaths = [System.Collections.Generic.HashSet[string]]::new()
     $script:sigStatus = 'Valid'; $script:sigSubject = 'CN=NinjaOne LLC, O=NinjaOne LLC, C=US'
-    $script:downloadFails = $false; $script:stuck = ''; $script:installCode = 0; $script:serviceAfter = 'Running'
+    $script:failures = 0; $script:failStatus = 0; $script:fileHash = $InstallerSha256; $script:stuck = ''; $script:installCode = 0; $script:serviceAfter = 'Running'
     $script:marker = $null
     if ($Empty) { return }
     $script:fakeServices.Add([pscustomobject]@{ Name = 'NinjaRMMAgent'; Path = "`"$agentExe`""; State = 'Stopped' })
@@ -89,7 +101,14 @@ function Remove-NrItem {
     foreach ($p in @($script:fakePaths | Where-Object { $_ -eq $Path -or $_.StartsWith($Path) })) { $null = $script:fakePaths.Remove($p) }
     foreach ($k in @($script:fakeKeys | Where-Object Key -eq $Path)) { $null = $script:fakeKeys.Remove($k) }
 }
-function Save-NrMsi { param([string]$Url, [string]$Path) $script:calls.Add("download $Url"); if ($script:downloadFails) { throw 'network down' } }
+function Save-NrMsi {
+    param([string]$Url, [string]$Path)
+    $script:calls.Add("download $Url")
+    if ($script:failures -gt 0) { $script:failures--; throw 'download failed' }
+}
+function Get-NrHttpStatus { param($ErrorRecord) $script:failStatus }
+function Wait-NrRetry { }
+function Get-NrFileSha256 { param([string]$Path) $script:fileHash }
 function Get-NrSignature { param([string]$Path) [pscustomobject]@{ Status = $script:sigStatus; Subject = $script:sigSubject } }
 function Wait-NrAgentService { param([int]$Seconds = 120) $script:serviceAfter }
 function Set-NrMarker { param([string]$Text) $script:marker = $Text }
@@ -113,11 +132,26 @@ $run = Invoke-NrRun -Apply -Token '%ninjatoken%'
 Assert-Same $run.exitCode 1 'no token exit'
 Assert-Same (@(Get-Writes).Count) 0 'no token writes nothing'
 
-# 3. Download fails or the signature is wrong: nothing removed.
-Reset-Fake; $script:downloadFails = $true
+# 3. Download fails, the hash or the signature is wrong: nothing removed.
+function Get-Downloads { @($script:calls | Where-Object { $_ -like 'download *' }).Count }
+Reset-Fake; $script:failures = 9; $script:failStatus = 0
 $run = Invoke-NrRun -Apply -Token $token
 Assert-Same $run.exitCode 1 'download fail exit'
+Assert-Same (Get-Downloads) 3 'no-response failure tried 3 times'
 Assert-Same (@(Get-Writes | Where-Object { $_ -like 'delete *' -or $_ -like 'run *' }).Count) 0 'download fail removes nothing'
+Reset-Fake; $script:failures = 9; $script:failStatus = 404
+$run = Invoke-NrRun -Apply -Token $token
+Assert-Same $run.exitCode 1 '404 exit'
+Assert-Same (Get-Downloads) 1 '404 is not retried'
+Reset-Fake; $script:failures = 1; $script:failStatus = 503
+$run = Invoke-NrRun -Apply -Token $token
+Assert-Same $run.exitCode 0 '503 then success'
+Assert-Same (Get-Downloads) 2 '503 retried once'
+Reset-Fake; $script:fileHash = 'b' * 64
+$run = Invoke-NrRun -Apply -Token $token
+Assert-Same $run.exitCode 1 'hash mismatch exit'
+Assert-Same (Get-Downloads) 1 'hash mismatch is not retried'
+Assert-Same (@(Get-Writes | Where-Object { $_ -like 'delete *' -or $_ -like 'run *' }).Count) 0 'hash mismatch removes nothing'
 Reset-Fake; $script:sigSubject = 'CN=Someone Else'
 $run = Invoke-NrRun -Apply -Token $token
 Assert-Same $run.exitCode 1 'bad signer exit'
@@ -130,7 +164,7 @@ $run = Invoke-NrRun -Apply -Token $token
 Assert-Same $run.exitCode 0 "apply exit ($($run.record.verdict))"
 $w = @(Get-Writes)
 $order = @(
-    'download https://ca.ninjarmm.com/ws/api/v2/generic-installer/NinjaOneAgent-x86.msi',
+    "download $InstallerUrl",
     "run $agentExe -disableUninstallPrevention NOUI",
     'run msiexec.exe /x{817AF559-0C8C-4539-94D8-3096AF4B08D9} /qn /norestart WRAPPED_ARGUMENTS="--mode unattended"',
     'delete service NinjaRMMAgent',
@@ -188,8 +222,6 @@ Assert-True ($source -notmatch '(?i)/l\*?v|/log ') 'no MSI log switch'
 foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinVersion', "[string]`$Apply = ''")) {
     if ($source.IndexOf($need, [StringComparison]::Ordinal) -lt 0) { Fail "param block lacks $need" }
 }
-$release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/ninja-reset.json') | ConvertFrom-Json
-Assert-Same $release.installsSoftware $true 'release installsSoftware'
 
 # 9. Detection: only the marker counts.
 $pd = Join-Path $tmp 'pd'
