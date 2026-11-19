@@ -364,7 +364,12 @@ function Get-FiChildFolders {
         $next = @()
         foreach ($p in $level) {
             if (Test-FiOverBudget) { break }
-            try { foreach ($c in [IO.DirectoryInfo]::new($p).EnumerateDirectories()) { if (-not ($c.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $out.Add($c.FullName); $next += $c.FullName } } }
+            try {
+                foreach ($c in [IO.DirectoryInfo]::new($p).EnumerateDirectories()) {
+                    if (($out.Count % 256) -eq 255 -and (Test-FiOverBudget)) { break }
+                    if (-not ($c.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $out.Add($c.FullName); $next += $c.FullName }
+                }
+            }
             catch { if ($Report) { $Report['unreadable'] = 1 + [int]$Report['unreadable'] } }
         }
         $level = $next
