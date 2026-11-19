@@ -42,6 +42,9 @@ function Get-RelianPrinterTcpDriverName {
     if ($ModelId -ceq 'KonicaUniversalPcl') {
         return 'KONICA MINOLTA Universal PCL'
     }
+    if ($ModelId -ceq 'ToshibaUniversalPcl2') {
+        return 'TOSHIBA Universal Printer 2'
+    }
     return ''
 }
 

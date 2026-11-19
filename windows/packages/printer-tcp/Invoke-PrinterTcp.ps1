@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Two models are fixed in this script. A release file cannot add a third.
+# Three models are fixed in this script. A release file cannot add another.
 $script:PrinterTcpKonicaReferer = 'https://onyxweb.mykonicaminolta.com/OneStopProductSupport?appMode=Public&target=Drivers'
 $script:PrinterTcpModels = @(
     [pscustomobject]@{
@@ -51,6 +51,20 @@ $script:PrinterTcpModels = @(
         Stage        = 'SevenZipSfx'
         Referer      = $script:PrinterTcpKonicaReferer
         OuterSubject = 'KONICA MINOLTA'
+    }
+    [pscustomobject]@{
+        Id           = 'ToshibaUniversalPcl2'
+        DriverName   = 'TOSHIBA Universal Printer 2'
+        SourceUrl    = 'https://business.toshiba.com/downloads/KB/f1Ulds/21836/ebn-Uni-7.222.5412.313.zip'
+        File         = 'ebn-Uni-7.222.5412.313.zip'
+        Sha256       = '118ed2bdda94084b553a4d862e59913a565d6e7a2f3f3b1304b22caee4949415'
+        Size         = [int64]87653514
+        Version      = '7.222.5412.313'
+        Inf          = 'eSf6u.inf'
+        Catalog      = 'eSf6u.cat'
+        Stage        = 'Zip'
+        Referer      = ''
+        OuterSubject = ''
     }
 )
 
@@ -266,6 +280,17 @@ function Get-PrinterTcpModelTrayId {
         }
         return 0
     }
+    if ($ModelId -ceq 'ToshibaUniversalPcl2') {
+        switch -Exact ($Tray) {
+            'Auto'   { return 7 }
+            'Tray1'  { return 1 }
+            'Tray2'  { return 3 }
+            'Tray3'  { return 2 }
+            'Tray4'  { return 257 }
+            'Manual' { return 4 }
+        }
+        return 0
+    }
     return 0
 }
 
@@ -282,10 +307,10 @@ function Resolve-PrinterTcpTraySourceId {
     $candidates = @()
     switch -Exact ($Tray) {
         'Auto'   { $candidates = @('Auto', 'Auto Select', 'Automatically Select', 'Default') }
-        'Tray1'  { $candidates = @('Tray 1', 'Tray1', 'Cassette 1', 'Cassette1', 'Upper') }
-        'Tray2'  { $candidates = @('Tray 2', 'Tray2', 'Cassette 2', 'Cassette2', 'Lower') }
-        'Tray3'  { $candidates = @('Tray 3', 'Tray3', 'Cassette 3', 'Cassette3', 'Middle') }
-        'Tray4'  { $candidates = @('Tray 4', 'Tray4', 'Cassette 4', 'Cassette4') }
+        'Tray1'  { $candidates = @('Tray 1', 'Tray1', 'Drawer 1', 'Drawer1', 'Cassette 1', 'Cassette1', 'Upper') }
+        'Tray2'  { $candidates = @('Tray 2', 'Tray2', 'Drawer 2', 'Drawer2', 'Cassette 2', 'Cassette2', 'Lower') }
+        'Tray3'  { $candidates = @('Tray 3', 'Tray3', 'Drawer 3', 'Drawer3', 'Cassette 3', 'Cassette3', 'Middle') }
+        'Tray4'  { $candidates = @('Tray 4', 'Tray4', 'Drawer 4', 'Drawer4', 'Cassette 4', 'Cassette4') }
         'Manual' { $candidates = @('Manual', 'Manual Feed', 'Bypass', 'Bypass Tray', 'MP Tray', 'Multi-Purpose Tray') }
         'Lct'    { $candidates = @('LCT', 'Large Capacity', 'Large Capacity Tray', 'Large Capacity Feeder') }
     }
@@ -358,20 +383,29 @@ function Set-PrinterTcpDevModeBytes {
         return
     }
     $dmFields = [System.BitConverter]::ToUInt32($Bytes, 72)
+    $changed = $false
     if ([bool]$Spec.HasTray -and $SourceId -gt 0) {
         $dmFields = $dmFields -bor [uint32]0x0200
         $srcBytes = [System.BitConverter]::GetBytes([int16]$SourceId)
         [System.Array]::Copy($srcBytes, 0, $Bytes, 88, 2)
+        $changed = $true
     }
     if ([bool]$Spec.HasColor -and [int]$Spec.DmColor -gt 0) {
         $dmFields = $dmFields -bor [uint32]0x0800
         $colBytes = [System.BitConverter]::GetBytes([int16]$Spec.DmColor)
         [System.Array]::Copy($colBytes, 0, $Bytes, 92, 2)
+        $changed = $true
     }
     if ([bool]$Spec.HasDuplex -and [int]$Spec.DmDuplex -gt 0) {
         $dmFields = $dmFields -bor [uint32]0x1000
         $dupBytes = [System.BitConverter]::GetBytes([int16]$Spec.DmDuplex)
         [System.Array]::Copy($dupBytes, 0, $Bytes, 94, 2)
+        $changed = $true
+    }
+    if ($changed) {
+        $dmFields = $dmFields -bor [uint32]0x0001
+        $oriBytes = [System.BitConverter]::GetBytes([int16]1)
+        [System.Array]::Copy($oriBytes, 0, $Bytes, 76, 2)
     }
     $fieldBytes = [System.BitConverter]::GetBytes([uint32]$dmFields)
     [System.Array]::Copy($fieldBytes, 0, $Bytes, 72, 4)
@@ -1241,6 +1275,7 @@ function Invoke-PrinterTcpInfLayout {
     $names = Get-PrinterTcpInfSectionEntries -Sections $sections -BaseName 'SourceDisksNames'
     $files = Get-PrinterTcpInfSectionEntries -Sections $sections -BaseName 'SourceDisksFiles'
     $diskSubdir = @{}
+    $diskCab = @{}
     foreach ($entry in @($names)) {
         if ($null -eq $entry) {
             continue
@@ -1250,7 +1285,14 @@ function Invoke-PrinterTcpInfLayout {
         if (@($fields).Count -ge 4) {
             $subdir = Get-PrinterTcpInfSubdirectory -Raw ([string]$fields[3])
         }
+        $cab = ''
+        if (@($fields).Count -ge 2) {
+            $cab = ([string]$fields[1]).Trim()
+        }
         $diskSubdir[[string]$entry.Key] = $subdir
+        if (-not [string]::IsNullOrWhiteSpace($cab) -and $cab.EndsWith('.cab', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $diskCab[[string]$entry.Key] = $cab
+        }
     }
     $root = Split-Path -Parent $InfPath
     foreach ($entry in @($files)) {
@@ -1270,9 +1312,17 @@ function Invoke-PrinterTcpInfLayout {
         if ($diskSubdir.ContainsKey($diskId)) {
             $subdir = [string]$diskSubdir[$diskId]
         }
-        if (-not (Move-PrinterTcpOneDriverFile -Root $root -FileName $fileName -Subdirectory $subdir)) {
-            return $false
+        if (Move-PrinterTcpOneDriverFile -Root $root -FileName $fileName -Subdirectory $subdir) {
+            continue
         }
+        if ([string]::IsNullOrWhiteSpace($subdir) -and $diskCab.ContainsKey($diskId)) {
+            $cabName = [string]$diskCab[$diskId]
+            if ((Test-PrinterTcpPathSegment -Segment $cabName) -and
+                -not [string]::IsNullOrWhiteSpace((Resolve-PrinterTcpDriverFile -Directory $root -FileName $cabName))) {
+                continue
+            }
+        }
+        return $false
     }
     return $true
 }
@@ -2117,6 +2167,14 @@ $script:ExpandSfx = {
     }
 }
 
+$script:ExpandZip = {
+    param($ZipPath, $Destination)
+    if ($env:RELIAN_DEPLOY_TEST -eq '1') {
+        throw 'refusing to expand a zip while a test is running'
+    }
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $Destination -Force
+}
+
 $script:InvokePnpUtil = {
     param($InfPath)
     if ($env:RELIAN_DEPLOY_TEST -eq '1') {
@@ -2151,10 +2209,12 @@ function Invoke-PrinterTcpEnsureDriver {
     if (Test-PrinterTcpCancelled -CancelPath $CancelPath) {
         return 130
     }
-    $outer = Get-PrinterTcpSignatureParts -Signature (& $script:GetAuthenticodeSignature -Path $destination)
-    if (-not (Test-PrinterTcpOuterSignature -ModelId ([string]$Model.Id) -Status $outer.Status -Subject $outer.Subject)) {
-        Add-PrinterTcpError -Message "outer signature rejected for $($Model.Id)"
-        return 1
+    if ([string]$Model.Stage -cne 'Zip') {
+        $outer = Get-PrinterTcpSignatureParts -Signature (& $script:GetAuthenticodeSignature -Path $destination)
+        if (-not (Test-PrinterTcpOuterSignature -ModelId ([string]$Model.Id) -Status $outer.Status -Subject $outer.Subject)) {
+            Add-PrinterTcpError -Message "outer signature rejected for $($Model.Id)"
+            return 1
+        }
     }
     $extract = Join-Path $Cache 'extract'
     New-Item -ItemType Directory -Path $extract -Force | Out-Null
@@ -2162,6 +2222,8 @@ function Invoke-PrinterTcpEnsureDriver {
         [void](& $script:ExpandCab -CabPath $destination -Destination $extract)
     } elseif ([string]$Model.Stage -ceq 'SevenZipSfx') {
         [void](& $script:ExpandSfx -ExePath $destination -Destination $extract)
+    } elseif ([string]$Model.Stage -ceq 'Zip') {
+        [void](& $script:ExpandZip -ZipPath $destination -Destination $extract)
     } else {
         Add-PrinterTcpError -Message "unknown stage for $($Model.Id)"
         return 1
