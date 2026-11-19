@@ -39,6 +39,10 @@ $script:SaPowercfg = {
     switch ($Arguments[0]) {
         '/getactivescheme' { return [pscustomobject]@{ Lines = @("Power Scheme GUID: $script:active  (Balanced)"); ExitCode = 0 } }
         '/q' {
+            # UNATTENDSLEEP is hidden: plain /q prints nothing for it.
+            return [pscustomobject]@{ Lines = @("Power Scheme GUID: $($Arguments[1])  (Balanced)"); ExitCode = 0 }
+        }
+        '/qh' {
             $v = $script:store["$($Arguments[1])|$($Arguments[3])"]
             $lines = @("Power Scheme GUID: $($Arguments[1])  (Balanced)", '  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)',
                 '    Power Setting GUID: 29f6c1db-86da-48c5-9fdb-f2b67b1f44da  (Sleep after)',
@@ -92,6 +96,8 @@ Assert-Same $r.record.before.STANDBYIDLE.ac 1800 'report standby ac'
 Assert-Same $r.record.before.UNATTENDSLEEP.dc 120 'report unattend dc'
 Assert-Same (Count-Sets) 0 'report writes nothing'
 Assert-Same $script:savedText $null 'report saves nothing'
+Assert-Same @($script:calls | Where-Object { $_ -like '/q *' }).Count 0 'values are read with /qh, never /q'
+Assert-Same @($script:calls | Where-Object { $_ -like '/qh * UNATTENDSLEEP' }).Count 1 'hidden setting read with /qh'
 
 # 4. Hold saves the originals, sets both AC values to 0, leaves DC alone.
 $r = Invoke-SaRun -Mode Hold
@@ -141,6 +147,21 @@ $script:failSet = $true
 $r = Invoke-SaRun -Mode Hold
 Assert-Same $r.exitCode 1 'hold refused exit'
 Assert-Same ($null -ne $script:savedText) $true 'hold refused still saved originals'
+
+# 9b. A second Hold after the active scheme changed is refused with no change.
+Reset-Fake
+[void](Invoke-SaRun -Mode Hold)
+$other = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+$script:store["$other|STANDBYIDLE"] = @([long]600, [long]300)
+$script:store["$other|UNATTENDSLEEP"] = @([long]120, [long]120)
+$script:active = $other
+$keep = $script:savedText
+$script:calls.Clear()
+$r = Invoke-SaRun -Mode Hold
+Assert-Same $r.exitCode 1 'hold on changed scheme exit'
+Assert-Same (Count-Sets) 0 'hold on changed scheme writes nothing'
+Assert-Same $script:savedText $keep 'hold on changed scheme keeps saved file'
+Assert-Same $script:store["$other|STANDBYIDLE"][0] 600 'other scheme untouched'
 
 # 10. A tampered or broken saved file is refused before any write.
 foreach ($bad in @('not json', '{"scheme":"x; shutdown","values":{}}',

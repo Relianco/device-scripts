@@ -14,7 +14,9 @@
       Hold     reads the current values and saves them to C:\ProgramData\Relian\stay-awake\saved.json,
                then sets both AC timeouts to 0 (never) on the active scheme and re-applies the scheme.
                If saved.json already exists, it is kept as is (it holds the values from before the first
-               Hold), so a repeated Hold never saves 0 as the "original". DC values are not changed.
+               Hold), so a repeated Hold never saves 0 as the "original"; if the active scheme is no longer
+               the saved one, Hold refuses and changes nothing. DC values are not changed. Values are read
+               with powercfg /qh, since UNATTENDSLEEP is hidden from /q.
       Restore  puts the saved AC values back on the saved scheme, re-applies it, reads them back and
                deletes saved.json only when the read-back matches. No saved file: nothing to restore, exit 0.
 
@@ -87,7 +89,8 @@ function Get-SaSchemeFromLines {
     throw 'active scheme not found'
 }
 
-# Pure: AC and DC values from `powercfg /q <scheme> SUB_SLEEP <setting>` output. The labels are localized,
+# Pure: AC and DC values from `powercfg /qh <scheme> SUB_SLEEP <setting>` output (/qh, because
+# UNATTENDSLEEP is a hidden setting that /q leaves out). The labels are localized,
 # so it takes the last two "...: 0x<hex>" lines: powercfg prints the current AC index, then the current DC
 # index, after the minimum, maximum and increment lines.
 function Get-SaIndexFromLines {
@@ -124,7 +127,7 @@ function Get-SaCurrent {
     param([string]$Scheme)
     if (-not $Scheme) { $Scheme = Get-SaSchemeFromLines (Invoke-SaCfg @('/getactivescheme')) }
     $values = [ordered]@{}
-    foreach ($s in $script:SaSettings) { $values[$s] = Get-SaIndexFromLines (Invoke-SaCfg @('/q', $Scheme, 'SUB_SLEEP', $s)) }
+    foreach ($s in $script:SaSettings) { $values[$s] = Get-SaIndexFromLines (Invoke-SaCfg @('/qh', $Scheme, 'SUB_SLEEP', $s)) }
     return [ordered]@{ scheme = $Scheme; values = $values }
 }
 
@@ -153,6 +156,10 @@ function Invoke-SaRun {
         switch ($Mode) {
             'Report' { $rec.status = 'report' }
             'Hold' {
+                # The saved values belong to one scheme; zeroing another would leave it unrestorable.
+                if ($null -ne $saved -and ([string]$saved.scheme).ToLowerInvariant() -ne $now.scheme) {
+                    throw "active scheme $($now.scheme) differs from the saved scheme; Restore first"
+                }
                 if ($null -eq $saved) {
                     & $script:SaWriteSaved ($now | ConvertTo-Json -Depth 4 -Compress)
                     $rec.saved = $true
