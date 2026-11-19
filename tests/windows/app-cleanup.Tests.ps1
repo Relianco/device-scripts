@@ -12,6 +12,9 @@ Set-StrictMode -Off
 . $scriptPath
 Set-StrictMode -Version Latest
 
+$script:sessions = @()
+function Get-AcSessionUsers { @($script:sessions) }
+
 # Get-AcMode
 Assert-Same (Get-AcMode -Action 'Install' -Fix '' -Target 'all') 'check' 'default is check'
 Assert-Same (Get-AcMode -Action 'Install' -Fix 'true' -Target 'firefox') 'fix' 'fix'
@@ -126,6 +129,12 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $outside 'f.txt'))) { Fail 'file outside the profile was deleted' }
     Assert-Same (Remove-AcUserDir -Dir $outside -Root $prof) 2 'dir outside the root refused'
     $ok = Join-Path $prof 'plain'; [void](New-Item -ItemType Directory -Path $ok)
+    $script:sessions = @('PROF'.ToLowerInvariant()); $ok2 = Join-Path $prof 'plain2'; [void](New-Item -ItemType Directory -Path $ok2)
+    Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'user with a session is skipped'
+    if (-not (Test-Path -LiteralPath $ok2)) { Fail 'dir of a signed-in user was deleted' }
+    $script:sessions = @('*')
+    Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'unreadable session list skips'
+    $script:sessions = @()
     Assert-Same (Remove-AcUserDir -Dir $ok -Root $prof) 0 'plain dir under the root is removed'
 } finally { Remove-Item -LiteralPath $rt -Recurse -Force }
 
