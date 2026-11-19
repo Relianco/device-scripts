@@ -100,6 +100,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-group-member.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-user-offboard.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The wau package runs under Intune's Windows PowerShell 5.1.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wau-plan.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
