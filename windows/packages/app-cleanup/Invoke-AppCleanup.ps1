@@ -124,7 +124,12 @@ function Test-AcProgramFiles {
     foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
         if (-not $root) { continue }
         try { $r = [System.IO.Path]::GetFullPath($root).TrimEnd([char]92, [char]47) } catch { continue }
-        if ($full.StartsWith($r + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if (-not $full.StartsWith($r + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+        # Program Files is admin-writable, but a link anywhere between it and the file would still lead out of it: refuse.
+        for ($d = $full; $d.Length -gt $r.Length; $d = Split-Path -Parent $d) {
+            if ((Test-Path -LiteralPath $d) -and ((Get-Item -LiteralPath $d -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+        }
+        return $true
     }
     return $false
 }

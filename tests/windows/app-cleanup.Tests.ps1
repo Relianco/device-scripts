@@ -92,6 +92,9 @@ try {
     $env:ProgramFiles = Join-Path $ftmp 'pf'
     if (Test-AcProgramFiles -Path (Join-Path $ftmp 'pf/../ua/firefox.exe')) { Fail '.. path accepted as Program Files' }
     if (-not (Test-AcProgramFiles -Path (Join-Path $ftmp 'pf/Mozilla Firefox/firefox.exe'))) { Fail 'real Program Files path rejected' }
+    [void](New-Item -ItemType Directory -Path (Join-Path $ftmp 'pf') -Force)
+    [void](New-Item -ItemType SymbolicLink -Path (Join-Path $ftmp 'pf/linked') -Target (Join-Path $ftmp 'ua'))
+    if (Test-AcProgramFiles -Path (Join-Path $ftmp 'pf/linked/firefox.exe')) { Fail 'path through a link accepted as Program Files' }
     function Get-AcMachineKeys { [pscustomobject]@{ Key = '{12345678-1234-1234-1234-123456789ABC}'; Name = 'Mozilla Firefox 72'; Version = '72.0.1'; Uninstall = ''; Location = '' } }
     Assert-Same (@(Get-AcFirefoxInventory | Where-Object { $_.Key -like '{*' })[0].Scope) 'user' 'MSI with no verified location is report-only'
 } finally {
