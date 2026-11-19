@@ -624,11 +624,19 @@ function Get-FiAccessSection {
             elseif ([string]$o.ObjectClass -eq 'group') {
                 $row.kind = 'group'
                 $m = @(Get-ADGroupMember -Identity $o.DistinguishedName -Recursive | Where-Object { [string]$_.objectClass -eq 'user' })
-                # Members by primary group (Domain Users above all) are not in the member list.
-                # shortcut: only this group's own RID, not nested groups' primary members; upgrade if a nested group is a primary group.
-                $rid = $sid.Substring($sid.LastIndexOf('-') + 1)
-                $known = @{}; foreach ($u in $m) { $known[[string]$u.SamAccountName] = $true }
-                $m += @(Get-ADUser -Filter "primaryGroupID -eq $rid" | Where-Object { -not $known.ContainsKey([string]$_.SamAccountName) })
+                # Members by primary group (Domain Users above all) are not in the member list: add them for this
+                # group and every group nested in it. If that fails, the list is incomplete and the report says so.
+                try {
+                    $dnEscaped = [string]$o.DistinguishedName -replace '\\', '\5c' -replace '\(', '\28' -replace '\)', '\29' -replace '\*', '\2a'
+                    $groupSids = @($sid) + @(Get-ADGroup -LDAPFilter "(memberOf:1.2.840.113556.1.4.1941:=$dnEscaped)" | ForEach-Object { [string]$_.SID })
+                    $known = @{}; foreach ($u in $m) { $known[[string]$u.SamAccountName] = $true }
+                    foreach ($gs in $groupSids) {
+                        $rid = $gs.Substring($gs.LastIndexOf('-') + 1)
+                        foreach ($u in @(Get-ADUser -Filter "primaryGroupID -eq $rid")) {
+                            if (-not $known.ContainsKey([string]$u.SamAccountName)) { $known[[string]$u.SamAccountName] = $true; $m += $u }
+                        }
+                    }
+                } catch { $row.primaryMembers = 'incomplete'; $Report.status = 'partial' }
                 $row.memberCount = $m.Count
                 $row.members = @($m | Select-Object -First 40 | ForEach-Object { [string]$_.SamAccountName })
                 foreach ($u in $m) { $users[[string]$u.SamAccountName] = $true }
