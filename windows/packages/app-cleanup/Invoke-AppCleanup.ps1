@@ -117,10 +117,14 @@ function Invoke-AcProcess {
 }
 function Get-AcNow { Get-Date }
 
+# True only when the fully resolved path (no "..", no relative form) sits under Program Files. Anything unresolvable is false.
 function Test-AcProgramFiles {
     param([string]$Path)
+    try { $full = [System.IO.Path]::GetFullPath($Path) } catch { return $false }
     foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if ($root -and $Path.StartsWith($root.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if (-not $root) { continue }
+        try { $r = [System.IO.Path]::GetFullPath($root).TrimEnd([char]92, [char]47) } catch { continue }
+        if ($full.StartsWith($r + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
     return $false
 }
@@ -135,14 +139,18 @@ function Get-AcFirefoxInventory {
         $ver = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AcFileVersion -Path $exe } else { '' }
         if (-not $ver) { $ver = $k.Version -replace '\s.*', '' }
         $msi = ($k.Key -match '^\{[0-9A-Fa-f-]{36}\}$')
-        $scope = 'machine'; $owner = ''
-        # Registered under HKLM is not installed machine-wide: only Program Files counts. A copy anywhere else
-        # (for example in a profile) is user-writable, so it is report-only.
-        $probe = if ($exe) { $exe } elseif (-not $msi) { ([string]$k.Uninstall).Trim('"') } else { '' }
-        if ($probe -and -not (Test-AcProgramFiles -Path $probe)) {
-            $scope = 'user'
-            if ($probe -match '(?i)[\\/]Users[\\/]([^\\/]+)') { $owner = $Matches[1] }
+        # An MSI with no recorded location: look where Mozilla's MSI installs by default; if it is not there the location
+        # is unverified.
+        if (-not $exe -and $msi) {
+            $def = Join-Path $env:ProgramFiles 'Mozilla Firefox\firefox.exe'
+            if ($env:ProgramFiles -and (Test-Path -LiteralPath $def)) { $exe = $def; $ver = Get-AcFileVersion -Path $exe }
         }
+        # Machine scope only after the install path is positively inside Program Files. Registered under HKLM is not
+        # enough: a copy in a profile, or one whose location is unknown, is user-writable or unverified, so report-only.
+        $probe = if ($exe) { $exe } else { ([string]$k.Uninstall).Trim('"') }
+        $scope = 'user'; $owner = ''
+        if ($probe -and (Test-AcProgramFiles -Path $probe)) { $scope = 'machine' }
+        elseif ($probe -match '(?i)[\\/]Users[\\/]([^\\/]+)') { $owner = $Matches[1] }
         $installs += [pscustomobject]@{ Id = "m$n"; Version = $ver; Scope = $scope; User = $owner; Path = $exe; Uninstall = $k.Uninstall; Key = $k.Key; Msi = $msi }
     }
     foreach ($u in Get-AcUserDirs) {
@@ -180,6 +188,7 @@ function Remove-AcFirefox {
     if ($Install.Msi) { return Invoke-AcProcess -File "$env:SystemRoot\System32\msiexec.exe" -Arguments "/x $($Install.Key) /qn /norestart" }
     $helper = if ($Install.Uninstall -match '"?([^"]+helper\.exe)') { $Matches[1] } else { '' }
     if (-not $helper -or -not (Test-Path -LiteralPath $helper)) { return 2 }
+    if (-not (Test-AcProgramFiles -Path $helper)) { return 4 }
     return Invoke-AcProcess -File $helper -Arguments '/S'
 }
 

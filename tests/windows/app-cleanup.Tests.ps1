@@ -62,6 +62,7 @@ Assert-Same $p[0].Action 'remove' 'unparseable version is treated as old'
 
 # Several installs: the inventory and the plan are flat arrays with one element per copy (a nested array would
 # make the planner act on aggregated properties).
+$savedPf = $env:ProgramFiles; $savedPf86 = ${env:ProgramFiles(x86)}
 $ftmp = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-acf-' + [guid]::NewGuid().ToString('n'))
 try {
     foreach ($u in 'ua', 'ub') {
@@ -87,7 +88,14 @@ try {
     $inv2 = @(Get-AcFirefoxInventory)
     Assert-Same $inv2[0].Scope 'user' 'registry copy outside Program Files is user-scope'
     Assert-Same (Remove-AcFirefox -Install $inv2[0]) 4 'it is left for the user session'
+    # A path that climbs out of Program Files with .. is not machine-wide; an MSI with no known location is unverified.
+    $env:ProgramFiles = Join-Path $ftmp 'pf'
+    if (Test-AcProgramFiles -Path (Join-Path $ftmp 'pf/../ua/firefox.exe')) { Fail '.. path accepted as Program Files' }
+    if (-not (Test-AcProgramFiles -Path (Join-Path $ftmp 'pf/Mozilla Firefox/firefox.exe'))) { Fail 'real Program Files path rejected' }
+    function Get-AcMachineKeys { [pscustomobject]@{ Key = '{12345678-1234-1234-1234-123456789ABC}'; Name = 'Mozilla Firefox 72'; Version = '72.0.1'; Uninstall = ''; Location = '' } }
+    Assert-Same (@(Get-AcFirefoxInventory | Where-Object { $_.Key -like '{*' })[0].Scope) 'user' 'MSI with no verified location is report-only'
 } finally {
+    $env:ProgramFiles = $savedPf; ${env:ProgramFiles(x86)} = $savedPf86
     Remove-Item -LiteralPath $ftmp -Recurse -Force
 }
 
