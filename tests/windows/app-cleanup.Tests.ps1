@@ -70,6 +70,7 @@ try {
         Set-Content -LiteralPath (Join-Path $d 'firefox.exe') -Value 'x'
     }
     function Get-AcUserDirs { @(Get-ChildItem -LiteralPath $ftmp -Directory) }
+    $env:ProgramFiles = $ftmp
     function Get-AcMachineKeys { [pscustomobject]@{ Key = 'k1'; Name = 'Mozilla Firefox 72'; Version = '72.0.1'; Uninstall = ''; Location = (Join-Path $ftmp 'ua\AppData\Local\Mozilla Firefox') } }
     function Get-AcFileVersion { param([string]$Path) if ($Path -like '*ub*') { return '158.0' } return '72.0.1' }
     $inv = @(Get-AcFirefoxInventory)
@@ -81,6 +82,11 @@ try {
     Assert-Same $pl.Count 2 'plan has one element per copy'
     Assert-Same $pl[0].Action 'upgrade' 'old machine copy is not replaced by a per-user current copy'
     Assert-Same $pl[1].Action 'keep' 'current copy is kept'
+    # An HKLM-registered copy outside Program Files (here ua's profile path) is user-scope and never removed by SYSTEM.
+    $env:ProgramFiles = Join-Path $ftmp 'elsewhere'; ${env:ProgramFiles(x86)} = ''
+    $inv2 = @(Get-AcFirefoxInventory)
+    Assert-Same $inv2[0].Scope 'user' 'registry copy outside Program Files is user-scope'
+    Assert-Same (Remove-AcFirefox -Install $inv2[0]) 4 'it is left for the user session'
 } finally {
     Remove-Item -LiteralPath $ftmp -Recurse -Force
 }

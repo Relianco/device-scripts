@@ -117,6 +117,14 @@ function Invoke-AcProcess {
 }
 function Get-AcNow { Get-Date }
 
+function Test-AcProgramFiles {
+    param([string]$Path)
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($root -and $Path.StartsWith($root.TrimEnd([char]92, [char]47) + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 function Get-AcFirefoxInventory {
     $installs = @(); $n = 0
     foreach ($k in @(Get-AcMachineKeys | Where-Object { $_.Name -like 'Mozilla Firefox*' })) {
@@ -126,7 +134,16 @@ function Get-AcFirefoxInventory {
         $exe = if ($loc) { Join-Path $loc 'firefox.exe' } else { '' }
         $ver = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AcFileVersion -Path $exe } else { '' }
         if (-not $ver) { $ver = $k.Version -replace '\s.*', '' }
-        $installs += [pscustomobject]@{ Id = "m$n"; Version = $ver; Scope = 'machine'; User = ''; Path = $exe; Uninstall = $k.Uninstall; Key = $k.Key; Msi = ($k.Key -match '^\{[0-9A-Fa-f-]{36}\}$') }
+        $msi = ($k.Key -match '^\{[0-9A-Fa-f-]{36}\}$')
+        $scope = 'machine'; $owner = ''
+        # Registered under HKLM is not installed machine-wide: only Program Files counts. A copy anywhere else
+        # (for example in a profile) is user-writable, so it is report-only.
+        $probe = if ($exe) { $exe } elseif (-not $msi) { ([string]$k.Uninstall).Trim('"') } else { '' }
+        if ($probe -and -not (Test-AcProgramFiles -Path $probe)) {
+            $scope = 'user'
+            if ($probe -match '(?i)[\\/]Users[\\/]([^\\/]+)') { $owner = $Matches[1] }
+        }
+        $installs += [pscustomobject]@{ Id = "m$n"; Version = $ver; Scope = $scope; User = $owner; Path = $exe; Uninstall = $k.Uninstall; Key = $k.Key; Msi = $msi }
     }
     foreach ($u in Get-AcUserDirs) {
         foreach ($rel in 'AppData\Local\Mozilla Firefox', 'AppData\Local\Programs\Mozilla Firefox') {
