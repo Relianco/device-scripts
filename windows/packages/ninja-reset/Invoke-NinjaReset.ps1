@@ -76,13 +76,18 @@ function Write-NrLog {
 
 # Pure: 'report', 'apply' or 'none'. Throws on bad input. An empty PinVersion or InstallerSha256 is the off switch.
 function Get-NrMode {
-    param([string]$Action, [string]$Apply, [string]$PinVersion = '1.0.0', [string]$InstallerSha256 = ('0' * 64))
+    param([string]$Action, [string]$Apply, [string]$PinVersion = '1.0.0', [string]$InstallerSha256 = ('0' * 64),
+          [string]$InstallerUrl = 'https://example.invalid/agent.msi')
     if ([string]::IsNullOrWhiteSpace($PinVersion) -or [string]::IsNullOrEmpty($InstallerSha256)) { return 'none' }
     if ($InstallerSha256 -cnotmatch '^[0-9a-f]{64}$') { throw 'InstallerSha256 must be 64 lowercase hex characters.' }
     if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) {
         throw 'Action must be Install, Update, Repair, Reinstall, or Uninstall.'
     }
     if ($Action -eq 'Uninstall') { return 'none' }
+    $u = $null
+    if (-not [uri]::TryCreate($InstallerUrl, [UriKind]::Absolute, [ref]$u) -or $u.Scheme -ne 'https' -or $u.UserInfo) {
+        throw 'InstallerUrl must be an https URL without user info.'
+    }
     if ($Apply -eq '' -or $Apply -eq 'false') { return 'report' }
     if ($Apply -eq 'true') { return 'apply' }
     throw 'Apply must be true or false.'
@@ -191,9 +196,22 @@ function Save-NrMsi {
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     Invoke-WebRequest -Uri $Url -OutFile $Path -UseBasicParsing
 }
+# The HTTP status of a failed download; 0 for a timeout, connection or DNS failure (worth another attempt);
+# -1 for anything else (certificate trust, a bad URL, a local write error), which is not retried.
 function Get-NrHttpStatus {
     param($ErrorRecord)
-    try { return [int]$ErrorRecord.Exception.Response.StatusCode } catch { return 0 }
+    $e = $ErrorRecord.Exception
+    try { $s = [int]$e.Response.StatusCode; if ($s -gt 0) { return $s } } catch { }
+    $network = @('Timeout', 'ConnectFailure', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectionClosed',
+                 'ReceiveFailure', 'SendFailure', 'KeepAliveFailure', 'SecureChannelFailure')
+    for ($x = $e; $null -ne $x; $x = $x.InnerException) {
+        $n = $x.GetType().Name
+        if (@('TimeoutException', 'TaskCanceledException', 'SocketException') -contains $n) { return 0 }
+        if ($n -eq 'WebException' -and $network -contains [string]$x.Status) { return 0 }
+        if ($n -eq 'HttpRequestException' -and $x.PSObject.Properties['HttpRequestError'] -and
+            @('NameResolutionError', 'ConnectionError', 'SecureConnectionError') -contains [string]$x.HttpRequestError) { return 0 }
+    }
+    return -1
 }
 function Get-NrFileSha256 { param([string]$Path) (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() }
 function Wait-NrRetry { Start-Sleep -Seconds 15 }
@@ -340,7 +358,7 @@ function Invoke-NrRun {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -ne '1') {
-    try { $nrMode = Get-NrMode -Action $Action -Apply $Apply -PinVersion $PinVersion -InstallerSha256 $InstallerSha256 }
+    try { $nrMode = Get-NrMode -Action $Action -Apply $Apply -PinVersion $PinVersion -InstallerSha256 $InstallerSha256 -InstallerUrl $InstallerUrl }
     catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     if ($nrMode -eq 'none') { Write-Output 'Nothing to change.'; exit 0 }
     $nrToken = [string]$env:RELIAN_NINJA_TOKENID

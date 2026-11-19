@@ -26,7 +26,24 @@ foreach ($bad in @('ABC', ('A' * 64), ('a' * 63))) {
     $threw = $false; try { Get-NrMode -Action Install -Apply 'true' -InstallerSha256 $bad } catch { $threw = $true }; Assert-True $threw "hash [$bad] throws"
 }
 foreach ($s in @(0, 408, 429, 500, 502, 503, 504)) { Assert-True (Test-NrRetryable $s) "status $s retried" }
-foreach ($s in @(400, 401, 403, 404, 501)) { Assert-True (-not (Test-NrRetryable $s)) "status $s not retried" }
+foreach ($s in @(-1, 400, 401, 403, 404, 501)) { Assert-True (-not (Test-NrRetryable $s)) "status $s not retried" }
+
+# URL: https only, no user info; an empty hash (off) and Uninstall are not blocked by the URL.
+foreach ($bad in @('https://user@resources.example/a.msi', 'https://u:p@resources.example/a.msi', 'http://resources.example/a.msi', 'not a url')) {
+    $threw = $false; try { Get-NrMode -Action Install -Apply 'true' -InstallerUrl $bad } catch { $threw = $true }; Assert-True $threw "url [$bad] throws"
+}
+Assert-Same (Get-NrMode -Action Install -Apply 'true' -InstallerSha256 '' -InstallerUrl 'https://u@x/a.msi') 'none' 'empty hash is off before the URL check'
+Assert-Same (Get-NrMode -Action Uninstall -Apply 'true' -InstallerUrl 'https://u@x/a.msi') 'none' 'Uninstall is not blocked by the URL'
+
+# Failure classes (real exceptions, before the fakes below replace the function).
+function New-Err { param($Exception) [Management.Automation.ErrorRecord]::new($Exception, 'x', 'NotSpecified', $null) }
+Assert-Same (Get-NrHttpStatus (New-Err ([Net.WebException]::new('t', [Net.WebExceptionStatus]::Timeout)))) 0 'timeout retried'
+Assert-Same (Get-NrHttpStatus (New-Err ([Net.WebException]::new('d', [Net.WebExceptionStatus]::NameResolutionFailure)))) 0 'DNS retried'
+Assert-Same (Get-NrHttpStatus (New-Err ([Net.Sockets.SocketException]::new(10061)))) 0 'socket refused retried'
+Assert-Same (Get-NrHttpStatus (New-Err ([Net.Http.HttpRequestException]::new('w', [Net.Sockets.SocketException]::new(10060))))) 0 'wrapped socket retried'
+Assert-Same (Get-NrHttpStatus (New-Err ([Net.WebException]::new('c', [Net.WebExceptionStatus]::TrustFailure)))) -1 'certificate trust not retried'
+Assert-Same (Get-NrHttpStatus (New-Err ([IO.IOException]::new('disk full')))) -1 'local write error not retried'
+Assert-Same (Get-NrHttpStatus (New-Err ([UriFormatException]::new('bad')))) -1 'bad URL not retried'
 
 # Param defaults are the release pin.
 $release = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'windows/releases/ninja-reset.json') | ConvertFrom-Json
@@ -34,7 +51,7 @@ Assert-Same $InstallerUrl $release.installerUrl 'InstallerUrl default is the rel
 Assert-Same $InstallerSha256 $release.installerSha256 'InstallerSha256 default is the release pin'
 Assert-Same $release.installsSoftware $true 'release installsSoftware'
 
-$token = '00000000-0000-0000-0000-000000000000'  # fake, low entropy so the secret scan passes
+$token = [guid]::NewGuid().ToString()  # generated: no token is committed
 Assert-True (Test-NrToken $token) 'uuid token ok'
 foreach ($bad in @('', '%ninjatoken%', "$token extra", "$token`" /i x", '0123')) { Assert-True (-not (Test-NrToken $bad)) "token [$bad] rejected" }
 
@@ -44,8 +61,8 @@ Assert-True (-not (Test-NrSigner 'NotSigned' 'CN=NinjaOne LLC, O=NinjaOne LLC'))
 Assert-True (-not (Test-NrSigner 'Valid' 'CN=Evil, O=Evil Corp')) 'other signer rejected'
 
 $roots = @('C:\Program Files (x86)', 'C:\Program Files')
-Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\contoso-main' $roots) 'org-location folder is safe'
-Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\contoso-main\' $roots) 'trailing slash is safe'
+Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\org1-loc1' $roots) 'org-location folder is safe'
+Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\org1-loc1\' $roots) 'trailing slash is safe'
 foreach ($bad in @('C:\Program Files (x86)', 'C:\Program Files (x86)\', 'C:\Program Files (x86)\a\b', 'C:\Program Files (x86)evil', 'C:\Windows\System32', '')) {
     Assert-True (-not (Test-NrSafeFolder $bad $roots)) "folder [$bad] refused"
 }
@@ -55,7 +72,7 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ninja-reset-' + [guid]::NewGuid().
 $null = New-Item -ItemType Directory -Path $tmp
 $env:ProgramData = 'C:\ProgramData'
 $env:ProgramFiles = 'C:\Program Files'
-$agentDir = 'C:\Program Files (x86)\contoso-main'
+$agentDir = 'C:\Program Files (x86)\org1-loc1'
 $agentExe = "$agentDir\NinjaRMMAgent.exe"
 $dataDir = 'C:\ProgramData\NinjaRMMAgent'
 $uKey = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{817AF559-0C8C-4539-94D8-3096AF4B08D9}'
