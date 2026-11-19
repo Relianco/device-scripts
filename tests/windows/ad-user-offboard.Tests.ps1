@@ -36,6 +36,12 @@ function New-Fake([object[]]$Users, [string[]]$Ous = @(), [bool]$IsDc = $true) {
             switch ($_) { 'Domain Admins' { New-Group $_ 512 } 'Enterprise Admins' { New-Group $_ 519 } 'Schema Admins' { New-Group $_ 518 } 'Administrators' { [pscustomobject]@{ Name = $_; SID = 'S-1-5-32-544' } } default { New-Group $_ 1105 } }
         })
     }
+    $script:OfTokenSids = {
+        param($g)
+        $u = @($script:Fake.Users | Where-Object { $_.ObjectGUID -eq $g })[0]
+        if ($u.PSObject.Properties['_tokens']) { return @($u._tokens) }
+        @("$domain-513") + @($u._groups | ForEach-Object { switch ($_) { 'Domain Admins' { "$domain-512" } 'Enterprise Admins' { "$domain-519" } 'Schema Admins' { "$domain-518" } default { "$domain-1105" } } })
+    }
     $script:OfDisable = { param($g) $script:Fake.Log.Add('disable'); if ($script:Fake.DisableSticks) { (& $script:OfGet $g).Enabled = $false } }
     $script:OfSetDescription = { param($g, $t) $script:Fake.Log.Add('describe'); if ($script:Fake.DescSticks) { (& $script:OfGet $g).Description = $t } }
     $script:OfOuExists = { param($dn) $script:Fake.Ous -contains $dn }
@@ -79,12 +85,14 @@ try {
     New-Fake @(
         (New-User 'ea' 1300 @('Enterprise Admins')), (New-User 'sa' 1301 @('Schema Admins')), (New-User 'pa' 1302 @('Staff') -Primary 512),
         (New-User 'Administrator' 500), (New-User 'renamed' 502), (New-User 'krbtgt' 502), (New-User 'Guest' 501),
-        (New-User 'svc-dirmaint' 1400), (New-User 'upnonly' 1401 -Upn 'svc-dirmaint@x.onmicrosoft.com'), (New-User 'MSOL_abc' 1402), (New-User 'BreakGlass1' 1403)
+        (New-User 'svc-dirmaint' 1400),
+        ([pscustomobject]@{ ObjectGUID = [Guid]::NewGuid(); SamAccountName = 'childea'; UserPrincipalName = 'childea@x'; SID = "$domain-1500"; DistinguishedName = 'CN=childea,CN=Users,DC=x'; Enabled = $true; Description = ''; MemberOf = @(); lastLogonTimestamp = 0; PrimaryGroupID = 513; _groups = @('Staff'); _tokens = @('S-1-5-21-9-9-9-519', "$domain-513") }),
+        ([pscustomobject]@{ ObjectGUID = [Guid]::NewGuid(); SamAccountName = 'notokens'; UserPrincipalName = 'notokens@x'; SID = "$domain-1501"; DistinguishedName = 'CN=notokens,CN=Users,DC=x'; Enabled = $true; Description = ''; MemberOf = @(); lastLogonTimestamp = 0; PrimaryGroupID = 513; _groups = @('Staff'); _tokens = @() }), (New-User 'upnonly' 1401 -Upn 'svc-dirmaint@x.onmicrosoft.com'), (New-User 'MSOL_abc' 1402), (New-User 'BreakGlass1' 1403)
     )
-    $r = Run 'Disable' 'ea,sa,pa,Administrator,renamed,krbtgt,Guest,svc-dirmaint,upnonly,MSOL_abc,BreakGlass1,ghost'
+    $r = Run 'Disable' 'ea,sa,pa,Administrator,renamed,krbtgt,Guest,svc-dirmaint,upnonly,MSOL_abc,BreakGlass1,childea,notokens,ghost'
     Assert ($r.ExitCode -eq 1) 'Refusals exit 1'
-    foreach ($l in $r.Lines | Select-Object -First 11) { Assert ($l.Status -eq 'refused') "Refused: $($l.Sam) ($($l.Status))" }
-    Assert ($r.Lines[11].Status -eq 'notfound') 'Missing account is notfound'
+    foreach ($l in $r.Lines | Select-Object -First 13) { Assert ($l.Status -eq 'refused') "Refused: $($l.Sam) ($($l.Status))" }
+    Assert ($r.Lines[13].Status -eq 'notfound') 'Missing account is notfound'
     Assert ($script:Fake.Log.Count -eq 0 -and -not (Test-Path -LiteralPath $tmp)) 'A refusal changes nothing and writes no backup'
     Assert ($r.Lines[0].Reason -match 'Enterprise Admins' -and $r.Lines[2].Reason -match 'primary group') 'Reasons name the group'
 

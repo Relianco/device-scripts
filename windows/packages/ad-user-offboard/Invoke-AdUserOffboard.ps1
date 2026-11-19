@@ -17,8 +17,8 @@
     Report: prints the before-state of each account (enabled, description, DN, group names, lastLogonTimestamp,
     adminCount, which privileged groups it is in) and whether Disable would refuse it. It changes nothing.
 
-    Disable: refuses an account that does not exist or matches more than one object, is a member (nested or by primary
-    group) of Domain Admins, Enterprise Admins or Schema Admins, is a built-in account (RID under 1000, Administrator,
+    Disable: refuses an account that does not exist or matches more than one object, is a member (nested, by primary
+    group, or across the forest, by token groups) of Domain Admins, Enterprise Admins or Schema Admins, is a built-in account (RID under 1000, Administrator,
     Guest, krbtgt, DefaultAccount) or a directory-sync or break-glass account (MSOL_*, AAD_*, Sync_*, svc-dirmaint*,
     breakglass*, break-glass*, in the sAMAccountName or the userPrincipalName). For every other account it writes a JSON
     backup of the before-state to C:\Relian\Offboard\<yyyy-MM-dd>\<sam>-<HHmmss>-<random>.json (the folders are locked to SYSTEM and
@@ -76,6 +76,9 @@ $script:OfGroups = {
     $primary = Get-ADGroup -Identity $primarySid -Properties adminCount
     $all + $primary + @(& $chain ([string]$primary.DistinguishedName)) | Sort-Object -Property { [string]$_.SID } -Unique
 }
+# The user's token group SIDs: nested, primary and cross-domain universal groups (Enterprise and Schema Admins live in
+# the forest root), as the DC computes them. This is what the Admins refusal rests on.
+$script:OfTokenSids = { param($guid) @((Get-ADUser -Identity $guid -Properties tokenGroups).tokenGroups | ForEach-Object { [string]$_ }) }
 $script:OfDisable = { param($guid) Disable-ADAccount -Identity $guid }
 $script:OfSetDescription = { param($guid, $text) Set-ADUser -Identity $guid -Description $text }
 # A missing SearchBase throws ADIdentityNotFoundException (terminating); any other error propagates.
@@ -110,7 +113,7 @@ function Get-OfRid([string]$Sid) {
 }
 
 # The before-state: what a restore needs. memberOf holds the direct group DNs, groups the names of all groups.
-function Get-OfSnapshot($User, $Groups) {
+function Get-OfSnapshot($User, $Groups, $TokenSids) {
     $names = @($Groups | ForEach-Object { [string]$_.Name } | Sort-Object)
     $privileged = [System.Collections.Generic.List[string]]::new()
     $adminHit = [System.Collections.Generic.List[string]]::new()
@@ -124,6 +127,10 @@ function Get-OfSnapshot($User, $Groups) {
     }
     # The primary group is not in the member chain, so a Domain Admins primary group needs its own check.
     if ($script:OfAdminRids -contains [int]$User.PrimaryGroupID) { $adminHit.Add("primary group RID $($User.PrimaryGroupID)"); $privileged.Add("primary group RID $($User.PrimaryGroupID)") }
+    foreach ($sid in @($TokenSids)) {
+        $rid = Get-OfRid $sid
+        if ($script:OfAdminRids -contains $rid) { $adminHit.Add("a group with RID $rid"); $privileged.Add("a group with RID $rid") }
+    }
     $userCount = $User.PSObject.Properties['adminCount']
     return [ordered]@{
         sam = [string]$User.SamAccountName; upn = [string]$User.UserPrincipalName; dn = [string]$User.DistinguishedName
@@ -132,13 +139,15 @@ function Get-OfSnapshot($User, $Groups) {
         lastLogonTimestamp = ConvertTo-OfTime $User.lastLogonTimestamp
         adminCount = if ($userCount) { [string]$userCount.Value } else { '' }
         privilegedGroups = @($privileged | Select-Object -Unique); adminGroups = @($adminHit | Select-Object -Unique)
-        memberOf = @($User.MemberOf | ForEach-Object { [string]$_ }); groups = $names
+        memberOf = @($User.MemberOf | ForEach-Object { [string]$_ }); groups = $names; tokenGroupCount = @($TokenSids).Count
     }
 }
 
 # $null when Disable may proceed, else the reason it refuses.
 function Get-OfRefusal($Snapshot) {
     $sam = $Snapshot.sam
+    # Fail closed: every user has at least a primary group in the token.
+    if ($Snapshot.tokenGroupCount -eq 0) { return "${sam}: token groups unavailable, so the admin-group check cannot be made" }
     if ($script:OfBuiltinNames -contains $sam) { return "$sam is a built-in account" }
     $rid = Get-OfRid $Snapshot.sid
     if ($rid -ge 0 -and $rid -lt 1000) { return "$sam is a built-in account (RID $rid)" }
@@ -176,7 +185,8 @@ function Invoke-OfAccount([string]$Sam, [bool]$Apply, [string]$Text, [string]$Ou
         if ($found.Count -gt 1) { $line.Status = 'refused'; $line.Reason = "$Sam matches $($found.Count) AD objects"; return $line }
         $user = $found[0]
         $groups = @(& $script:OfGroups $user)
-        $before = Get-OfSnapshot $user $groups
+        $tokens = @(& $script:OfTokenSids ([Guid]$user.ObjectGUID).ToString())
+        $before = Get-OfSnapshot $user $groups $tokens
         $refusal = Get-OfRefusal $before
         $line.Before = $before
         if ($before.groups.Count -gt $script:OfMaxGroups) {
@@ -194,7 +204,7 @@ function Invoke-OfAccount([string]$Sam, [bool]$Apply, [string]$Text, [string]$Ou
         $ouOk = if ($Ou -ne '') { [bool](& $script:OfOuExists $Ou) } else { $false }
         $now = & $script:OfNow
         # The backup holds the full group list; the printed line may be cut.
-        $line.Backup = Write-OfBackup (Get-OfSnapshot $user $groups) $now
+        $line.Backup = Write-OfBackup (Get-OfSnapshot $user $groups $tokens) $now
         $guid = $before.guid
         & $script:OfDisable $guid
         & $script:OfSetDescription $guid $Text
