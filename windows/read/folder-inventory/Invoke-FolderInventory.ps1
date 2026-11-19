@@ -147,11 +147,17 @@ function Get-FiFamily {
 
 function Get-FiRights {
     param($Rights)
+    # A short name only when it is the whole set (Synchronize aside), so no extra right is hidden.
     $n = [int64]$Rights
+    $core = $n -band (-bnot [int64]1048576)
     foreach ($p in @(@('FullControl', 2032127), @('Modify', 1245631), @('ReadAndExecute', 1179817), @('Read', 1179785), @('Write', 278))) {
-        if (($n -band $p[1]) -eq $p[1]) { return $p[0] }
+        if ($core -eq ([int64]$p[1] -band (-bnot [int64]1048576))) { return $p[0] }
     }
-    return ('0x{0:X}' -f $n)
+    # Generic rights (high bits) have no FileSystemRights name: those print as hex.
+    $named = ''
+    try { $named = [Enum]::ToObject([Security.AccessControl.FileSystemRights], [int]$n).ToString() } catch { }
+    if ($named -notmatch '^[A-Za-z]') { return ('0x{0:X}' -f $n) }
+    return ($named -replace ', ', '+')
 }
 
 function Format-FiAce {

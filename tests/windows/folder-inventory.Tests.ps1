@@ -30,16 +30,19 @@ Assert ((Get-Item -LiteralPath $path).Length -lt 1048576) 'package under 1 MiB'
 # --- Helpers. Secret-shaped values are generated here, never committed.
 $secret = 'S' + [guid]::NewGuid().ToString('n')
 $user = 'u' + [guid]::NewGuid().ToString('n').Substring(0, 6)
+$pc = 'c' + [guid]::NewGuid().ToString('n').Substring(0, 6) + '$'
+$homeShare = '\\h' + [guid]::NewGuid().ToString('n').Substring(0, 6) + '\s' + [guid]::NewGuid().ToString('n').Substring(0, 6)
 Assert ((Test-FiInvalidName 'CON.txt' 2 $false) -eq 'reservedName' -and (Test-FiInvalidName '~$a.docx' 2 $false) -eq 'ownerFile') 'invalid names'
 Assert ((Test-FiInvalidName 'forms' 1 $true) -eq 'formsAtRoot' -and $null -eq (Test-FiInvalidName 'forms' 2 $true) -and $null -eq (Test-FiInvalidName 'ok.pdf' 1 $false)) 'forms only at the root'
 Assert ((Test-FiInvalidName 'a.' 1 $false) -eq 'trailingDot' -and (Test-FiInvalidName ' a' 1 $false) -eq 'edgeSpace') 'edge characters'
-Assert ((Get-FiRights 2032127) -eq 'FullControl' -and (Get-FiRights 1245631) -eq 'Modify' -and (Get-FiRights 1179817) -eq 'ReadAndExecute' -and (Get-FiRights 1) -eq '0x1') 'rights'
+Assert ((Get-FiRights 2032127) -eq 'FullControl' -and (Get-FiRights 1245631) -eq 'Modify' -and (Get-FiRights 1179817) -eq 'ReadAndExecute' -and (Get-FiRights 2097152) -eq '0x200000' -and (Get-FiRights 1) -eq 'ReadData' -or (Get-FiRights 1) -eq 'ListDirectory') 'rights'
+Assert ((Get-FiRights (1179785 -bor 278)) -match 'Write' -and (Get-FiRights (1179817 -bor 278)) -match 'Write' -and (Get-FiRights 1179785) -eq 'Read') 'combined rights are not shortened to Read'
 Assert ((Get-FiFamily 'Co.QBW') -eq 'quickbooks' -and (Get-FiFamily 'x.ACCDB') -eq 'access' -and (Get-FiFamily 'x.mdf') -eq 'sqlServer' -and (Get-FiFamily 'x.fdb') -eq 'firebird') 'db families by extension'
 Assert ($null -eq (Get-FiFamily 'Thumbs.db') -and (Get-FiFamily 'x.db') -eq 'sqlite' -and (Get-FiFamily '~$book.xlsx') -eq 'officeOwner' -and (Get-FiFamily 'PCLaw.cfg') -eq 'pclaw') 'ignore names and name patterns'
 Assert ((Get-FiFamily 'a.ldb') -eq 'lockOrLog' -and $null -eq (Get-FiFamily 'a.pdf') -and $null -eq (Get-FiFamily 'a.dat')) 'lock files; a lone .dat is not data'
 Assert ((Protect-FiText ('net use z: \\s\x ' + $secret + ' /user:a pass' + 'word=' + $secret)) -eq '[sensitive value omitted]' -and (Protect-FiText ('x' * 300) -Max 50).Length -le 60) 'redaction and clipping'
 Assert ((ConvertTo-FiMapLine ('net use Z: \\fs1\data ' + $secret + ' /user:dom\' + $user + ' /persistent:yes')) -eq 'netUse|Z:|\\fs1\data') 'net use keeps letter and UNC only'
-Assert ((ConvertTo-FiMapLine 'oNet.MapNetworkDrive "Y:", "\\fs1\scans", False, "u", "p"') -eq 'wsh|Y:|\\fs1\scans') 'MapNetworkDrive keeps letter and UNC only'
+Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Y:", "\\fs1\scans", False, "u", "' + $secret + '"')) -eq 'wsh|Y:|\\fs1\scans') 'MapNetworkDrive keeps letter and UNC only'
 Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Z:", sharePath, False, "dom\u", "C:\' + $secret + '"')) -eq 'wsh|Z:|') 'a path-shaped password after a variable target is not printed'
 Assert ((ConvertTo-FiMapLine 'net use X: "\\fs1\Shared Data" /persistent:no') -eq 'netUse|X:|\\fs1\Shared Data') 'quoted UNC with a space kept whole'
 Assert ((ConvertTo-FiMapLine 'subst S: D:\Shared') -eq 'subst|S:|D:\Shared' -and $null -eq (ConvertTo-FiMapLine 'echo hello')) 'subst and non-mapping lines'
@@ -159,7 +162,7 @@ try {
     function Get-ADObject { param($Filter, $Properties)
         if ($Filter -like '*S-1-5-21-1-2-3-1100*') { return [pscustomobject]@{ ObjectClass = 'group'; DistinguishedName = 'CN=Accounting Staff,OU=Groups,DC=example,DC=invalid' } }
         return $null }
-    function Get-ADGroupMember { param($Identity, [switch]$Recursive) @([pscustomobject]@{ objectClass = 'user'; SamAccountName = 'alice' }, [pscustomobject]@{ objectClass = 'user'; SamAccountName = 'bob' }, [pscustomobject]@{ objectClass = 'computer'; SamAccountName = 'PC1$' }) }
+    function Get-ADGroupMember { param($Identity, [switch]$Recursive) @([pscustomobject]@{ objectClass = 'user'; SamAccountName = 'alice' }, [pscustomobject]@{ objectClass = 'user'; SamAccountName = 'bob' }, [pscustomobject]@{ objectClass = 'computer'; SamAccountName = $pc }) }
     function Get-ADUser { param($Identity, $Properties, $Filter)
         if ($Identity -eq 'bob') { return [pscustomobject]@{ Enabled = $false; LastLogonDate = $null; DistinguishedName = 'CN=bob,OU=Former,DC=example,DC=invalid' } }
         [pscustomobject]@{ Enabled = $true; LastLogonDate = [datetime]'2026-11-01'; DistinguishedName = 'CN=alice,OU=General,DC=example,DC=invalid' } }
@@ -207,11 +210,11 @@ try {
     Assert (($lines -join ';') -notmatch $secret) 'logon script password never printed'
     # The whole Discover section with the AD part failing: shares still reported, status partial.
     function Get-ADDomain { throw [InvalidOperationException]::new('no domain') }
-    function Get-ADUser { param($Filter, $Properties) @([pscustomobject]@{ homeDrive = 'H:'; homeDirectory = ('\\fs1\home$\' + $user); scriptPath = 'logon.bat' }) }
+    function Get-ADUser { param($Filter, $Properties) @([pscustomobject]@{ homeDrive = 'H:'; homeDirectory = ($homeShare + '\' + $user); scriptPath = 'logon.bat' }) }
     $d = Invoke-FolderInventory | ConvertFrom-Json
     Assert ($d.section -eq 'Discover' -and $d.status -eq 'partial' -and $d.errors -contains 'domain:InvalidOperationException') 'discover partial on AD failure'
     Assert ($d.shares[0].name -eq 'Data' -and $d.shares[0].abe -eq 'AccessBased' -and $d.shareAccess.Data[0] -eq 'Everyone|Allow|Full') 'discover shares'
-    Assert ($d.homeDrives[0] -eq 'H:|\\fs1\home$|1' -and $d.scriptPaths[0] -eq 'logon.bat|1') 'home drives grouped without user names'
+    Assert ($d.homeDrives[0] -eq ('H:|' + $homeShare + '|1') -and $d.scriptPaths[0] -eq 'logon.bat|1') 'home drives grouped without user names'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
