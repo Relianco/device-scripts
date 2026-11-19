@@ -21,7 +21,8 @@
     and the machine-wide version. Fix removes it by direct cleanup, not with Google's uninstaller: a user's
     setup.exe is user-writable, so running it as SYSTEM would hand that user SYSTEM, and without --system-level it
     would act on SYSTEM's own profile anyway. Per user, when Chrome is not running and no junction or symlink sits
-    on the path to or inside any folder it deletes (else "skip-unsafe", a failure), it deletes the Application
+    on the path to or inside any folder it deletes (else "skip-unsafe", a failure; each delete re-checks this on the
+    open handle, so swapping in a junction after the check is refused too), it deletes the Application
     folder; the per-user updater folders only when Chrome is the only Google app in that user's hive; scheduled
     tasks and Run values that point into a deleted folder; the user's Chrome Uninstall and App Paths keys;
     Software\Google\Update when the updater went; and .lnk shortcuts (Desktop, Start Menu, taskbar pins) to the
@@ -316,15 +317,69 @@ function Find-AcReparseIn {
     }
     return $null
 }
-# SYSTEM deletes inside a user-writable tree: check each item just before it goes and never follow a reparse point.
-function Remove-AcTree {
-    param([string]$Dir)
-    if (Test-AcReparse -Path $Dir) { throw "reparse point: $Dir" }
-    foreach ($c in @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop)) {
-        if (Test-AcReparse -Path $c.FullName) { throw "reparse point: $($c.FullName)" }
-        if ($c.PSIsContainer) { Remove-AcTree -Dir $c.FullName } else { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction Stop }
+# SYSTEM deletes inside a user-writable tree, where the user can swap any folder for a junction at any moment, so a
+# path check before a delete can be raced. Each item is opened without following a link, refused when it is a
+# reparse point or when its real location is not exactly Root's real location plus its relative path (an ancestor
+# swapped for a junction), and deleted through that same handle. Names from a listing are only candidates.
+$AcDeleteSource = @'
+using System;
+using System.IO;
+using System.Text;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class RelianAcDelete {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder buf, uint len, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetFileInformationByHandleEx(SafeFileHandle h, int cls, out Basic info, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetFileInformationByHandle(SafeFileHandle h, int cls, ref byte delete, uint size);
+    [StructLayout(LayoutKind.Sequential)] struct Basic { public long C, A, W, Ch; public uint Attr; }
+
+    // OPEN_EXISTING with FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT: a link is opened itself, never its target.
+    static SafeFileHandle Open(string path, uint access) {
+        SafeFileHandle h = CreateFileW(path, access, 7, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (h.IsInvalid) throw new IOException("open failed (" + Marshal.GetLastWin32Error() + "): " + path);
+        return h;
     }
-    Remove-Item -LiteralPath $Dir -Force -ErrorAction Stop
+    static uint Attr(SafeFileHandle h) {
+        Basic b;
+        if (!GetFileInformationByHandleEx(h, 0, out b, (uint)Marshal.SizeOf(typeof(Basic)))) throw new IOException("attributes failed (" + Marshal.GetLastWin32Error() + ")");
+        return b.Attr;
+    }
+    static string Final(SafeFileHandle h) {
+        StringBuilder sb = new StringBuilder(1024);
+        uint n = GetFinalPathNameByHandleW(h, sb, 1024, 0);
+        if (n == 0 || n >= 1024) throw new IOException("final path failed (" + Marshal.GetLastWin32Error() + ")");
+        return sb.ToString();
+    }
+    public static void Delete(string root, string path) {
+        string real;
+        using (SafeFileHandle h = Open(root, 0x80)) {
+            if ((Attr(h) & 0x400) != 0) throw new IOException("reparse point: " + root);
+            real = Final(h).TrimEnd('\\');
+        }
+        Del(path, real + path.Substring(root.TrimEnd('\\').Length));
+    }
+    static void Del(string path, string expected) {
+        using (SafeFileHandle h = Open(path, 0x10080)) {
+            uint a = Attr(h);
+            if ((a & 0x400) != 0) throw new IOException("reparse point: " + path);
+            if (!string.Equals(Final(h), expected, StringComparison.OrdinalIgnoreCase)) throw new IOException("moved under a link: " + path);
+            if ((a & 0x10) != 0) { foreach (string c in Directory.GetFileSystemEntries(path)) { Del(c, expected + c.Substring(path.Length)); } }
+            byte yes = 1;
+            if (!SetFileInformationByHandle(h, 4, ref yes, 1)) throw new IOException("delete failed (" + Marshal.GetLastWin32Error() + "): " + path);
+        }
+    }
+}
+'@
+function Remove-AcTree {
+    param([string]$Root, [string]$Path)
+    if (-not ('RelianAcDelete' -as [type])) { Add-Type -TypeDefinition $AcDeleteSource }
+    try { [RelianAcDelete]::Delete($Root, $Path) }
+    catch { throw $(if ($_.Exception.InnerException) { $_.Exception.InnerException.Message } else { $_.Exception.Message }) }
 }
 
 # Fix for one user whose Chrome is not running and whose folders passed the reparse check. Returns @{ Res; Failed }.
@@ -342,12 +397,12 @@ function Remove-AcChromeUser {
             $others = @(Get-AcOtherGoogleApps -Ids $ids)
         }
         $dropUpd = $hive -and $others.Count -eq 0
-        Remove-AcTree -Dir $app
+        Remove-AcTree -Root $Dir -Path $app
         $gone = @($app)
         foreach ($d in 'GoogleUpdater', 'Update') {
             $p = Join-Path $google $d
             if (-not (Test-Path -LiteralPath $p)) { continue }
-            if ($dropUpd) { Remove-AcTree -Dir $p; $gone += $p }
+            if ($dropUpd) { Remove-AcTree -Root $Dir -Path $p; $gone += $p }
             elseif ($hive) { $out += "kept $d for $($others -join ',')" }
             else { $out += "kept $d" }
         }
@@ -376,8 +431,7 @@ function Remove-AcChromeUser {
     foreach ($rel in 'Desktop', 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs', 'AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned') {
         foreach ($l in @(Get-ChildItem -LiteralPath (Join-Path $Dir $rel) -Filter '*.lnk' -File -Recurse -Force -ErrorAction SilentlyContinue)) {
             if (-not (Test-AcUnder -Path (Get-AcShortcutTarget -Path $l.FullName) -Dir $app)) { continue }
-            if (Find-AcReparseOnPath -Root $Dir -Target $l.FullName) { $out += "kept $($l.Name): reparse point"; continue }
-            Remove-Item -LiteralPath $l.FullName -Force -ErrorAction Stop; $nl++
+            try { Remove-AcTree -Root $Dir -Path $l.FullName; $nl++ } catch { $out += "kept $($l.Name): $($_.Exception.Message)" }
         }
     }
     if ($nl) { $out += "lnk $nl" }

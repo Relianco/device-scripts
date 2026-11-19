@@ -86,6 +86,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           pwsh -NoProfile -File tests/windows/scansnap-update-prompts.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # app-cleanup chrome-user: the handle-based delete against real junctions, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/app-cleanup-chrome-user.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/app-cleanup-chrome-user.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # Read-only evidence: real registry on a Windows host, then Windows PowerShell 5.1.
           pwsh -NoProfile -File tests/windows/endpoint-evidence.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

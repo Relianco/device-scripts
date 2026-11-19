@@ -50,7 +50,7 @@ function New-ChromeUser {
 }
 
 try {
-    # The real Test-AcReparse sees a real symlink, and Remove-AcTree leaves its target alone (skipped where links need admin).
+    # The real Test-AcReparse sees a real symlink (skipped where links need admin).
     $outside = Join-Path $tmp 'outside'
     New-File (Join-Path $outside 'keep.txt')
     $linked = Join-Path $tmp 'tree/sub'
@@ -59,13 +59,43 @@ try {
     try { [void](New-Item -ItemType SymbolicLink -Path (Join-Path $linked 'link') -Target $outside -ErrorAction Stop) } catch { $made = $false }
     if ($made) {
         Assert-True (Find-AcReparseIn -Dir (Join-Path $tmp 'tree')) 'real symlink found inside the tree'
-        $threw = $false
-        try { Remove-AcTree -Dir (Join-Path $tmp 'tree') } catch { $threw = $true }
-        Assert-True $threw 'Remove-AcTree refuses a real symlink'
-        Assert-True (Test-Path -LiteralPath (Join-Path $outside 'keep.txt')) 'symlink target survives'
+        [IO.Directory]::Delete((Join-Path $linked 'link'))
     }
     Remove-Item -LiteralPath (Join-Path $tmp 'tree') -Recurse -Force
     Remove-Item -LiteralPath $outside -Recurse -Force
+
+    # The real handle-based Remove-AcTree against real junctions (Windows only; junctions need no admin).
+    if ($env:OS -eq 'Windows_NT') {
+        $prof = Join-Path $tmp 'win\prof'
+        $out = Join-Path $tmp 'win\outside'
+        $chrome = Join-Path $prof 'AppData\Local\Google\Chrome'
+        $app = Join-Path $chrome 'Application'
+        New-File (Join-Path $out 'Application\keep.txt')
+        New-File (Join-Path $app '131\chrome.dll')
+        New-File (Join-Path $app 'chrome.exe')
+        New-File (Join-Path $chrome 'User Data\Default\Bookmarks') 'my bookmarks'
+        $refused = { param($Path) try { Remove-AcTree -Root $prof -Path $Path; $false } catch { $true } }
+
+        # A junction inside the target: refused, its target untouched.
+        $j = Join-Path $app '131\link'
+        [void](New-Item -ItemType Junction -Path $j -Target $out)
+        Assert-True (& $refused $app) 'junction inside the target is refused'
+        Assert-True (Test-Path -LiteralPath (Join-Path $out 'Application\keep.txt')) 'junction target survives'
+        [IO.Directory]::Delete($j)
+
+        # An ancestor swapped for a junction: the real location no longer matches, refused.
+        Rename-Item -LiteralPath $chrome -NewName 'Chrome.real'
+        [void](New-Item -ItemType Junction -Path $chrome -Target $out)
+        Assert-True (& $refused $app) 'ancestor junction is refused'
+        Assert-True (Test-Path -LiteralPath (Join-Path $out 'Application\keep.txt')) 'files behind the ancestor junction survive'
+        [IO.Directory]::Delete($chrome)
+        Rename-Item -LiteralPath (Join-Path $prof 'AppData\Local\Google\Chrome.real') -NewName 'Chrome'
+
+        # A plain tree is deleted; User Data beside it survives.
+        Assert-True (-not (& $refused $app)) 'plain Application folder is deleted'
+        Assert-True (-not (Test-Path -LiteralPath $app)) 'Application folder is gone'
+        Assert-Same (Get-Content -LiteralPath (Join-Path $chrome 'User Data\Default\Bookmarks')) 'my bookmarks' 'User Data survives the real delete'
+    }
 
     $fixedNow = Get-Date
     function Get-AcNow { $fixedNow }
@@ -88,6 +118,8 @@ try {
         [pscustomobject]@{ Name = 'GoogleUpdaterTaskUserShared'; TaskPath = '\'; Exe = (Join-Path $shared 'AppData/Local/Google/GoogleUpdater/updater.exe') },
         [pscustomobject]@{ Name = 'Other'; TaskPath = '\'; Exe = 'X:\Tools\other.exe' })
     function Get-AcTasks { $script:tasks }
+    # The real handle-based delete is tested on Windows above; here it is a plain delete.
+    function Remove-AcTree { param($Root, $Path) Remove-Item -LiteralPath $Path -Recurse -Force }
     $script:unregistered = New-Object System.Collections.Generic.List[string]
     function Unregister-AcTask { param($Task) $script:unregistered.Add($Task.Name) }
 
@@ -168,12 +200,6 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $junk 'AppData/Local/Google/Chrome/Application/chrome.exe')) 'unsafe Chrome untouched'
     Assert-True (Test-Path -LiteralPath (Join-Path $junk 'AppData/Local/Google/Chrome/Application/131.0.1/chrome.dll')) 'nothing deleted beside the reparse point'
     Assert-Same $script:mounted.Count 2 'hives loaded only for removed users'
-
-    # Remove-AcTree refuses a reparse point met during the delete (the race after the check).
-    $threw = $false
-    try { Remove-AcTree -Dir (Join-Path $junk 'AppData/Local/Google/Chrome/Application') } catch { $threw = $true }
-    Assert-True $threw 'Remove-AcTree throws on a reparse point'
-    Assert-True (Test-Path -LiteralPath (Join-Path $junk 'AppData/Local/Google/Chrome/Application/131.0.1/chrome.dll')) 'Remove-AcTree did not follow the reparse point'
 
     # A reparse point on the path above the target (AppData\Local\Google) is caught too.
     function Test-AcReparse { param($Path) ([string]$Path).Replace('\', '/') -like '*/busy/AppData/Local/Google' }
