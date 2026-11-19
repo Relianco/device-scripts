@@ -54,7 +54,11 @@ if ([string]$release.version -cne '158.0.8127.37') {
 if ([string]$release.arch -cne 'x64' -or [string]$release.file -cne 'googlechromestandaloneenterprise64.msi') {
     Fail 'release arch or file name'
 }
-if ($InstallerUrl -cne [string]$release.sourceUrl -or $InstallerSha256 -cne [string]$release.sha256) {
+if ([string]$release.blobBase -cne 'https://relianpub.blob.core.windows.net/pub/sec/') {
+    Fail "blob base '$($release.blobBase)'"
+}
+$blobUrl = [string]$release.blobBase + 'googlechromestandaloneenterprise64-' + [string]$release.sha256 + '.msi'
+if ($InstallerUrl -cne $blobUrl -or $InstallerSha256 -cne [string]$release.sha256) {
     Fail 'script defaults do not match windows/releases/chrome.json'
 }
 

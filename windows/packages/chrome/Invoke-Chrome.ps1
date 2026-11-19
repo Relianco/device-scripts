@@ -2,12 +2,14 @@
 # file is dot-sourced under RELIAN_DEPLOY_TEST.
 # InstallerUrl and InstallerSha256 are the pin in windows/releases/chrome.json.
 # The runner copies this script alone, so the values are inlined.
+# InstallerUrl is the relianpub copy (blobBase + googlechromestandaloneenterprise64-<sha256>.msi):
+# Google's URL always serves the latest MSI, so a pinned hash against it breaks at every release.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
     [string]$Action,
     [string]$PinVersion,
-    [string]$InstallerUrl = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi',
+    [string]$InstallerUrl = 'https://relianpub.blob.core.windows.net/pub/sec/googlechromestandaloneenterprise64-3a6e02f372f35dd9f97b4109440c5622e02db4c42406a7fd99d08145a5276ba0.msi',
     [string]$InstallerSha256 = '3a6e02f372f35dd9f97b4109440c5622e02db4c42406a7fd99d08145a5276ba0',
     [string]$CancelPath = '',
     [string]$MarkerRoot = ''
