@@ -181,7 +181,12 @@ function Test-NrPath { param([string]$Path) return (Test-Path -LiteralPath $Path
 function Invoke-NrProcess {
     param([string]$FilePath, [string]$Arguments, [int]$TimeoutSeconds = 900)
     $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -WindowStyle Hidden
-    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) { return -1 }
+    if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+        # Timed out: end it so no MSI transaction is left running under the cleanup.
+        try { $p.Kill() } catch { }
+        $null = $p.WaitForExit(60000)
+        return -1
+    }
     return $p.ExitCode
 }
 function Stop-NrProcesses { foreach ($n in $NrProcesses) { Get-Process -Name $n -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } }
@@ -324,6 +329,9 @@ function Invoke-NrRun {
             if ($exe) { Write-NrLog "uninstall prevention off: $(Invoke-NrProcess -FilePath $exe -Arguments '-disableUninstallPrevention NOUI' -TimeoutSeconds 60)" }
             $code = Invoke-NrProcess -FilePath 'msiexec.exe' -Arguments "/x$($u.ProductCode) /qn /norestart WRAPPED_ARGUMENTS=`"--mode unattended`""
             Write-NrLog "msiexec /x $($u.ProductCode) exit $code"
+            if ($code -eq -1) {
+                return @{ exitCode = 1; record = (New-NrRecord $mode $found @(Get-NrLeftovers) '' $true 'MSI uninstall timed out and was stopped; no cleanup or install done, retry later') }
+            }
         }
         Stop-NrProcesses
         foreach ($i in $found) {

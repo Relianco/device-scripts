@@ -84,7 +84,7 @@ function Reset-Fake {
     $script:fakeKeys = [System.Collections.Generic.List[object]]::new()
     $script:fakePaths = [System.Collections.Generic.HashSet[string]]::new()
     $script:sigStatus = 'Valid'; $script:sigSubject = 'CN=NinjaOne LLC, O=NinjaOne LLC, C=US'
-    $script:failures = 0; $script:failStatus = 0; $script:fileHash = $InstallerSha256; $script:stuck = ''; $script:installCode = 0; $script:serviceAfter = 'Running'
+    $script:failures = 0; $script:failStatus = 0; $script:fileHash = $InstallerSha256; $script:stuck = ''; $script:installCode = 0; $script:uninstallCode = 0; $script:serviceAfter = 'Running'
     $script:marker = $null
     if ($Empty) { return }
     $script:fakeServices.Add([pscustomobject]@{ Name = 'NinjaRMMAgent'; Path = "`"$agentExe`""; State = 'Stopped' })
@@ -104,6 +104,7 @@ function Invoke-NrProcess {
     param([string]$FilePath, [string]$Arguments, [int]$TimeoutSeconds = 900)
     $script:calls.Add("run $FilePath $Arguments")
     if ($Arguments -like '/i *') { return $script:installCode }
+    if ($Arguments -like '/x*') { return $script:uninstallCode }
     return 0
 }
 function Stop-NrProcesses { $script:calls.Add('stop processes') }
@@ -205,6 +206,13 @@ $json = $run.record | ConvertTo-Json -Depth 4 -Compress
 Assert-True (-not $json.Contains($token)) 'record never holds the token'
 Assert-True (-not (@($script:calls | Where-Object { $_ -like 'log *' }) -join ' ').Contains($token)) 'log never holds the token'
 Assert-True ($w[-1] -like 'remove *NinjaOneAgent-*.msi') 'downloaded MSI removed last'
+
+# 4b. The vendor uninstall times out (stopped by Invoke-NrProcess): no cleanup, no install, no marker.
+Reset-Fake; $script:uninstallCode = -1
+$run = Invoke-NrRun -Apply -Token $token
+Assert-Same $run.exitCode 1 'uninstall timeout exit'
+Assert-Same (@(Get-Writes | Where-Object { $_ -like 'delete *' -or $_ -like 'run msiexec.exe /i *' -or ($_ -like 'remove *' -and $_ -notlike '*.msi') }).Count) 0 'uninstall timeout stops before cleanup'
+Assert-Same $script:marker $null 'uninstall timeout writes no marker'
 
 # 5. Nothing left over (the agent was removed by hand): straight to the install.
 Reset-Fake -Empty
