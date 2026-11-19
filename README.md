@@ -239,6 +239,7 @@ These report by default and change the device only when you ask. None reboots un
 - `feature-update`: why Windows Update has not offered the next feature update. `Fix` `true` re-enables only the appraiser tasks.
 - `feature-upgrade`: an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task.
 - `restart-notice`: restarts a device with a pending restart after a notice. `ReportOnly` `true` restarts nothing.
+- `stay-awake`: keeps a device awake on AC power for a maintenance window. `Mode` `Hold` saves the sleep-after and unattended-sleep timeouts and sets both AC values to never; `Restore` (or `Uninstall`) puts the saved values back. The default, `Report`, changes nothing.
 - `outlook-autocomplete`: counts matching rows in Classic Outlook autocomplete caches. `Fix` `true` removes them.
 
 ### Diagnostics and evidence
