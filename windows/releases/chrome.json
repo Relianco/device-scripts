@@ -5,5 +5,6 @@
   "file": "googlechromestandaloneenterprise64.msi",
   "sha256": "3a6e02f372f35dd9f97b4109440c5622e02db4c42406a7fd99d08145a5276ba0",
   "size": 175902720,
-  "version": "158.0.8127.37"
+  "version": "158.0.8127.37",
+  "blobBase": "https://relianpub.blob.core.windows.net/pub/sec/"
 }

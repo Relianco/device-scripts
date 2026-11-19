@@ -189,7 +189,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `adobe-reader`: Adobe Acrobat Reader.
 - `app-cleanup`: read-only report of stale Firefox copies and classic Teams 1.x; with `Fix` `true` it removes a machine-wide old Firefox copy that is not running and is beside a current one or unused for `IdleDays` (90), and the classic Teams machine-wide installer (never new Teams). Per-user copies are report-only (`user-context`): remove them in the user session. Arguments: `Target` (`firefox`, `teams`, `all`), `Fix`, `CurrentMajor`, `IdleDays`.
 - `autoelevate`: installs or upgrades the AutoElevate agent and stops its services before an upgrade. A fresh install needs `CompanyName`, `LocationName` and the license key (`LicenseKey` argument or `AE_LICENSE_KEY` variable). `Section` `Evidence` is read-only. See `docs/autoelevate.md`.
-- `chrome`: Google Chrome.
+- `chrome`: Google Chrome, from a copy on relianpub (`sec/googlechromestandaloneenterprise64-<sha256>.msi`), because Google's URL always serves the latest MSI and would break the hash at every release. To bump: download the MSI from the `sourceUrl` in `windows/releases/chrome.json`, hash it, upload it with `az storage blob upload --auth-mode login --account-name relianpub -c pub -n sec/googlechromestandaloneenterprise64-<sha256>.msi -f <file>`, then update the sha256, size, version and `InstallerUrl` in `chrome.json`, `Invoke-Chrome.ps1` and the chrome tests.
 - `edge`: Microsoft Edge.
 - `everything`: Everything, the file search tool.
 - `firefox`: Mozilla Firefox.
