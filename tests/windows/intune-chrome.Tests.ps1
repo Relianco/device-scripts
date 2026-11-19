@@ -6,7 +6,7 @@ $packageDir = Join-Path $repoRoot 'windows/packages/chrome'
 $jsonPath = Join-Path $packageDir 'intune.json'
 $detectPath = Join-Path $packageDir 'Detect-Chrome.ps1'
 $releasePath = Join-Path $repoRoot 'windows/releases/chrome.json'
-$pin = '155.0.8059.85'
+$pin = '158.0.8127.37'
 
 function Fail {
     param([string]$Message)
@@ -241,7 +241,7 @@ if (-not (Test-ChromeDetectInstalled -Entries @($differentCase))) {
     Fail 'display name comparison was case-sensitive'
 }
 
-$abovePin = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '155.0.8059.100'
+$abovePin = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '158.0.8127.50'
 if (-not (Test-ChromeDetectInstalled -Entries @($abovePin))) {
     Fail 'Google Chrome newer than the pin was absent'
 }
@@ -251,7 +251,7 @@ if (-not (Test-ChromeDetectInstalled -Entries @($otherPublisher))) {
     Fail 'a publisher the installer does not read was treated as absent'
 }
 
-$older = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '155.0.8059.84'
+$older = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '158.0.8127.36'
 if (Test-ChromeDetectInstalled -Entries @($older)) {
     Fail 'Google Chrome older than the pin was present'
 }
@@ -277,14 +277,14 @@ if (-not (Test-ChromeDetectInstalled -Entries @($null, $atPin))) {
 }
 
 # The first key that has both a version and a product code is returned immediately.
-$olderComplete = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '155.0.8059.84' -UninstallString $productCode -PSChildName $productCode
+$olderComplete = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '158.0.8127.36' -UninstallString $productCode -PSChildName $productCode
 $laterComplete = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion $pin -UninstallString $productCode -PSChildName $productCode
 if (Test-ChromeDetectInstalled -Entries @($olderComplete, $laterComplete)) {
     Fail 'a later key was read after the first complete Google Chrome match'
 }
 
 # A later partial key does not replace the first partial key.
-$olderPartial = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '155.0.8059.84'
+$olderPartial = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion '158.0.8127.36'
 $laterPartial = New-ChromeDetectEntry -DisplayName 'Google Chrome' -DisplayVersion $pin
 if (Test-ChromeDetectInstalled -Entries @($olderPartial, $laterPartial)) {
     Fail 'a later partial key replaced the first partial Google Chrome key'
@@ -321,7 +321,7 @@ if (Test-ChromeDetectInstalled -Entries @($codeOnly) -UpdateVersion $pin) {
 if (-not (Test-ChromeDetectInstalled -Entries @($otherName) -UpdateVersion $pin)) {
     Fail 'Omaha pv at the pin was absent when no uninstall key was selected'
 }
-if (Test-ChromeDetectInstalled -Entries @() -UpdateVersion '155.0.8059.84') {
+if (Test-ChromeDetectInstalled -Entries @() -UpdateVersion '158.0.8127.36') {
     Fail 'older Omaha pv was present'
 }
 if (Test-ChromeDetectInstalled -Entries @() -UpdateVersion 'not-a-version') {

@@ -8,7 +8,7 @@ param(
     [string]$Action,
     [string]$PinVersion,
     [string]$InstallerUrl = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi',
-    [string]$InstallerSha256 = '9b7615c72f17f5ef7fa5cf3c7dbf872cebe9e8ebeae7786bb96b490214efb31c',
+    [string]$InstallerSha256 = '3a6e02f372f35dd9f97b4109440c5622e02db4c42406a7fd99d08145a5276ba0',
     [string]$CancelPath = '',
     [string]$MarkerRoot = ''
 )

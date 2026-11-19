@@ -108,7 +108,7 @@ function Test-ChromeDetectInstalled {
     )
     $selected = Find-ChromeDetectSelectedVersion -Entries $Entries -UpdateVersion $UpdateVersion
     $installed = Convert-ChromeDetectVersionText -Text $selected
-    $minimum = Convert-ChromeDetectVersionText -Text '155.0.8059.85'
+    $minimum = Convert-ChromeDetectVersionText -Text '158.0.8127.37'
     if (-not ($installed -is [version]) -or -not ($minimum -is [version])) {
         return $false
     }

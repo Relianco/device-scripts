@@ -3,7 +3,7 @@
   "arch": "x64",
   "sourceUrl": "https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi",
   "file": "googlechromestandaloneenterprise64.msi",
-  "sha256": "9b7615c72f17f5ef7fa5cf3c7dbf872cebe9e8ebeae7786bb96b490214efb31c",
-  "size": 168984576,
-  "version": "155.0.8059.85"
+  "sha256": "3a6e02f372f35dd9f97b4109440c5622e02db4c42406a7fd99d08145a5276ba0",
+  "size": 175902720,
+  "version": "158.0.8127.37"
 }

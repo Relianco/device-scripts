@@ -38,17 +38,17 @@ foreach ($command in @(
 
 $release = Get-Content -LiteralPath $releasePath -Raw -Encoding utf8 | ConvertFrom-Json
 $pinnedUrl = 'https://dl.google.com/dl/chrome/install/googlechromestandaloneenterprise64.msi'
-$pinnedSha = '9b7615c72f17f5ef7fa5cf3c7dbf872cebe9e8ebeae7786bb96b490214efb31c'
+$pinnedSha = '3a6e02f372f35dd9f97b4109440c5622e02db4c42406a7fd99d08145a5276ba0'
 if ([string]$release.sourceUrl -cne $pinnedUrl) {
     Fail "source URL '$($release.sourceUrl)'"
 }
 if ([string]$release.sha256 -cne $pinnedSha) {
     Fail 'sha256 does not match the downloaded MSI'
 }
-if ([int64]$release.size -ne 168984576) {
+if ([int64]$release.size -ne 175902720) {
     Fail "size $($release.size)"
 }
-if ([string]$release.version -cne '155.0.8059.85') {
+if ([string]$release.version -cne '158.0.8127.37') {
     Fail "version '$($release.version)'"
 }
 if ([string]$release.arch -cne 'x64' -or [string]$release.file -cne 'googlechromestandaloneenterprise64.msi') {
