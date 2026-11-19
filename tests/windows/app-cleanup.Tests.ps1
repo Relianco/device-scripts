@@ -12,8 +12,6 @@ Set-StrictMode -Off
 . $scriptPath
 Set-StrictMode -Version Latest
 
-$script:sessions = @()
-function Get-AcSessionUsers { @($script:sessions) }
 
 # Get-AcMode
 Assert-Same (Get-AcMode -Action 'Install' -Fix '' -Target 'all') 'check' 'default is check'
@@ -96,7 +94,7 @@ $r = Invoke-AcTeams -Fix $true
 Assert-Same $r.failed 0 'empty teams fix has no failures'
 Assert-Same $script:calls.Count 0 'no installer called when nothing is present'
 
-# Teams: a user copy that is running is skipped; a stopped one is uninstalled.
+# Teams: per-user copies are reported and never touched by SYSTEM.
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-ac-' + [guid]::NewGuid().ToString('n'))
 foreach ($u in 'busy', 'idle') {
     $d = Join-Path $tmp "$u\AppData\Local\Microsoft\Teams"
@@ -111,31 +109,14 @@ try {
     Assert-Same @($r.items).Count 2 'two user copies found'
     Assert-Same (@($r.items | Where-Object { $_.id -eq 'busy' })[0].action) 'skip-running' 'running user copy skipped'
     Assert-Same $script:calls.Count 0 'no user-writable file is executed'
-    if (-not (Test-Path -LiteralPath (Join-Path $tmp 'busy'))) { Fail 'running copy was deleted' }
-    if (Test-Path -LiteralPath (Join-Path $tmp 'idle\AppData\Local\Microsoft\Teams')) { Fail 'idle copy was not deleted' }
-    Assert-Same $r.failed 0 'verified removal has no failures'
+    
+    if (-not (Test-Path -LiteralPath (Join-Path $tmp 'idle\AppData\Local\Microsoft\Teams\Update.exe'))) { Fail 'per-user copy was deleted by SYSTEM' }
+    Assert-Same (@($r.items | Where-Object { $_.id -eq 'idle' })[0].action) 'user-context' 'stopped per-user copy is left for the user session'
+    Assert-Same $r.failed 0 'report-only per-user copies are not failures'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
 }
-
-# Remove-AcUserDir refuses a reparse-point ancestor (here a symlink standing in for a junction) and a dir outside the root.
-$rt = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-acr-' + [guid]::NewGuid().ToString('n'))
-try {
-    $outside = Join-Path $rt 'outside\victim'; $prof = Join-Path $rt 'prof'
-    [void](New-Item -ItemType Directory -Path $outside -Force); [void](New-Item -ItemType Directory -Path $prof -Force)
-    Set-Content -LiteralPath (Join-Path $outside 'f.txt') -Value 'x'
-    [void](New-Item -ItemType SymbolicLink -Path (Join-Path $prof 'link') -Target (Join-Path $rt 'outside'))
-    Assert-Same (Remove-AcUserDir -Dir (Join-Path $prof 'link\victim') -Root $prof) 2 'reparse ancestor refused'
-    if (-not (Test-Path -LiteralPath (Join-Path $outside 'f.txt'))) { Fail 'file outside the profile was deleted' }
-    Assert-Same (Remove-AcUserDir -Dir $outside -Root $prof) 2 'dir outside the root refused'
-    $ok = Join-Path $prof 'plain'; [void](New-Item -ItemType Directory -Path $ok)
-    $script:sessions = @('*'); $ok2 = Join-Path $prof 'plain2'; [void](New-Item -ItemType Directory -Path $ok2)
-    Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'any interactive session skips'
-    if (-not (Test-Path -LiteralPath $ok2)) { Fail 'dir of a signed-in user was deleted' }
-    $script:sessions = @('*')
-    Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'unreadable session list skips'
-    $script:sessions = @()
-    Assert-Same (Remove-AcUserDir -Dir $ok -Root $prof) 0 'plain dir under the root is removed'
-} finally { Remove-Item -LiteralPath $rt -Recurse -Force }
+# A per-user Firefox copy is never removed by SYSTEM, even when the plan says remove.
+Assert-Same (Remove-AcFirefox -Install ([pscustomobject]@{ Scope = 'user'; User = 'u1'; Path = 'x'; Msi = $false; Key = ''; Uninstall = '' })) 4 'per-user firefox is left for the user session'
 
 Write-Host 'PASS app-cleanup'

@@ -11,9 +11,11 @@
     IdleDays. An old copy that is in use is reported as "upgrade" and left alone: upgrade it with the
     firefox package, then run this again. A running copy is reported as "skip-running".
 
-    Teams: removes the classic Teams Machine-Wide Installer (msiexec /x) and each user's classic copy
-    (its Teams folder is deleted; no user-writable file is run as SYSTEM). A user's copy is skipped while that user's classic Teams runs. New Teams A per-user copy (Firefox or Teams) is also skipped while anyone has an interactive session on the PC, so a junction cannot be swapped during the delete.
-    (ms-teams) is never touched.
+    Teams: removes the classic Teams Machine-Wide Installer (msiexec /x). New Teams (ms-teams) is never touched.
+
+    Per-user copies (Firefox under a profile, classic Teams under AppData) are only reported, action "user-context":
+    they sit in a user-writable tree, and SYSTEM neither runs files there nor deletes recursively there (a junction
+    swap would redirect the delete). Remove them in the user session, for example with an Intune user-context script.
 
     The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as -Name value:
     Target, Fix, CurrentMajor, IdleDays (all strings). Install, Update, Repair and Reinstall run the check
@@ -24,8 +26,7 @@
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM
-    shortcut: deleting a per-user copy leaves the user HKCU Uninstall and Run keys and shortcuts; clean them when
-    an inventory tool keeps reporting a removed copy.
+    shortcut: per-user copies are report-only; upgrade to a user-context remover when one is needed.
 #>
 
 # Not Mandatory: a mandatory param block prompts when this file is dot-sourced under RELIAN_DEPLOY_TEST.
@@ -114,15 +115,6 @@ function Invoke-AcProcess {
     $p = Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
     return [int]$p.ExitCode
 }
-# Any interactive logon session (console, remote, cached; active or disconnected) on the PC returns @("*"), and so does a
-# failed read: per-user deletes fail closed. No name or SID matching, so a renamed account or a "name.DOMAIN" profile cannot slip past.
-function Get-AcSessionUsers {
-    try {
-        $s = @(Get-CimInstance -ClassName Win32_LogonSession -ErrorAction Stop | Where-Object { @(2, 10, 11, 12, 13) -contains [int]$_.LogonType })
-        if ($s.Count -gt 0) { return @("*") }
-        return @()
-    } catch { return @("*") }
-}
 function Get-AcNow { Get-Date }
 
 function Get-AcFirefoxInventory {
@@ -164,28 +156,10 @@ function Get-AcIdleByUser {
     return $h
 }
 
-# A per-user install dir is user-writable: SYSTEM never runs anything from it, it only deletes the tree.
-# Directory.Delete does not follow a junction inside the tree; a reparse-point top directory is refused.
-function Remove-AcUserDir {
-    param([string]$Dir, [string]$Root)
-    if (-not (Test-Path -LiteralPath $Dir)) { return 0 }
-    if (@(Get-AcSessionUsers).Count -gt 0) { return 4 }
-    # Only the owner (or an admin) can write inside a profile, so with no interactive session on the PC nothing can swap
-    # a junction between the checks below and the delete. With any session (active or disconnected) the delete is
-    # skipped (return 4). Refuse when the dir or an ancestor up to the profile root is a reparse point.
-    $cur = (Get-Item -LiteralPath $Dir -Force).FullName.TrimEnd([char]92, [char]47)
-    $top = $Root.TrimEnd([char]92, [char]47)
-    if (-not $cur.StartsWith($top + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return 2 }
-    for ($d = $cur; $d.Length -ge $top.Length; $d = Split-Path -Parent $d) {
-        if ((Get-Item -LiteralPath $d -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return 2 }
-        if ($d.Length -eq $top.Length) { break }
-    }
-    try { [System.IO.Directory]::Delete($Dir, $true); return 0 } catch { return 1 }
-}
-
 function Remove-AcFirefox {
     param($Install)
-    if ($Install.Scope -eq 'user') { return Remove-AcUserDir -Dir (Split-Path -Parent $Install.Path) -Root (Join-Path "$env:SystemDrive\Users" $Install.User) }
+    # A per-user copy sits in a user-writable tree: SYSTEM neither runs nor recursively deletes there (junction swap). 4 = left for user context.
+    if ($Install.Scope -eq 'user') { return 4 }
     if ($Install.Msi) { return Invoke-AcProcess -File "$env:SystemRoot\System32\msiexec.exe" -Arguments "/x $($Install.Key) /qn /norestart" }
     $helper = if ($Install.Uninstall -match '"?([^"]+helper\.exe)') { $Matches[1] } else { '' }
     if (-not $helper -or -not (Test-Path -LiteralPath $helper)) { return 2 }
@@ -246,10 +220,8 @@ function Invoke-AcTeams {
         $row = [ordered]@{ kind = 'user copy'; id = $u.Name; action = 'remove'; result = '' }
         if ($run.Count -gt 0) { $row.action = 'skip-running' }
         elseif ($Fix) {
-            $c = Remove-AcUserDir -Dir $dir -Root $u.FullName
-            $row.result = "exit $c"
-            if ($c -eq 4) { $row.result = "skipped: interactive session on the PC" }
-            elseif ($c -ne 0 -or (Test-Path -LiteralPath $dir)) { $failed++; $row.result += " but still present" }
+            $row.action = 'user-context'
+            $row.result = 'not removed: per-user copy, remove it in the user session'
         }
         $rows += $row
     }
