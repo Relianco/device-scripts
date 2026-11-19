@@ -18,6 +18,7 @@ $script:RpGptEfi = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
 $script:RpGptZero = '{00000000-0000-0000-0000-000000000000}'
 $script:RpMbrWinRe = 39
 $script:RpMaxBytes = 4294967296L
+$script:RpLabelMaxBytes = 2147483648L
 $script:RpBackupDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\RecoveryPartitionLetterBackup'
 $script:RpSystemDrive = $env:SystemDrive
 
@@ -50,6 +51,14 @@ $script:RpProtectDir = {
 
 $script:RpReadPartitions = {
     $parts = @(Get-Partition -ErrorAction Stop)
+    $volsByLetter = @{}
+    foreach ($v in @(Get-Volume -ErrorAction Stop)) {
+        $vl = if ($v.PSObject.Properties['DriveLetter'] -and $null -ne $v.DriveLetter) { [string]$v.DriveLetter } else { '' }
+        if ($vl -and $vl[0] -ne [char]0 -and $vl.Trim() -match '\A[A-Za-z]\z') {
+            $lbl = if ($v.PSObject.Properties['FileSystemLabel'] -and $null -ne $v.FileSystemLabel) { [string]$v.FileSystemLabel } else { '' }
+            $volsByLetter[$vl.Trim().ToUpperInvariant()] = $lbl
+        }
+    }
     $out = [Collections.Generic.List[object]]::new()
     foreach ($p in $parts) {
         $rawLetter = [string]$p.DriveLetter
@@ -57,6 +66,7 @@ $script:RpReadPartitions = {
         $gpt = if ($p.PSObject.Properties['GptType'] -and $null -ne $p.GptType) { [string]$p.GptType } else { '' }
         $mbr = if ($p.PSObject.Properties['MbrType'] -and $null -ne $p.MbrType) { [int]$p.MbrType } else { $null }
         $guid = if ($p.PSObject.Properties['Guid'] -and $null -ne $p.Guid) { [string]$p.Guid } else { '' }
+        $label = if ($letter -and $volsByLetter.ContainsKey($letter.ToUpperInvariant())) { [string]$volsByLetter[$letter.ToUpperInvariant()] } else { '' }
         $out.Add(@{
             diskNumber      = [int]$p.DiskNumber
             partitionNumber = [int]$p.PartitionNumber
@@ -66,6 +76,7 @@ $script:RpReadPartitions = {
             size            = [long]$p.Size
             isBoot          = [bool]$p.IsBoot
             guid            = $guid
+            label           = $label
         })
     }
     return @($out)
@@ -76,13 +87,13 @@ $script:RpRemoveLetter = {
     Remove-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -AccessPath "${DriveLetter}:\" -ErrorAction Stop
 }
 
-# Owner must be SYSTEM or Administrators; DACL must be protected and allow SYSTEM only.
+# Owner must be SYSTEM or Administrators; DACL must be protected, inheritable to files, and allow SYSTEM only.
 function Test-RpBackupAcl {
     param([AllowEmptyString()][string]$Sddl)
-    return ($Sddl -match '\AO:(SY|BA)G:[^:]*D:([A-Z]*)(\(A;[A-Z]*;[^;()]*;;;SY\))+\z' -and $Matches[2].Contains('P'))
+    return ($Sddl -match '\AO:(SY|BA)G:[^:]*D:([A-Z]*)(\(A;(?=[^;()]*OI)(?=[^;()]*CI)[A-Z]*;[^;()]*;;;SY\))+\z' -and $Matches[2].Contains('P'))
 }
 
-# Parent directory must be owned by SYSTEM or Administrators with no non-admin write, delete, or ownership-change ACEs.
+# Parent directory must be owned by SYSTEM or Administrators with no non-admin write, create, delete, or ownership-change ACEs.
 function Test-RpParentAcl {
     param([AllowEmptyString()][string]$Sddl)
     if ($Sddl -notmatch '\AO:(SY|BA)G:[^:]*D:[^()]*((?:\([^()]+\))+)') { return $false }
@@ -91,16 +102,17 @@ function Test-RpParentAcl {
         $parts = $m.Groups[1].Value -split ';'
         if ($parts.Count -lt 6) { return $false }
         $aceType = $parts[0]
+        $aceFlags = $parts[1]
         $rights = $parts[2]
         $trustee = $parts[5]
         if ($aceType -ne 'A') { continue }
         if ($trustee -in @('SY', 'BA')) { continue }
-        if ($trustee -eq 'CO' -and $parts[1] -match 'IO') { continue }
-        if ($rights -match '^(FA|GA|GW|KA)$' -or $rights -match '(DC|SD|WD|WDAC|WO)') { return $false }
+        if ($aceFlags -match 'IO') { continue }
+        if ($rights -match '(FA|GA|GW|FW|KW|KA|DC|SD|WD|AD|CC|WDAC|WO)') { return $false }
         if ($rights -match '^0x([0-9a-fA-F]+)$') {
             $mask = [Convert]::ToInt64($Matches[1], 16)
-            # Reject generic all/write, delete, delete-child, write-dac, write-owner.
-            if (($mask -band 0x500D0040) -ne 0) { return $false }
+            # Reject generic all/write, delete, delete-child, write-dac, write-owner, write-data/create-file (0x2), append-data/create-subdir (0x4), write-ea (0x10), write-attributes (0x100).
+            if (($mask -band 0x500D0156) -ne 0) { return $false }
         }
     }
     return $true
@@ -156,10 +168,17 @@ function Get-RpPartitionKind {
     if ($gpt -and $gpt -ne $script:RpGptZero) {
         if ($gpt -eq $script:RpGptWinRe) { return 'gpt-winre' }
         if ($gpt -eq $script:RpGptEfi) { return 'gpt-efi' }
-        return $null
+    } else {
+        $mbrRaw = Get-RpProp $Partition 'mbrType' $null
+        if ($null -ne $mbrRaw -and [int]$mbrRaw -eq $script:RpMbrWinRe) { return 'mbr-winre' }
     }
-    $mbrRaw = Get-RpProp $Partition 'mbrType' $null
-    if ($null -ne $mbrRaw -and [int]$mbrRaw -eq $script:RpMbrWinRe) { return 'mbr-winre' }
+    $size = [long](Get-RpProp $Partition 'size' 0)
+    $lblRaw = Get-RpProp $Partition 'label' ''
+    $lbl = if ($null -ne $lblRaw) { ([string]$lblRaw).Trim() } else { '' }
+    if ($size -gt 0 -and $size -le $script:RpLabelMaxBytes -and $lbl) {
+        if ($lbl -imatch '\ASystem Reserved\z') { return 'label-system-reserved' }
+        if ($lbl -imatch '\A(Recovery|WinRE|Windows RE tools)\z') { return 'label-recovery' }
+    }
     return $null
 }
 
@@ -189,6 +208,7 @@ function Get-RpTargets {
             mbrType         = (Get-RpProp $p 'mbrType' $null)
             size            = $size
             guid            = [string](Get-RpProp $p 'guid' '')
+            label           = [string](Get-RpProp $p 'label' '')
         })
     }
     $sorted = @($found | Sort-Object @{ Expression = { $_.diskNumber } }, @{ Expression = { $_.partitionNumber } })
@@ -222,7 +242,8 @@ function Test-RpTargetsEqual {
             [string](Get-RpProp $a[$i] 'driveLetter' '') -ne [string](Get-RpProp $b[$i] 'driveLetter' '') -or
             [string](Get-RpProp $a[$i] 'kind' '') -ne [string](Get-RpProp $b[$i] 'kind' '') -or
             [long](Get-RpProp $a[$i] 'size' -1) -ne [long](Get-RpProp $b[$i] 'size' -1) -or
-            [string](Get-RpProp $a[$i] 'guid' '') -ne [string](Get-RpProp $b[$i] 'guid' '')) {
+            [string](Get-RpProp $a[$i] 'guid' '') -ne [string](Get-RpProp $b[$i] 'guid' '') -or
+            [string](Get-RpProp $a[$i] 'label' '') -ne [string](Get-RpProp $b[$i] 'label' '')) {
             return $false
         }
     }
