@@ -13,10 +13,14 @@
     script only the drive letter and the UNC or local path of a drive-mapping line are kept, so no user name or
     password can come through. A cpassword is counted, never printed.
 
-    Arguments (base64 flat JSON; values [A-Za-z0-9{}.-], so no path can be passed):
-      Section  Discover (default), Summary, Tree, Acl, Access or Open
+    Arguments (base64 flat JSON; values [A-Za-z0-9{}.-] of at most 64 characters, so a path goes as hex):
+      Section  Discover (default), Summary, Tree, Acl, Access, Open or TopLevel
       Folder   folder or share name to inventory (default Accounting). Looked for as a share name, a child of a
                share path, a child of a fixed volume root, and one level below a volume root.
+      FolderHex  instead of Folder: lower- or upper-case hex of the UTF-8 bytes of a name ('Client Files'), a
+               relative path ('Client Files\Sub Folder', looked for like Folder) or a full local path
+               ('F:\Client Files\Sub Folder', used as is). Over 64 hex characters, split it in order into
+               FolderHex, FolderHex2 ... FolderHex8, each at most 64 (256 bytes in all).
       Pick     index into "candidates" when Folder matches more than one path (default 0)
       Offset   first row for Tree and Acl (the previous run prints nextOffset)
 
@@ -33,6 +37,10 @@
       Access    principals in the root ACL, depth-1 explicit ACEs and the containing share ACL, resolved in AD:
                 broad principals flagged, groups expanded to users with enabled, last logon and parent OU.
       Open      SMB open files and sessions under the root, with families and the folders they sit in.
+      TopLevel  the root's immediate child folders, each with files, bytes, folders and newest write from a
+                totals-only walk, paged by Offset. A child the clock cuts is left for the next call (nextOffset),
+                unless it is the call's first child: then it is printed as partial, and too big for one call,
+                so scope to it with FolderHex. For a share too big for Summary or Tree in 85 seconds.
 
     Limits: a walk stops starting new work after 85 seconds and reports status "partial" (the loader kills the
     child at 120 s). A list cut to fit the size cap sets truncated; a paged list is never cut (nextOffset).
@@ -51,14 +59,16 @@ param(
     [string]$Section = 'Discover',
     [string]$Folder = 'Accounting',
     [string]$Pick = '0',
-    [string]$Offset = '0'
+    [string]$Offset = '0',
+    [string]$FolderHex, [string]$FolderHex2, [string]$FolderHex3, [string]$FolderHex4,
+    [string]$FolderHex5, [string]$FolderHex6, [string]$FolderHex7, [string]$FolderHex8
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 #region Settings and data tables
-$script:FiVersion = '1.0.0'
-$script:FiSections = @('Discover', 'Summary', 'Tree', 'Acl', 'Access', 'Open')
+$script:FiVersion = '1.1.0'
+$script:FiSections = @('Discover', 'Summary', 'Tree', 'Acl', 'Access', 'Open', 'TopLevel')
 $script:FiClock = [Diagnostics.Stopwatch]::StartNew()
 $script:FiBudgetSeconds = 85
 $script:FiMaxBytes = 7200
@@ -355,6 +365,38 @@ function Invoke-FiWalk {
     return $w
 }
 
+# Totals only (files, bytes, folders, newest write) under $Path: the cheap walk TopLevel runs once per child.
+# Same rules as Invoke-FiWalk: lazy enumeration under the time budget, reparse points counted, not followed.
+function Measure-FiTree {
+    param([string]$Path)
+    $m = @{ files = 0; bytes = [int64]0; dirs = 0; newest = [DateTime]::MinValue; unreadable = 0; partial = $false }
+    $prefix = Get-FiLongPrefix $Path
+    $stack = [Collections.Generic.Stack[object]]::new()
+    $stack.Push([IO.DirectoryInfo]::new($prefix + $Path))
+    $seen = 0
+    while ($stack.Count) {
+        if (Test-FiOverBudget) { $m.partial = $true; break }
+        $dir = $stack.Pop()
+        $entries = $null
+        while ($true) {
+            try {
+                if ($null -eq $entries) { $entries = $dir.EnumerateFileSystemInfos().GetEnumerator() }
+                if (-not $entries.MoveNext()) { break }
+            } catch { $m.unreadable++; break }
+            $e = $entries.Current
+            if ((++$seen % 256) -eq 0 -and (Test-FiOverBudget)) { $m.partial = $true; break }
+            if ($e.Attributes -band [IO.FileAttributes]::Directory) {
+                $m.dirs++
+                if (-not ($e.Attributes -band [IO.FileAttributes]::ReparsePoint)) { $stack.Push($e) }
+                continue
+            }
+            $m.files++; $m.bytes += [int64]$e.Length
+            if ($e.LastWriteTimeUtc -gt $m.newest) { $m.newest = $e.LastWriteTimeUtc }
+        }
+    }
+    return $m
+}
+
 # Child folders of $Path to $Depth levels, as full paths; unreadable folders are skipped and counted.
 function Get-FiChildFolders {
     param([string]$Path, [int]$Depth = 1, $Report)
@@ -389,10 +431,48 @@ function ConvertTo-FiRootPath {
     return $t
 }
 
+# FolderHex parts joined in order. A part after an empty one is refused, so a dropped part cannot shorten the path.
+function Join-FiHexParts {
+    param([string[]]$Parts)
+    $joined = ''; $gap = $false
+    foreach ($p in $Parts) {
+        if (-not $p) { $gap = $true; continue }
+        if ($gap) { throw [ArgumentException]::new('Bad argument.') }
+        $joined += $p
+    }
+    return $joined
+}
+
+# The folder FolderHex names: hex of UTF-8 bytes, decoded strictly. A name, a relative path or a full local path
+# ('X:\...'; on a host whose separator is '/', a '/' path, so tests walk a real tree). No '.' or '..' segment,
+# no empty segment (so no UNC or '\\?\'), no character Windows refuses in a name.
+function ConvertFrom-FiFolderHex {
+    param([string]$Hex)
+    $bad = [ArgumentException]::new('Bad argument.')
+    if ($Hex -cnotmatch '\A(?:[0-9A-Fa-f]{2}){1,256}\z') { throw $bad }
+    $bytes = [byte[]]::new($Hex.Length / 2)
+    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($Hex.Substring($i * 2, 2), 16) }
+    try { $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) } catch { throw $bad }
+    $rest = $text; $rooted = $true
+    if ($text -match '\A[A-Za-z]:[\\/]') { $rest = $text.Substring(3) }
+    elseif ([IO.Path]::DirectorySeparatorChar -eq '/' -and $text.StartsWith('/')) { $rest = $text.Substring(1) }
+    else { $rooted = $false }
+    $rest = $rest.TrimEnd('\', '/')
+    if ($rest -match '[\x00-\x1F<>:"|?*]') { throw $bad }
+    if ($rest) { foreach ($s in $rest -split '[\\/]') { if ($s -eq '' -or $s -match '\A\.+\z') { throw $bad } } }
+    elseif (-not $rooted) { throw $bad }
+    return $text
+}
+
 # Paths that could be Folder: a share named Folder, a child of a share path, a child of a volume root, one level down.
+# A full local path (from FolderHex) is the only candidate, when it exists.
 function Get-FiCandidates {
     param([string]$Name)
     $seen = [Collections.Generic.List[string]]::new()
+    if ($Name -match '\A[A-Za-z]:[\\/]' -or ([IO.Path]::DirectorySeparatorChar -eq '/' -and $Name.StartsWith('/'))) {
+        if ([IO.Directory]::Exists($Name)) { $seen.Add((ConvertTo-FiRootPath $Name)) }
+        return @($seen)
+    }
     $add = { param($p) if ($p -and [IO.Directory]::Exists($p)) { $t = ConvertTo-FiRootPath $p; if (-not @($seen | Where-Object { $_ -ieq $t }).Count) { $seen.Add($t) } } }
     $shares = @(); try { $shares = Get-FiShareList } catch { }
     foreach ($s in $shares) { if ($s.Name -ieq $Name) { & $add $s.Path } }
@@ -560,6 +640,42 @@ function Get-FiDbClusters {
     return @($rows | Sort-Object @{ Expression = 'n'; Descending = $true }, dir | Select-Object -First $Top | ForEach-Object { $_.text })
 }
 
+# TopLevel: the root's child folders with totals, for a share too big to walk in one call. Paged by Offset and by
+# the clock: the walk stops at a child boundary, so each printed row is complete or marked partial.
+function Get-FiTopLevelSection {
+    param([string]$Root, [int]$Start, $Report)
+    $children = @(Get-FiChildFolders $Root 1 $Report)
+    $Report.childCount = $children.Count
+    $Report.offset = $Start
+    $Report.rowFormat = 'name|state|files|bytes|folders|newestWrite|unreadableFolders'
+    if ($Start -eq 0) {
+        Invoke-FiStep $Report 'rootFiles' {
+            $n = 0; $b = [int64]0
+            foreach ($f in [IO.DirectoryInfo]::new($Root).EnumerateFiles()) { $n++; $b += [int64]$f.Length }
+            $Report.rootFiles = [string]$n + '|' + $b
+        }
+    }
+    $budget = $script:FiPageBytes - (Get-FiJsonBytes $Report) - 120
+    $rows = [Collections.Generic.List[string]]::new()
+    $next = $null
+    for ($i = [Math]::Max(0, $Start); $i -lt $children.Count; $i++) {
+        if ($rows.Count -and $script:FiClock.Elapsed.TotalSeconds -gt $script:FiBudgetSeconds) { $next = $i; break }
+        $m = Measure-FiTree $children[$i]
+        # Cut by the clock after other rows: leave it whole for the next call, which starts with a full budget.
+        if ($m.partial -and $rows.Count) { $script:FiOutOfTime = $false; $next = $i; break }
+        $state = 'done'; if ($m.partial) { $state = 'partial' }
+        $newest = ''; if ($m.newest -gt [DateTime]::MinValue) { $newest = $m.newest.ToString('yyyy-MM-dd') }
+        $row = (Protect-FiText (Split-Path -Leaf $children[$i]) -Max 60) + '|' + $state + '|' + $m.files + '|' + $m.bytes + '|' + $m.dirs + '|' + $newest + '|' + $m.unreadable
+        $size = (Get-FiJsonBytes $row) + 1
+        if ($size -gt $budget -and $rows.Count) { $next = $i; break }
+        $budget -= $size
+        $rows.Add($row)
+        if ($m.partial -or $m.unreadable) { $Report.status = 'partial' }
+    }
+    $Report.rows = $rows.ToArray()
+    $Report.nextOffset = $next
+}
+
 # Tree: folders to depth 4 with recursive sums, paged by Offset.
 function Get-FiTreeSection {
     param([string]$Root, [int]$Start, $Report)
@@ -700,10 +816,11 @@ function Get-FiOpenSection {
 
 #region Dispatcher
 function Invoke-FolderInventory {
-    param([string]$Section = 'Discover', [string]$Folder = 'Accounting', [string]$Pick = '0', [string]$Offset = '0')
+    param([string]$Section = 'Discover', [string]$Folder = 'Accounting', [string]$Pick = '0', [string]$Offset = '0', [string]$FolderHex = '')
     if ($script:FiSections -notcontains $Section) { throw [ArgumentException]::new('Unknown section.') }
     # No '..' or '.': Folder is joined to share and volume paths.
     if ($Folder -cnotmatch '^[A-Za-z0-9.{}-]{1,64}$' -or $Folder -match '^\.+$' -or $Pick -cnotmatch '^[0-9]{1,2}$' -or $Offset -cnotmatch '^[0-9]{1,5}$') { throw [ArgumentException]::new('Bad argument.') }
+    if ($FolderHex) { $Folder = ConvertFrom-FiFolderHex $FolderHex }
     $Section = $script:FiSections | Where-Object { $_ -eq $Section } | Select-Object -First 1
     $report = [ordered]@{ job = 'folder-inventory'; version = $script:FiVersion; section = $Section; status = 'ok'; truncated = $false; errors = @() }
     $root = Resolve-FiRoot $Folder ([int]$Pick) $report
@@ -716,6 +833,7 @@ function Invoke-FolderInventory {
             'Acl' { Get-FiAclSection $root ([int]$Offset) $report }
             'Access' { Get-FiAccessSection $root $report }
             'Open' { Get-FiOpenSection $root $report }
+            'TopLevel' { Get-FiTopLevelSection $root ([int]$Offset) $report }
         }
     }
     if ($script:FiOutOfTime -and $report.status -eq 'ok') { $report.status = 'partial' }
@@ -726,5 +844,8 @@ function Invoke-FolderInventory {
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
 if ($Action -eq 'Uninstall') { [Console]::Out.WriteLine('{"job":"folder-inventory","status":"nothingToUninstall"}'); exit 0 }
 if ($Action -and @('Install', 'Update', 'Repair', 'Reinstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
-try { [Console]::Out.WriteLine((Invoke-FolderInventory -Section $Section -Folder $Folder -Pick $Pick -Offset $Offset)); exit 0 }
+try {
+    $hex = Join-FiHexParts @($FolderHex, $FolderHex2, $FolderHex3, $FolderHex4, $FolderHex5, $FolderHex6, $FolderHex7, $FolderHex8)
+    [Console]::Out.WriteLine((Invoke-FolderInventory -Section $Section -Folder $Folder -Pick $Pick -Offset $Offset -FolderHex $hex)); exit 0
+}
 catch { [Console]::Out.WriteLine('{"job":"folder-inventory","section":"' + ($Section -replace '[^A-Za-z]', '') + '","status":"error","error":"' + ($_.Exception.GetType().Name -replace '[^A-Za-z.]', '') + '"}'); exit 1 }
