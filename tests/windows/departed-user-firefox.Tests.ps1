@@ -75,6 +75,21 @@ try {
     Assert-Same $r.report.filesOutsideOneDrive.Documents 1 'one document outside OneDrive'
     Assert-Same @($r.firefoxFolders).Count 1 'firefox folder listed'
 
+    # Redirected known folders: a link into a OneDrive folder counts as inside, a link to somewhere else is counted, an
+    # unresolvable link is reported as -1.
+    $lp = Join-Path $root 'redir.user'
+    foreach ($rel in 'OneDrive - Firm/Documents', 'D_drive/Desktop') { [void](New-Item -ItemType Directory -Path (Join-Path $lp $rel) -Force) }
+    Set-Content -LiteralPath (Join-Path $lp 'OneDrive - Firm/Documents/a.docx') -Value 'x'
+    Set-Content -LiteralPath (Join-Path $lp 'D_drive/Desktop/b.docx') -Value 'x'
+    Set-Content -LiteralPath (Join-Path $lp 'D_drive/Desktop/c.docx') -Value 'x'
+    [void](New-Item -ItemType SymbolicLink -Path (Join-Path $lp 'Documents') -Target (Join-Path $lp 'OneDrive - Firm/Documents'))
+    [void](New-Item -ItemType SymbolicLink -Path (Join-Path $lp 'Desktop') -Target (Join-Path $lp 'D_drive/Desktop'))
+    $rep = Get-DuReport -Profile $lp
+    Assert-Same $rep.filesOutsideOneDrive.Documents 0 'link into OneDrive counts as inside'
+    Assert-Same $rep.filesOutsideOneDrive.Desktop 2 'link to another folder is counted as outside'
+    function Get-DuLinkTarget { param([string]$Path) $null }
+    Assert-Same (Get-DuReport -Profile $lp).filesOutsideOneDrive.Desktop -1 'unresolvable link is reported as unknown'
+
     # Fix with every guard satisfied removes only the Firefox folder and its uninstall entry; the profile and documents stay.
     $r = Run-Du -Fix
     Assert-Same @($r.refused).Count 0 'no refusals'

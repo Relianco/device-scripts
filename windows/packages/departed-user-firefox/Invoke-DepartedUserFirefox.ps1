@@ -5,13 +5,14 @@
 
 .DESCRIPTION
     The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as -Name value (all strings):
-    User (the account name, as in C:\Users\<User>), Fix ("true" removes; anything else reports only).
+    User (the account name, which is also the name of its profile folder), Fix ("true" removes; anything else reports only).
 
     Report (always): profile size, Firefox profile size, sizes of the top folders under the profile, whether OneDrive is
     present, and how many files under Desktop, Documents and Downloads are NOT inside a OneDrive folder (so the owner can decide
     on retention). Nothing is deleted or read beyond names, sizes and dates.
 
-    Fix removes C:\Users\<User>\AppData\Local\Mozilla Firefox and ...\Programs\Mozilla Firefox (when present) and the HKLM
+    Fix removes the Firefox program folders inside that user's profile (AppData\Local\Mozilla Firefox and
+    AppData\Local\Programs\Mozilla Firefox, when present) and the HKLM
     Uninstall entries whose install location is one of those folders. It never touches the profile or any other file. As SYSTEM,
     it refuses (exit 1, nothing changed) unless ALL of these hold:
       - the account exists in the domain and is disabled (userAccountControl bit 2). An unreachable directory refuses.
@@ -89,6 +90,11 @@ function Get-DuFolderBytes {
     foreach ($f in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)) { $sum += [int64]$f.Length }
     return $sum
 }
+function Get-DuLinkTarget {
+    param([string]$Path)
+    try { $t = @((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Target); if ($t.Count -and $t[0]) { return [string]$t[0] } } catch { }
+    return $null
+}
 function Test-DuReparse { param([string]$Path) [bool]((Get-Item -LiteralPath $Path -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
 
 # Folders that may be removed for this user, under the profile root only.
@@ -128,9 +134,15 @@ function Get-DuReport {
     foreach ($n in 'Desktop', 'Documents', 'Downloads') {
         $p = Join-Path $Profile $n
         if (-not (Test-Path -LiteralPath $p)) { $outside[$n] = 0; continue }
-        # A redirected known folder is a reparse point into OneDrive; its files are not "outside".
-        if (Test-DuReparse -Path $p) { $outside[$n] = 0; continue }
-        $outside[$n] = @(Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction SilentlyContinue).Count
+        # A redirected known folder is a reparse point: its files are inside OneDrive only when its resolved target is. A target
+        # elsewhere (local disk, share) is counted as outside; a target that cannot be resolved is reported as -1 (unknown).
+        if (Test-DuReparse -Path $p) {
+            $target = Get-DuLinkTarget -Path $p
+            if (-not $target) { $outside[$n] = -1; continue }
+            if ($target -match '(?i)[\\/]OneDrive[^\\/]*([\\/]|$)') { $outside[$n] = 0; continue }
+            $p = $target
+        }
+        try { $outside[$n] = @(Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction Stop).Count } catch { $outside[$n] = -1 }
     }
     $latest = Get-ChildItem -LiteralPath $Profile -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     return [ordered]@{
