@@ -24,6 +24,18 @@
       "inf": "KOUWNJ1_.inf",
       "catalog": "KOUWNJ1_.CAT",
       "stage": "SevenZipSfx"
+    },
+    {
+      "id": "ToshibaUniversalPcl2",
+      "driverName": "TOSHIBA Universal Printer 2",
+      "sourceUrl": "https://business.toshiba.com/downloads/KB/f1Ulds/21836/ebn-Uni-7.222.5412.313.zip",
+      "file": "ebn-Uni-7.222.5412.313.zip",
+      "sha256": "118ed2bdda94084b553a4d862e59913a565d6e7a2f3f3b1304b22caee4949415",
+      "size": 87653514,
+      "version": "7.222.5412.313",
+      "inf": "eSf6u.inf",
+      "catalog": "eSf6u.cat",
+      "stage": "Zip"
     }
   ]
 }

@@ -61,8 +61,8 @@ if ([string]$release.name -cne 'printer-tcp') {
 }
 $releaseDrivers = @($release.drivers)
 $models = Get-PrinterTcpModels
-if (@($models).Count -ne 2 -or $releaseDrivers.Count -ne 2) {
-    Fail 'model catalog must contain exactly two drivers'
+if (@($models).Count -ne 3 -or $releaseDrivers.Count -ne 3) {
+    Fail 'model catalog must contain exactly three drivers'
 }
 $scriptText = Get-Content -LiteralPath $scriptPath -Raw -Encoding utf8
 foreach ($driver in $releaseDrivers) {
@@ -110,7 +110,8 @@ foreach ($driver in $releaseDrivers) {
 
 $brother = Get-PrinterTcpModel -Id 'BrotherHlL2370Dw'
 $konica = Get-PrinterTcpModel -Id 'KonicaUniversalPcl'
-if ($null -eq $brother -or $null -eq $konica) {
+$toshiba = Get-PrinterTcpModel -Id 'ToshibaUniversalPcl2'
+if ($null -eq $brother -or $null -eq $konica -or $null -eq $toshiba) {
     Fail 'known model was missing'
 }
 if ($brother.DriverName -cne 'Brother HL-L2370DW series') {
@@ -119,11 +120,20 @@ if ($brother.DriverName -cne 'Brother HL-L2370DW series') {
 if ($konica.DriverName -cne 'KONICA MINOLTA Universal PCL') {
     Fail 'Konica driver name is not the unversioned name'
 }
-if ($brother.Stage -cne 'Cab' -or $konica.Stage -cne 'SevenZipSfx') {
+if ($toshiba.DriverName -cne 'TOSHIBA Universal Printer 2') {
+    Fail 'Toshiba driver name did not match'
+}
+if ($brother.Stage -cne 'Cab' -or $konica.Stage -cne 'SevenZipSfx' -or $toshiba.Stage -cne 'Zip') {
     Fail 'stage does not match the pin'
 }
 if (-not [string]::IsNullOrEmpty([string]$brother.Referer)) {
     Fail 'Brother set a Referer'
+}
+if (-not [string]::IsNullOrEmpty([string]$toshiba.Referer)) {
+    Fail 'Toshiba set a Referer'
+}
+if (-not [string]::IsNullOrEmpty([string]$toshiba.OuterSubject)) {
+    Fail 'Toshiba zip set an OuterSubject'
 }
 $konicaReferer = 'https://onyxweb.mykonicaminolta.com/OneStopProductSupport?appMode=Public&target=Drivers'
 if ([string]$konica.Referer -cne $konicaReferer) {
@@ -821,6 +831,8 @@ $script:OriginalBrotherUrl = [string]$brother.SourceUrl
 $script:OriginalBrotherSha = [string]$brother.Sha256
 $script:OriginalKonicaUrl = [string]$konica.SourceUrl
 $script:OriginalKonicaSha = [string]$konica.Sha256
+$script:OriginalToshibaUrl = [string]$toshiba.SourceUrl
+$script:OriginalToshibaSha = [string]$toshiba.Sha256
 $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ('printer-tcp-plan-' + [guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
 $script:MarkerRoot = Join-Path $script:Root 'marker'
@@ -830,6 +842,8 @@ function Restore-Models {
     $brother.Sha256 = $script:OriginalBrotherSha
     $konica.SourceUrl = $script:OriginalKonicaUrl
     $konica.Sha256 = $script:OriginalKonicaSha
+    $toshiba.SourceUrl = $script:OriginalToshibaUrl
+    $toshiba.Sha256 = $script:OriginalToshibaSha
 }
 
 function Reset-Case {
@@ -1025,6 +1039,25 @@ function Reset-Case {
             [System.IO.File]::WriteAllBytes((Join-Path $dir 'KOUWNJ1_.CAT'), [byte[]]@(8))
         }
     }
+    $script:ExpandZip = {
+        param($ZipPath, $Destination)
+        $script:ExpandKinds.Add('Zip')
+        $dir = Join-Path $Destination 'UNI/Driver/64bit'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $inf = @(
+            '[SourceDisksNames]'
+            '1 = %SOURCE_DISK%,,,'
+            '2 = %SOURCE_DISK%,eSf6usfpkg.cab,,'
+            ''
+            '[SourceDisksFiles]'
+            'eSf6u.dll = 1'
+            'eSf6usf_builtin.dll = 2'
+        ) -join "`r`n"
+        [System.IO.File]::WriteAllText((Join-Path $dir 'eSf6u.inf'), $inf)
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'eSf6u.dll'), [byte[]]@(7))
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'eSf6usfpkg.cab'), [byte[]]@(6))
+        [System.IO.File]::WriteAllBytes((Join-Path $dir 'eSf6u.cat'), [byte[]]@(5))
+    }
     $script:GetAuthenticodeSignature = {
         param($Path)
         $script:SignaturePaths.Add([string]$Path)
@@ -1053,6 +1086,19 @@ function Reset-Case {
                 HasTimestamp = $false
             }
         }
+        if ($leaf -ceq 'eSf6u.cat') {
+            $norm = $Path.Replace('\', '/')
+            $dir = Split-Path -Parent $Path
+            $dll = Join-Path $dir 'eSf6u.dll'
+            $cab = Join-Path $dir 'eSf6usfpkg.cab'
+            if ($norm.Contains('/64bit/') -and (Test-Path -LiteralPath $dll) -and (Test-Path -LiteralPath $cab)) {
+                $script:LayoutOk = $true
+            }
+            return [pscustomobject]@{ Status = 'Valid'; Subject = $whql; HasTimestamp = $true }
+        }
+        if ($Path -like '*.zip') {
+            return [pscustomobject]@{ Status = 'UnknownError'; Subject = '' }
+        }
         if ($Path -like '*.exe') {
             return [pscustomobject]@{ Status = 'Valid'; Subject = 'CN=KONICA MINOLTA, O=KONICA MINOLTA' }
         }
@@ -1065,6 +1111,9 @@ function Reset-Case {
         if ($leaf -ceq 'KOUWNJ1_.inf') {
             $script:DriverNames.Add('KONICA MINOLTA Universal PCL')
             $script:DriverVersions['KONICA MINOLTA Universal PCL'] = '3.9.1203.500'
+        } elseif ($leaf -ceq 'eSf6u.inf') {
+            $script:DriverNames.Add('TOSHIBA Universal Printer 2')
+            $script:DriverVersions['TOSHIBA Universal Printer 2'] = '7.222.5412.313'
         } else {
             $script:DriverNames.Add('Brother HL-L2370DW series')
             $script:DriverVersions['Brother HL-L2370DW series'] = '1.6.0.0'
@@ -1078,6 +1127,8 @@ function Use-FakePins {
     $brother.SourceUrl = 'https://example.invalid/brother.cab'
     $konica.Sha256 = $script:GoodSha
     $konica.SourceUrl = 'https://example.invalid/konica.exe'
+    $toshiba.Sha256 = $script:GoodSha
+    $toshiba.SourceUrl = 'https://example.invalid/toshiba.zip'
 }
 
 function Read-Marker {
@@ -1419,6 +1470,26 @@ try {
 
     Reset-Case
     Use-FakePins
+    $code = Invoke-Case -PrinterModel 'ToshibaUniversalPcl2' -PinVersion '7.222.5412.313' -PrinterName 'Office Toshiba' -PrinterAddress '192.0.2.12' -PrinterColor 'Grayscale' -PrinterDuplex 'OneSided' -PrinterTray 'Auto'
+    if ($code -ne 0 -or $script:DownloadCount -ne 1 -or $script:Referers.Count -ne 1 -or $script:Referers[0] -cne '') {
+        Fail "Toshiba install returned $code downloads $($script:DownloadCount)"
+    }
+    if ($script:ExpandKinds.Count -ne 1 -or $script:ExpandKinds[0] -cne 'Zip' -or -not $script:LayoutOk) {
+        Fail 'Toshiba install did not expand the zip or pass layout before the catalog check'
+    }
+    if ($script:PnpPaths.Count -ne 1 -or $script:PnpPaths[0].Replace('\', '/') -notlike '*/64bit/eSf6u.inf') {
+        Fail "Toshiba pnputil path '$($script:PnpPaths -join ',')'"
+    }
+    if ($script:AddCalls.Count -ne 1 -or $script:AddCalls[0].DriverName -cne 'TOSHIBA Universal Printer 2' -or $script:AddCalls[0].PortName -cne 'IP_192.0.2.12') {
+        Fail 'Toshiba queue was not created with TOSHIBA Universal Printer 2 on 9100'
+    }
+    $toshibaMarker = @(Read-Marker)
+    if ($toshibaMarker.Count -ne 1 -or [string]$toshibaMarker[0].model -cne 'ToshibaUniversalPcl2' -or [string]$toshibaMarker[0].address -cne '192.0.2.12') {
+        Fail 'Toshiba marker was wrong'
+    }
+
+    Reset-Case
+    Use-FakePins
     $script:DriverNames.Add('Brother HL-L2370DW series')
     $script:LivePrinters.Add([pscustomobject]@{
             Name       = 'Front Desk'
@@ -1588,6 +1659,29 @@ try {
     }
     if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -ModelId 'BrotherHlL2370Dw') -ne 1) {
         Fail 'Brother model fallback Tray1 bin did not resolve to 1'
+    }
+    $toshibaBins = @(7, 1, 3, 2, 257, 4)
+    $toshibaNames = @('Auto', 'Drawer 1', 'Drawer 2', 'Drawer 3', 'Drawer 4', 'Bypass Tray')
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Auto' -BinIds $toshibaBins -BinNames $toshibaNames -ModelId 'ToshibaUniversalPcl2') -ne 7) {
+        Fail 'Toshiba Auto bin did not resolve to 7'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1' -BinIds $toshibaBins -BinNames $toshibaNames -ModelId 'ToshibaUniversalPcl2') -ne 1) {
+        Fail 'Toshiba Drawer 1 bin did not resolve to 1'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray2' -BinIds $toshibaBins -BinNames $toshibaNames -ModelId 'ToshibaUniversalPcl2') -ne 3) {
+        Fail 'Toshiba Drawer 2 bin did not resolve to 3'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray3' -BinIds $toshibaBins -BinNames $toshibaNames -ModelId 'ToshibaUniversalPcl2') -ne 2) {
+        Fail 'Toshiba Drawer 3 bin did not resolve to 2'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray4' -BinIds $toshibaBins -BinNames $toshibaNames -ModelId 'ToshibaUniversalPcl2') -ne 257) {
+        Fail 'Toshiba Drawer 4 bin did not resolve to 257'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Manual' -BinIds $toshibaBins -BinNames $toshibaNames -ModelId 'ToshibaUniversalPcl2') -ne 4) {
+        Fail 'Toshiba Bypass Tray bin did not resolve to 4'
+    }
+    if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray2' -ModelId 'ToshibaUniversalPcl2') -ne 3) {
+        Fail 'Toshiba model fallback Tray2 bin did not resolve to 3'
     }
     if ((Resolve-PrinterTcpTraySourceId -Tray 'Tray1') -ne 0) {
         Fail 'unknown model fallback Tray1 should return 0'

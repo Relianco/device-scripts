@@ -272,6 +272,12 @@ if (-not (Test-RelianPrinterTcpInstalled -Printers @($konica) -PrinterName $queu
     Fail 'KonicaUniversalPcl with KONICA MINOLTA Universal PCL was absent'
 }
 
+$toshibaDriver = 'TOSHIBA Universal Printer 2'
+$toshiba = New-PrinterTcpDetectPrinter -Name $queueName -DriverName $toshibaDriver -HostAddress $queueAddress
+if (-not (Test-RelianPrinterTcpInstalled -Printers @($toshiba) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'ToshibaUniversalPcl2')) {
+    Fail 'ToshibaUniversalPcl2 with TOSHIBA Universal Printer 2 was absent'
+}
+
 $wrongDriver = New-PrinterTcpDetectPrinter -Name $queueName -DriverName 'Other Driver' -HostAddress $queueAddress
 if (Test-RelianPrinterTcpInstalled -Printers @($wrongDriver) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw') {
     Fail 'a different driver for that model was present'

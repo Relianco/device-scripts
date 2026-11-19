@@ -396,6 +396,42 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $compressedThere 'amd64/AmdFile.DL_'))) {
         Fail 'compressed file already in the subdirectory was removed'
     }
+
+    $toshibaCab = New-CaseDir 'toshiba-cab'
+    $toshibaCabInf = Join-Path $toshibaCab 'eSf6u.inf'
+    Write-Inf -Path $toshibaCabInf -Lines @(
+        '[SourceDisksNames]'
+        '1 = %SOURCE_DISK%,,,'
+        '2 = %SOURCE_DISK%,eSf6usfpkg.cab,,'
+        ''
+        '[SourceDisksFiles]'
+        'eSf6u.dll = 1'
+        'eSf6usf_builtin.dll = 2'
+    )
+    Write-Bytes -Path (Join-Path $toshibaCab 'eSf6u.dll') -Value 18
+    Write-Bytes -Path (Join-Path $toshibaCab 'eSf6usfpkg.cab') -Value 19
+    if (-not (Invoke-PrinterTcpInfLayout -InfPath $toshibaCabInf)) {
+        Fail 'disk cabinet layout returned false when the cabinet was present'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $toshibaCab 'eSf6usfpkg.cab'))) {
+        Fail 'disk cabinet was removed'
+    }
+
+    $missingCab = New-CaseDir 'missing-cab'
+    $missingCabInf = Join-Path $missingCab 'eSf6u.inf'
+    Write-Inf -Path $missingCabInf -Lines @(
+        '[SourceDisksNames]'
+        '1 = %SOURCE_DISK%,,,'
+        '2 = %SOURCE_DISK%,eSf6usfpkg.cab,,'
+        ''
+        '[SourceDisksFiles]'
+        'eSf6u.dll = 1'
+        'eSf6usf_builtin.dll = 2'
+    )
+    Write-Bytes -Path (Join-Path $missingCab 'eSf6u.dll') -Value 20
+    if (Invoke-PrinterTcpInfLayout -InfPath $missingCabInf) {
+        Fail 'disk cabinet layout returned true when neither the file nor the cabinet was present'
+    }
 } finally {
     if (Test-Path -LiteralPath $root) {
         Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
