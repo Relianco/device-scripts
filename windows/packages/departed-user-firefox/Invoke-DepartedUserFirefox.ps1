@@ -142,7 +142,8 @@ function Get-DuReport {
             if ($target -match '(?i)[\\/]OneDrive[^\\/]*([\\/]|$)') { $outside[$n] = 0; continue }
             $p = $target
         }
-        try { $outside[$n] = @(Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction Stop).Count } catch { $outside[$n] = -1 }
+        # Files under a nested OneDrive folder are inside OneDrive whatever the top folder is.
+        try { $outside[$n] = @(Get-ChildItem -LiteralPath $p -Recurse -File -Force -ErrorAction Stop | Where-Object { $_.FullName.Substring($p.Length) -notmatch '(?i)[\\/]OneDrive[^\\/]*[\\/]' }).Count } catch { $outside[$n] = -1 }
     }
     $latest = Get-ChildItem -LiteralPath $Profile -Recurse -File -Force -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     return [ordered]@{

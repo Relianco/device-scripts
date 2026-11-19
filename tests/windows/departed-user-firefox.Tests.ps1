@@ -90,6 +90,13 @@ try {
     function Get-DuLinkTarget { param([string]$Path) $null }
     Assert-Same (Get-DuReport -Profile $lp).filesOutsideOneDrive.Desktop -1 'unresolvable link is reported as unknown'
 
+    # A OneDrive folder nested under a plain Documents folder: its files are inside, the others outside.
+    $np = Join-Path $root 'nested.user'
+    [void](New-Item -ItemType Directory -Path (Join-Path $np 'Documents/OneDrive - Firm') -Force)
+    Set-Content -LiteralPath (Join-Path $np 'Documents/OneDrive - Firm/in.docx') -Value 'x'
+    Set-Content -LiteralPath (Join-Path $np 'Documents/out.docx') -Value 'x'
+    Assert-Same (Get-DuReport -Profile $np).filesOutsideOneDrive.Documents 1 'nested OneDrive files are not counted as outside'
+
     # Fix with every guard satisfied removes only the Firefox folder and its uninstall entry; the profile and documents stay.
     $r = Run-Du -Fix
     Assert-Same @($r.refused).Count 0 'no refusals'
