@@ -35,7 +35,7 @@ $homeShare = '\\h' + [guid]::NewGuid().ToString('n').Substring(0, 6) + '\s' + [g
 Assert ((Test-FiInvalidName 'CON.txt' 2 $false) -eq 'reservedName' -and (Test-FiInvalidName '~$a.docx' 2 $false) -eq 'ownerFile') 'invalid names'
 Assert ((Test-FiInvalidName 'forms' 1 $true) -eq 'formsAtRoot' -and $null -eq (Test-FiInvalidName 'forms' 2 $true) -and $null -eq (Test-FiInvalidName 'ok.pdf' 1 $false)) 'forms only at the root'
 Assert ((Test-FiInvalidName 'a.' 1 $false) -eq 'trailingDot' -and (Test-FiInvalidName ' a' 1 $false) -eq 'edgeSpace') 'edge characters'
-Assert ((Get-FiRights 2032127) -eq 'FullControl' -and (Get-FiRights 1245631) -eq 'Modify' -and (Get-FiRights 1179817) -eq 'ReadAndExecute' -and (Get-FiRights 2097152) -eq '0x200000' -and (Get-FiRights 1) -eq 'ReadData' -or (Get-FiRights 1) -eq 'ListDirectory') 'rights'
+Assert ((Get-FiRights 2032127) -eq 'FullControl' -and (Get-FiRights 1245631) -eq 'Modify' -and (Get-FiRights 1179817) -eq 'ReadAndExecute' -and (Get-FiRights 2097152) -eq '0x200000' -and @('ReadData', 'ListDirectory') -contains (Get-FiRights 1)) 'rights'
 Assert ((Get-FiRights (1179785 -bor 278)) -match 'Write' -and (Get-FiRights (1179817 -bor 278)) -match 'Write' -and (Get-FiRights 1179785) -eq 'Read') 'combined rights are not shortened to Read'
 Assert ((Get-FiFamily 'Co.QBW') -eq 'quickbooks' -and (Get-FiFamily 'x.ACCDB') -eq 'access' -and (Get-FiFamily 'x.mdf') -eq 'sqlServer' -and (Get-FiFamily 'x.fdb') -eq 'firebird') 'db families by extension'
 Assert ($null -eq (Get-FiFamily 'Thumbs.db') -and (Get-FiFamily 'x.db') -eq 'sqlite' -and (Get-FiFamily '~$book.xlsx') -eq 'officeOwner' -and (Get-FiFamily 'PCLaw.cfg') -eq 'pclaw') 'ignore names and name patterns'
@@ -152,8 +152,14 @@ try {
     $a = $aj | ConvertFrom-Json
     Assert ($a.rootAcl.protected -and $a.rootAcl.aces[0] -eq 'EXAMPLE\Accounting Staff|Allow|Modify|I3|exp') 'root ACL'
     Assert ($a.acl[0].p -eq 'AppData' -and $a.acl[0].explicit[0] -like 'EXAMPLE\Bookkeepers|Allow|FullControl|*') 'protected folder listed'
-    Assert ($a.acl[0].aceCount -eq 251 -and $a.acl[0].explicit.Count -eq 40 -and $a.truncated) 'a folder with 251 ACEs is capped, still paged'
+    Assert ($a.acl[0].aceCount -eq 251 -and $a.acl[0].explicit.Count -lt 251 -and $a.acl[0].explicit.Count -gt 10 -and $a.truncated) 'a folder with 251 ACEs is capped, still paged'
     Assert ($a.inheritOnly -gt 0 -and $a.totalRows -gt $a.acl.Count -and $null -ne $a.nextOffset -and [Text.Encoding]::UTF8.GetByteCount($aj) -le 7200) 'acl paged and within cap'
+    & {
+        function Get-Acl { param($LiteralPath) [pscustomobject]@{ Owner = 'EXAMPLE\x'; AreAccessRulesProtected = $true; Access = @(1..300 | ForEach-Object { New-Rule ('EXAMPLE\' + ('g' * 55) + $_) 1179817 $false }) } }
+        $worst = Invoke-FolderInventory -Section Acl
+        $wr = $worst | ConvertFrom-Json
+        Assert ([Text.Encoding]::UTF8.GetByteCount($worst) -le 7200 -and $wr.acl.Count -ge 1 -and $null -ne $wr.nextOffset -and $wr.status -ne 'error') 'worst-case ACLs still page within the cap'
+    }
     $a2 = Invoke-FolderInventory -Section Acl -Offset ([string]$a.nextOffset) | ConvertFrom-Json
     Assert ($a2.acl[0].p -ne $a.acl[0].p -and $a2.offset -eq $a.nextOffset) 'acl page 2'
 

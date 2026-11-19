@@ -557,8 +557,10 @@ function Get-FiAclSection {
     param([string]$Root, [int]$Start, $Report)
     $acl = Get-Acl -LiteralPath $Root
     $rootAces = @($acl.Access)
-    $Report.rootAcl = [ordered]@{ owner = (Protect-FiText ([string]$acl.Owner) -Max 60); protected = [bool]$acl.AreAccessRulesProtected; aceCount = $rootAces.Count; aces = @($rootAces | Select-Object -First 60 | ForEach-Object { (Format-FiAce $_) + '|' + $(if ($_.IsInherited) { 'inh' } else { 'exp' }) }) }
-    if ($rootAces.Count -gt 60) { $Report.truncated = $true }
+    # Byte-bounded ACE lists (root 2,000, a folder row 2,800) so a page with at least one row always fits the line.
+    $aces = (Select-FiPage @($rootAces | ForEach-Object { (Format-FiAce $_) + '|' + $(if ($_.IsInherited) { 'inh' } else { 'exp' }) }) 0 2000).Rows
+    $Report.rootAcl = [ordered]@{ owner = (Protect-FiText ([string]$acl.Owner) -Max 60); protected = [bool]$acl.AreAccessRulesProtected; aceCount = $rootAces.Count; aces = @($aces) }
+    if ($aces.Count -lt $rootAces.Count) { $Report.truncated = $true }
     $dirs = @(Get-FiChildFolders $Root 2 $Report)
     $Report.foldersChecked = $dirs.Count
     $rows = @(); $same = 0
@@ -568,9 +570,9 @@ function Get-FiAclSection {
         try { $a = Get-Acl -LiteralPath $dir } catch { $rows += [ordered]@{ p = $p; error = 'unreadable' }; continue }
         $exp = @($a.Access | Where-Object { -not $_.IsInherited })
         if (-not $a.AreAccessRulesProtected -and $exp.Count -eq 0) { $same++; continue }
-        # At most 40 ACEs a row, so one folder always fits a page; aceCount says how many it has.
-        if ($exp.Count -gt 40) { $Report.truncated = $true }
-        $rows += [ordered]@{ p = $p; protected = [bool]$a.AreAccessRulesProtected; owner = (Protect-FiText ([string]$a.Owner) -Max 60); aceCount = $exp.Count; explicit = @($exp | Select-Object -First 40 | ForEach-Object { Format-FiAce $_ }) }
+        $kept = (Select-FiPage @($exp | ForEach-Object { Format-FiAce $_ }) 0 2800).Rows
+        if ($kept.Count -lt $exp.Count) { $Report.truncated = $true }
+        $rows += [ordered]@{ p = $p; protected = [bool]$a.AreAccessRulesProtected; owner = (Protect-FiText ([string]$a.Owner) -Max 60); aceCount = $exp.Count; explicit = @($kept) }
     }
     $Report.inheritOnly = $same
     $Report.totalRows = $rows.Count
