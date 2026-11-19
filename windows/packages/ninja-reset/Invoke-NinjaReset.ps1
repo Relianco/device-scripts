@@ -113,8 +113,10 @@ function Test-NrSafeFolder {
     foreach ($r in $Roots) {
         if ([string]::IsNullOrWhiteSpace($r)) { continue }
         $root = $r.TrimEnd('\')
-        if ($p.Length -gt $root.Length + 1 -and $p.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase) -and
-            $p.Substring($root.Length + 1).IndexOf('\') -lt 0) { return $true }
+        if ($p.Length -le $root.Length + 1 -or -not $p.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $child = $p.Substring($root.Length + 1)
+        # One plain folder name. Windows drops trailing dots and spaces, so '..', '.' or ' ' would resolve to the root or above.
+        if ($child -match '^[^\\/:*?"<>|]+$' -and $child.Trim('. ') -ne '') { return $true }
     }
     return $false
 }

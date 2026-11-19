@@ -63,7 +63,7 @@ Assert-True (-not (Test-NrSigner 'Valid' 'CN=Evil, O=Evil Corp')) 'other signer 
 $roots = @('C:\Program Files (x86)', 'C:\Program Files')
 Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\org1-loc1' $roots) 'org-location folder is safe'
 Assert-True (Test-NrSafeFolder 'C:\Program Files (x86)\org1-loc1\' $roots) 'trailing slash is safe'
-foreach ($bad in @('C:\Program Files (x86)', 'C:\Program Files (x86)\', 'C:\Program Files (x86)\a\b', 'C:\Program Files (x86)evil', 'C:\Windows\System32', '')) {
+foreach ($bad in @('C:\Program Files\..', 'C:\Program Files (x86)\.', 'C:\Program Files (x86)\ . ', 'C:\Program Files (x86)\a/..', 'C:\Program Files (x86)\a:b', 'C:\Program Files (x86)', 'C:\Program Files (x86)\', 'C:\Program Files (x86)\a\b', 'C:\Program Files (x86)evil', 'C:\Windows\System32', '')) {
     Assert-True (-not (Test-NrSafeFolder $bad $roots)) "folder [$bad] refused"
 }
 
@@ -92,8 +92,8 @@ function Reset-Fake {
     $script:fakeKeys.Add([pscustomobject]@{ Key = $uKey; Kind = 'uninstall'; ProductCode = '{817AF559-0C8C-4539-94D8-3096AF4B08D9}'; UninstallString = 'MsiExec.exe /X{817AF559-0C8C-4539-94D8-3096AF4B08D9}' })
     foreach ($p in @($agentDir, $agentExe, $dataDir, 'HKLM:\SOFTWARE\WOW6432Node\NinjaRMM LLC')) { $null = $script:fakePaths.Add($p) }
 }
-function Get-NrServiceList { @($script:fakeServices) }
-function Get-NrProductKeys { @($script:fakeKeys) }
+function Get-NrServiceList { $script:fakeServices.ToArray() }
+function Get-NrProductKeys { $script:fakeKeys.ToArray() }
 function Get-NrAgentLocation { '' }  # damaged install: folder comes from the exe scan and the service path
 function Get-NrProgramRoots { @('C:\Program Files (x86)', 'C:\Program Files') }
 function Get-NrAgentExeFolders { @($script:fakePaths | Where-Object { $_ -eq $agentDir }) }
