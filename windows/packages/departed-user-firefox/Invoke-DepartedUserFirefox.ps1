@@ -70,7 +70,8 @@ function Get-DuSessionCount {
 }
 function Get-DuProcessPaths {
     # $null when the process list cannot be read: the caller refuses (an empty list would mean "nothing runs").
-    try { return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ExecutablePath } | ForEach-Object { [string]$_.ExecutablePath }) }
+    # The comma keeps an empty list an empty array instead of $null.
+    try { return ,@(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ExecutablePath } | ForEach-Object { [string]$_.ExecutablePath }) }
     catch { return $null }
 }
 function Get-DuUninstallKeys {

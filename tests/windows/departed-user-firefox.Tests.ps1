@@ -38,7 +38,7 @@ function Get-DuUsersRoot { $root }
 $script:disabled = $true; $script:sessions = 0; $script:procs = @(); $script:keys = @()
 function Get-DuAccountDisabled { param([string]$User) $script:disabled }
 function Get-DuSessionCount { $script:sessions }
-function Get-DuProcessPaths { if ($null -eq $script:procs) { return $null } @($script:procs) }
+function Get-DuProcessPaths { if ($null -eq $script:procs) { return $null } return ,@($script:procs) }
 function Get-DuUninstallKeys { @($script:keys) }
 function Run-Du { param([switch]$Fix) (Get-DuResult -User 'gone.user' -Fix:$Fix).record }
 
