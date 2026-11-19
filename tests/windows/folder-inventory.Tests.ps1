@@ -130,6 +130,15 @@ try {
     Assert (@($seen | Where-Object { $_ -like 'Clients\A\2019\Q1|4|1|2|1|*' }).Count -eq 1) 'depth-4 folder with recursive totals'
     Assert (-not @($seen | Where-Object { $_ -like 'Clients\A\2019\Q1\deep|*' }).Count) 'nothing deeper than 4'
 
+    # --- A folder that cannot be read makes the walk partial, never an empty success.
+    & {
+        $w0 = Initialize-FiWalkState; $w0.denied = 2
+        $rep0 = [ordered]@{ status = 'ok'; errors = @() }
+        Merge-FiWalkStatus $w0 $rep0
+        Assert ($rep0.status -eq 'partial' -and $rep0.errors[0] -eq 'walk:unreadableFolders=2') 'unreadable folders mark the walk partial'
+    }
+    Assert ($t1.walk.denied -eq 0 -and $t1.status -eq 'ok') 'tree reports its walk counters'
+
     # --- Budget: a walk past its time reports partial.
     $saved = $script:FiBudgetSeconds; $script:FiBudgetSeconds = 0
     $p = Invoke-FolderInventory -Section Summary | ConvertFrom-Json
@@ -170,16 +179,17 @@ try {
         return $null }
     function Get-ADGroupMember { param($Identity, [switch]$Recursive) @([pscustomobject]@{ objectClass = 'user'; SamAccountName = 'alice' }, [pscustomobject]@{ objectClass = 'user'; SamAccountName = 'bob' }, [pscustomobject]@{ objectClass = 'computer'; SamAccountName = $pc }) }
     function Get-ADUser { param($Identity, $Properties, $Filter)
+        if ($Filter -eq 'primaryGroupID -eq 1100') { return @([pscustomobject]@{ SamAccountName = 'bob' }, [pscustomobject]@{ SamAccountName = 'dave' }) }
         if ($Identity -eq 'bob') { return [pscustomobject]@{ Enabled = $false; LastLogonDate = $null; DistinguishedName = 'CN=bob,OU=Former,DC=example,DC=invalid' } }
         [pscustomobject]@{ Enabled = $true; LastLogonDate = [datetime]'2026-11-01'; DistinguishedName = 'CN=alice,OU=General,DC=example,DC=invalid' } }
     $script:Sids = @{ 'EXAMPLE\Accounting Staff' = 'S-1-5-21-1-2-3-1100'; 'Everyone' = 'S-1-1-0'; 'NT AUTHORITY\SYSTEM' = 'S-1-5-18'; 'EXAMPLE\Partners' = 'S-1-5-21-1-2-3-1200'; 'EXAMPLE\Bookkeepers' = 'S-1-5-21-1-2-3-1300' }
     $script:FiResolveSid = { param($Id) $script:Sids[$Id] }
     $acc = Invoke-FolderInventory -Section Access | ConvertFrom-Json
     $staff = @($acc.principals | Where-Object { $_.id -eq 'EXAMPLE\Accounting Staff' })[0]
-    Assert ($staff.kind -eq 'group' -and $staff.memberCount -eq 2 -and ($staff.members -join ',') -eq 'alice,bob') 'group expanded to users'
+    Assert ($staff.kind -eq 'group' -and $staff.memberCount -eq 3 -and ($staff.members -join ',') -eq 'alice,bob,dave') 'group expanded to users, primary-group members included once'
     Assert (@($acc.principals | Where-Object { $_.id -eq 'Everyone' -and $_.broad }).Count -eq 1) 'share Everyone flagged broad'
     Assert (@($acc.principals | Where-Object { $_.id -eq 'EXAMPLE\Bookkeepers' -and $_.kind -eq 'notInAd' }).Count -eq 1 -and -not @($acc.principals | Where-Object { $_.id -eq 'EXAMPLE\Partners' }).Count) 'depth-1 explicit ACE principal included, depth 2 not'
-    Assert (($acc.users -join ';') -eq 'alice|True|2026-11-01|OU=General,DC=example,DC=invalid;bob|False||OU=Former,DC=example,DC=invalid') "users: $($acc.users -join ';')"
+    Assert (($acc.users -join ';') -eq 'alice|True|2026-11-01|OU=General,DC=example,DC=invalid;bob|False||OU=Former,DC=example,DC=invalid;dave|True|2026-11-01|OU=General,DC=example,DC=invalid') "users: $($acc.users -join ';')"
 
     # --- Open (stubbed SMB; Windows-style paths).
     $winRoot = 'F:\Data\Accounting'

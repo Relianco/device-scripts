@@ -507,10 +507,17 @@ function Get-FiLogonScriptLines {
 }
 
 # Summary: one walk, then totals, families, clusters, names, paths and ages.
+# A walk that ran out of time or could not read a folder is partial; errors says which.
+function Merge-FiWalkStatus {
+    param($W, $Report)
+    if ($W.partial) { $Report.status = 'partial' }
+    if ($W.denied + $W.tooLong -gt 0) { $Report.status = 'partial'; $Report.errors = @($Report.errors) + ('walk:unreadableFolders=' + ($W.denied + $W.tooLong)) }
+}
+
 function Get-FiSummarySection {
     param([string]$Root, $Report)
     $w = Invoke-FiWalk $Root
-    if ($w.partial) { $Report.status = 'partial' }
+    Merge-FiWalkStatus $w $Report
     $Report.totals = [ordered]@{ files = $w.files; folders = $w.dirs; bytes = $w.bytes; denied = $w.denied; tooLong = $w.tooLong; longPathMode = $w.longPathMode; reparsePoints = $w.reparse }
     $Report.excel = $w.excel
     $Report.families = [ordered]@{}
@@ -544,7 +551,8 @@ function Get-FiDbClusters {
 function Get-FiTreeSection {
     param([string]$Root, [int]$Start, $Report)
     $w = Invoke-FiWalk $Root
-    if ($w.partial) { $Report.status = 'partial' }
+    Merge-FiWalkStatus $w $Report
+    $Report.walk = [ordered]@{ denied = $w.denied; tooLong = $w.tooLong; longPathMode = $w.longPathMode }
     $keys = [string[]]@($w.folders.Keys); [Array]::Sort($keys, [StringComparer]::OrdinalIgnoreCase)
     $all = foreach ($k in $keys) {
         $f = $w.folders[$k]
@@ -616,6 +624,11 @@ function Get-FiAccessSection {
             elseif ([string]$o.ObjectClass -eq 'group') {
                 $row.kind = 'group'
                 $m = @(Get-ADGroupMember -Identity $o.DistinguishedName -Recursive | Where-Object { [string]$_.objectClass -eq 'user' })
+                # Members by primary group (Domain Users above all) are not in the member list.
+                # shortcut: only this group's own RID, not nested groups' primary members; upgrade if a nested group is a primary group.
+                $rid = $sid.Substring($sid.LastIndexOf('-') + 1)
+                $known = @{}; foreach ($u in $m) { $known[[string]$u.SamAccountName] = $true }
+                $m += @(Get-ADUser -Filter "primaryGroupID -eq $rid" | Where-Object { -not $known.ContainsKey([string]$_.SamAccountName) })
                 $row.memberCount = $m.Count
                 $row.members = @($m | Select-Object -First 40 | ForEach-Object { [string]$_.SamAccountName })
                 foreach ($u in $m) { $users[[string]$u.SamAccountName] = $true }
