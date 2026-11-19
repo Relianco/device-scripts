@@ -29,7 +29,8 @@ function New-Part {
         $MbrType = $null,
         [long]$Size = 536870912,
         [bool]$IsBoot = $false,
-        [string]$Guid = ''
+        [string]$Guid = '',
+        [string]$Label = ''
     )
     @{
         diskNumber      = $Disk
@@ -40,6 +41,7 @@ function New-Part {
         size            = $Size
         isBoot          = $IsBoot
         guid            = $Guid
+        label           = $Label
     }
 }
 
@@ -277,7 +279,7 @@ Assert-True ($line1.after -is [System.Array]) 'single target line after is JSON 
 Assert-Same $line1.before.Count 1 'single target line before count'
 Assert-Same $line1.after.Count 1 'single target line after count'
 
-# 11. Ancestor reparse point check and parent ACL validation.
+# 11. Ancestor reparse point check, parent/backup ACL validation, and labeled System Reserved / RECOVERY partitions.
 $symTarget = Join-Path $tmpRoot 'sym-target'
 $null = New-Item -ItemType Directory -Path $symTarget
 $symAncestor = Join-Path $tmpRoot 'sym-ancestor'
@@ -285,9 +287,34 @@ $null = New-Item -ItemType SymbolicLink -Path $symAncestor -Target $symTarget
 $reparseThrew = $false
 try { & $defaultAssertNotReparse @((Join-Path $symAncestor 'Relian\RecoveryPartitionLetterBackup')) } catch { $reparseThrew = ($_.Exception.Message -match 'reparse point') }
 Assert-True $reparseThrew 'default reparse check walks ancestors'
-Assert-True (Test-RpParentAcl 'O:SYG:SYD:AI(A;ID;0x1200a9;;;BU)(A;CIID;0x100116;;;BU)(A;;FA;;;SY)') 'accepts ProgramData-inherited Relian parent'
-Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:AI(A;;DC;;;BU)(A;;FA;;;SY)')) 'rejects BU delete-child on parent'
+Assert-True (Test-RpParentAcl 'O:SYG:SYD:AI(A;ID;0x1200a9;;;BU)(A;CIIDIO;0x100116;;;BU)(A;;FA;;;SY)') 'accepts ProgramData-inherited Relian parent with IO on create-child'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:AI(A;CIID;0x100116;;;BU)(A;;FA;;;SY)')) 'rejects BU create-child on parent without IO'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:AI(A;;FW;;;BU)(A;;FA;;;SY)')) 'rejects BU FW on parent'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:P(A;;GAGR;;;BU)(A;;FA;;;SY)')) 'rejects combined GAGR on parent'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:AI(A;;DC;;;BU)(A;;FA;;;SY)')) 'rejects BU DC on parent'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:P(A;;DT;;;BU)(A;;FA;;;SY)')) 'rejects BU DT delete-child on parent'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:P(A;;LC;;;BU)(A;;FA;;;SY)')) 'rejects BU LC create-subdir on parent'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:P(A;;FRDT;;;BU)(A;;FA;;;SY)')) 'rejects BU combined FRDT on parent'
+Assert-True (Test-RpParentAcl 'O:SYG:SYD:P(A;;FRFX;;;BU)(A;;FA;;;SY)') 'accepts read+execute symbolic rights on parent'
 Assert-True (-not (Test-RpParentAcl 'O:S-1-5-21-1-2-3-1001G:SYD:P(A;OICI;FA;;;SY)')) 'rejects user owner on parent'
+Assert-True (-not (Test-RpBackupAcl 'O:SYG:SYD:P(A;;FA;;;SY)')) 'rejects backup ACL without OICI'
+Assert-True (Test-RpBackupAcl 'O:SYG:SYD:P(A;OICI;FA;;;SY)') 'accepts backup ACL with OICI'
+
+$labelParts = @(
+    (New-Part -Disk 0 -Part 1 -Letter 'E' -GptType $basicDataGpt -MbrType 7 -Size 575668224 -Label 'System Reserved'),
+    (New-Part -Disk 0 -Part 2 -Letter 'C' -GptType $basicDataGpt -Size 250000000000 -IsBoot $true),
+    (New-Part -Disk 0 -Part 3 -Letter 'D' -GptType $basicDataGpt -Size 785580032 -Label 'RECOVERY'),
+    (New-Part -Disk 0 -Part 4 -Letter 'F' -GptType $basicDataGpt -Size 2147483649 -Label 'RECOVERY'),
+    (New-Part -Disk 0 -Part 5 -Letter 'G' -GptType $basicDataGpt -Size 536870912 -Label 'UserData')
+)
+Reset-Test -Parts $labelParts
+$r = Invoke-RpJob
+Assert-Same $r.ExitCode 0 'labeled partitions exit'
+Assert-Same $r.Status 'removed' 'labeled partitions status'
+Assert-Same (@($r.Before).Count) 2 'matches only <=2GiB System Reserved and RECOVERY'
+Assert-Same $r.Before[0].kind 'label-system-reserved' 'System Reserved kind'
+Assert-Same $r.Before[1].kind 'label-recovery' 'RECOVERY kind'
+Assert-Same (@($r.After).Count) 0 'labeled partitions removed'
 
 Remove-Item -LiteralPath $tmpRoot -Recurse -Force
 Write-Output 'hide-recovery-partitions tests passed'
