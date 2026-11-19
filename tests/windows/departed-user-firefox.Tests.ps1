@@ -68,6 +68,16 @@ try {
     $why = @(Get-DuRefusals -User 'link.user' -Profile $linkProf -Folders @(Get-DuFirefoxFolders -Profile $linkProf))
     if (-not ($why -like 'reparse point*')) { Fail 'reparse point did not refuse' }
 
+    # A path that cannot be inspected refuses (fail closed) and nothing is deleted.
+    $realReparse = (Get-Command Test-DuReparse).ScriptBlock
+    function Test-DuReparse { param([string]$Path) throw 'access denied' }
+    $why = @(Get-DuRefusals -User 'gone.user' -Profile $prof -Folders @(Get-DuFirefoxFolders -Profile $prof))
+    if (-not ($why -like 'cannot inspect path*')) { Fail 'an uninspectable path did not refuse' }
+    $r = Get-DuResult -User 'gone.user' -Fix
+    Assert-Same $r.exitCode 1 'uninspectable path exits 1'
+    if (-not (Test-Path -LiteralPath $ff)) { Fail 'an uninspectable path deleted the folder' }
+    Set-Item -Path Function:Test-DuReparse -Value $realReparse
+
     # Report mode never deletes and reports the documents outside OneDrive.
     $r = Run-Du
     Assert-Same $r.mode 'report' 'report mode'

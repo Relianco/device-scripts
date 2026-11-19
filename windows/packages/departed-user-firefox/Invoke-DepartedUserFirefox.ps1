@@ -95,7 +95,8 @@ function Get-DuLinkTarget {
     try { $t = @((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Target); if ($t.Count -and $t[0]) { return [string]$t[0] } } catch { }
     return $null
 }
-function Test-DuReparse { param([string]$Path) [bool]((Get-Item -LiteralPath $Path -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
+# Throws when the path cannot be inspected: callers refuse (guard) or report unknown, never read a failure as "not a link".
+function Test-DuReparse { param([string]$Path) [bool]((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes -band [System.IO.FileAttributes]::ReparsePoint) }
 
 # Folders that may be removed for this user, under the profile root only.
 function Get-DuFirefoxFolders {
@@ -118,7 +119,8 @@ function Get-DuRefusals {
         $running = @(@($procs | Where-Object { $_ }) | Where-Object { $_.StartsWith($f + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) })
         if ($running.Count) { $why += "a process runs from $f" }
         for ($d = $f; $d.Length -ge $Profile.Length; $d = Split-Path -Parent $d) {
-            if (Test-DuReparse -Path $d) { $why += "reparse point on the path: $d"; break }
+            try { $link = Test-DuReparse -Path $d } catch { $why += "cannot inspect path: $d"; break }
+            if ($link) { $why += "reparse point on the path: $d"; break }
             if ($d.Length -eq $Profile.Length) { break }
         }
     }
@@ -136,7 +138,8 @@ function Get-DuReport {
         if (-not (Test-Path -LiteralPath $p)) { $outside[$n] = 0; continue }
         # A redirected known folder is a reparse point: its files are inside OneDrive only when its resolved target is. A target
         # elsewhere (local disk, share) is counted as outside; a target that cannot be resolved is reported as -1 (unknown).
-        if (Test-DuReparse -Path $p) {
+        try { $isLink = Test-DuReparse -Path $p } catch { $outside[$n] = -1; continue }
+        if ($isLink) {
             $target = Get-DuLinkTarget -Path $p
             if (-not $target) { $outside[$n] = -1; continue }
             if ($target -match '(?i)[\\/]OneDrive[^\\/]*([\\/]|$)') { $outside[$n] = 0; continue }
