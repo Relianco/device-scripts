@@ -38,6 +38,8 @@ if (@($files).Count -lt 10) { Fail "only $(@($files).Count) files scanned" }
 $found = @()
 foreach ($file in $files) {
     $rel = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
+    # ninja-reset removes and reinstalls the NinjaOne agent itself: naming its paths and installer is its job, not a coupling.
+    if ($rel.StartsWith('windows/packages/ninja-reset/') -or $rel -eq 'windows/releases/ninja-reset.json') { continue }
     $hits = @(Select-String -LiteralPath $file.FullName -Pattern $regex.ToString() -AllMatches:$false)
     foreach ($h in $hits) { $found += "${rel}:$($h.LineNumber): $($h.Line.Trim())" }
 }
