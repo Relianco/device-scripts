@@ -46,6 +46,7 @@ Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Y:", "\\fs1\scans", False, 
 Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Z:", sharePath, False, "dom\u", "C:\' + $secret + '"')) -eq 'wsh|Z:|') 'a path-shaped password after a variable target is not printed'
 Assert ((ConvertTo-FiMapLine 'net use X: "\\fs1\Shared Data" /persistent:no') -eq 'netUse|X:|\\fs1\Shared Data') 'quoted UNC with a space kept whole'
 Assert ((ConvertTo-FiMapLine 'subst S: D:\Shared') -eq 'subst|S:|D:\Shared' -and $null -eq (ConvertTo-FiMapLine 'echo hello')) 'subst and non-mapping lines'
+if ($onWindows) { Assert ((ConvertTo-FiRootPath 'F:/Share/Sub/') -eq 'F:\Share\Sub') 'a forward-slash path is made canonical' }
 Assert ((ConvertTo-FiRootPath 'C:\') -eq 'C:\' -and (ConvertTo-FiRootPath 'F:\Data\') -eq 'F:\Data' -and (ConvertTo-FiRootPath 'C:') -eq 'C:\') 'a volume root keeps its separator'
 $page = Select-FiPage @(1..100 | ForEach-Object { 'row' + $_ }) 10 120
 Assert ($page.Rows.Count -gt 0 -and $page.Rows[0] -eq 'row11' -and $page.Next -eq (10 + $page.Rows.Count)) 'page helper'
@@ -169,7 +170,18 @@ try {
         $c2 = Invoke-FolderInventory -Section TopLevel -Offset 2 | ConvertFrom-Json
         $script:FiBudgetSeconds = $saved; $script:FiOutOfTime = $false
         Assert (@($c2.rows).Count -eq 1 -and $c2.rows[0] -like 'Clients|partial|*' -and $c2.nextOffset -eq 3 -and $c2.status -eq 'partial' -and -not $c2.PSObject.Properties['rootFiles']) "a child too big for one call is printed partial: $($c2 | ConvertTo-Json -Compress)"
+        function Measure-FiTree { param($Path) @{ files = 1; bytes = [int64]1; dirs = 0; newest = [DateTime]::MinValue; unreadable = [int]((Split-Path -Leaf $Path) -eq 'Docs'); partial = $false } }
+        $c3 = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+        Assert ($c3.rows[3] -like 'Docs|unreadable|*|1' -and $c3.rows[0] -like 'AppData|done|*' -and $c3.status -eq 'partial') 'a child with unreadable folders is labelled and makes the page partial'
+        function Get-FiChildFolders { param($Path, $Depth, $Report) if ($Report) { $Report['unreadable'] = 1 }; @() }
+        $c4 = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+        Assert ($c4.status -eq 'partial' -and $c4.errors -contains 'children:unreadable' -and $c4.childCount -eq 0) 'an unreadable root is partial, not an empty success'
     }
+    # Root files are counted on the last page.
+    [IO.File]::WriteAllBytes((Join-Path $acct 'root.txt'), [byte[]]::new(5))
+    $rf = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+    Assert ($rf.rootFiles -eq '1|5' -and $rf.status -eq 'ok') "root files: $($rf.rootFiles)"
+    Remove-Item -LiteralPath (Join-Path $acct 'root.txt')
 
     # --- Tree, paged.
     1..150 | ForEach-Object { [void][IO.Directory]::CreateDirectory((Join-Path $acct ("Matters/Matter number $_ with a long name/Sub"))) }

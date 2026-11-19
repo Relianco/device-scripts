@@ -40,7 +40,9 @@
       TopLevel  the root's immediate child folders, each with files, bytes, folders and newest write from a
                 totals-only walk, paged by Offset. A child the clock cuts is left for the next call (nextOffset),
                 unless it is the call's first child: then it is printed as partial, and too big for one call,
-                so scope to it with FolderHex. For a share too big for Summary or Tree in 85 seconds.
+                so scope to it with FolderHex. A child with folders it could not read is "unreadable". Files
+                directly in the root are counted on the last page (rootFiles). For a share too big for Summary
+                or Tree in 85 seconds.
 
     Limits: a walk stops starting new work after 85 seconds and reports status "partial" (the loader kills the
     child at 120 s). A list cut to fit the size cap sets truncated; a paged list is never cut (nextOffset).
@@ -424,8 +426,10 @@ function Get-FiChildFolders {
 function Get-FiShareList { return @(Get-SmbShare | Where-Object { -not $_.Special -and $_.Path }) }
 
 # No trailing separator, except a volume root keeps it: 'C:' alone means the current folder on drive C.
+# On Windows '/' becomes '\', so a FolderHex path matches SMB open-file and share paths.
 function ConvertTo-FiRootPath {
     param([string]$Path)
+    if ([IO.Path]::DirectorySeparatorChar -eq '\') { $Path = $Path -replace '/', '\' }
     $t = $Path.TrimEnd('\')
     if ($t -match '^[A-Za-z]:$') { return $t + '\' }
     return $t
@@ -648,13 +652,7 @@ function Get-FiTopLevelSection {
     $Report.childCount = $children.Count
     $Report.offset = $Start
     $Report.rowFormat = 'name|state|files|bytes|folders|newestWrite|unreadableFolders'
-    if ($Start -eq 0) {
-        Invoke-FiStep $Report 'rootFiles' {
-            $n = 0; $b = [int64]0
-            foreach ($f in [IO.DirectoryInfo]::new($Root).EnumerateFiles()) { $n++; $b += [int64]$f.Length }
-            $Report.rootFiles = [string]$n + '|' + $b
-        }
-    }
+    if ($Report.Contains('unreadable')) { $Report.status = 'partial'; $Report.errors = @($Report.errors) + 'children:unreadable' }
     $budget = $script:FiPageBytes - (Get-FiJsonBytes $Report) - 120
     $rows = [Collections.Generic.List[string]]::new()
     $next = $null
@@ -663,7 +661,7 @@ function Get-FiTopLevelSection {
         $m = Measure-FiTree $children[$i]
         # Cut by the clock after other rows: leave it whole for the next call, which starts with a full budget.
         if ($m.partial -and $rows.Count) { $script:FiOutOfTime = $false; $next = $i; break }
-        $state = 'done'; if ($m.partial) { $state = 'partial' }
+        $state = 'done'; if ($m.partial) { $state = 'partial' } elseif ($m.unreadable) { $state = 'unreadable' }
         $newest = ''; if ($m.newest -gt [DateTime]::MinValue) { $newest = $m.newest.ToString('yyyy-MM-dd') }
         $row = (Protect-FiText (Split-Path -Leaf $children[$i]) -Max 60) + '|' + $state + '|' + $m.files + '|' + $m.bytes + '|' + $m.dirs + '|' + $newest + '|' + $m.unreadable
         $size = (Get-FiJsonBytes $row) + 1
@@ -674,6 +672,17 @@ function Get-FiTopLevelSection {
     }
     $Report.rows = $rows.ToArray()
     $Report.nextOffset = $next
+    # Files directly in the root, on the last page only: a cut here never holds back a child row.
+    if ($null -eq $next) {
+        Invoke-FiStep $Report 'rootFiles' {
+            $n = 0; $b = [int64]0; $cut = ''
+            foreach ($f in [IO.DirectoryInfo]::new($Root).EnumerateFiles()) {
+                $n++; $b += [int64]$f.Length
+                if (($n % 256) -eq 0 -and (Test-FiOverBudget)) { $cut = '|partial'; break }
+            }
+            $Report.rootFiles = [string]$n + '|' + $b + $cut
+        }
+    }
 }
 
 # Tree: folders to depth 4 with recursive sums, paged by Offset.
