@@ -381,11 +381,19 @@ function Get-FiChildFolders {
 #region Root resolution
 function Get-FiShareList { return @(Get-SmbShare | Where-Object { -not $_.Special -and $_.Path }) }
 
+# No trailing separator, except a volume root keeps it: 'C:' alone means the current folder on drive C.
+function ConvertTo-FiRootPath {
+    param([string]$Path)
+    $t = $Path.TrimEnd('\')
+    if ($t -match '^[A-Za-z]:$') { return $t + '\' }
+    return $t
+}
+
 # Paths that could be Folder: a share named Folder, a child of a share path, a child of a volume root, one level down.
 function Get-FiCandidates {
     param([string]$Name)
     $seen = [Collections.Generic.List[string]]::new()
-    $add = { param($p) if ($p -and [IO.Directory]::Exists($p)) { $t = $p.TrimEnd('\'); if (-not @($seen | Where-Object { $_ -ieq $t }).Count) { $seen.Add($t) } } }
+    $add = { param($p) if ($p -and [IO.Directory]::Exists($p)) { $t = ConvertTo-FiRootPath $p; if (-not @($seen | Where-Object { $_ -ieq $t }).Count) { $seen.Add($t) } } }
     $shares = @(); try { $shares = Get-FiShareList } catch { }
     foreach ($s in $shares) { if ($s.Name -ieq $Name) { & $add $s.Path } }
     foreach ($s in $shares) { & $add ([IO.Path]::Combine([string]$s.Path, $Name)) }

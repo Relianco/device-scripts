@@ -46,6 +46,7 @@ Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Y:", "\\fs1\scans", False, 
 Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Z:", sharePath, False, "dom\u", "C:\' + $secret + '"')) -eq 'wsh|Z:|') 'a path-shaped password after a variable target is not printed'
 Assert ((ConvertTo-FiMapLine 'net use X: "\\fs1\Shared Data" /persistent:no') -eq 'netUse|X:|\\fs1\Shared Data') 'quoted UNC with a space kept whole'
 Assert ((ConvertTo-FiMapLine 'subst S: D:\Shared') -eq 'subst|S:|D:\Shared' -and $null -eq (ConvertTo-FiMapLine 'echo hello')) 'subst and non-mapping lines'
+Assert ((ConvertTo-FiRootPath 'C:\') -eq 'C:\' -and (ConvertTo-FiRootPath 'F:\Data\') -eq 'F:\Data' -and (ConvertTo-FiRootPath 'C:') -eq 'C:\') 'a volume root keeps its separator'
 $page = Select-FiPage @(1..100 | ForEach-Object { 'row' + $_ }) 10 120
 Assert ($page.Rows.Count -gt 0 -and $page.Rows[0] -eq 'row11' -and $page.Next -eq (10 + $page.Rows.Count)) 'page helper'
 $last = Select-FiPage @('a', 'b') 0 1000
