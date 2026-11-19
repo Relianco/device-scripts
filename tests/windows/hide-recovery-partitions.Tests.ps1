@@ -17,7 +17,8 @@ $null = New-Item -ItemType Directory -Path $tmpRoot
 
 $winreGpt = '{DE94BBA4-06D1-4D40-A16A-BFD50179D6AC}'
 $efiGpt = '{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}'
-$basicDataGpt = '{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}'
+$basicDataGpt = '{EBD0A0A2-B9E5-4433-87C0-68B6b72699C7}'
+$zeroGpt = '{00000000-0000-0000-0000-000000000000}'
 
 function New-Part {
     param(
@@ -45,22 +46,32 @@ function New-Part {
 function Reset-Test {
     param($Parts = @())
     $script:FakeParts = [Collections.Generic.List[object]]::new()
-    foreach ($p in $Parts) { $script:FakeParts.Add($p) }
+    foreach ($p in $Parts) { $script:FakeParts.Add($p.Clone()) }
     $script:Log = [Collections.Generic.List[string]]::new()
     $script:RemoveThrowOnLetter = ''
     $script:KeepLetterAfterRemove = $false
     $script:ReadThrows = $false
     $script:ReadCount = 0
-    $script:OnSecondRead = $null
+    $script:OnRead = @{}
+    $script:OnFirstRemove = $null
     $script:RpSystemDrive = 'C:'
-    $script:RpBackupDir = Join-Path $tmpRoot ([Guid]::NewGuid().ToString('N'))
+    $script:FakeParentSddl = 'O:SYG:SYD:P(A;OICI;FA;;;SY)'
+    $script:FakeBackupSddl = 'O:SYG:SYD:P(A;OICI;FA;;;SY)'
+    $script:RpBackupDir = Join-Path (Join-Path $tmpRoot ([Guid]::NewGuid().ToString('N'))) 'RecoveryPartitionLetterBackup'
 }
 
-$script:RpProtectDir = { param($Path) $script:Log.Add('protect') }
+$defaultAssertNotReparse = $script:RpAssertNotReparse
+$script:RpAssertNotReparse = { param([string[]]$Paths) }
+$script:RpProtectDir = { param($Path) $script:Log.Add("protect:$(Split-Path -Leaf $Path)") }
+$script:RpReadSddl = {
+    param($Path)
+    if ($Path -eq $script:RpBackupDir) { return $script:FakeBackupSddl }
+    return $script:FakeParentSddl
+}
 $script:RpReadPartitions = {
     if ($script:ReadThrows) { throw 'CIM failure' }
     $script:ReadCount++
-    if ($script:ReadCount -eq 2 -and $null -ne $script:OnSecondRead) { & $script:OnSecondRead }
+    if ($script:OnRead.ContainsKey($script:ReadCount)) { & $script:OnRead[$script:ReadCount] }
     return @($script:FakeParts.ToArray())
 }
 $script:RpRemoveLetter = {
@@ -73,6 +84,11 @@ $script:RpRemoveLetter = {
                 $p.driveLetter = ''
             }
         }
+    }
+    if ($null -ne $script:OnFirstRemove) {
+        $cb = $script:OnFirstRemove
+        $script:OnFirstRemove = $null
+        & $cb
     }
 }
 
@@ -97,14 +113,15 @@ Assert-Same $script:Log.Count 0 'clean changes nothing'
 Assert-Same (@(Backups).Count) 0 'clean writes no backup'
 $line = ConvertTo-RpJobLine $r | ConvertFrom-Json
 Assert-Same $line.job 'hide-recovery-partitions' 'line job'
-Assert-Same (@($line.before).Count) 0 'clean line before empty'
+Assert-True ($line.before -is [System.Array]) 'clean line before is JSON array'
+Assert-Same $line.before.Count 0 'clean line before empty'
 
-# 2. -ReportOnly with GPT WinRE (D:), GPT EFI (E:), MBR WinRE (F:): drift exit 1, no backup, no remove.
+# 2. -ReportOnly with GPT WinRE (D:), GPT EFI (E:), MBR WinRE with zero GptType (F:): drift exit 1, no backup, no remove.
 $driftParts = @(
     (New-Part -Disk 0 -Part 1 -Letter 'E' -GptType $efiGpt -Size 104857600),
     (New-Part -Disk 0 -Part 2 -Letter 'C' -GptType $basicDataGpt -Size 250000000000 -IsBoot $true),
     (New-Part -Disk 0 -Part 3 -Letter 'd' -GptType $winreGpt -Size 785580032),
-    (New-Part -Disk 1 -Part 2 -Letter 'F' -GptType '' -MbrType 39 -Size 524288000)
+    (New-Part -Disk 1 -Part 2 -Letter 'F' -GptType $zeroGpt -MbrType 39 -Size 524288000)
 )
 Reset-Test -Parts $driftParts
 $r = Invoke-RpJob -ReportOnly
@@ -115,7 +132,7 @@ Assert-Same (@($r.Before).Count) 3 'report-only target count'
 Assert-Same $r.Before[0].kind 'gpt-efi' 'first target kind'
 Assert-Same $r.Before[1].driveLetter 'D' 'second target normalized upper letter'
 Assert-Same $r.Before[1].kind 'gpt-winre' 'second target kind'
-Assert-Same $r.Before[2].kind 'mbr-winre' 'third target kind'
+Assert-Same $r.Before[2].kind 'mbr-winre' 'third target kind (zero GptType)'
 Assert-Same $script:Log.Count 0 'report-only touches nothing'
 Assert-Same (@(Backups).Count) 0 'report-only writes no backup'
 
@@ -126,7 +143,7 @@ Assert-Same $r.ExitCode 0 'run exit'
 Assert-Same $r.Status 'removed' 'run status'
 Assert-Same (@($r.Before).Count) 3 'run before count'
 Assert-Same (@($r.After).Count) 0 'run after empty'
-Assert-Same ($script:Log -join ',') 'protect,remove:0:1:E,remove:0:3:D,remove:1:2:F' 'protect before ordered removals'
+Assert-True (($script:Log -join ',') -match '^protect:[^,]+,protect:RecoveryPartitionLetterBackup,remove:0:1:E,remove:0:3:D,remove:1:2:F$') 'protect parent and backup before ordered removals'
 $files = @(Backups)
 Assert-Same $files.Count 1 'one backup created'
 Assert-Same $r.Backup $files[0].Name 'backup name returned'
@@ -136,8 +153,9 @@ Assert-Same (@($doc.partitions).Count) 4 'backup holds full partition list'
 $cPart = @($script:FakeParts | Where-Object { $_.partitionNumber -eq 2 -and $_.diskNumber -eq 0 })[0]
 Assert-Same $cPart.driveLetter 'C' 'OS drive C untouched'
 $line = ConvertTo-RpJobLine $r | ConvertFrom-Json
-Assert-Same (@($line.before).Count) 3 'line before array count'
-Assert-Same (@($line.after).Count) 0 'line after array count'
+Assert-True ($line.before -is [System.Array] -and $line.after -is [System.Array]) 'line before/after are JSON arrays'
+Assert-Same $line.before.Count 3 'line before array count'
+Assert-Same $line.after.Count 0 'line after array count'
 
 # 4. Never overwrite existing backup on subsequent run.
 $firstContent = Get-Content -LiteralPath $files[0].FullName -Raw
@@ -164,9 +182,25 @@ Assert-Same $r.Status 'failed' 'backup fail status'
 Assert-True (-not ($script:Log -match '^remove:')) 'backup fail removes nothing'
 Assert-Same $script:FakeParts[1].driveLetter 'D' 'letter preserved on backup fail'
 
+# 5b. Untrusted parent or backup ACL refuses to run and removes nothing.
+Reset-Test -Parts $oneTarget
+$script:FakeParentSddl = 'O:SYG:SYD:AI(A;;FA;;;BU)'
+$r = Invoke-RpJob
+Assert-Same $r.ExitCode 2 'untrusted parent acl exit'
+Assert-Same $r.Status 'failed' 'untrusted parent acl status'
+Assert-True (-not ($script:Log -match '^remove:')) 'untrusted parent acl removes nothing'
+
+Reset-Test -Parts $oneTarget
+$null = New-Item -ItemType Directory -Path $script:RpBackupDir -Force
+$script:FakeBackupSddl = 'O:BUG:BUD:P(A;OICI;FA;;;BU)'
+$r = Invoke-RpJob
+Assert-Same $r.ExitCode 2 'untrusted backup acl exit'
+Assert-Same $r.Status 'failed' 'untrusted backup acl status'
+Assert-True (-not ($script:Log -match '^remove:')) 'untrusted backup acl removes nothing'
+
 # 6. Snapshot drift between backup and removal aborts with exit 2 and removes nothing.
 Reset-Test -Parts $oneTarget
-$script:OnSecondRead = { $script:FakeParts[1].driveLetter = 'E' }
+$script:OnRead[2] = { $script:FakeParts[1].driveLetter = 'E' }
 $r = Invoke-RpJob
 Assert-Same $r.ExitCode 2 'snapshot drift exit'
 Assert-Same $r.Status 'failed' 'snapshot drift status'
@@ -179,19 +213,33 @@ $oneTargetGuid = @(
     (New-Part -Disk 0 -Part 3 -Letter 'D' -GptType $winreGpt -Size 785580032 -Guid '{11111111-1111-1111-1111-111111111111}')
 )
 Reset-Test -Parts $oneTargetGuid
-$script:OnSecondRead = { $script:FakeParts[1].guid = '{22222222-2222-2222-2222-222222222222}' }
+$script:OnRead[2] = { $script:FakeParts[1].guid = '{22222222-2222-2222-2222-222222222222}' }
 $r = Invoke-RpJob
 Assert-Same $r.ExitCode 2 'guid drift exit'
 Assert-Same $r.Status 'failed' 'guid drift status'
 Assert-True (-not ($script:Log -match '^remove:')) 'guid drift removes nothing'
 
-# 7. Partial failure: RpRemoveLetter throws on second partition -> still populates $r.After with live remaining state.
+# 6c. Multi-target drift between first and second removal stops before removing the changed second partition.
 $twoTargets = @(
     (New-Part -Disk 0 -Part 1 -Letter 'E' -GptType $efiGpt -Size 104857600),
     (New-Part -Disk 0 -Part 2 -Letter 'C' -GptType $basicDataGpt -Size 250000000000 -IsBoot $true),
     (New-Part -Disk 0 -Part 3 -Letter 'D' -GptType $winreGpt -Size 785580032)
 )
 Reset-Test -Parts $twoTargets
+$script:OnFirstRemove = { $script:FakeParts[2].gptType = $basicDataGpt }
+$r = Invoke-RpJob
+Assert-Same $r.ExitCode 2 'mid-loop drift exit'
+Assert-Same $r.Status 'failed' 'mid-loop drift status'
+Assert-True ($r.Error -match 'changed before removal') 'mid-loop drift error'
+Assert-True (-not ($script:Log -match 'remove:0:3:D')) 'mid-loop drift stops before second removal'
+
+# 7. Partial failure: RpRemoveLetter throws on second partition -> still populates $r.After with live remaining state (1 element array).
+$twoTargetsPartial = @(
+    (New-Part -Disk 0 -Part 1 -Letter 'E' -GptType $efiGpt -Size 104857600),
+    (New-Part -Disk 0 -Part 2 -Letter 'C' -GptType $basicDataGpt -Size 250000000000 -IsBoot $true),
+    (New-Part -Disk 0 -Part 3 -Letter 'D' -GptType $winreGpt -Size 785580032)
+)
+Reset-Test -Parts $twoTargetsPartial
 $script:RemoveThrowOnLetter = 'D'
 $r = Invoke-RpJob
 Assert-Same $r.ExitCode 2 'partial fail exit'
@@ -200,6 +248,9 @@ Assert-True ($r.Error -match 'Access denied on D') 'partial fail captures error'
 Assert-Same (@($r.Before).Count) 2 'partial fail before count'
 Assert-Same (@($r.After).Count) 1 'partial fail after populated with remaining live target'
 Assert-Same $r.After[0].driveLetter 'D' 'partial fail remaining letter is D'
+$linePartial = ConvertTo-RpJobLine $r | ConvertFrom-Json
+Assert-True ($linePartial.after -is [System.Array]) 'single remaining after is JSON array'
+Assert-Same $linePartial.after.Count 1 'single remaining after count'
 
 # 8. Letter still present after removal -> exit 2, After populated.
 Reset-Test -Parts $oneTarget
@@ -217,11 +268,26 @@ Assert-Same $r.ExitCode 2 'read throw exit'
 Assert-Same $r.Status 'failed' 'read throw status'
 Assert-True ($r.Error -match 'CIM failure') 'read throw message'
 
-# 10. Single target JSON line keeps before/after as arrays.
+# 10. Single target JSON line keeps before/after as JSON arrays (checked without wrapping).
 Reset-Test -Parts $oneTarget
 $r = Invoke-RpJob -ReportOnly
 $line1 = ConvertTo-RpJobLine $r | ConvertFrom-Json
-Assert-Same (@($line1.before).Count) 1 'single target line before count'
+Assert-True ($line1.before -is [System.Array]) 'single target line before is JSON array'
+Assert-True ($line1.after -is [System.Array]) 'single target line after is JSON array'
+Assert-Same $line1.before.Count 1 'single target line before count'
+Assert-Same $line1.after.Count 1 'single target line after count'
+
+# 11. Ancestor reparse point check and parent ACL validation.
+$symTarget = Join-Path $tmpRoot 'sym-target'
+$null = New-Item -ItemType Directory -Path $symTarget
+$symAncestor = Join-Path $tmpRoot 'sym-ancestor'
+$null = New-Item -ItemType SymbolicLink -Path $symAncestor -Target $symTarget
+$reparseThrew = $false
+try { & $defaultAssertNotReparse @((Join-Path $symAncestor 'Relian\RecoveryPartitionLetterBackup')) } catch { $reparseThrew = ($_.Exception.Message -match 'reparse point') }
+Assert-True $reparseThrew 'default reparse check walks ancestors'
+Assert-True (Test-RpParentAcl 'O:SYG:SYD:AI(A;ID;0x1200a9;;;BU)(A;CIID;0x100116;;;BU)(A;;FA;;;SY)') 'accepts ProgramData-inherited Relian parent'
+Assert-True (-not (Test-RpParentAcl 'O:SYG:SYD:AI(A;;DC;;;BU)(A;;FA;;;SY)')) 'rejects BU delete-child on parent'
+Assert-True (-not (Test-RpParentAcl 'O:S-1-5-21-1-2-3-1001G:SYD:P(A;OICI;FA;;;SY)')) 'rejects user owner on parent'
 
 Remove-Item -LiteralPath $tmpRoot -Recurse -Force
 Write-Output 'hide-recovery-partitions tests passed'

@@ -4,7 +4,7 @@
 # Never touches the OS drive letter ($env:SystemDrive), any IsBoot partition, any partition over 4 GiB, or any other
 # partition type. Before removing a drive letter, writes a JSON snapshot under
 # C:\ProgramData\Relian\RecoveryPartitionLetterBackup (SYSTEM-only, never overwritten) and reads it back.
-# A failed backup or a partition change between snapshot and removal stops the run with nothing removed.
+# A failed backup or a partition change before removal stops the run.
 # -ReportOnly changes and writes nothing. Exit 0 unchanged or removed, 1 drift with -ReportOnly, 2 failed.
 # Prints one JSON line on stdout.
 [CmdletBinding()]
@@ -15,18 +15,34 @@ Set-StrictMode -Version Latest
 
 $script:RpGptWinRe = '{de94bba4-06d1-4d40-a16a-bfd50179d6ac}'
 $script:RpGptEfi = '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+$script:RpGptZero = '{00000000-0000-0000-0000-000000000000}'
 $script:RpMbrWinRe = 39
 $script:RpMaxBytes = 4294967296L
 $script:RpBackupDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\RecoveryPartitionLetterBackup'
 $script:RpSystemDrive = $env:SystemDrive
 
-$script:RpProtectDir = {
-    param($Path)
-    foreach ($d in @((Split-Path -Parent $Path), $Path)) {
-        if ($d -and (Test-Path -LiteralPath $d) -and ((Get-Item -LiteralPath $d -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-            throw 'refusing reparse point on backup path'
+$script:RpReadSddl = { param($Path) (Get-Acl -LiteralPath $Path).Sddl }
+
+$script:RpAssertNotReparse = {
+    param([string[]]$Paths)
+    foreach ($p in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($p)) { continue }
+        $full = [IO.Path]::GetFullPath($p)
+        $root = [IO.Path]::GetPathRoot($full)
+        $cur = $(if ($full.Length -gt $root.Length) { $full.TrimEnd('\', '/') } else { $full })
+        while ($cur -and $cur -ne $root) {
+            if ((Test-Path -LiteralPath $cur) -and ((Get-Item -LiteralPath $cur -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'refusing reparse point on backup path'
+            }
+            $parent = Split-Path -Parent $cur
+            if (-not $parent -or $parent -eq $cur) { break }
+            $cur = $parent
         }
     }
+}
+
+$script:RpProtectDir = {
+    param($Path)
     $acl = New-Object Security.AccessControl.DirectorySecurity
     $acl.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;OICI;FA;;;SY)')
     Set-Acl -LiteralPath $Path -AclObject $acl
@@ -60,12 +76,57 @@ $script:RpRemoveLetter = {
     Remove-PartitionAccessPath -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber -AccessPath "${DriveLetter}:\" -ErrorAction Stop
 }
 
-function Get-RpOsLetter {
-    param([AllowEmptyString()][string]$SystemDrive)
-    if ($SystemDrive -match '\A\s*([A-Za-z])(?::|\\|\z)') {
-        return $Matches[1].ToUpperInvariant()
+# Owner must be SYSTEM or Administrators; DACL must be protected and allow SYSTEM only.
+function Test-RpBackupAcl {
+    param([AllowEmptyString()][string]$Sddl)
+    return ($Sddl -match '\AO:(SY|BA)G:[^:]*D:([A-Z]*)(\(A;[A-Z]*;[^;()]*;;;SY\))+\z' -and $Matches[2].Contains('P'))
+}
+
+# Parent directory must be owned by SYSTEM or Administrators with no non-admin write, delete, or ownership-change ACEs.
+function Test-RpParentAcl {
+    param([AllowEmptyString()][string]$Sddl)
+    if ($Sddl -notmatch '\AO:(SY|BA)G:[^:]*D:[^()]*((?:\([^()]+\))+)') { return $false }
+    $aces = [regex]::Matches($Matches[2], '\(([^()]+)\)')
+    foreach ($m in $aces) {
+        $parts = $m.Groups[1].Value -split ';'
+        if ($parts.Count -lt 6) { return $false }
+        $aceType = $parts[0]
+        $rights = $parts[2]
+        $trustee = $parts[5]
+        if ($aceType -ne 'A') { continue }
+        if ($trustee -in @('SY', 'BA')) { continue }
+        if ($trustee -eq 'CO' -and $parts[1] -match 'IO') { continue }
+        if ($rights -match '^(FA|GA|GW|KA)$' -or $rights -match '(DC|SD|WD|WDAC|WO)') { return $false }
+        if ($rights -match '^0x([0-9a-fA-F]+)$') {
+            $mask = [Convert]::ToInt64($Matches[1], 16)
+            # Reject generic all/write, delete, delete-child, write-dac, write-owner.
+            if (($mask -band 0x500D0040) -ne 0) { return $false }
+        }
     }
-    throw 'cannot determine OS drive letter'
+    return $true
+}
+
+function Ensure-RpBackupDirectory {
+    param([string]$BackupDir)
+    $parent = Split-Path -Parent $BackupDir
+    $chain = @($parent, $BackupDir)
+    & $script:RpAssertNotReparse $chain
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        $null = New-Item -ItemType Directory -Path $parent -Force
+        & $script:RpAssertNotReparse @($parent)
+        & $script:RpProtectDir $parent
+    }
+    if ($parent -and -not (Test-RpParentAcl (& $script:RpReadSddl $parent))) {
+        throw 'refusing backup parent directory with untrusted owner or ACL'
+    }
+    if (-not (Test-Path -LiteralPath $BackupDir)) {
+        $null = New-Item -ItemType Directory -Path $BackupDir -Force
+        & $script:RpAssertNotReparse $chain
+        & $script:RpProtectDir $BackupDir
+    }
+    if (-not (Test-RpBackupAcl (& $script:RpReadSddl $BackupDir))) {
+        throw 'refusing backup directory with untrusted owner or ACL'
+    }
 }
 
 function Get-RpProp {
@@ -80,11 +141,19 @@ function Get-RpProp {
     return $Default
 }
 
+function Get-RpOsLetter {
+    param([AllowEmptyString()][string]$SystemDrive)
+    if ($SystemDrive -match '\A\s*([A-Za-z])(?::|\\|\z)') {
+        return $Matches[1].ToUpperInvariant()
+    }
+    throw 'cannot determine OS drive letter'
+}
+
 function Get-RpPartitionKind {
     param($Partition)
     $gptRaw = Get-RpProp $Partition 'gptType' ''
     $gpt = if ($null -ne $gptRaw) { ([string]$gptRaw).Trim().ToLowerInvariant() } else { '' }
-    if ($gpt) {
+    if ($gpt -and $gpt -ne $script:RpGptZero) {
         if ($gpt -eq $script:RpGptWinRe) { return 'gpt-winre' }
         if ($gpt -eq $script:RpGptEfi) { return 'gpt-efi' }
         return $null
@@ -163,8 +232,7 @@ function Test-RpTargetsEqual {
 # Writes a new backup file and reads it back. CreateNew: an existing file is never overwritten. Throws on any failure.
 function Write-RpBackup {
     param($Partitions, $Targets)
-    $null = New-Item -ItemType Directory -Path $script:RpBackupDir -Force
-    & $script:RpProtectDir $script:RpBackupDir
+    Ensure-RpBackupDirectory $script:RpBackupDir
     $name = 'backup-{0}-{1}.json' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $path = Join-Path $script:RpBackupDir $name
     $targetList = @($Targets)
@@ -210,6 +278,12 @@ function Invoke-RpJob {
             }
             $removeErr = ''
             foreach ($t in $targets) {
+                $liveNow = @(Get-RpTargets (& $script:RpReadPartitions) $script:RpSystemDrive)
+                $match = @($liveNow | Where-Object { $_.diskNumber -eq $t.diskNumber -and $_.partitionNumber -eq $t.partitionNumber })
+                if ($match.Count -ne 1 -or -not (Test-RpTargetsEqual @($t) $match)) {
+                    $removeErr = 'partition target changed before removal'
+                    break
+                }
                 try {
                     & $script:RpRemoveLetter $t.diskNumber $t.partitionNumber $t.driveLetter
                 } catch {
