@@ -246,10 +246,11 @@ These report by default and change the device only when you ask. None reboots un
 
 ### Diagnostics and evidence
 
-All read-only, and each prints bounded JSON. The five under `windows/read/` also run through `Invoke-RelianReadJob`. The two test tools at the end are not read-only.
+All read-only, and each prints bounded JSON. The six under `windows/read/` also run through `Invoke-RelianReadJob`. The two test tools at the end are not read-only.
 
 - `diagnose-feature-upgrade` (read): a failed or running feature upgrade. `Section` is `Summary`, `Rollback`, `Servicing`, `Setup`, `Boot` or `Maintenance`.
 - `diagnose-windows-update` (read): Windows Update state. `Section` is `Summary`, `History`, `Events`, `Policy`, `Service` or `ServicingHistory` (a CBS and DISM error digest).
+- `folder-inventory` (read): one folder or share before a file-share migration. `Section` is `Discover` (shares, GPO drive maps, logon-script drive lines, AD home drives), `Summary` (file types, Excel count, database and lock-file families and the folders they cluster in, largest files, paths over 250 and 400 characters, SharePoint-invalid names, age), `Tree` or `Acl` (paged by `Offset`), `Access` (AD group expansion) or `Open` (SMB open files). `Folder` names it (default `Accounting`); `Pick` chooses among matches. Extend the file families in `$script:FiFamilies`.
 - `gpo-evidence` (read): Group Policy state for a domain. `Section` is `Summary`, `Gpos`, `Policy` or `Rsop`; `Gpo` picks one. A `cpassword` is counted, never printed.
 - `maintenance-evidence` (read): reads back stored storage and update maintenance reports, in pages.
 - `wake-device` (read): sends a Wake-on-LAN packet from an online peer to `Mac` on the same subnet. A sent packet does not prove the target woke.
