@@ -110,6 +110,12 @@ try {
     $r = Run 'Disable' 'jdoe' '' 'OU=Nope,DC=x'
     Assert ($r.ExitCode -eq 0 -and $r.Lines[0].Moved -eq 'skipped, OU not found' -and -not ($script:Fake.Log -contains 'move')) 'A missing OU skips the move without failing'
 
+    # An OU lookup that throws changes nothing.
+    New-Fake @((New-User 'jdoe' 1200))
+    $script:OfOuExists = { throw 'directory error' }
+    $r = Run 'Disable' 'jdoe' '' 'OU=Any,DC=x'
+    Assert ($r.Lines[0].Status -eq 'error' -and $script:Fake.Log.Count -eq 0) 'A failed OU lookup happens before any change'
+
     # Read-back mismatch exits 1.
     New-Fake @((New-User 'jdoe' 1200)); $script:Fake.DisableSticks = $false
     $r = Run 'Disable' 'jdoe'

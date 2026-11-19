@@ -78,7 +78,12 @@ $script:OfGroups = {
 }
 $script:OfDisable = { param($guid) Disable-ADAccount -Identity $guid }
 $script:OfSetDescription = { param($guid, $text) Set-ADUser -Identity $guid -Description $text }
-$script:OfOuExists = { param($dn) [bool](Get-ADObject -LDAPFilter '(objectClass=organizationalUnit)' -SearchBase $dn -SearchScope Base -ErrorAction SilentlyContinue) }
+# A missing SearchBase throws ADIdentityNotFoundException (terminating); any other error propagates.
+$script:OfOuExists = {
+    param($dn)
+    try { [bool](Get-ADObject -LDAPFilter '(objectClass=organizationalUnit)' -SearchBase $dn -SearchScope Base) }
+    catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] { $false }
+}
 $script:OfMove = { param($guid, $ou) Move-ADObject -Identity $guid -TargetPath $ou }
 $script:OfNow = { [DateTime]::Now }
 $script:OfHost = { $env:COMPUTERNAME }
@@ -185,6 +190,8 @@ function Invoke-OfAccount([string]$Sam, [bool]$Apply, [string]$Text, [string]$Ou
         }
         if ($refusal) { $line.Status = 'refused'; $line.Reason = $refusal; return $line }
 
+        # Resolve the OU before any change, so a failed lookup cannot leave a half-done account.
+        $ouOk = if ($Ou -ne '') { [bool](& $script:OfOuExists $Ou) } else { $false }
         $now = & $script:OfNow
         # The backup holds the full group list; the printed line may be cut.
         $line.Backup = Write-OfBackup (Get-OfSnapshot $user $groups) $now
@@ -193,7 +200,7 @@ function Invoke-OfAccount([string]$Sam, [bool]$Apply, [string]$Text, [string]$Ou
         & $script:OfSetDescription $guid $Text
         $moved = $null
         if ($Ou -ne '') {
-            if (& $script:OfOuExists $Ou) { & $script:OfMove $guid $Ou; $moved = $true } else { $moved = $false }
+            if ($ouOk) { & $script:OfMove $guid $Ou; $moved = $true } else { $moved = $false }
         }
         $after = & $script:OfGet $guid
         $line.After = [ordered]@{ enabled = [bool]$after.Enabled; description = [string]$after.Description; dn = [string]$after.DistinguishedName }
