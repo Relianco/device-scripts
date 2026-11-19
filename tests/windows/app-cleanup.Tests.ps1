@@ -44,10 +44,36 @@ $p = Plan @((New-Inst 'a' '72.0.1' 'user' 'u1')) @{ u1 = 89; u2 = 300 }
 Assert-Same $p[0].Action 'upgrade' 'per-user copy looks at its own user only (89 days is in use)'
 $p = Plan @((New-Inst 'a' '72.0.1' 'user' 'u1')) @{ u1 = 90 }
 Assert-Same $p[0].Action 'remove' '90 days is unused'
-$p = Plan @((New-Inst 'a' '72.0.1' 'user' 'u1' 'C:\Users\u1\x\Firefox.exe')) @{ u1 = 900 } @('c:\users\u1\x\firefox.exe')
+$fx = Join-Path ([System.IO.Path]::GetTempPath()) 'relian-ac-fx\Firefox.exe'
+$p = Plan @((New-Inst 'a' '72.0.1' 'user' 'u1' $fx)) @{ u1 = 900 } @($fx.ToLowerInvariant())
 Assert-Same $p[0].Action 'skip-running' 'running copy is never removed'
 $p = Plan @((New-Inst 'a' '')) @{ u1 = 900 }
 Assert-Same $p[0].Action 'remove' 'unparseable version is treated as old'
+
+# Several installs: the inventory and the plan are flat arrays with one element per copy (a nested array would
+# make the planner act on aggregated properties).
+$ftmp = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-acf-' + [guid]::NewGuid().ToString('n'))
+try {
+    foreach ($u in 'ua', 'ub') {
+        $d = Join-Path $ftmp "$u\AppData\Local\Mozilla Firefox"
+        [void](New-Item -ItemType Directory -Path $d -Force)
+        Set-Content -LiteralPath (Join-Path $d 'firefox.exe') -Value 'x'
+    }
+    function Get-AcUserDirs { @(Get-ChildItem -LiteralPath $ftmp -Directory) }
+    function Get-AcMachineKeys { [pscustomobject]@{ Key = 'k1'; Name = 'Mozilla Firefox 72'; Version = '72.0.1'; Uninstall = ''; Location = (Join-Path $ftmp 'ua\AppData\Local\Mozilla Firefox') } }
+    function Get-AcFileVersion { param([string]$Path) if ($Path -like '*ub*') { return '158.0' } return '72.0.1' }
+    $inv = @(Get-AcFirefoxInventory)
+    # ua's exe is listed by its machine key and as a user path: counted once. ub is separate.
+    Assert-Same $inv.Count 2 'inventory has one element per distinct copy'
+    Assert-Same $inv[0].Version '72.0.1' 'first copy version is a scalar'
+    Assert-Same $inv[1].Version '158.0' 'second copy version is a scalar'
+    $pl = @(Get-AcFirefoxPlan -Installs $inv -IdleByUser @{} -RunningPaths @() -CurrentMajor 150 -IdleDays 90)
+    Assert-Same $pl.Count 2 'plan has one element per copy'
+    Assert-Same $pl[0].Action 'remove' 'old copy is removed beside the current one'
+    Assert-Same $pl[1].Action 'keep' 'current copy is kept'
+} finally {
+    Remove-Item -LiteralPath $ftmp -Recurse -Force
+}
 
 # Teams: nothing present, check mode touches nothing.
 $script:calls = New-Object System.Collections.Generic.List[string]
@@ -72,8 +98,10 @@ try {
     $r = Invoke-AcTeams -Fix $true
     Assert-Same @($r.items).Count 2 'two user copies found'
     Assert-Same (@($r.items | Where-Object { $_.id -eq 'busy' })[0].action) 'skip-running' 'running user copy skipped'
-    Assert-Same $script:calls.Count 1 'only the idle copy was uninstalled'
-    if ($script:calls[0] -notlike '*idle*Update.exe --uninstall -s') { Fail "uninstall call was [$($script:calls[0])]" }
+    Assert-Same $script:calls.Count 0 'no user-writable file is executed'
+    if (-not (Test-Path -LiteralPath (Join-Path $tmp 'busy'))) { Fail 'running copy was deleted' }
+    if (Test-Path -LiteralPath (Join-Path $tmp 'idle\AppData\Local\Microsoft\Teams')) { Fail 'idle copy was not deleted' }
+    Assert-Same $r.failed 0 'verified removal has no failures'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
 }

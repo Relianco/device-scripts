@@ -12,7 +12,7 @@
     firefox package, then run this again. A running copy is reported as "skip-running".
 
     Teams: removes the classic Teams Machine-Wide Installer (msiexec /x) and each user's classic copy
-    (Update.exe --uninstall -s). A user's copy is skipped while that user's classic Teams runs. New Teams
+    (its Teams folder is deleted; no user-writable file is run as SYSTEM). A user's copy is skipped while that user's classic Teams runs. New Teams
     (ms-teams) is never touched.
 
     The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as -Name value:
@@ -24,7 +24,7 @@
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM
-    shortcut: a per-user uninstall as SYSTEM leaves the user's HKCU Uninstall key behind; delete it when
+    shortcut: deleting a per-user copy leaves the user HKCU Uninstall and Run keys and shortcuts; clean them when
     an inventory tool keeps reporting a removed copy.
 #>
 
@@ -81,7 +81,7 @@ function Get-AcFirefoxPlan {
         }
         $plan += [pscustomobject]@{ Id = $i.Id; Action = $act; Reason = $why }
     }
-    return , $plan
+    return $plan
 }
 
 # Seams for unit tests.
@@ -139,7 +139,7 @@ function Get-AcFirefoxInventory {
     # Same firefox.exe seen as a registry entry and a user path counts once.
     $seen = @{}; $out = @()
     foreach ($i in $installs) { $p = $i.Path.ToLowerInvariant(); if ($p -and $seen[$p]) { continue }; if ($p) { $seen[$p] = $true }; $out += $i }
-    return , $out
+    return $out
 }
 
 function Get-AcIdleByUser {
@@ -155,8 +155,18 @@ function Get-AcIdleByUser {
     return $h
 }
 
+# A per-user install dir is user-writable: SYSTEM never runs anything from it, it only deletes the tree.
+# Directory.Delete does not follow a junction inside the tree; a reparse-point top directory is refused.
+function Remove-AcUserDir {
+    param([string]$Dir)
+    if (-not (Test-Path -LiteralPath $Dir)) { return 0 }
+    if ((Get-Item -LiteralPath $Dir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return 2 }
+    try { [System.IO.Directory]::Delete($Dir, $true); return 0 } catch { return 1 }
+}
+
 function Remove-AcFirefox {
     param($Install)
+    if ($Install.Scope -eq 'user') { return Remove-AcUserDir -Dir (Split-Path -Parent $Install.Path) }
     if ($Install.Msi) { return Invoke-AcProcess -File "$env:SystemRoot\System32\msiexec.exe" -Arguments "/x $($Install.Key) /qn /norestart" }
     $helper = if ($Install.Uninstall -match '"?([^"]+helper\.exe)') { $Matches[1] } else { '' }
     if (-not $helper -or -not (Test-Path -LiteralPath $helper)) { return 2 }
@@ -179,7 +189,17 @@ function Invoke-AcFirefox {
         }
         $rows += [ordered]@{ scope = $i.Scope; user = $i.User; version = $i.Version; path = $i.Path; msi = $i.Msi; action = $p.Action; reason = $p.Reason; result = $res }
     }
-    $after = if ($Fix) { @((Get-AcFirefoxInventory) | ForEach-Object { "$($_.Version) $($_.Path)" }) } else { $null }
+    $after = $null
+    if ($Fix) {
+        $left = @(Get-AcFirefoxInventory)
+        $after = @($left | ForEach-Object { "$($_.Version) $($_.Path)" })
+        # A removal that exited 0 but left that same copy behind is a failure; skipped and kept copies are not.
+        for ($x = 0; $x -lt $installs.Count; $x++) {
+            if ($rows[$x].result -ne 'exit 0' -and $rows[$x].result -ne 'exit 3010') { continue }
+            $i = $installs[$x]
+            if (@($left | Where-Object { ($i.Key -and $_.Key -eq $i.Key) -or ($i.Path -and $_.Path -eq $i.Path) }).Count -gt 0) { $failed++; $rows[$x].result += ' but still present' }
+        }
+    }
     return [ordered]@{ installs = $rows; idleDays = $idle; remaining = $after; failed = $failed }
 }
 
@@ -193,7 +213,9 @@ function Invoke-AcTeams {
         $res = ''
         if ($Fix) {
             $c = Invoke-AcProcess -File "$env:SystemRoot\System32\msiexec.exe" -Arguments "/x $code /qn /norestart"
-            $res = "exit $c"; if ($c -ne 0 -and $c -ne 3010) { $failed++ }
+            $res = "exit $c"
+            $still = (Test-Path -LiteralPath "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$code") -or (Test-Path -LiteralPath "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$code")
+            if (($c -ne 0 -and $c -ne 3010) -or $still) { $failed++; if ($still) { $res += ' but still present' } }
         }
         $rows += [ordered]@{ kind = 'machine-wide installer'; id = $code; action = 'remove'; result = $res }
     }
@@ -205,8 +227,9 @@ function Invoke-AcTeams {
         $row = [ordered]@{ kind = 'user copy'; id = $u.Name; action = 'remove'; result = '' }
         if ($run.Count -gt 0) { $row.action = 'skip-running' }
         elseif ($Fix) {
-            $c = Invoke-AcProcess -File $upd -Arguments '--uninstall -s'
-            $row.result = "exit $c"; if ($c -ne 0) { $failed++ }
+            $c = Remove-AcUserDir -Dir $dir
+            $row.result = "exit $c"
+            if ($c -ne 0 -or (Test-Path -LiteralPath $dir)) { $failed++; $row.result += ' but still present' }
         }
         $rows += $row
     }
