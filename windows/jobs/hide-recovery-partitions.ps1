@@ -147,16 +147,24 @@ function Ensure-RpBackupDirectory {
     $parent = Split-Path -Parent $BackupDir
     $chain = @($parent, $BackupDir)
     & $script:RpAssertNotReparse $chain
-    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
-        $null = New-Item -ItemType Directory -Path $parent -Force
-        & $script:RpAssertNotReparse @($parent)
-        & $script:RpProtectDir $parent
-    }
-    if ($parent -and -not (Test-RpParentAcl (& $script:RpReadSddl $parent))) {
-        throw 'refusing backup parent directory with untrusted owner or ACL'
+    if ($parent) {
+        if (-not (Test-Path -LiteralPath $parent)) {
+            $null = New-Item -ItemType Directory -Path $parent -Force
+            & $script:RpAssertNotReparse @($parent)
+            & $script:RpProtectDir $parent
+        } elseif (-not (Test-RpParentAcl (& $script:RpReadSddl $parent))) {
+            & $script:RpAssertNotReparse @($parent)
+            & $script:RpProtectDir $parent
+        }
+        if (-not (Test-RpParentAcl (& $script:RpReadSddl $parent))) {
+            throw 'refusing backup parent directory with untrusted owner or ACL'
+        }
     }
     if (-not (Test-Path -LiteralPath $BackupDir)) {
         $null = New-Item -ItemType Directory -Path $BackupDir -Force
+        & $script:RpAssertNotReparse $chain
+        & $script:RpProtectDir $BackupDir
+    } elseif (-not (Test-RpBackupAcl (& $script:RpReadSddl $BackupDir))) {
         & $script:RpAssertNotReparse $chain
         & $script:RpProtectDir $BackupDir
     }
