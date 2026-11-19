@@ -66,7 +66,7 @@ function Get-AcFirefoxPlan {
     foreach ($i in @($Installs)) {
         $act = 'keep'; $why = 'current'
         if (-not (& $isCurrent $i)) {
-            $other = @($Installs | Where-Object { $_.Id -ne $i.Id -and (& $isCurrent $_) })
+            $other = @($Installs | Where-Object { $_.Id -ne $i.Id -and (& $isCurrent $_) -and ($_.Scope -eq 'machine' -or ($i.Scope -eq 'user' -and $_.User -eq $i.User)) })
             if (@($RunningPaths) -contains ([string]$i.Path).ToLowerInvariant()) {
                 $act = 'skip-running'; $why = 'old copy is running'
             } elseif ($other.Count -gt 0) {
@@ -158,15 +158,24 @@ function Get-AcIdleByUser {
 # A per-user install dir is user-writable: SYSTEM never runs anything from it, it only deletes the tree.
 # Directory.Delete does not follow a junction inside the tree; a reparse-point top directory is refused.
 function Remove-AcUserDir {
-    param([string]$Dir)
+    param([string]$Dir, [string]$Root)
     if (-not (Test-Path -LiteralPath $Dir)) { return 0 }
-    if ((Get-Item -LiteralPath $Dir -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return 2 }
+    # Refuse when the dir or any ancestor up to the user profile root is a reparse point (a junction could
+    # send SYSTEM elsewhere). shortcut: a user could swap a junction in between this check and the delete; a
+    # signed-in user is the only one who can, so run Fix on a PC with no session when that matters.
+    $cur = (Get-Item -LiteralPath $Dir -Force).FullName.TrimEnd([char]92, [char]47)
+    $top = $Root.TrimEnd([char]92, [char]47)
+    if (-not $cur.StartsWith($top + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) { return 2 }
+    for ($d = $cur; $d.Length -ge $top.Length; $d = Split-Path -Parent $d) {
+        if ((Get-Item -LiteralPath $d -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return 2 }
+        if ($d.Length -eq $top.Length) { break }
+    }
     try { [System.IO.Directory]::Delete($Dir, $true); return 0 } catch { return 1 }
 }
 
 function Remove-AcFirefox {
     param($Install)
-    if ($Install.Scope -eq 'user') { return Remove-AcUserDir -Dir (Split-Path -Parent $Install.Path) }
+    if ($Install.Scope -eq 'user') { return Remove-AcUserDir -Dir (Split-Path -Parent $Install.Path) -Root (Join-Path "$env:SystemDrive\Users" $Install.User) }
     if ($Install.Msi) { return Invoke-AcProcess -File "$env:SystemRoot\System32\msiexec.exe" -Arguments "/x $($Install.Key) /qn /norestart" }
     $helper = if ($Install.Uninstall -match '"?([^"]+helper\.exe)') { $Matches[1] } else { '' }
     if (-not $helper -or -not (Test-Path -LiteralPath $helper)) { return 2 }
@@ -227,7 +236,7 @@ function Invoke-AcTeams {
         $row = [ordered]@{ kind = 'user copy'; id = $u.Name; action = 'remove'; result = '' }
         if ($run.Count -gt 0) { $row.action = 'skip-running' }
         elseif ($Fix) {
-            $c = Remove-AcUserDir -Dir $dir
+            $c = Remove-AcUserDir -Dir $dir -Root $u.FullName
             $row.result = "exit $c"
             if ($c -ne 0 -or (Test-Path -LiteralPath $dir)) { $failed++; $row.result += ' but still present' }
         }

@@ -30,9 +30,18 @@ function Plan { param($Installs, $Idle = @{}, $Running = @()) @(Get-AcFirefoxPla
 $p = Plan @((New-Inst 'a' '158.0'))
 Assert-Same $p[0].Action 'keep' 'current copy kept'
 
-$p = Plan @((New-Inst 'a' '134.0'), (New-Inst 'b' '158.0' 'user' 'u1'))
+$p = Plan @((New-Inst 'a' '134.0'), (New-Inst 'b' '158.0'))
 Assert-Same $p[0].Action 'remove' 'old copy beside current is removed'
 Assert-Same $p[1].Action 'keep' 'current beside old is kept'
+# A current copy of one user does not replace another user's old copy, nor a machine-wide old copy.
+$p = Plan @((New-Inst 'a' '134.0' 'user' 'u1'), (New-Inst 'b' '158.0' 'user' 'u2')) @{ u1 = 1; u2 = 1 }
+Assert-Same $p[0].Action 'upgrade' 'another user current copy does not replace this user old copy'
+$p = Plan @((New-Inst 'a' '134.0'), (New-Inst 'b' '158.0' 'user' 'u2')) @{ u1 = 1 }
+Assert-Same $p[0].Action 'upgrade' 'a per-user current copy does not replace a machine-wide old copy'
+$p = Plan @((New-Inst 'a' '134.0' 'user' 'u1'), (New-Inst 'b' '158.0' 'user' 'u1')) @{ u1 = 1 }
+Assert-Same $p[0].Action 'remove' 'same user current copy replaces this user old copy'
+$p = Plan @((New-Inst 'a' '134.0' 'user' 'u1'), (New-Inst 'b' '158.0')) @{ u1 = 1 }
+Assert-Same $p[0].Action 'remove' 'machine-wide current copy replaces a per-user old copy'
 
 $p = Plan @((New-Inst 'a' '72.0.1')) @{ u1 = 200 }
 Assert-Same $p[0].Action 'remove' 'machine copy idle 200 days is removed'
@@ -67,9 +76,9 @@ try {
     Assert-Same $inv.Count 2 'inventory has one element per distinct copy'
     Assert-Same $inv[0].Version '72.0.1' 'first copy version is a scalar'
     Assert-Same $inv[1].Version '158.0' 'second copy version is a scalar'
-    $pl = @(Get-AcFirefoxPlan -Installs $inv -IdleByUser @{} -RunningPaths @() -CurrentMajor 150 -IdleDays 90)
+    $pl = @(Get-AcFirefoxPlan -Installs $inv -IdleByUser @{ ua = 1; ub = 1 } -RunningPaths @() -CurrentMajor 150 -IdleDays 90)
     Assert-Same $pl.Count 2 'plan has one element per copy'
-    Assert-Same $pl[0].Action 'remove' 'old copy is removed beside the current one'
+    Assert-Same $pl[0].Action 'upgrade' 'old machine copy is not replaced by a per-user current copy'
     Assert-Same $pl[1].Action 'keep' 'current copy is kept'
 } finally {
     Remove-Item -LiteralPath $ftmp -Recurse -Force
@@ -105,5 +114,19 @@ try {
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force
 }
+
+# Remove-AcUserDir refuses a reparse-point ancestor (here a symlink standing in for a junction) and a dir outside the root.
+$rt = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-acr-' + [guid]::NewGuid().ToString('n'))
+try {
+    $outside = Join-Path $rt 'outside\victim'; $prof = Join-Path $rt 'prof'
+    [void](New-Item -ItemType Directory -Path $outside -Force); [void](New-Item -ItemType Directory -Path $prof -Force)
+    Set-Content -LiteralPath (Join-Path $outside 'f.txt') -Value 'x'
+    [void](New-Item -ItemType SymbolicLink -Path (Join-Path $prof 'link') -Target (Join-Path $rt 'outside'))
+    Assert-Same (Remove-AcUserDir -Dir (Join-Path $prof 'link\victim') -Root $prof) 2 'reparse ancestor refused'
+    if (-not (Test-Path -LiteralPath (Join-Path $outside 'f.txt'))) { Fail 'file outside the profile was deleted' }
+    Assert-Same (Remove-AcUserDir -Dir $outside -Root $prof) 2 'dir outside the root refused'
+    $ok = Join-Path $prof 'plain'; [void](New-Item -ItemType Directory -Path $ok)
+    Assert-Same (Remove-AcUserDir -Dir $ok -Root $prof) 0 'plain dir under the root is removed'
+} finally { Remove-Item -LiteralPath $rt -Recurse -Force }
 
 Write-Host 'PASS app-cleanup'
