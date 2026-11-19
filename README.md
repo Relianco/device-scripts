@@ -276,6 +276,7 @@ One module per file under `windows/jobs/`, run by `Invoke-RelianJob`.
 - `reset-windowsupdate-auto-policy`: backs up the WindowsUpdate policy key, then removes only `NoAutoUpdate` and `AUOptions`. A failed backup deletes nothing.
 - `restore-windowsupdate-auto-policy`: the undo. Writes those two values back from the newest backup and deletes nothing.
 - `hide-recovery-partitions`: removes drive letters assigned to Windows Recovery or EFI System partitions (4 GiB or smaller) after writing a backup under `C:\ProgramData\Relian\RecoveryPartitionLetterBackup`. A failed backup changes nothing.
+- `remove-eol-dotnet`: removes end-of-life Microsoft .NET 5 and .NET 7 runtimes (Runtime, Windows Desktop Runtime, ASP.NET Core Shared Framework, Host, Host FX Resolver) after writing a SYSTEM-only backup under `C:\ProgramData\Relian\EolDotnetBackup`. Verified WiX Burn bundles under `C:\ProgramData\Package Cache\{GUID}\*.exe` run silently first, then any remaining matched Windows Installer `{GUID}` products run via `msiexec.exe /x`. Leaves .NET 6, .NET 8, .NET 9, .NET 10, .NET Framework and third-party runtimes untouched. `-ReportOnly` changes and writes nothing (`drift`, exit 1).
 
 ## Linux
 
