@@ -1,0 +1,6 @@
+{
+  "name": "AD user offboard",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Base64-encoded UTF-8 JSON object, run on a domain controller. {\"Users\":\"jdoe,asmith\"} (Mode Report, the default) prints each account's before-state and changes nothing. {\"Mode\":\"Disable\",\"Users\":\"jdoe\",\"Description\":\"Disabled by Relian 2026-11-19, left\",\"TargetOu\":\"OU=Disabled Users,DC=example,DC=com\"} writes a JSON backup to C:\\Relian\\Offboard\\<date>\\, disables the account, sets its Description, moves it only if the OU exists, then reads it back; any mismatch exits 1. Description defaults to \"Disabled by Relian <date>\". Domain, Enterprise and Schema Admins, built-in, break-glass and sync accounts and unknown accounts are refused. Never deletes, never removes group memberships, never touches mailboxes. One JSON line per account. Revoke sessions and run a directory sync separately."
+}
