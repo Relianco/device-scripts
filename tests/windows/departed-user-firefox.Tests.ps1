@@ -38,7 +38,7 @@ function Get-DuUsersRoot { $root }
 $script:disabled = $true; $script:sessions = 0; $script:procs = @(); $script:keys = @()
 function Get-DuAccountDisabled { param([string]$User) $script:disabled }
 function Get-DuSessionCount { $script:sessions }
-function Get-DuProcessPaths { @($script:procs) }
+function Get-DuProcessPaths { if ($null -eq $script:procs) { return $null } @($script:procs) }
 function Get-DuUninstallKeys { @($script:keys) }
 function Run-Du { param([switch]$Fix) (Get-DuResult -User 'gone.user' -Fix:$Fix).record }
 
@@ -49,6 +49,7 @@ try {
             @{ n = 'unreachable directory'; set = { $script:disabled = $null } },
             @{ n = 'a session exists'; set = { $script:sessions = 1 } },
             @{ n = 'unreadable sessions'; set = { $script:sessions = $null } },
+            @{ n = 'unreadable process list'; set = { $script:procs = $null } },
             @{ n = 'process running from the folder'; set = { $script:procs = @((Join-Path $ff 'firefox.exe')) } })) {
         $script:disabled = $true; $script:sessions = 0; $script:procs = @()
         & $case.set

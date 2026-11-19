@@ -69,7 +69,9 @@ function Get-DuSessionCount {
     catch { return $null }
 }
 function Get-DuProcessPaths {
-    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.ExecutablePath } | ForEach-Object { [string]$_.ExecutablePath })
+    # $null when the process list cannot be read: the caller refuses (an empty list would mean "nothing runs").
+    try { return @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ExecutablePath } | ForEach-Object { [string]$_.ExecutablePath }) }
+    catch { return $null }
 }
 function Get-DuUninstallKeys {
     foreach ($root in 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall') {
@@ -103,8 +105,10 @@ function Get-DuRefusals {
     if ($null -eq $disabled) { $why += 'account not found or directory unreachable' } elseif (-not $disabled) { $why += 'account is enabled' }
     $sessions = Get-DuSessionCount
     if ($null -eq $sessions) { $why += 'session list unreadable' } elseif ($sessions -gt 0) { $why += "interactive sessions exist ($sessions)" }
+    $procs = Get-DuProcessPaths
+    if ($null -eq $procs) { $why += 'process list unreadable' }
     foreach ($f in $Folders) {
-        $running = @(Get-DuProcessPaths | Where-Object { $_.StartsWith($f + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) })
+        $running = @(@($procs | Where-Object { $_ }) | Where-Object { $_.StartsWith($f + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase) })
         if ($running.Count) { $why += "a process runs from $f" }
         for ($d = $f; $d.Length -ge $Profile.Length; $d = Split-Path -Parent $d) {
             if (Test-DuReparse -Path $d) { $why += "reparse point on the path: $d"; break }
