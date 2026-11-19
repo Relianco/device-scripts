@@ -111,13 +111,13 @@ function Get-DnProp {
     return $Default
 }
 
-# Owner must be SYSTEM or Administrators; DACL must be protected and allow SYSTEM only.
+# Owner must be SYSTEM or Administrators; DACL must be protected, inheritable to files, and allow SYSTEM only.
 function Test-DnBackupAcl {
     param([AllowEmptyString()][string]$Sddl)
-    return ($Sddl -match '\AO:(SY|BA)G:[^:]*D:([A-Z]*)(\(A;[A-Z]*;[^;()]*;;;SY\))+\z' -and $Matches[2].Contains('P'))
+    return ($Sddl -match '\AO:(SY|BA)G:[^:]*D:([A-Z]*)(\(A;(?=[^;()]*OI)(?=[^;()]*CI)[A-Z]*;[^;()]*;;;SY\))+\z' -and $Matches[2].Contains('P'))
 }
 
-# Parent directory must be owned by SYSTEM or Administrators with no non-admin write, delete, or ownership-change ACEs.
+# Parent directory must be owned by SYSTEM or Administrators with no non-admin write, create, delete, or ownership-change ACEs.
 function Test-DnParentAcl {
     param([AllowEmptyString()][string]$Sddl)
     if ($Sddl -notmatch '\AO:(SY|BA)G:[^:]*D:[^()]*((?:\([^()]+\))+)') { return $false }
@@ -126,15 +126,18 @@ function Test-DnParentAcl {
         $parts = $m.Groups[1].Value -split ';'
         if ($parts.Count -lt 6) { return $false }
         $aceType = $parts[0]
+        $aceFlags = $parts[1]
         $rights = $parts[2]
         $trustee = $parts[5]
         if ($aceType -ne 'A') { continue }
         if ($trustee -in @('SY', 'BA')) { continue }
-        if ($trustee -eq 'CO' -and $parts[1] -match 'IO') { continue }
-        if ($rights -match '^(FA|GA|GW|KA)$' -or $rights -match '(DC|SD|WD|WDAC|WO)') { return $false }
+        # In ProgramData, inheritance-only (IO) ACEs do not grant permissions on the parent container itself.
+        if ($aceFlags -match 'IO') { continue }
+        if ($rights -match '(FA|GA|GW|FW|KW|KA|DC|SD|WD|AD|CC|WDAC|WO)') { return $false }
         if ($rights -match '^0x([0-9a-fA-F]+)$') {
             $mask = [Convert]::ToInt64($Matches[1], 16)
-            if (($mask -band 0x500D0040) -ne 0) { return $false }
+            # Reject generic all/write, delete, delete-child, write-dac, write-owner, write-data/create-file (0x2), append-data/create-subdir (0x4), write-ea (0x10), write-attributes (0x100).
+            if (($mask -band 0x500D0156) -ne 0) { return $false }
         }
     }
     return $true
@@ -281,6 +284,11 @@ function Invoke-DnJob {
             $errors = [Collections.Generic.List[string]]::new()
             $seenBundles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
+            $backedUpMsiIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($t in $targets) {
+                if ($t.msi -and $t.id -match $script:DnGuidPattern) { [void]$backedUpMsiIds.Add($t.id) }
+            }
+
             foreach ($t in $targets) {
                 $exe = Get-DnVerifiedBundlePath $t
                 if (-not $exe -or -not $seenBundles.Add($exe)) { continue }
@@ -298,6 +306,7 @@ function Invoke-DnJob {
             $seenMsis = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
             foreach ($t in $remaining) {
                 if (-not $t.msi -or $t.id -notmatch $script:DnGuidPattern) { continue }
+                if (-not $backedUpMsiIds.Contains($t.id)) { continue }
                 if (-not $seenMsis.Add($t.id)) { continue }
                 try {
                     $code = [int](& $script:DnRunMsi $t.id)

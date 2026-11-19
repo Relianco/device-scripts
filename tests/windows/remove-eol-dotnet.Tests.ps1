@@ -192,13 +192,20 @@ try {
     Assert-Same $r.Status 'removed' '3010 removed'
     Assert-Same $r.RebootRequired $true '3010 sets rebootRequired'
 
-    # 6. Untrusted backup parent ACL aborts before running any uninstaller.
+    # 6. Untrusted backup parent ACL or non-inheritable backup ACL aborts before running any uninstaller.
     Reset-Test -Entries @((New-Entry -Id $msi7020 -Name 'Microsoft .NET Runtime - 7.0.20 (x64)' -Version '56.80.15184' -Msi $true))
     $script:FakeParentSddl = 'O:SYG:SYD:(A;OICI;FA;;;WD)'
     $r = Invoke-DnJob
     Assert-Same $r.ExitCode 2 'bad parent ACL exit 2'
     Assert-Same $r.Status 'failed' 'bad parent ACL status failed'
     Assert-Same (@($script:Log | Where-Object { $_ -like 'msi:*' -or $_ -like 'bundle:*' }).Count) 0 'no uninstaller ran on backup failure'
+
+    Assert-True (-not (Test-DnParentAcl 'O:SYG:SYD:AI(A;;FW;;;BU)(A;;FA;;;SY)')) 'rejects FW on parent'
+    Assert-True (-not (Test-DnParentAcl 'O:SYG:SYD:AI(A;CIID;0x100116;;;BU)(A;;FA;;;SY)')) 'rejects 0x100116 create-child on parent without IO'
+    Assert-True (-not (Test-DnParentAcl 'O:SYG:SYD:P(A;;GAGR;;;BU)(A;;FA;;;SY)')) 'rejects combined GAGR on parent'
+    Assert-True (Test-DnParentAcl 'O:SYG:SYD:AI(A;ID;0x1200a9;;;BU)(A;OICIIOID;0x100116;;;BU)(A;;FA;;;SY)') 'accepts ProgramData IO ACE on parent'
+    Assert-True (-not (Test-DnBackupAcl 'O:SYG:SYD:P(A;;FA;;;SY)')) 'rejects backup ACL without OICI inheritance'
+    Assert-True (Test-DnBackupAcl 'O:SYG:SYD:P(A;OICI;FA;;;SY)') 'accepts backup ACL with OICI inheritance'
 } finally {
     if (Test-Path -LiteralPath $tmpRoot) { Remove-Item -LiteralPath $tmpRoot -Recurse -Force }
 }
