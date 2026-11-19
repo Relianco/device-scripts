@@ -187,6 +187,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `7-zip`: 7-Zip.
 - `acrobat`: Adobe Acrobat. `Edition` picks the edition.
 - `adobe-reader`: Adobe Acrobat Reader.
+- `app-cleanup`: read-only report of stale Firefox copies and classic Teams 1.x; with `Fix` `true` it removes a machine-wide old Firefox copy that is not running and is beside a current one or unused for `IdleDays` (90), and the classic Teams machine-wide installer (never new Teams). Per-user copies are report-only (`user-context`): remove them in the user session. Arguments: `Target` (`firefox`, `teams`, `all`), `Fix`, `CurrentMajor`, `IdleDays`.
 - `autoelevate`: installs or upgrades the AutoElevate agent and stops its services before an upgrade. A fresh install needs `CompanyName`, `LocationName` and the license key (`LicenseKey` argument or `AE_LICENSE_KEY` variable). `Section` `Evidence` is read-only. See `docs/autoelevate.md`.
 - `chrome`: Google Chrome.
 - `edge`: Microsoft Edge.
