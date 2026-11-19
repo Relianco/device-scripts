@@ -1,9 +1,11 @@
 <#
 .SYNOPSIS
-    Finds, and with Fix removes, stale Firefox copies and classic Teams 1.x, for the Relian deploy runner (NinjaOne script 374).
+    Finds, and with Fix removes, stale Firefox copies, classic Teams 1.x and per-user Google Chrome, for the Relian
+    deploy runner (NinjaOne script 374).
 
 .DESCRIPTION
-    Read-only unless Fix is "true". Target is "firefox", "teams" or "all" (default).
+    Read-only unless Fix is "true". Target is "firefox", "teams", "chrome-user" or "all" (default). "all" means
+    firefox and teams only: chrome-user is opt-in, so an existing "all" run never removes Chrome.
 
     Firefox: lists every copy (machine-wide MSI or exe, and per-user installs under C:\Users) with its
     version and the newest write time of each user's profile (last use). A copy older than CurrentMajor is
@@ -15,6 +17,17 @@
     (Update.exe --uninstall -s). A user's copy is skipped while that user's classic Teams runs. New Teams
     (ms-teams) is never touched.
 
+    chrome-user: reports each per-user Chrome (AppData\Local\Google\Chrome\Application\chrome.exe in each profile)
+    and the machine-wide version. Fix removes it by direct cleanup, not with Google's uninstaller: a user's
+    setup.exe is user-writable, so running it as SYSTEM would hand that user SYSTEM, and without --system-level it
+    would act on SYSTEM's own profile anyway. Per user, when Chrome is not running and no junction or symlink sits
+    on the path to or inside any folder it deletes (else "skip-unsafe", a failure), it deletes the Application
+    folder; the per-user updater folders only when Chrome is the only Google app in that user's hive; scheduled
+    tasks and Run values that point into a deleted folder; the user's Chrome Uninstall and App Paths keys;
+    Software\Google\Update when the updater went; and .lnk shortcuts (Desktop, Start Menu, taskbar pins) to the
+    deleted chrome.exe. It never touches User Data (bookmarks, passwords), file associations, machine-wide Chrome
+    (Program Files) or a running Chrome. A running Chrome is "skip-running", not a failure.
+
     The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as -Name value:
     Target, Fix, CurrentMajor, IdleDays (all strings). Install, Update, Repair and Reinstall run the check
     (and the fix when Fix is "true"); Uninstall changes nothing and exits 0.
@@ -24,6 +37,8 @@
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM
+    shortcut: chrome-user scans the profile's own Desktop folder, not a OneDrive-redirected one; add that path
+    when users keep Chrome shortcuts on a redirected desktop.
     shortcut: a per-user uninstall as SYSTEM leaves the user's HKCU Uninstall key behind; delete it when
     an inventory tool keeps reporting a removed copy.
 #>
@@ -42,6 +57,8 @@ param(
 
 $ProgressPreference = 'SilentlyContinue'
 $AcTeamsCodes = @('{731F6BAA-A986-45A4-8936-7C3AAAAA760B}', '{39AF0813-FA7B-4860-ADBE-93B9B214B914}')
+# Chrome, Chrome binaries, Google Update (Omaha) and GoogleUpdater ids: any other app id keeps the per-user updater.
+$AcChromeOwnIds = @('8A69D345-D564-463C-AFF1-A69D9E530F96', '4DC8B4CA-1BDA-483E-B5FA-D3C12E15B62D', '430FD4D0-B729-4F61-AA34-91526481799D', '44FC7FE2-65CE-487C-93F4-EDEE46EEAAAB')
 
 # Pure: 'none', 'check' or 'fix'. An empty PinVersion is the off switch. Throws on bad input.
 function Get-AcMode {
@@ -50,11 +67,27 @@ function Get-AcMode {
     if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) {
         throw 'Action must be Install, Update, Repair, Reinstall, or Uninstall.'
     }
-    if (@('firefox', 'teams', 'all') -notcontains $Target) { throw 'Target must be firefox, teams or all.' }
+    if (@('firefox', 'teams', 'chrome-user', 'all') -notcontains $Target) { throw 'Target must be firefox, teams, chrome-user or all.' }
     if ($Fix -ne '' -and $Fix -ne 'true' -and $Fix -ne 'false') { throw 'Fix must be true or false.' }
     if ($Action -eq 'Uninstall') { return 'none' }
     if ($Fix -eq 'true') { return 'fix' }
     return 'check'
+}
+
+# Pure. "all" is firefox and teams only: chrome-user must be asked for by name.
+function Get-AcTargets { param([string]$Target) if ($Target -eq 'all') { return @('firefox', 'teams') } return @($Target) }
+
+# Pure. True when Path (an exe path or a command line, quoted or not) starts inside Dir.
+function Test-AcUnder {
+    param([string]$Path, [string]$Dir)
+    $p = $Path.Trim().TrimStart('"').Replace('/', '\').ToLowerInvariant()
+    return $p.StartsWith($Dir.Replace('/', '\').TrimEnd('\').ToLowerInvariant() + '\')
+}
+
+# Pure. App ids (registry subkey names) other than Chrome and the updater itself.
+function Get-AcOtherGoogleApps {
+    param([string[]]$Ids)
+    @($Ids | Where-Object { $_ -match '^\{?[0-9A-Fa-f-]{36}\}?$' -and $AcChromeOwnIds -notcontains $_.Trim('{', '}') } | Sort-Object -Unique)
 }
 
 # Pure. Installs: objects with Id, Version, Scope (machine|user), User, Path. IdleByUser: user -> days since last
@@ -115,6 +148,56 @@ function Invoke-AcProcess {
     return [int]$p.ExitCode
 }
 function Get-AcNow { Get-Date }
+function Test-AcReparse { param([string]$Path) [bool]((Get-Item -LiteralPath $Path -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) }
+function Get-AcTasks {
+    @(Get-ScheduledTask -ErrorAction SilentlyContinue | ForEach-Object {
+            $t = $_
+            foreach ($a in @($t.Actions)) {
+                if ($a.PSObject.Properties['Execute'] -and $a.Execute) { [pscustomobject]@{ Name = $t.TaskName; TaskPath = $t.TaskPath; Exe = [string]$a.Execute } }
+            }
+        })
+}
+function Unregister-AcTask { param($Task) Unregister-ScheduledTask -TaskName $Task.Name -TaskPath $Task.TaskPath -Confirm:$false -ErrorAction Stop }
+function Get-AcShortcutTarget {
+    param([string]$Path)
+    if (-not $script:AcShell) { $script:AcShell = New-Object -ComObject WScript.Shell }
+    return [string]$script:AcShell.CreateShortcut($Path).TargetPath
+}
+function Get-AcMachineChrome {
+    foreach ($p in "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe", "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") {
+        if (Test-Path -LiteralPath $p) { return Get-AcFileVersion -Path $p }
+    }
+    return $null
+}
+# Returns @{ Root; Mounted }: the user's loaded hive (HKU\<SID>), else NTUSER.DAT loaded as HKU\RelianAC_<n>.
+function Mount-AcHive {
+    param([string]$Dir, [int]$N)
+    $sid = $null
+    foreach ($k in @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction SilentlyContinue)) {
+        $img = [Environment]::ExpandEnvironmentVariables([string](Get-ItemProperty -LiteralPath $k.PSPath -ErrorAction SilentlyContinue).ProfileImagePath)
+        if ($img -and $img.TrimEnd('\') -ieq $Dir.TrimEnd('\')) { $sid = $k.PSChildName; break }
+    }
+    if ($sid -and (Test-Path -LiteralPath "Registry::HKEY_USERS\$sid")) { return @{ Root = "Registry::HKEY_USERS\$sid"; Mounted = '' } }
+    $name = "RelianAC_$N"
+    & "$env:SystemRoot\System32\reg.exe" load "HKU\$name" (Join-Path $Dir 'NTUSER.DAT') 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "reg load exit $LASTEXITCODE" }
+    return @{ Root = "Registry::HKEY_USERS\$name"; Mounted = $name }
+}
+function Dismount-AcHive {
+    param([string]$Name)
+    [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+    & "$env:SystemRoot\System32\reg.exe" unload "HKU\$Name" 2>&1 | Out-Null
+}
+function Get-AcRegValues {
+    param([string]$Path)
+    $h = @{}; $k = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
+    if ($k) { foreach ($n in $k.GetValueNames()) { $h[$n] = [string]$k.GetValue($n) } }
+    return $h
+}
+function Get-AcRegKeys { param([string]$Path) @(Get-ChildItem -LiteralPath $Path -ErrorAction SilentlyContinue | ForEach-Object { $_.PSChildName }) }
+function Test-AcRegKey { param([string]$Path) Test-Path -LiteralPath $Path }
+function Remove-AcRegKey { param([string]$Path) Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop }
+function Remove-AcRegValue { param([string]$Path, [string]$Name) Remove-ItemProperty -LiteralPath $Path -Name $Name -Force -ErrorAction Stop }
 
 function Get-AcFirefoxInventory {
     $installs = @(); $n = 0
@@ -213,13 +296,155 @@ function Invoke-AcTeams {
     return [ordered]@{ items = $rows; failed = $failed }
 }
 
+# Returns the first junction or symlink on the path from Root down to Target, Target included ($null when none).
+function Find-AcReparseOnPath {
+    param([string]$Root, [string]$Target)
+    $p = $Root
+    if (Test-AcReparse -Path $p) { return $p }
+    foreach ($s in @($Target.Substring($Root.TrimEnd('\', '/').Length) -split '[\\/]' | Where-Object { $_ })) {
+        $p = Join-Path $p $s
+        if (Test-AcReparse -Path $p) { return $p }
+    }
+    return $null
+}
+# Returns the first junction or symlink inside Dir, never following one ($null when none).
+function Find-AcReparseIn {
+    param([string]$Dir)
+    foreach ($c in @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop)) {
+        if (Test-AcReparse -Path $c.FullName) { return $c.FullName }
+        if ($c.PSIsContainer) { $r = Find-AcReparseIn -Dir $c.FullName; if ($r) { return $r } }
+    }
+    return $null
+}
+# SYSTEM deletes inside a user-writable tree: check each item just before it goes and never follow a reparse point.
+function Remove-AcTree {
+    param([string]$Dir)
+    if (Test-AcReparse -Path $Dir) { throw "reparse point: $Dir" }
+    foreach ($c in @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction Stop)) {
+        if (Test-AcReparse -Path $c.FullName) { throw "reparse point: $($c.FullName)" }
+        if ($c.PSIsContainer) { Remove-AcTree -Dir $c.FullName } else { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction Stop }
+    }
+    Remove-Item -LiteralPath $Dir -Force -ErrorAction Stop
+}
+
+# Fix for one user whose Chrome is not running and whose folders passed the reparse check. Returns @{ Res; Failed }.
+function Remove-AcChromeUser {
+    param([string]$Dir, [int]$N, $Tasks, $Row)
+    $google = Join-Path $Dir 'AppData\Local\Google'
+    $app = Join-Path $google 'Chrome\Application'
+    $out = @('removed'); $bad = $false; $hive = $null
+    $under = { param($p, $dirs) @($dirs | Where-Object { Test-AcUnder -Path $p -Dir $_ }).Count -gt 0 }
+    try {
+        try { $hive = Mount-AcHive -Dir $Dir -N $N } catch { $out += "hive not read: $($_.Exception.Message)"; $bad = $true }
+        $others = @()
+        if ($hive) {
+            $ids = @(Get-AcRegKeys -Path "$($hive.Root)\Software\Google\Update\Clients") + @(Get-AcRegKeys -Path "$($hive.Root)\Software\Google\GoogleUpdater")
+            $others = @(Get-AcOtherGoogleApps -Ids $ids)
+        }
+        $dropUpd = $hive -and $others.Count -eq 0
+        Remove-AcTree -Dir $app
+        $gone = @($app)
+        foreach ($d in 'GoogleUpdater', 'Update') {
+            $p = Join-Path $google $d
+            if (-not (Test-Path -LiteralPath $p)) { continue }
+            if ($dropUpd) { Remove-AcTree -Dir $p; $gone += $p }
+            elseif ($hive) { $out += "kept $d for $($others -join ',')" }
+            else { $out += "kept $d" }
+        }
+        $nt = 0
+        foreach ($t in @($Tasks | Where-Object { & $under $_.Exe $gone })) { Unregister-AcTask -Task $t; $nt++ }
+        if ($nt) { $out += "tasks $nt" }
+        if ($hive) {
+            $r = $hive.Root
+            $un = "$r\Software\Microsoft\Windows\CurrentVersion\Uninstall\Google Chrome"
+            if (Test-AcRegKey -Path $un) { Remove-AcRegKey -Path $un; $out += 'uninstall key' }
+            $runKey = "$r\Software\Microsoft\Windows\CurrentVersion\Run"
+            $vals = Get-AcRegValues -Path $runKey
+            foreach ($name in @($vals.Keys)) { if (& $under $vals[$name] $gone) { Remove-AcRegValue -Path $runKey -Name $name; $out += "run $name" } }
+            $ap = "$r\Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+            $apv = Get-AcRegValues -Path $ap
+            if ($apv.ContainsKey('') -and (Test-AcUnder -Path $apv[''] -Dir $app)) { Remove-AcRegKey -Path $ap; $out += 'app path' }
+            if ($dropUpd -and (Test-AcRegKey -Path "$r\Software\Google\Update")) { Remove-AcRegKey -Path "$r\Software\Google\Update"; $out += 'update key' }
+            # Associations stay: Windows falls back to Edge. Report them so the user can be told.
+            $choices = @(foreach ($s in 'http', 'https') { [string](Get-AcRegValues -Path "$r\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\$s\UserChoice")['ProgId'] })
+            $Row.progid = @($choices | Where-Object { $_ -like 'ChromeHTML*' }).Count -gt 0
+        }
+    } finally {
+        if ($hive -and $hive.Mounted) { Dismount-AcHive -Name $hive.Mounted }
+    }
+    $nl = 0
+    foreach ($rel in 'Desktop', 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs', 'AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned') {
+        foreach ($l in @(Get-ChildItem -LiteralPath (Join-Path $Dir $rel) -Filter '*.lnk' -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+            if (-not (Test-AcUnder -Path (Get-AcShortcutTarget -Path $l.FullName) -Dir $app)) { continue }
+            if (Find-AcReparseOnPath -Root $Dir -Target $l.FullName) { $out += "kept $($l.Name): reparse point"; continue }
+            Remove-Item -LiteralPath $l.FullName -Force -ErrorAction Stop; $nl++
+        }
+    }
+    if ($nl) { $out += "lnk $nl" }
+    return @{ Res = ($out -join '; '); Failed = $bad }
+}
+
+function Invoke-AcChromeUser {
+    param([bool]$Fix)
+    $procs = @(Get-AcRunning); $now = Get-AcNow; $tasks = @(Get-AcTasks)
+    $rows = @(); $failed = 0; $n = 0
+    foreach ($u in Get-AcUserDirs) {
+        $google = Join-Path $u.FullName 'AppData\Local\Google'
+        $app = Join-Path $google 'Chrome\Application'
+        $exe = Join-Path $app 'chrome.exe'
+        if (-not (Test-Path -LiteralPath $exe)) { continue }
+        $n++
+        $data = Join-Path $google 'Chrome\User Data'
+        $profs = @(Get-ChildItem -LiteralPath $data -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })
+        $marks = @(Get-Item -LiteralPath (Join-Path $data 'Local State') -Force -ErrorAction SilentlyContinue) +
+            @($profs | ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'Preferences'), (Join-Path $_.FullName 'History') -Force -ErrorAction SilentlyContinue })
+        $last = @($marks | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        $bytes = (@(Get-ChildItem -LiteralPath $data -Recurse -File -Force -ErrorAction SilentlyContinue) | Measure-Object -Property Length -Sum).Sum
+        $upd = @(foreach ($d in 'GoogleUpdater', 'Update') { if (Test-Path -LiteralPath (Join-Path $google $d)) { $d } })
+        $mine = @($tasks | Where-Object { Test-AcUnder -Path $_.Exe -Dir $google })
+        $run = @($procs | Where-Object { Test-AcUnder -Path $_.Path -Dir $app }).Count -gt 0
+        $row = [ordered]@{
+            user = $u.Name; ver = (Get-AcFileVersion -Path $exe); run = $run; mb = [int][math]::Round([double]$bytes / 1MB)
+            days = $(if ($last.Count) { [int]($now - $last[0].LastWriteTime).TotalDays } else { $null })
+            prof = $profs.Count; upd = $upd; tasks = @($mine | ForEach-Object { $_.Name }); act = 'remove'; res = ''
+        }
+        $bad = $null
+        if (-not $run) {
+            try {
+                foreach ($t in @($app) + @($upd | ForEach-Object { Join-Path $google $_ })) {
+                    $bad = Find-AcReparseOnPath -Root $u.FullName -Target $t
+                    if (-not $bad) { $bad = Find-AcReparseIn -Dir $t }
+                    if ($bad) { break }
+                }
+            } catch { $bad = "unreadable: $($_.Exception.Message)" }
+        }
+        if ($run) { $row.act = 'skip-running' }
+        elseif ($bad) {
+            # Profile-relative keeps the line short (Intune output caps at 2048 characters).
+            if ($bad.StartsWith($u.FullName)) { $bad = 'reparse point: ' + $bad.Substring($u.FullName.Length).TrimStart('\', '/') }
+            $row.act = 'skip-unsafe'; $row.res = $bad; if ($Fix) { $failed++ }
+        }
+        elseif ($Fix) {
+            $f = $false
+            try { $r = Remove-AcChromeUser -Dir $u.FullName -N $n -Tasks $mine -Row $row; $row.res = $r.Res; $f = $r.Failed }
+            catch { $row.res = "error: $($_.Exception.Message)"; $f = $true }
+            if (Test-Path -LiteralPath $exe) { $row.res += '; chrome.exe still present'; $f = $true }
+            if ($f) { $failed++ }
+        }
+        $rows += $row
+    }
+    return [ordered]@{ machineChrome = (Get-AcMachineChrome); users = $rows; failed = $failed }
+}
+
 function Invoke-Main {
     param([switch]$Fix, [string]$Target, [int]$CurrentMajor, [int]$IdleDays)
     try {
         $rec = [ordered]@{ mode = $(if ($Fix) { 'fix' } else { 'check' }); host = $env:COMPUTERNAME; version = '1.0' }
         $failed = 0
-        if ($Target -ne 'teams') { $rec.firefox = Invoke-AcFirefox -Fix:$Fix -CurrentMajor $CurrentMajor -IdleDays $IdleDays; $failed += $rec.firefox.failed }
-        if ($Target -ne 'firefox') { $rec.teams = Invoke-AcTeams -Fix:$Fix; $failed += $rec.teams.failed }
+        $targets = Get-AcTargets -Target $Target
+        if ($targets -contains 'firefox') { $rec.firefox = Invoke-AcFirefox -Fix:$Fix -CurrentMajor $CurrentMajor -IdleDays $IdleDays; $failed += $rec.firefox.failed }
+        if ($targets -contains 'teams') { $rec.teams = Invoke-AcTeams -Fix:$Fix; $failed += $rec.teams.failed }
+        if ($targets -contains 'chrome-user') { $rec.chromeUser = Invoke-AcChromeUser -Fix:$Fix; $failed += $rec.chromeUser.failed }
         $rec.timestamp = (Get-AcNow).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         Write-Output ($rec | ConvertTo-Json -Depth 6 -Compress)
         exit $(if ($failed -gt 0) { 1 } else { 0 })

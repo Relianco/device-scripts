@@ -187,7 +187,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `7-zip`: 7-Zip.
 - `acrobat`: Adobe Acrobat. `Edition` picks the edition.
 - `adobe-reader`: Adobe Acrobat Reader.
-- `app-cleanup`: read-only report of stale Firefox copies and classic Teams 1.x; with `Fix` `true` it removes an old Firefox copy that is not running and is beside a current one or unused for `IdleDays` (90), and removes classic Teams (machine-wide installer and per-user copies, never new Teams). Arguments: `Target` (`firefox`, `teams`, `all`), `Fix`, `CurrentMajor`, `IdleDays`.
+- `app-cleanup`: read-only report of stale Firefox copies and classic Teams 1.x; with `Fix` `true` it removes an old Firefox copy that is not running and is beside a current one or unused for `IdleDays` (90), and removes classic Teams (machine-wide installer and per-user copies, never new Teams). `Target` `chrome-user` reports per-user Google Chrome; with `Fix` it deletes each stopped user's Chrome binaries, the per-user updater when no other Google app uses it, and their tasks, Run values, registry keys and shortcuts, never User Data or machine-wide Chrome, and refuses a tree with a junction or symlink. `all` is Firefox and Teams only, so Chrome removal is always opt-in. Arguments: `Target` (`firefox`, `teams`, `chrome-user`, `all`), `Fix`, `CurrentMajor`, `IdleDays`.
 - `autoelevate`: installs or upgrades the AutoElevate agent and stops its services before an upgrade. A fresh install needs `CompanyName`, `LocationName` and the license key (`LicenseKey` argument or `AE_LICENSE_KEY` variable). `Section` `Evidence` is read-only. See `docs/autoelevate.md`.
 - `chrome`: Google Chrome.
 - `edge`: Microsoft Edge.
