@@ -31,8 +31,7 @@ function New-Fake([object[]]$Users, [string[]]$Ous = @(), [bool]$IsDc = $true) {
     $script:OfFind = { param($sam) @($script:Fake.Users | Where-Object { $_.SamAccountName -eq $sam }) }
     $script:OfGet = { param($g) @($script:Fake.Users | Where-Object { $_.ObjectGUID -eq $g })[0] }
     $script:OfGroups = {
-        param($dn)
-        $u = @($script:Fake.Users | Where-Object { $_.DistinguishedName -eq $dn })[0]
+        param($u)
         @($u._groups | ForEach-Object {
             switch ($_) { 'Domain Admins' { New-Group $_ 512 } 'Enterprise Admins' { New-Group $_ 519 } 'Schema Admins' { New-Group $_ 518 } 'Administrators' { [pscustomobject]@{ Name = $_; SID = 'S-1-5-32-544' } } default { New-Group $_ 1105 } }
         })
@@ -47,7 +46,7 @@ function Run([string]$Mode, [string]$Users, [string]$Desc = '', [string]$Ou = ''
 try {
     # Validation: nothing is looked up for a rejected value.
     New-Fake @((New-User 'jdoe' 1200))
-    foreach ($bad in @('', 'a*', 'a(b', 'a\b', 'a b', ('x' * 21), 'jdoe,jdoe', 'a$')) {
+    foreach ($bad in @('', 'a*', 'a(b', 'a\b', 'a b', ('x' * 21), 'jdoe,jdoe', 'a$', 'Jdoe,jdoe')) {
         $r = Run 'Disable' $bad
         Assert ($r.ExitCode -eq 1 -and $r.Lines.Count -eq 1 -and $r.Lines[0].Status -eq 'error') "Bad Users refused: [$bad]"
     }
@@ -98,7 +97,7 @@ try {
     Assert ($l.After.enabled -eq $false -and $l.After.description -eq 'Disabled by Relian 2026-11-19') 'Default description names the date'
     Assert ($l.Moved -eq 'not requested') 'No move unless asked'
     $backup = Get-Content -LiteralPath $l.Backup -Raw | ConvertFrom-Json
-    Assert ($l.Backup -like "$tmp*2026-11-19*jdoe-103000.json") "Backup path is dated: $($l.Backup)"
+    Assert ($l.Backup -like "$tmp*2026-11-19*jdoe-103000-*.json") "Backup path is dated: $($l.Backup)"
     Assert ($backup.before.enabled -eq $true -and $backup.before.description -eq 'old text' -and $backup.before.memberOf.Count -eq 2) 'Backup holds the before-state and the group DNs'
     Assert ((Run 'Report' 'other').Lines[0].Before.enabled -eq $true) 'Other accounts are untouched'
 
@@ -126,6 +125,12 @@ try {
     Assert ($r.Lines[0].Status -eq 'error' -and $r.Lines[0].Reason -match 'locked out') 'No change after a failed backup'
     Assert ((@($script:Fake.Users)[0]).Enabled -eq $true) 'Account stays enabled when the backup fails'
     Assert ($r.Lines[1].Status -eq 'disabled' -and $r.ExitCode -eq 1) 'The next account still runs; exit is 1'
+
+    # Two backups in the same second get different names.
+    New-Fake @((New-User 'jdoe' 1200))
+    $a = (Run 'Disable' 'jdoe').Lines[0].Backup; $script:Fake.Users[0].Enabled = $true
+    $b = (Run 'Disable' 'jdoe').Lines[0].Backup
+    Assert ($a -ne $b -and (Test-Path -LiteralPath $a) -and (Test-Path -LiteralPath $b)) 'A second backup in the same second does not overwrite the first'
 
     # Never deletes or removes memberships: the package has no such call.
     $src = Get-Content -LiteralPath $packagePath -Raw

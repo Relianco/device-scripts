@@ -21,7 +21,7 @@
     group) of Domain Admins, Enterprise Admins or Schema Admins, is a built-in account (RID under 1000, Administrator,
     Guest, krbtgt, DefaultAccount) or a directory-sync or break-glass account (MSOL_*, AAD_*, Sync_*, svc-dirmaint*,
     breakglass*, break-glass*, in the sAMAccountName or the userPrincipalName). For every other account it writes a JSON
-    backup of the before-state to C:\Relian\Offboard\<yyyy-MM-dd>\<sam>-<HHmmss>.json (the folders are locked to SYSTEM and
+    backup of the before-state to C:\Relian\Offboard\<yyyy-MM-dd>\<sam>-<HHmmss>-<random>.json (the folders are locked to SYSTEM and
     Administrators), disables the account, sets the Description, optionally moves it, then reads it back. Any mismatch
     exits 1. A refused account is not touched and the others still run. Group memberships are left as they are.
 
@@ -62,11 +62,19 @@ $script:OfIsDc = { [int](Get-CimInstance -ClassName Win32_ComputerSystem).Domain
 $script:OfImport = { Import-Module ActiveDirectory -ErrorAction Stop }
 $script:OfFind = { param($sam) @(Get-ADUser -LDAPFilter "(&(objectCategory=person)(objectClass=user)(sAMAccountName=$sam))" -Properties $script:OfProps) }
 $script:OfGet = { param($guid) Get-ADUser -Identity $guid -Properties $script:OfProps }
-# Every group the user is in, nested ones too (LDAP_MATCHING_RULE_IN_CHAIN). The DN is escaped for a filter.
+# Every group the user is in, nested ones too (LDAP_MATCHING_RULE_IN_CHAIN), and the primary group with its own
+# ancestors (the primary group is not in the member chain). The DN is escaped for a filter.
 $script:OfGroups = {
-    param($dn)
-    $safe = $dn.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29').Replace([string][char]0, '\00')
-    @(Get-ADGroup -LDAPFilter "(member:1.2.840.113556.1.4.1941:=$safe)" -Properties adminCount)
+    param($user)
+    $chain = {
+        param($dn)
+        $safe = $dn.Replace('\', '\5c').Replace('*', '\2a').Replace('(', '\28').Replace(')', '\29').Replace([string][char]0, '\00')
+        @(Get-ADGroup -LDAPFilter "(member:1.2.840.113556.1.4.1941:=$safe)" -Properties adminCount)
+    }
+    $all = @(& $chain ([string]$user.DistinguishedName))
+    $primarySid = ([string]$user.SID -replace '-\d+\z', "-$($user.PrimaryGroupID)")
+    $primary = Get-ADGroup -Identity $primarySid -Properties adminCount
+    $all + $primary + @(& $chain ([string]$primary.DistinguishedName)) | Sort-Object -Property { [string]$_.SID } -Unique
 }
 $script:OfDisable = { param($guid) Disable-ADAccount -Identity $guid }
 $script:OfSetDescription = { param($guid, $text) Set-ADUser -Identity $guid -Description $text }
@@ -144,9 +152,12 @@ function Write-OfBackup($Snapshot, [DateTime]$Now) {
         if (-not (Test-Path -LiteralPath $p)) { $null = New-Item -ItemType Directory -Path $p -Force }
         & $script:OfLockFolder $p
     }
-    $file = Join-Path $dir ("{0}-{1}.json" -f $Snapshot.sam, $Now.ToString('HHmmss'))
+    $file = Join-Path $dir ("{0}-{1}-{2}.json" -f $Snapshot.sam, $Now.ToString('HHmmss'), [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $doc = [ordered]@{ takenAt = $Now.ToString('o'); host = [string](& $script:OfHost); before = $Snapshot }
-    [System.IO.File]::WriteAllText($file, (ConvertTo-Json -InputObject $doc -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
+    # CreateNew: an existing backup is never overwritten.
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((ConvertTo-Json -InputObject $doc -Depth 5))
+    $stream = [System.IO.File]::Open($file, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
+    try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
     $back = ConvertFrom-Json ([System.IO.File]::ReadAllText($file))
     if ($back.before.guid -ne $Snapshot.guid) { throw 'backup read-back did not match' }
     return $file
@@ -159,7 +170,7 @@ function Invoke-OfAccount([string]$Sam, [bool]$Apply, [string]$Text, [string]$Ou
         if ($found.Count -eq 0) { $line.Status = 'notfound'; $line.Reason = "no AD user with sAMAccountName $Sam"; return $line }
         if ($found.Count -gt 1) { $line.Status = 'refused'; $line.Reason = "$Sam matches $($found.Count) AD objects"; return $line }
         $user = $found[0]
-        $groups = @(& $script:OfGroups ([string]$user.DistinguishedName))
+        $groups = @(& $script:OfGroups $user)
         $before = Get-OfSnapshot $user $groups
         $refusal = Get-OfRefusal $before
         $line.Before = $before
@@ -213,7 +224,7 @@ function Invoke-OfMain {
     $sams = @($Users.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     if ($sams.Count -eq 0 -or $sams.Count -gt $script:OfMaxUsers) { return & $fail "Users needs 1 to $($script:OfMaxUsers) comma-separated sAMAccountNames" }
     foreach ($s in $sams) { if ($s -cnotmatch $script:OfSamPattern) { return & $fail "a user name is not a valid sAMAccountName (A-Z a-z 0-9 . _ ' -, at most 20)" } }
-    if (@($sams | Select-Object -Unique).Count -ne $sams.Count) { return & $fail 'Users lists the same account twice' }
+    if (@($sams | ForEach-Object { $_.ToLowerInvariant() } | Select-Object -Unique).Count -ne $sams.Count) { return & $fail 'Users lists the same account twice' }
     if (($Description -ne '' -or $TargetOu -ne '') -and -not $apply) { return & $fail 'Description and TargetOu apply to Disable only' }
     if ($Description -eq '') { $Description = 'Disabled by Relian ' + (& $script:OfNow).ToString('yyyy-MM-dd') }
     if (-not (Test-OfDescription $Description)) { return & $fail 'Description must be 1 to 1024 characters with no control characters' }
