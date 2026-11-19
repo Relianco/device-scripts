@@ -12,7 +12,7 @@
     firefox package, then run this again. A running copy is reported as "skip-running".
 
     Teams: removes the classic Teams Machine-Wide Installer (msiexec /x) and each user's classic copy
-    (its Teams folder is deleted; no user-writable file is run as SYSTEM). A user's copy is skipped while that user's classic Teams runs. New Teams A per-user copy (Firefox or Teams) is also skipped while its owner has any session, so a junction cannot be swapped during the delete.
+    (its Teams folder is deleted; no user-writable file is run as SYSTEM). A user's copy is skipped while that user's classic Teams runs. New Teams A per-user copy (Firefox or Teams) is also skipped while anyone has an interactive session on the PC, so a junction cannot be swapped during the delete.
     (ms-teams) is never touched.
 
     The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as -Name value:
@@ -114,11 +114,14 @@ function Invoke-AcProcess {
     $p = Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
     return [int]$p.ExitCode
 }
+# Any interactive logon session (console, remote, cached; active or disconnected) on the PC returns @("*"), and so does a
+# failed read: per-user deletes fail closed. No name or SID matching, so a renamed account or a "name.DOMAIN" profile cannot slip past.
 function Get-AcSessionUsers {
-    # query user lists active and disconnected sessions; the name column may carry a leading ">".
-    $names = @()
-    try { foreach ($l in @(& query.exe user 2>$null | Select-Object -Skip 1)) { $t = ([string]$l).TrimStart(" ", ">").Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries); if ($t.Count -gt 0) { $names += $t[0].ToLowerInvariant() } } } catch { $names = @('*') }
-    return $names
+    try {
+        $s = @(Get-CimInstance -ClassName Win32_LogonSession -ErrorAction Stop | Where-Object { @(2, 10, 11, 12, 13) -contains [int]$_.LogonType })
+        if ($s.Count -gt 0) { return @("*") }
+        return @()
+    } catch { return @("*") }
 }
 function Get-AcNow { Get-Date }
 
@@ -166,10 +169,9 @@ function Get-AcIdleByUser {
 function Remove-AcUserDir {
     param([string]$Dir, [string]$Root)
     if (-not (Test-Path -LiteralPath $Dir)) { return 0 }
-    $sess = @(Get-AcSessionUsers)
-    if ($sess -contains "*" -or $sess -contains (Split-Path -Leaf $Root.TrimEnd([char]92, [char]47)).ToLowerInvariant()) { return 4 }
-    # Only the owner (or an admin) can write inside a profile, so while the owner has no session nothing can swap
-    # a junction between the checks below and the delete. A user with any session (active or disconnected) is
+    if (@(Get-AcSessionUsers).Count -gt 0) { return 4 }
+    # Only the owner (or an admin) can write inside a profile, so with no interactive session on the PC nothing can swap
+    # a junction between the checks below and the delete. With any session (active or disconnected) the delete is
     # skipped (return 4). Refuse when the dir or an ancestor up to the profile root is a reparse point.
     $cur = (Get-Item -LiteralPath $Dir -Force).FullName.TrimEnd([char]92, [char]47)
     $top = $Root.TrimEnd([char]92, [char]47)
@@ -246,7 +248,7 @@ function Invoke-AcTeams {
         elseif ($Fix) {
             $c = Remove-AcUserDir -Dir $dir -Root $u.FullName
             $row.result = "exit $c"
-            if ($c -eq 4) { $row.result = "skipped: user has a session" }
+            if ($c -eq 4) { $row.result = "skipped: interactive session on the PC" }
             elseif ($c -ne 0 -or (Test-Path -LiteralPath $dir)) { $failed++; $row.result += " but still present" }
         }
         $rows += $row

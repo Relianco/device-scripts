@@ -129,8 +129,8 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $outside 'f.txt'))) { Fail 'file outside the profile was deleted' }
     Assert-Same (Remove-AcUserDir -Dir $outside -Root $prof) 2 'dir outside the root refused'
     $ok = Join-Path $prof 'plain'; [void](New-Item -ItemType Directory -Path $ok)
-    $script:sessions = @('PROF'.ToLowerInvariant()); $ok2 = Join-Path $prof 'plain2'; [void](New-Item -ItemType Directory -Path $ok2)
-    Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'user with a session is skipped'
+    $script:sessions = @('*'); $ok2 = Join-Path $prof 'plain2'; [void](New-Item -ItemType Directory -Path $ok2)
+    Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'any interactive session skips'
     if (-not (Test-Path -LiteralPath $ok2)) { Fail 'dir of a signed-in user was deleted' }
     $script:sessions = @('*')
     Assert-Same (Remove-AcUserDir -Dir $ok2 -Root $prof) 4 'unreadable session list skips'
