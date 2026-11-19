@@ -144,15 +144,11 @@ function Get-AcFirefoxInventory {
         $ver = if ($exe -and (Test-Path -LiteralPath $exe)) { Get-AcFileVersion -Path $exe } else { '' }
         if (-not $ver) { $ver = $k.Version -replace '\s.*', '' }
         $msi = ($k.Key -match '^\{[0-9A-Fa-f-]{36}\}$')
-        # An MSI with no recorded location: look where Mozilla's MSI installs by default; if it is not there the location
-        # is unverified.
-        if (-not $exe -and $msi) {
-            $def = Join-Path $env:ProgramFiles 'Mozilla Firefox\firefox.exe'
-            if ($env:ProgramFiles -and (Test-Path -LiteralPath $def)) { $exe = $def; $ver = Get-AcFileVersion -Path $exe }
-        }
+        # An MSI registration with no recorded install location stays unverified (report-only): a firefox.exe at the default
+        # path may belong to a different installation.
         # Machine scope only after the install path is positively inside Program Files. Registered under HKLM is not
         # enough: a copy in a profile, or one whose location is unknown, is user-writable or unverified, so report-only.
-        $probe = if ($exe) { $exe } else { ([string]$k.Uninstall).Trim('"') }
+        $probe = if ($exe) { $exe } elseif (-not $msi) { ([string]$k.Uninstall).Trim('"') } else { '' }
         $scope = 'user'; $owner = ''
         if ($probe -and (Test-AcProgramFiles -Path $probe)) { $scope = 'machine' }
         elseif ($probe -match '(?i)[\\/]Users[\\/]([^\\/]+)') { $owner = $Matches[1] }
