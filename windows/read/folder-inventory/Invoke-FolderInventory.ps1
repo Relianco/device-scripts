@@ -276,10 +276,18 @@ function Invoke-FiWalk {
     while ($stack.Count) {
         if (Test-FiOverBudget) { $w.partial = $true; break }
         $dir = $stack.Pop()
-        try { $entries = @($dir.EnumerateFileSystemInfos()) }
-        catch [IO.PathTooLongException] { $w.tooLong++; continue }
-        catch { if ($_.Exception.InnerException -is [IO.PathTooLongException]) { $w.tooLong++ } else { $w.denied++ }; continue }
-        foreach ($e in $entries) {
+        # Lazy: a huge flat folder is read entry by entry, so the time budget still applies inside it.
+        $entries = $null
+        while ($true) {
+            try {
+                if ($null -eq $entries) { $entries = $dir.EnumerateFileSystemInfos().GetEnumerator() }
+                if (-not $entries.MoveNext()) { break }
+            } catch {
+                $ex = $_.Exception; if ($ex.InnerException) { $ex = $ex.InnerException }
+                if ($ex -is [IO.PathTooLongException]) { $w.tooLong++ } else { $w.denied++ }
+                break
+            }
+            $e = $entries.Current
             if ((++$seen % 256) -eq 0 -and (Test-FiOverBudget)) { $w.partial = $true; break }
             $rel = $e.FullName.Substring($baseLen + 1)
             $local = $e.FullName.Length - $prefix.Length
@@ -644,7 +652,9 @@ function Get-FiOpenSection {
     $Report.openFolders = @($open | Group-Object { $r = & $rel $_.Path; $i = $r.LastIndexOf('\'); if ($i -gt 0) { $r.Substring(0, $i) } else { '' } } | Sort-Object Count -Descending | Select-Object -First 10 | ForEach-Object { (Protect-FiText $_.Name -Max 100) + '|' + $_.Count })
     $Report.openFiles = @($open | Select-Object -First 15 | ForEach-Object { (Protect-FiText (& $rel $_.Path) -Max 100) + '|' + (Protect-FiText ([string]$_.ClientUserName) -Max 40) + '|' + [int]$_.Locks })
     Invoke-FiStep $Report 'sessions' {
-        $sessions = @(Get-SmbSession)
+        # Only sessions that hold a file under the root: other users' activity on the server is not reported.
+        $ids = @($open | ForEach-Object { [string]$_.SessionId } | Sort-Object -Unique)
+        $sessions = @(Get-SmbSession | Where-Object { $ids -contains [string]$_.SessionId })
         $Report.sessions = [ordered]@{ count = $sessions.Count; users = @($sessions | Group-Object { [string]$_.ClientUserName } | ForEach-Object { (Protect-FiText $_.Name -Max 60) + '|' + $_.Count }) }
     }
     Invoke-FiStep $Report 'containingShares' {

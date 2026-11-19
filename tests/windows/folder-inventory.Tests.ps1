@@ -185,17 +185,17 @@ try {
     $winRoot = 'F:\Data\Accounting'
     function Get-SmbShare { @([pscustomobject]@{ Name = 'Data'; Path = 'F:\Data'; Special = $false; CachingMode = 'Manual'; FolderEnumerationMode = 'AccessBased'; CurrentUsers = 4 }) }
     function Get-SmbOpenFile { @(
-            [pscustomobject]@{ Path = 'F:\Data\Accounting\AppData\Company.QBW'; ClientUserName = 'EXAMPLE\alice'; Locks = 2 }
-            [pscustomobject]@{ Path = 'F:\Data\Accounting\AppData\Company.QBW.TLG'; ClientUserName = 'EXAMPLE\alice'; Locks = 0 }
-            [pscustomobject]@{ Path = 'F:\Data\Accounting\Clients\A\book.xlsx'; ClientUserName = 'EXAMPLE\bob'; Locks = 1 }
-            [pscustomobject]@{ Path = 'F:\Data\AccountingOld\x.xlsx'; ClientUserName = 'EXAMPLE\bob'; Locks = 0 }) }
-    function Get-SmbSession { @([pscustomobject]@{ ClientUserName = 'EXAMPLE\alice' }, [pscustomobject]@{ ClientUserName = 'EXAMPLE\bob' }) }
+            [pscustomobject]@{ Path = 'F:\Data\Accounting\AppData\Company.QBW'; ClientUserName = 'EXAMPLE\alice'; Locks = 2; SessionId = 11 }
+            [pscustomobject]@{ Path = 'F:\Data\Accounting\AppData\Company.QBW.TLG'; ClientUserName = 'EXAMPLE\alice'; Locks = 0; SessionId = 11 }
+            [pscustomobject]@{ Path = 'F:\Data\Accounting\Clients\A\book.xlsx'; ClientUserName = 'EXAMPLE\bob'; Locks = 1; SessionId = 12 }
+            [pscustomobject]@{ Path = 'F:\Data\AccountingOld\x.xlsx'; ClientUserName = 'EXAMPLE\carol'; Locks = 0; SessionId = 13 }) }
+    function Get-SmbSession { @([pscustomobject]@{ ClientUserName = 'EXAMPLE\alice'; SessionId = 11 }, [pscustomobject]@{ ClientUserName = 'EXAMPLE\bob'; SessionId = 12 }, [pscustomobject]@{ ClientUserName = 'EXAMPLE\carol'; SessionId = 13 }) }
     $or = [ordered]@{ status = 'ok'; errors = @() }
     Get-FiOpenSection $winRoot $or
     Assert ($or.openCount -eq 3) 'open files under the root only (not a sibling with the same prefix)'
     Assert ($or.openFamilies.quickbooks -eq 1 -and $or.openFamilies.lockOrLog -eq 1 -and $or.openFamilies.other -eq 1) 'open files by family'
     Assert ($or.openFolders[0] -eq 'AppData|2' -and $or.openFiles[0] -eq 'AppData\Company.QBW|EXAMPLE\alice|2') 'open folders and files'
-    Assert ($or.sessions.count -eq 2 -and $or.containingShares[0].name -eq 'Data' -and $or.containingShares[0].access[0] -eq 'Everyone|Allow|Full') 'sessions and share'
+    Assert ($or.sessions.count -eq 2 -and ($or | ConvertTo-Json -Depth 6) -notmatch 'carol' -and $or.containingShares[0].name -eq 'Data' -and $or.containingShares[0].access[0] -eq 'Everyone|Allow|Full') 'sessions and share'
 
     # --- Discover parts (fake SYSVOL and NETLOGON).
     $policies = Join-Path $tmp 'Policies'
