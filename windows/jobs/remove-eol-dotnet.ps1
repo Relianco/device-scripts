@@ -117,10 +117,36 @@ function Test-DnBackupAcl {
     return ($Sddl -match '\AO:(SY|BA)G:[^:]*D:([A-Z]*)(\(A;(?=[^;()]*OI)(?=[^;()]*CI)[A-Z]*;[^;()]*;;;SY\))+\z' -and $Matches[2].Contains('P'))
 }
 
+$script:DnSddlRightMap = @{
+    'CC' = 0x00000001L; 'DC' = 0x00000002L; 'LC' = 0x00000004L; 'SW' = 0x00000008L
+    'RP' = 0x00000010L; 'WP' = 0x00000020L; 'DT' = 0x00000040L; 'LO' = 0x00000080L
+    'CR' = 0x00000100L; 'SD' = 0x00010000L; 'RC' = 0x00020000L; 'WD' = 0x00040000L
+    'WO' = 0x00080000L; 'GA' = 0x10000000L; 'GX' = 0x20000000L; 'GW' = 0x40000000L
+    'GR' = 0x80000000L; 'FA' = 0x001F01FFL; 'FR' = 0x00120089L; 'FW' = 0x00120116L
+    'FX' = 0x001200A0L; 'KA' = 0x000F003FL; 'KR' = 0x00020019L; 'KW' = 0x00020006L
+    'KX' = 0x00020019L
+}
+
+function ConvertFrom-DnSddlRights {
+    param([AllowEmptyString()][string]$Rights)
+    if ([string]::IsNullOrWhiteSpace($Rights)) { return -1L }
+    if ($Rights -match '\A0x([0-9a-fA-F]{1,8})\z') {
+        return [Convert]::ToInt64($Matches[1], 16)
+    }
+    if (($Rights.Length % 2) -ne 0) { return -1L }
+    $mask = 0L
+    for ($i = 0; $i -lt $Rights.Length; $i += 2) {
+        $tok = $Rights.Substring($i, 2).ToUpperInvariant()
+        if (-not $script:DnSddlRightMap.ContainsKey($tok)) { return -1L }
+        $mask = $mask -bor $script:DnSddlRightMap[$tok]
+    }
+    return $mask
+}
+
 # Parent directory must be owned by SYSTEM or Administrators with no non-admin write, create, delete, or ownership-change ACEs.
 function Test-DnParentAcl {
     param([AllowEmptyString()][string]$Sddl)
-    if ($Sddl -notmatch '\AO:(SY|BA)G:[^:]*D:[^()]*((?:\([^()]+\))+)') { return $false }
+    if ($Sddl -notmatch '\AO:(SY|BA)G:[^:]*D:[^()]*((?:\([^()]+\))+)\z') { return $false }
     $aces = [regex]::Matches($Matches[2], '\(([^()]+)\)')
     foreach ($m in $aces) {
         $parts = $m.Groups[1].Value -split ';'
@@ -131,14 +157,11 @@ function Test-DnParentAcl {
         $trustee = $parts[5]
         if ($aceType -ne 'A') { continue }
         if ($trustee -in @('SY', 'BA')) { continue }
-        # In ProgramData, inheritance-only (IO) ACEs do not grant permissions on the parent container itself.
         if ($aceFlags -match 'IO') { continue }
-        if ($rights -match '(FA|GA|GW|FW|KW|KA|DC|SD|WD|AD|CC|WDAC|WO)') { return $false }
-        if ($rights -match '^0x([0-9a-fA-F]+)$') {
-            $mask = [Convert]::ToInt64($Matches[1], 16)
-            # Reject generic all/write, delete, delete-child, write-dac, write-owner, write-data/create-file (0x2), append-data/create-subdir (0x4), write-ea (0x10), write-attributes (0x100).
-            if (($mask -band 0x500D0156) -ne 0) { return $false }
-        }
+        $mask = ConvertFrom-DnSddlRights $rights
+        if ($mask -lt 0) { return $false }
+        # Reject generic all/write, delete, delete-child (DT/0x40), write-dac, write-owner, write-data/create-file (DC/0x2), append-data/create-subdir (LC/0x4), write-ea (RP/0x10), write-attributes (CR/0x100).
+        if (($mask -band 0x500D0156L) -ne 0) { return $false }
     }
     return $true
 }
@@ -148,16 +171,24 @@ function Ensure-DnBackupDirectory {
     $parent = Split-Path -Parent $BackupDir
     $chain = @($parent, $BackupDir)
     & $script:DnAssertNotReparse $chain
-    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
-        $null = New-Item -ItemType Directory -Path $parent -Force
-        & $script:DnAssertNotReparse @($parent)
-        & $script:DnProtectDir $parent
-    }
-    if ($parent -and -not (Test-DnParentAcl (& $script:DnReadSddl $parent))) {
-        throw 'refusing backup parent directory with untrusted owner or ACL'
+    if ($parent) {
+        if (-not (Test-Path -LiteralPath $parent)) {
+            $null = New-Item -ItemType Directory -Path $parent -Force
+            & $script:DnAssertNotReparse @($parent)
+            & $script:DnProtectDir $parent
+        } elseif (-not (Test-DnParentAcl (& $script:DnReadSddl $parent))) {
+            & $script:DnAssertNotReparse @($parent)
+            & $script:DnProtectDir $parent
+        }
+        if (-not (Test-DnParentAcl (& $script:DnReadSddl $parent))) {
+            throw 'refusing backup parent directory with untrusted owner or ACL'
+        }
     }
     if (-not (Test-Path -LiteralPath $BackupDir)) {
         $null = New-Item -ItemType Directory -Path $BackupDir -Force
+        & $script:DnAssertNotReparse $chain
+        & $script:DnProtectDir $BackupDir
+    } elseif (-not (Test-DnBackupAcl (& $script:DnReadSddl $BackupDir))) {
         & $script:DnAssertNotReparse $chain
         & $script:DnProtectDir $BackupDir
     }

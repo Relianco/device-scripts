@@ -184,13 +184,29 @@ Assert-Same $r.Status 'failed' 'backup fail status'
 Assert-True (-not ($script:Log -match '^remove:')) 'backup fail removes nothing'
 Assert-Same $script:FakeParts[1].driveLetter 'D' 'letter preserved on backup fail'
 
-# 5b. Untrusted parent or backup ACL refuses to run and removes nothing.
+# 5b. Untrusted parent or backup ACL attempts RpProtectDir and refuses to run if still untrusted, removing nothing.
 Reset-Test -Parts $oneTarget
 $script:FakeParentSddl = 'O:SYG:SYD:AI(A;;FA;;;BU)'
 $r = Invoke-RpJob
 Assert-Same $r.ExitCode 2 'untrusted parent acl exit'
 Assert-Same $r.Status 'failed' 'untrusted parent acl status'
 Assert-True (-not ($script:Log -match '^remove:')) 'untrusted parent acl removes nothing'
+
+Reset-Test -Parts $oneTarget
+$null = New-Item -ItemType Directory -Path (Split-Path -Parent $script:RpBackupDir) -Force
+$script:FakeParentSddl = 'O:SYG:SYD:AI(A;;FA;;;BU)'
+$origProtect = $script:RpProtectDir
+$script:RpProtectDir = {
+    param($Path)
+    $script:Log.Add("protect:$(Split-Path -Leaf $Path)")
+    if ($Path -eq (Split-Path -Parent $script:RpBackupDir)) {
+        $script:FakeParentSddl = 'O:SYG:SYD:P(A;OICI;FA;;;SY)'
+    }
+}
+$rHeal = Invoke-RpJob
+$script:RpProtectDir = $origProtect
+Assert-Same $rHeal.ExitCode 0 'pre-existing parent acl healed by RpProtectDir exit'
+Assert-Same $rHeal.Status 'removed' 'pre-existing parent acl healed by RpProtectDir status'
 
 Reset-Test -Parts $oneTarget
 $null = New-Item -ItemType Directory -Path $script:RpBackupDir -Force

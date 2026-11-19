@@ -192,13 +192,29 @@ try {
     Assert-Same $r.Status 'removed' '3010 removed'
     Assert-Same $r.RebootRequired $true '3010 sets rebootRequired'
 
-    # 6. Untrusted backup parent ACL or non-inheritable backup ACL aborts before running any uninstaller.
+    # 6. Untrusted backup parent ACL or non-inheritable backup ACL aborts before running any uninstaller if protection does not fix it, or succeeds after healing pre-existing parent ACL.
     Reset-Test -Entries @((New-Entry -Id $msi7020 -Name 'Microsoft .NET Runtime - 7.0.20 (x64)' -Version '56.80.15184' -Msi $true))
     $script:FakeParentSddl = 'O:SYG:SYD:(A;OICI;FA;;;WD)'
     $r = Invoke-DnJob
     Assert-Same $r.ExitCode 2 'bad parent ACL exit 2'
     Assert-Same $r.Status 'failed' 'bad parent ACL status failed'
     Assert-Same (@($script:Log | Where-Object { $_ -like 'msi:*' -or $_ -like 'bundle:*' }).Count) 0 'no uninstaller ran on backup failure'
+
+    Reset-Test -Entries @((New-Entry -Id $msi7020 -Name 'Microsoft .NET Runtime - 7.0.20 (x64)' -Version '56.80.15184' -Msi $true))
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $script:DnBackupDir) -Force
+    $script:FakeParentSddl = 'O:SYG:SYD:(A;OICI;FA;;;WD)'
+    $origDnProtect = $script:DnProtectDir
+    $script:DnProtectDir = {
+        param($Path)
+        $script:Log.Add("protect:$Path")
+        if ($Path -eq (Split-Path -Parent $script:DnBackupDir)) {
+            $script:FakeParentSddl = 'O:SYG:SYD:P(A;OICI;FA;;;SY)'
+        }
+    }
+    $rHeal = Invoke-DnJob
+    $script:DnProtectDir = $origDnProtect
+    Assert-Same $rHeal.ExitCode 0 'healed parent ACL exit 0'
+    Assert-Same $rHeal.Status 'removed' 'healed parent ACL removed'
 
     Assert-True (-not (Test-DnParentAcl 'O:SYG:SYD:AI(A;;FW;;;BU)(A;;FA;;;SY)')) 'rejects FW on parent'
     Assert-True (-not (Test-DnParentAcl 'O:SYG:SYD:AI(A;CIID;0x100116;;;BU)(A;;FA;;;SY)')) 'rejects 0x100116 create-child on parent without IO'
