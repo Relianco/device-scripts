@@ -601,6 +601,7 @@ try {
     $amName = 'Relian - OneDrive AutoMount Accounting'
     $amKey = 'HKCU\Software\Policies\Microsoft\OneDrive\TenantAutoMount'
 
+    Assert ((Get-GpbAuthenticatedUsersName) -match '\S') 'Authenticated Users name resolves or falls back'
     foreach ($id in @('workstations-only', 'onedrive-workstations', 'onedrive-users', 'onedrive-automount', 'password-lockout')) {
         $d = Get-GpbDefinition $id
         Assert ($null -ne $d) "embedded definition found: $id"
@@ -850,6 +851,14 @@ try {
     Assert ($r.report.status -eq 'noChange') 'adopting a GPO that already holds the value changes nothing'
     $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'noChange' -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'undo keeps a value that predates adoption'
+    # A value read that fails during undo keeps the record, so a later undo still removes the value adopt added.
+    $script:regValues.Remove("$($so.Id)|$newKey|Added")
+    [void](Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx)
+    $saved = $script:regValues["$($so.Id)|$newKey|Added"]; $script:regValues.Remove("$($so.Id)|$newKey|Added")
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    $script:regValues["$($so.Id)|$newKey|Added"] = $saved
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'undone' -and -not $script:regValues.ContainsKey("$($so.Id)|$newKey|Added")) 'failed value read keeps the adopt record'
     foreach ($k in @('security', 'securityFilter')) {
         $bad = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; registry = @(); audit = @(); security = @() }
         if ($k -eq 'security') { $bad.security = @([pscustomobject]@{ cis = 'x'; section = 'System Access'; key = 'LockoutBadCount'; value = '1' }) } else { $bad | Add-Member securityFilter 'optional' }

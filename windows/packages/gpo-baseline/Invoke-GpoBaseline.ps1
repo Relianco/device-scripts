@@ -424,6 +424,12 @@ function Resolve-GpbDefinition {
     return @{ Def = $out; Missing = @($missing) }
 }
 
+# The local name of Authenticated Users (S-1-5-11): Set-GPPermission takes a name, which differs by DC language.
+function Get-GpbAuthenticatedUsersName {
+    try { return ([Security.Principal.SecurityIdentifier]'S-1-5-11').Translate([Security.Principal.NTAccount]).Value.Split('\')[-1] }
+    catch { return 'Authenticated Users' }
+}
+
 # objectSid of the one account with this sAMAccountName and class, or $null.
 function Get-GpbTrusteeSid {
     param($Context, [string]$Name, [string]$Type)
@@ -730,7 +736,7 @@ function Get-GpbPlan {
         # New-GPO grants Authenticated Users GpoApply.
         $au = 'GpoApply'; if ($Gpo) { $au = & $level 'S-1-5-11' }
         $want = 'GpoApply'; if ($Filter.Name) { $want = 'GpoRead' }
-        if ($au -ne $want) { $changes.Add([ordered]@{ kind = 'permission'; target = 'Authenticated Users'; current = $au; desired = $want; trustee = 'Authenticated Users'; trusteeType = 'Group'; sid = 'S-1-5-11' }) }
+        if ($au -ne $want) { $changes.Add([ordered]@{ kind = 'permission'; target = 'Authenticated Users'; current = $au; desired = $want; trustee = (Get-GpbAuthenticatedUsersName); trusteeType = 'Group'; sid = 'S-1-5-11' }) }
         if ($Filter.Name) {
             $cur = 'None'; if ($Gpo) { $cur = & $level $Filter.Sid }
             if ($cur -ne 'GpoApply') { $changes.Add([ordered]@{ kind = 'permission'; target = "$($Filter.Type) $($Filter.Name)"; current = $cur; desired = 'GpoApply'; trustee = $Filter.Name; trusteeType = $Filter.Type; sid = $Filter.Sid }) }
@@ -1128,8 +1134,9 @@ function Invoke-GpoBaseline {
                 $report.lastBackupId = $lastBackup
                 if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
                 if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
-                # Nothing left to undo: retire the record, so a link or value set again later by someone else is not ours.
-                if ($undo.Count -eq 0) { $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id; if ([IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }; $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
+                # Nothing left to undo: retire a link-only record, so a link set again later by someone else is not ours.
+                # A record with values stays: a value read that failed looks like an absent value.
+                if ($undo.Count -eq 0) { $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id; if ($added.values.Count -eq 0 -and [IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }; $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
                 $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
                 foreach ($u in $undo) {
                     if ($u.kind -eq 'removeValue') { Remove-GPRegistryValue -Guid $gpo.Id -Key $u.item.key -ValueName $u.item.valueName -Server $Context.Server -ErrorAction Stop | Out-Null }
