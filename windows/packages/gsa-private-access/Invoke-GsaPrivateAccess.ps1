@@ -53,28 +53,33 @@ $script:GpaGetHives = {
             [pscustomobject]@{ Sid = $sid; Upn = $upn }
         })
 }
+# The key, or $null only when it genuinely does not exist; access denied and other failures throw.
+function Get-GpaKeyItem {
+    param([string]$Path)
+    try { return Get-Item -LiteralPath $Path -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return $null }
+}
+
 # $null only when the key or the value is genuinely missing; any other read failure throws.
 $script:GpaGetValue = {
     param([string]$Sid)
     $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
-    if (-not (Test-Path -LiteralPath $k)) { return $null }
-    $item = Get-Item -LiteralPath $k -ErrorAction Stop
-    if (@($item.GetValueNames()) -notcontains $script:GpaValue) { return $null }
+    $item = Get-GpaKeyItem -Path $k
+    if ($null -eq $item -or @($item.GetValueNames()) -notcontains $script:GpaValue) { return $null }
     return [int]$item.GetValue($script:GpaValue)
 }
 $script:GpaSetValue = {
     param([string]$Sid)
     $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
-    if (-not (Test-Path -LiteralPath $k)) { New-Item -Path $k -Force -ErrorAction Stop | Out-Null }
+    if ($null -eq (Get-GpaKeyItem -Path $k)) { New-Item -Path $k -Force -ErrorAction Stop | Out-Null }
     New-ItemProperty -LiteralPath $k -Name $script:GpaValue -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
 }
 $script:GpaRemoveValue = {
     param([string]$Sid)
     $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
     # Only an already-absent value is fine; any other failure (reading or removing) stops the run.
-    if (-not (Test-Path -LiteralPath $k)) { return }
-    $item = Get-Item -LiteralPath $k -ErrorAction Stop
-    if (@($item.GetValueNames()) -contains $script:GpaValue) {
+    $item = Get-GpaKeyItem -Path $k
+    if ($null -ne $item -and @($item.GetValueNames()) -contains $script:GpaValue) {
         Remove-ItemProperty -LiteralPath $k -Name $script:GpaValue -ErrorAction Stop
     }
 }
