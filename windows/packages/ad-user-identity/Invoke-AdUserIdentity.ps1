@@ -19,14 +19,16 @@
       TargetOu           optional. The DN of an existing OU or container, such as OU=Unsynced,DC=example,DC=com.
       NewSamAccountName  optional. Same rule as Identity.
       Backup             Rollback only, optional. A backup file name (<sam>-yyyyMMdd-HHmmss.json); default the newest
-                         backup of this user (matched by objectGUID, so a renamed user still finds it).
+                         backup taken by an Apply of this user (matched by objectGUID, so a renamed user still finds
+                         it). A repeated Rollback restores the same state; name a Rollback's own backup to undo it.
+                         Only complete backups owned by SYSTEM or Administrators are read.
 
     Plan: prints the current values, the changes, the move, every other AD object (user, contact, group, any class)
     whose userPrincipalName, mail or SMTP proxyAddresses equal a planned address, or whose sAMAccountName equals the
     planned one (case-insensitive), and the objectGUID with its base64. ImmutableId is the base64 of
     mS-DS-ConsistencyGuid when that is set (Cloud Sync anchors on it), else of objectGUID: set the cloud user's
     onPremisesImmutableId to it before the user comes into sync scope. Plan writes nothing and exits 0.
-    Apply: refuses on any conflict or a missing OU. When something differs, it writes a JSON backup of the identity
+    Apply: refuses on any conflict or a TargetOu that is not an existing OU or container. When something differs, it writes a JSON backup of the identity
     attributes and the OU to %ProgramData%\Relian\ad-user-identity\<sam>-<yyyyMMdd-HHmmss>.json (the folder is locked
     to SYSTEM and Administrators), then sets only the given attributes, moves the user, and reads it back. A second
     run with the same values changes nothing.
@@ -74,9 +76,10 @@ $script:UiFind = { param($sam) @(Get-ADUser -LDAPFilter "(sAMAccountName=$sam)" 
 $script:UiGet = { param($guid) Get-ADUser -Identity $guid -Properties $script:UiProps }
 $script:UiSearch = { param($filter) @(Get-ADObject -LDAPFilter $filter -Properties sAMAccountName, userPrincipalName, mail, proxyAddresses) }
 # A missing object throws ADIdentityNotFoundException; any other error propagates.
+# True only for an existing OU or container: Move-ADObject cannot move into anything else.
 $script:UiOuExists = {
     param($dn)
-    try { [bool](Get-ADObject -Identity $dn) }
+    try { [string](Get-ADObject -Identity $dn).ObjectClass -in @('organizationalUnit', 'container') }
     catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] { $false }
 }
 $script:UiSet = {
@@ -87,9 +90,12 @@ $script:UiSet = {
 $script:UiMove = { param($guid, $ou) Move-ADObject -Identity $guid -TargetPath $ou }
 $script:UiNow = { [DateTime]::Now }
 $script:UiHost = { $env:COMPUTERNAME }
+# Owner Administrators, protected DACL: a folder someone else made first is taken over, not trusted.
 $script:UiLockFolder = {
     param($path)
+    if ((Get-Item -LiteralPath $path -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw "$path is a reparse point" }
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetOwner((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')))
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
         $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
@@ -97,6 +103,12 @@ $script:UiLockFolder = {
         $acl.AddAccessRule($rule)
     }
     Set-Acl -LiteralPath $path -AclObject $acl
+}
+# A backup file is trusted only when SYSTEM or Administrators own it.
+$script:UiTrusted = {
+    param($path)
+    $owner = (Get-Acl -LiteralPath $path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    $owner -in @('S-1-5-18', 'S-1-5-32-544')
 }
 
 # RFC 4515 escaping for a value inside an LDAP filter.
@@ -181,13 +193,13 @@ function Get-UiConflicts([string]$Guid, $Planned) {
     return , $conflicts.ToArray()
 }
 
-function Write-UiBackup([string]$Guid, [string]$Dn, $State, [DateTime]$Now) {
+function Write-UiBackup([string]$Guid, [string]$Dn, $State, [DateTime]$Now, [string]$Operation) {
     $root = $script:UiBackupRoot
     if (-not (Test-Path -LiteralPath $root)) { $null = New-Item -ItemType Directory -Path $root -Force }
     & $script:UiLockFolder $root
     $stamp = $Now.ToString('yyyyMMdd-HHmmss')
     $file = Join-Path $root ('{0}-{1}.json' -f $State['sAMAccountName'], $stamp)
-    $doc = [ordered]@{ takenAt = $Now.ToString('o'); stamp = $stamp; host = [string](& $script:UiHost); guid = $Guid; dn = $Dn; parent = (Get-UiParent $Dn); attributes = $State }
+    $doc = [ordered]@{ takenAt = $Now.ToString('o'); stamp = $stamp; operation = $Operation; host = [string](& $script:UiHost); guid = $Guid; dn = $Dn; parent = (Get-UiParent $Dn); attributes = $State }
     $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((ConvertTo-Json -InputObject $doc -Depth 5))
     # CreateNew: an existing backup is never overwritten.
     $stream = [System.IO.File]::Open($file, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write)
@@ -196,25 +208,40 @@ function Write-UiBackup([string]$Guid, [string]$Dn, $State, [DateTime]$Now) {
     return $file
 }
 
-# The backup to restore for this user: the named one, or the newest whose objectGUID matches.
+# A parsed backup, or the reason it cannot be used. Every field must be present: a missing one would become a clear.
+function Read-UiBackup([string]$Path, [string]$Guid) {
+    if (-not [bool](& $script:UiTrusted $Path)) { return 'is not owned by SYSTEM or Administrators' }
+    try { $doc = ConvertFrom-Json ([System.IO.File]::ReadAllText($Path)) } catch { return 'is not valid JSON' }
+    if ([string]$doc.guid -ne $Guid) { return 'belongs to another object' }
+    $names = @($doc.PSObject.Properties.Name)
+    $attrs = if ($names -contains 'attributes' -and $doc.attributes) { @($doc.attributes.PSObject.Properties.Name) } else { @() }
+    foreach ($k in @('stamp', 'operation', 'parent')) { if ($names -notcontains $k -or [string]$doc.$k -eq '') { return "has no $k" } }
+    foreach ($a in $script:UiAttributes) { if ($attrs -notcontains $a) { return "has no $a" } }
+    if ([string]$doc.attributes.sAMAccountName -cnotmatch $script:UiSamPattern) { return 'has an invalid sAMAccountName' }
+    return $doc
+}
+
+# The backup to restore for this user: the named one, or the newest one taken before an Apply (so a repeated
+# Rollback restores the same state instead of undoing the last Rollback).
 function Get-UiRestore([string]$Guid, [string]$Name) {
     $root = $script:UiBackupRoot
+    if (Test-Path -LiteralPath $root) { & $script:UiLockFolder $root }
     if ($Name) {
         $path = Join-Path $root $Name
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "backup $Name not found under $root" }
-        $doc = ConvertFrom-Json ([System.IO.File]::ReadAllText($path))
-        if ([string]$doc.guid -ne $Guid) { throw "backup $Name belongs to another object" }
+        $doc = Read-UiBackup $path $Guid
+        if ($doc -is [string]) { throw "backup $Name $doc" }
         return @{ Path = $path; Doc = $doc }
     }
     $best = $null
     if (Test-Path -LiteralPath $root) {
         foreach ($f in @(Get-ChildItem -LiteralPath $root -Filter '*.json' -File | Where-Object { $_.Name -cmatch $script:UiBackupPattern })) {
-            try { $doc = ConvertFrom-Json ([System.IO.File]::ReadAllText($f.FullName)) } catch { continue }
-            if ([string]$doc.guid -ne $Guid) { continue }
+            $doc = Read-UiBackup $f.FullName $Guid
+            if ($doc -is [string] -or [string]$doc.operation -cne 'Apply') { continue }
             if ($null -eq $best -or [string]::CompareOrdinal([string]$doc.stamp, [string]$best.Doc.stamp) -gt 0) { $best = @{ Path = $f.FullName; Doc = $doc } }
         }
     }
-    if ($null -eq $best) { throw "no backup for this user under $root" }
+    if ($null -eq $best) { throw "no usable Apply backup for this user under $root" }
     return $best
 }
 
@@ -300,7 +327,7 @@ function Invoke-UiMain {
         }
         if ($changes.Count -eq 0 -and -not $move) { $line.Status = 'unchanged'; return @{ ExitCode = 0; Line = $line } }
 
-        $line.Backup = Write-UiBackup $guid $dn $current (& $script:UiNow)
+        $line.Backup = Write-UiBackup $guid $dn $current (& $script:UiNow) $Mode
         if ($changes.Count -gt 0) {
             $replace = @{}
             $clear = @()

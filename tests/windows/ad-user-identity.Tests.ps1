@@ -24,6 +24,7 @@ function New-Fake([object[]]$Objects, [string[]]$Ous = @('OU=Staff,DC=example,DC
     $script:UiNow = { [DateTime]'2026-11-19T10:30:00' }
     $script:UiHost = { 'DC1' }
     $script:UiLockFolder = { param($p) $script:Fake.Log.Add('lock') }
+    $script:UiTrusted = { param($p) -not $p.EndsWith('-20261119-090000.json') }
     $script:UiFind = { param($sam) @($script:Fake.Objects | Where-Object { $_.ObjectClass -eq 'user' -and $_.sAMAccountName -eq $sam }) }
     $script:UiGet = { param($g) @($script:Fake.Objects | Where-Object { $_.ObjectGUID -eq [Guid]$g })[0] }
     $script:UiSearch = { param($filter) $script:Fake.Filters.Add($filter); @($script:Fake.Objects) }
@@ -140,8 +141,28 @@ try {
     Assert ($r.Line.RestoredFrom -like '*jdoe-20261119-103000.json') 'Rollback used the newest backup'
     $u = $script:Fake.Objects[0]
     Assert ($u.userPrincipalName -eq 'jdoe@corp.local' -and $null -eq $u.mail -and $u.DistinguishedName -eq 'CN=jdoe,OU=Staff,DC=example,DC=com' -and (@($u.proxyAddresses) -join ';') -eq 'SMTP:jdoe@old.example;X500:/o=Org/cn=jdoe') 'Rollback restored attributes and OU'
-    Assert ($script:Fake.Log[0] -eq 'lock' -and $script:Fake.Log[1] -eq 'set:-mail,proxyAddresses,userPrincipalName') "Rollback backs up, then clears what was empty: $($script:Fake.Log -join ' ')"
+    Assert ($script:Fake.Log[0] -eq 'lock' -and $script:Fake.Log[1] -eq 'lock' -and $script:Fake.Log[2] -eq 'set:-mail,proxyAddresses,userPrincipalName') "Rollback backs up, then clears what was empty: $($script:Fake.Log -join ' ')"
     Assert ((Backups).Count -eq 2) 'Rollback writes its own backup first'
+
+    # A repeated Rollback restores the same Apply backup, not the Rollback's own one.
+    $script:Fake.Log.Clear()
+    $script:UiNow = { [DateTime]'2026-11-19T11:05:00' }
+    $r = Run @{ Mode = 'Rollback' }
+    Assert ($r.ExitCode -eq 0 -and $r.Line.Status -eq 'unchanged' -and $r.Line.RestoredFrom -like '*jdoe-20261119-103000.json' -and $script:Fake.Log.Count -eq 1) 'Second Rollback is a no-op'
+
+    # Backups that are incomplete, or not owned by SYSTEM or Administrators, are never used.
+    $good = Get-Content -LiteralPath (Join-Path $tmp 'jdoe-20261119-103000.json') -Raw | ConvertFrom-Json
+    $good.stamp = '20261119-235959'
+    $good.attributes.PSObject.Properties.Remove('mail')
+    Set-Content -LiteralPath (Join-Path $tmp 'jdoe-20261119-235959.json') -Value (ConvertTo-Json $good -Depth 5)
+    $good.stamp = '20261119-090000'
+    Set-Content -LiteralPath (Join-Path $tmp 'jdoe-20261119-090000.json') -Value (Get-Content -LiteralPath (Join-Path $tmp 'jdoe-20261119-103000.json') -Raw)
+    $r = Run @{ Mode = 'Rollback'; Backup = 'jdoe-20261119-235959.json' }
+    Assert ($r.ExitCode -eq 1 -and $r.Line.Reason -match 'has no mail') 'Incomplete backup refused'
+    $r = Run @{ Mode = 'Rollback'; Backup = 'jdoe-20261119-090000.json' }
+    Assert ($r.ExitCode -eq 1 -and $r.Line.Reason -match 'not owned') 'Untrusted backup refused'
+    Assert ((Run @{ Mode = 'Rollback' }).Line.RestoredFrom -like '*jdoe-20261119-103000.json') 'Newest skips bad backups'
+    Remove-Item -LiteralPath (Join-Path $tmp 'jdoe-20261119-235959.json'), (Join-Path $tmp 'jdoe-20261119-090000.json')
 
     # A rename: the backup is found by GUID; a named backup for another object is refused.
     New-Std
@@ -154,7 +175,7 @@ try {
     $r = Run @{ Identity = 'asmith'; Mode = 'Rollback'; Backup = 'jdoe-20261119-120000.json' }
     Assert ($r.ExitCode -eq 1 -and $r.Line.Reason -match 'another object') 'Backup of another object refused'
     $r = Run @{ Identity = 'asmith'; Mode = 'Rollback' }
-    Assert ($r.ExitCode -eq 1 -and $r.Line.Reason -match 'no backup') 'No backup for this user'
+    Assert ($r.ExitCode -eq 1 -and $r.Line.Reason -match 'no usable Apply backup') 'No backup for this user'
     $r = Run @{ Mode = 'Rollback'; Backup = 'jdoe-20990101-000000.json' }
     Assert ($r.ExitCode -eq 1) 'Missing named backup refused'
 
