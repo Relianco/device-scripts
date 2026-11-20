@@ -65,8 +65,8 @@ $script:GpaGetValue = {
 $script:GpaSetValue = {
     param([string]$Sid)
     $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
-    if (-not (Test-Path -LiteralPath $k)) { New-Item -Path $k -Force | Out-Null }
-    New-ItemProperty -LiteralPath $k -Name $script:GpaValue -PropertyType DWord -Value 1 -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $k)) { New-Item -Path $k -Force -ErrorAction Stop | Out-Null }
+    New-ItemProperty -LiteralPath $k -Name $script:GpaValue -PropertyType DWord -Value 1 -Force -ErrorAction Stop | Out-Null
 }
 $script:GpaRemoveValue = {
     param([string]$Sid)
