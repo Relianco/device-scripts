@@ -53,11 +53,14 @@ $script:GpaGetHives = {
             [pscustomobject]@{ Sid = $sid; Upn = $upn }
         })
 }
+# $null only when the key or the value is genuinely missing; any other read failure throws.
 $script:GpaGetValue = {
     param([string]$Sid)
-    $v = Get-ItemProperty -LiteralPath "Registry::HKEY_USERS\$Sid\$script:GpaKey" -Name $script:GpaValue -ErrorAction SilentlyContinue
-    if ($null -eq $v) { return $null }
-    return [int]$v.$($script:GpaValue)
+    $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
+    if (-not (Test-Path -LiteralPath $k)) { return $null }
+    $item = Get-Item -LiteralPath $k -ErrorAction Stop
+    if (@($item.GetValueNames()) -notcontains $script:GpaValue) { return $null }
+    return [int]$item.GetValue($script:GpaValue)
 }
 $script:GpaSetValue = {
     param([string]$Sid)
@@ -68,8 +71,10 @@ $script:GpaSetValue = {
 $script:GpaRemoveValue = {
     param([string]$Sid)
     $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
-    # Only an already-absent value is fine; any other failure stops the run.
-    if ($null -ne (Get-ItemProperty -LiteralPath $k -Name $script:GpaValue -ErrorAction SilentlyContinue)) {
+    # Only an already-absent value is fine; any other failure (reading or removing) stops the run.
+    if (-not (Test-Path -LiteralPath $k)) { return }
+    $item = Get-Item -LiteralPath $k -ErrorAction Stop
+    if (@($item.GetValueNames()) -contains $script:GpaValue) {
         Remove-ItemProperty -LiteralPath $k -Name $script:GpaValue -ErrorAction Stop
     }
 }
@@ -105,7 +110,10 @@ function Test-GpaSynthetic {
 function Get-GpaReport {
     param([string]$DnsName)
     $r = [ordered]@{
-        users    = @(& $script:GpaGetHives | ForEach-Object { [ordered]@{ upn = $_.Upn; sid = $_.Sid; privateAccessDisabled = ((& $script:GpaGetValue -Sid $_.Sid) -eq 1) } })
+        users    = @(& $script:GpaGetHives | ForEach-Object {
+                $state = try { ((& $script:GpaGetValue -Sid $_.Sid) -eq 1) } catch { 'unreadable' }
+                [ordered]@{ upn = $_.Upn; sid = $_.Sid; privateAccessDisabled = $state }
+            })
         services = @(& $script:GpaGetServices)
     }
     if ($DnsName) {

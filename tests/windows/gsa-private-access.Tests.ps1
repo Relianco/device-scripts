@@ -85,4 +85,12 @@ $script:GpaRemoveValue = { param([string]$Sid) throw 'access denied' }
 $r = Invoke-GpaRun -Mode 'Enable' -User 'user.one@example.invalid' -DnsName ''
 if ($r.exitCode -ne 1 -or @($r.record.errors) -notcontains 'write failed') { Fail 'a removal error must fail' }
 
+# A read failure is neither "absent" nor success.
+Reset-Fake
+$script:GpaGetValue = { param([string]$Sid) throw 'access denied' }
+$script:GpaRemoveValue = { param([string]$Sid) $script:calls.Add("remove $Sid") }
+$r = Invoke-GpaRun -Mode 'Enable' -User 'user.one@example.invalid' -DnsName ''
+if ($r.exitCode -ne 1) { Fail 'Enable must fail when the read-back cannot read' }
+if (($r.record.report.users | Where-Object { $_.sid -eq $SidA }).privateAccessDisabled -ne 'unreadable') { Fail 'report must say unreadable' }
+
 Write-Output 'gsa-private-access tests passed'
