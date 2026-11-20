@@ -38,7 +38,7 @@ function New-Settings {
         TunnelName = 'office'; Address = '10.99.10.10/32'; ServerPublicKey = $serverKey; Endpoint = '198.51.100.7:51820'
         AllowedIPs = '192.0.2.0/24, 203.0.113.4/32'; PersistentKeepalive = '25'
         NrptNamespaces = '.corp.example.invalid,files.example.invalid'; NrptServers = '192.0.2.5,203.0.113.4'
-        DisableGsaPrivateAccess = 'false'
+        DisableGsaPrivateAccess = 'false'; MapUrl = ''; MapKey = ''; LegacyPattern = ''; TrustedGateways = ''; TrustedGatewayMacs = ''
     }
     foreach ($k in $Over.Keys) { $s[$k] = $Over[$k] }
     return [pscustomobject]$s
@@ -69,7 +69,7 @@ $plan = Get-WgcNrptPlan -Existing $existing -Namespaces @() -Servers @() -Tag $t
 if (@($plan.Remove).Count -ne 2 -or @($plan.Remove | Where-Object Name -ceq 'c').Count -ne 0) { Fail 'uninstall nrpt plan' }
 
 # Install flow with every side effect mocked.
-$state = [ordered]@{ Installed = ''; Msi = 0; Config = ''; Written = 0; Service = $null; Restarts = 0; Folder = 0; Rules = [System.Collections.Generic.List[object]]::new(); Gsa = 0; FolderBeforeWrite = $true }
+$state = [ordered]@{ Installed = ''; Msi = 0; Config = ''; Key = ''; Written = 0; Service = $null; Restarts = 0; Folder = 0; Rules = [System.Collections.Generic.List[object]]::new(); Gsa = 0; FolderBeforeWrite = $true }
 $script:GetArch = { 'AMD64' }
 $script:GetInstalledVersion = { $state.Installed }
 $script:DownloadFile = { param($Url, $Destination) Set-Content -LiteralPath $Destination -Value 'msi' }
@@ -84,8 +84,16 @@ $script:InvokeWg = {
     }
 }
 $script:EnsureSecureFolder = { param($Path) $state.Folder++ }
-$script:ReadConfig = { param($Path) $state.Config }
-$script:WriteConfig = { param($Path, $Text) if ($state.Folder -eq 0) { $state.FolderBeforeWrite = $false }; $state.Config = $Text; $state.Written++ }
+# Written counts tunnel config writes only. The key file is tracked apart.
+$script:ReadConfig = { param($Path) if ($Path.EndsWith('.key')) { $state.Key } elseif ($Path.EndsWith('.conf')) { $state.Config } else { '' } }
+$script:WriteConfig = {
+    param($Path, $Text)
+    if ($state.Folder -eq 0) { $state.FolderBeforeWrite = $false }
+    if ($Path.EndsWith('.key')) { $state.Key = $Text } else { $state.Config = $Text; $state.Written++ }
+}
+$script:RemoveFile = { param($Path) }
+$script:RunGuardTask = { }
+$script:GetTunnelServices = { @() }
 $script:GetService = { param($Name) $state.Service }
 $script:InstallTunnelService = { param($ConfigPath) $state.Service = [pscustomobject]@{ Name = 'WireGuardTunnel$office'; Status = 'Running'; StartType = 'Automatic' }; 0 }
 $script:UninstallTunnelService = { param($TunnelName) $state.Service = $null; 0 }

@@ -114,6 +114,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/intune-wau.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The WireGuard Remediation verifies the signed map with .NET Framework RSA under Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wireguard-intune.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wireguard-client.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The read-only job loader: a real child killed at the timeout, under pwsh and Windows PowerShell 5.1.
           pwsh -NoProfile -File tests/windows/read-job.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
