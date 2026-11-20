@@ -266,10 +266,10 @@ try {
     $rc = Invoke-GpoEvidence -Section Rsop | ConvertFrom-Json
     Assert ($rc.section -eq 'Rsop' -and $rc.rsop.scope -eq 'Computer' -and $rc.rsop.applied[0].name -eq 'Computer GPO') 'Rsop computer scope'
     $a = @($script:calls[0] | Select-Object -Skip 1)
-    Assert (($a -join ' ') -match '^/scope computer /x \S+ /f$' -and $a -notcontains '/user') 'gpresult computer arguments'
+    Assert ($a.Count -eq 5 -and $a[0] -eq '/scope' -and $a[1] -eq 'computer' -and $a[2] -eq '/x' -and $a[3] -like '*relian-gpresult-*.xml' -and $a[4] -eq '/f') 'gpresult computer arguments'
     $ru = Invoke-GpoEvidence -Section Rsop -RsopUser 'j.smith-2' | ConvertFrom-Json
     $a = @($script:calls[1] | Select-Object -Skip 1)
-    Assert ($a[0] -eq '/user' -and $a[1] -eq 'EXAMPLE\j.smith-2' -and ($a -join ' ') -match '/scope user /x \S+ /f$') 'gpresult user arguments'
+    Assert ($a.Count -eq 7 -and $a[0] -eq '/user' -and $a[1] -eq 'EXAMPLE\j.smith-2' -and $a[2] -eq '/scope' -and $a[3] -eq 'user' -and $a[4] -eq '/x' -and $a[6] -eq '/f') 'gpresult user arguments'
     Assert ($ru.section -eq 'Rsop' -and $ru.rsop.scope -eq 'User' -and $ru.rsop.applied[0].name -like 'User GPO*') 'RsopUser selects the user scope'
     Assert (@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter 'relian-gpresult-*').Count -eq $before) 'gpresult temp file deleted'
     foreach ($badUser in @('', 'a b', 'x;y', 'EXAMPLE\u', ('a' * 21), 'u$', '..\x')) {
@@ -314,10 +314,10 @@ try {
     $uds = Join-Path $fdDir 'User\Documents & Settings'
     [void](New-Item -ItemType Directory -Path $uds -Force)
     [IO.File]::WriteAllText((Join-Path $uds 'fdeploy.ini'), "[FolderStatus]`r`nDesktop=3`r`nMusic=0`r`n[Desktop]`r`ns-1-1-0=\\fs1\Redirected$\%username%\Desktop`r`nFlags=1F001F`r`n[Music]`r`nFlags=1F001F`r`n", [Text.Encoding]::Unicode)
-    [IO.File]::WriteAllText((Join-Path $uds 'fdeploy1.ini'), "[version]`r`nversion=100`r`n[Folder_Redirection]`r`n{FDD39AD0-238F-46AF-ADB4-6C85480369C7}=S-1-1-0; S-1-5-21-1-2-3-1105`r`n{33E28130-4E1E-4676-835A-98395C3BC3BB}=S-1-1-0`r`n[{FDD39AD0-238F-46AF-ADB4-6C85480369C7}_S-1-1-0]`r`nFlags=1001`r`nFullPath=\\fs1\Home\%USERNAME%\Documents`r`n[{FDD39AD0-238F-46AF-ADB4-6C85480369C7}_S-1-5-21-1-2-3-1105]`r`nFlags=1001`r`nFullPath=%HOMESHARE%\Documents`r`n[{33E28130-4E1E-4676-835A-98395C3BC3BB}_S-1-1-0]`r`nFlags=2001`r`n", [Text.Encoding]::Unicode)
+    [IO.File]::WriteAllText((Join-Path $uds 'fdeploy1.ini'), "[version]`r`nversion=100`r`n[Folder_Redirection]`r`n{FDD39AD0-238F-46AF-ADB4-6C85480369C7}=S-1-1-0; S-1-5-21-1-2-3-1105`r`n{33E28130-4E1E-4676-835A-98395C3BC3BB}=S-1-1-0`r`n[{FDD39AD0-238F-46AF-ADB4-6C85480369C7}_S-1-1-0]`r`nFlags=1001`r`nFullPath=\\fs1\Docs\%USERNAME%\Documents`r`n[{FDD39AD0-238F-46AF-ADB4-6C85480369C7}_S-1-5-21-1-2-3-1105]`r`nFlags=1001`r`nFullPath=%HOMESHARE%\Documents`r`n[{33E28130-4E1E-4676-835A-98395C3BC3BB}_S-1-1-0]`r`nFlags=2001`r`n", [Text.Encoding]::Unicode)
     [void](New-Item -ItemType Directory -Path (Join-Path $fdDir 'User\Scripts') -Force)
     [void](New-Item -ItemType Directory -Path (Join-Path $fdDir 'Machine\Scripts') -Force)
-    [IO.File]::WriteAllText((Join-Path $fdDir 'User\Scripts\scripts.ini'), "[Logon]`r`n0CmdLine=\\example.invalid\netlogon\map.bat`r`n0Parameters=-flag secretflag`r`n1CmdLine=logon.vbs`r`n2CmdLine=`"C:\Program Files\x\tool.exe`" -flag zzzsecret1`r`n1Parameters=`r`n", [Text.Encoding]::Unicode)
+    [IO.File]::WriteAllText((Join-Path $fdDir 'User\Scripts\scripts.ini'), "[Logon]`r`n0CmdLine=\\example.invalid\netlogon\map.bat`r`n0Parameters=-flag secretflag`r`n1CmdLine=logon.vbs`r`n3CmdLine=plain.cmd sensitiveValue`r`n2CmdLine=`"C:\Program Files\x\tool.exe`" -flag zzzsecret1`r`n1Parameters=`r`n", [Text.Encoding]::Unicode)
     [IO.File]::WriteAllText((Join-Path $fdDir 'Machine\Scripts\scripts.ini'), "[Startup]`r`n0CmdLine=C:\Windows\SYSVOL\boot.cmd`r`n0Parameters=`r`n", [Text.Encoding]::Unicode)
     $script:fakeGpos = @($script:fakeGpos) + (New-FakeGpo $fdId 'Folder redirection' 1 1)
     $fd = Invoke-GpoEvidence -Section Gpo -Gpo $fdId.ToString() -Context $ctx
@@ -329,12 +329,12 @@ try {
     Assert ($music.redirected -eq $false -and @($music.targets).Count -eq 0) 'fdeploy.ini folder not redirected'
     $v1 = @((@($fr.folderRedirection | Where-Object { $_.file -eq 'fdeploy1.ini' })[0]).folders)
     $docs = @($v1 | Where-Object { $_.folder -eq 'Documents' })[0]
-    Assert ($v1.Count -eq 2 -and $docs.redirected -eq $true -and $docs.flags -eq '1001' -and $docs.targetCount -eq 2 -and @($docs.targets | Where-Object { $_.type -eq 'home' }).Count -eq 1 -and @($docs.targets | Where-Object { $_.type -eq 'unc' -and $_.path -like '\\fs1\Home\*' }).Count -eq 1) 'fdeploy1.ini known folder, unc and home targets'
+    Assert ($v1.Count -eq 2 -and $docs.redirected -eq $true -and $docs.flags -eq '1001' -and $docs.targetCount -eq 2 -and @($docs.targets | Where-Object { $_.type -eq 'home' }).Count -eq 1 -and @($docs.targets | Where-Object { $_.type -eq 'unc' -and $_.path -like '\\fs1\Docs\*' }).Count -eq 1) 'fdeploy1.ini known folder, unc and home targets'
     $pics = @($v1 | Where-Object { $_.folder -eq 'Pictures' })[0]
     Assert ($pics.redirected -eq $false -and $pics.flags -eq '2001') 'fdeploy1.ini follow-parent entry is not redirected'
     $names = @($fr.scripts | ForEach-Object { $_.side + ':' + $_.event + ':' + $_.name })
-    Assert (($names -contains 'User:Logon:map.bat') -and ($names -contains 'User:Logon:logon.vbs') -and ($names -contains 'User:Logon:tool.exe') -and ($names -contains 'Machine:Startup:boot.cmd')) 'scripts.ini script names'
-    Assert ($fd -notmatch 'secretflag' -and $fd -notmatch 'zzzsecret1' -and [Text.Encoding]::UTF8.GetByteCount($fd) -le 8000) 'script parameters never printed'
+    Assert (($names -contains 'User:Logon:map.bat') -and ($names -contains 'User:Logon:logon.vbs') -and ($names -contains 'User:Logon:tool.exe') -and ($names -contains 'User:Logon:plain.cmd') -and ($names -contains 'Machine:Startup:boot.cmd')) 'scripts.ini script names'
+    Assert ($fd -notmatch 'secretflag' -and $fd -notmatch 'zzzsecret1' -and $fd -notmatch 'sensitiveValue' -and [Text.Encoding]::UTF8.GetByteCount($fd) -le 8000) 'script parameters never printed'
     $plain = Invoke-GpoEvidence -Section Gpo -Gpo $gppId.ToString() -Context $ctx | ConvertFrom-Json
     Assert (@($plain.folderRedirection).Count -eq 0 -and @($plain.scripts).Count -eq 0) 'GPO without these files reports none'
 
@@ -357,18 +357,18 @@ try {
     function New-FakeUser { param($Sam, $ProfDir = $null, $HomeDir = $null, $Drive = $null, $Logon = $null, [int]$Bad = 0)
         [pscustomobject]@{ SamAccountName = $Sam; profilePath = $ProfDir; homeDirectory = $HomeDir; homeDrive = $Drive; scriptPath = $Logon; badPwdCount = $Bad } }
     $script:fakeUsers = @(
-        (New-FakeUser 'alice' '\\fs1\profiles\alice' '\\fs1\home\alice' 'H:' 'logon.bat' 0),
-        (New-FakeUser 'bob' '\\fs1\profiles\BOB.V2' '\\fs1\home\bob' 'H:' $null 3),
-        (New-FakeUser 'carol' $null 'D:\Users\carol' $null $null 1),
-        (New-FakeUser 'dave'))
+        (New-FakeUser 'usr1' '\\fs1\profiles\usr1' '\\fs1\dirs\usr1' 'H:' 'logon.bat' 0),
+        (New-FakeUser 'usr2' '\\fs1\profiles\USR2.V2' '\\fs1\dirs\usr2' 'H:' $null 3),
+        (New-FakeUser 'usr3' $null 'D:\Data\usr3' $null $null 1),
+        (New-FakeUser 'usr4'))
     function Get-ADUser { param($Filter, $LDAPFilter, $Properties, $Server, $ResultPageSize, $ErrorAction) $script:fakeUsers }
     $pj = Invoke-GpoEvidence -Section Profiles -Context $ctx
     $pr = $pj | ConvertFrom-Json
     Assert ($pr.section -eq 'Profiles' -and $pr.profiles.enabledUsers -eq 4 -and $pr.profiles.badPwdCountAboveZero -eq 2) 'profile user counts'
     Assert ($pr.profiles.profilePath.count -eq 2 -and $pr.profiles.profilePath.shapes[0].shape -eq '\\fs1\profiles\<user>' -and $pr.profiles.profilePath.shapes[0].count -eq 2) 'profilePath folded by shape'
-    Assert ($pr.profiles.homeDirectory.count -eq 3 -and @($pr.profiles.homeDirectory.shapes | Where-Object { $_.shape -eq 'D:\Users\<user>' }).Count -eq 1) 'homeDirectory shapes'
+    Assert ($pr.profiles.homeDirectory.count -eq 3 -and @($pr.profiles.homeDirectory.shapes | Where-Object { $_.shape -eq 'D:\Data\<user>' }).Count -eq 1) 'homeDirectory shapes'
     Assert ($pr.profiles.homeDrive.count -eq 2 -and $pr.profiles.scriptPath.count -eq 1) 'homeDrive and scriptPath counts'
-    Assert ($pj -notmatch 'alice|bob|carol|dave') 'no user names in the Profiles output'
+    Assert ($pj -notmatch 'usr1|usr2|usr3|usr4') 'no user names in the Profiles output'
     Assert (@($pr.fdeployGpos | Where-Object { $_.name -eq 'Folder redirection' -and $_.files -contains 'fdeploy.ini' -and $_.files -contains 'fdeploy1.ini' }).Count -eq 1) 'GPOs holding fdeploy files'
     Assert (@($pr.fdeployGpos).Count -eq 1 -and $pr.fdeployScanComplete -eq $true) 'only GPOs with fdeploy files listed'
     # The SYSVOL scan checks the clock for every GPO and says when it stopped early.

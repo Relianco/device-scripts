@@ -546,13 +546,13 @@ function Read-GpeFdeploy {
 }
 
 # scripts.ini: "<n>CmdLine=<path>" under [Logon], [Logoff], [Startup], [Shutdown]. Names only; the
-# parameters are never read into the report, and arguments typed into CmdLine are cut off.
+# parameters are never read into the report, and anything after the script path in CmdLine is cut off.
 function Read-GpeScriptsIni {
     param([AllowEmptyString()][string]$Text, [string]$Side)
     $ini = ConvertFrom-GpeInf $Text
     foreach ($ev in @($ini.Keys)) {
         foreach ($l in $ini[$ev]) {
-            if ($l -match '^\d+CmdLine\s*=\s*(.+)$') { $c = $Matches[1].Trim(); if ($c -match '^"([^"]*)"') { $c = $Matches[1] } else { $c = $c -replace '\s+[-/]\S.*$', '' }
+            if ($l -match '^\d+CmdLine\s*=\s*(.+)$') { $c = $Matches[1].Trim(); if ($c -match '^"([^"]*)"') { $c = $Matches[1] } elseif ($c -match '(?i)^(.*?\.(?:bat|cmd|vbs|vbe|ps1|js|wsf|exe|com|msi|lnk))(?:\s|$)') { $c = $Matches[1] } else { $c = ($c -split '\s+')[0] }
                 [ordered]@{ side = $Side; event = (Protect-GpeText $ev -Max 20); name = (Protect-GpeText (($c -split '[\\/]')[-1]) -Max 80) } }
         }
     }
