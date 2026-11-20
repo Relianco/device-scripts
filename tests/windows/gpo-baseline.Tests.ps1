@@ -139,7 +139,6 @@ function Backup-GPO {
     Assert (Test-Path -LiteralPath $Path) 'backup folder exists before Backup-GPO'
     return [pscustomobject]@{ Id = [guid]'11111111-2222-3333-4444-555555555555' }
 }
-function Remove-GPRegistryValue { [CmdletBinding()] param($Guid, $Key, $ValueName, $Server) $script:calls.Add("Remove-GPRegistryValue $Key\$ValueName"); $script:regValues.Remove("$Guid|$Key|$ValueName") }
 function Restore-GPO { [CmdletBinding()] param($BackupId, $Path, $Server) $script:calls.Add("Restore-GPO $BackupId") }
 function Remove-GPO { [CmdletBinding()] param($Guid, $Server) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName); $script:ad.Remove($g.Id.ToString()) }
 function Get-ADObject {
@@ -833,40 +832,12 @@ try {
     $r = Invoke-GpoBaseline -Definition 'workstations-only' -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0 -and $script:wmi['{BBBBBBBB-0000-0000-0000-000000000000}'].'msWMI-Parm2' -eq 'other') 'adopt never rewrites a shared WMI filter'
     $script:wmi.Clear()
+    # Adopt adds only a WMI link: a failed registry read cannot be told from an absent value.
     $adoptReg = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; security = @(); audit = @()
-        registry = @([pscustomobject]@{ cis = 'x'; key = $officeKey; valueName = 'updatebranch'; type = 'String'; value = 'MonthlyEnterprise' }) }
-    $script:regValues["$($so.Id)|$officeKey|updatebranch"] = [pscustomobject]@{ Value = 'Current'; Type = 'String' }
+        registry = @([pscustomobject]@{ cis = 'x'; key = 'HKLM\Software\Policies\Relian\Test'; valueName = 'Added'; type = 'DWord'; value = 1 }) }
+    $script:calls.Clear()
     $r = Invoke-GpoBaseline -DefinitionObject $adoptReg -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'adopt never replaces an existing value'
-    $newKey = 'HKLM\Software\Policies\Relian\Test'
-    $adoptAdd = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; security = @(); audit = @()
-        registry = @([pscustomobject]@{ cis = 'x'; key = $newKey; valueName = 'Added'; type = 'DWord'; value = 1 }) }
-    $r = Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.exitCode -eq 0 -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'adopt adds an absent value'
-    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.report.status -eq 'undone' -and -not $script:regValues.ContainsKey("$($so.Id)|$newKey|Added") -and [string]$script:regValues["$($so.Id)|$officeKey|updatebranch"].Value -eq 'Current') 'undo removes only the value adopt added'
-    # A value that already matched before adoption is not adopt's to remove.
-    $script:regValues["$($so.Id)|$newKey|Added"] = [pscustomobject]@{ Value = 1; Type = 'DWord' }
-    $r = Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.report.status -eq 'noChange') 'adopting a GPO that already holds the value changes nothing'
-    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.report.status -eq 'noChange' -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'undo keeps a value that predates adoption'
-    # A value read that fails during undo keeps the record, so a later undo still removes the value adopt added.
-    $script:regValues.Remove("$($so.Id)|$newKey|Added")
-    [void](Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx)
-    $saved = $script:regValues["$($so.Id)|$newKey|Added"]; $script:regValues.Remove("$($so.Id)|$newKey|Added")
-    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    $script:regValues["$($so.Id)|$newKey|Added"] = $saved
-    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.report.status -eq 'undone' -and -not $script:regValues.ContainsKey("$($so.Id)|$newKey|Added")) 'failed value read keeps the adopt record'
-    # A value someone changed is no longer ours: setting it back later is not undone.
-    [void](Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx)
-    $script:regValues["$($so.Id)|$newKey|Added"] = [pscustomobject]@{ Value = 2; Type = 'DWord' }
-    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.report.status -eq 'noChange') 'changed value is not undone'
-    $script:regValues["$($so.Id)|$newKey|Added"] = [pscustomobject]@{ Value = 1; Type = 'DWord' }
-    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.report.status -eq 'noChange' -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'a value changed and set back by someone else is kept'
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'adopt definition may not carry registry values'
     foreach ($k in @('security', 'securityFilter')) {
         $bad = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; registry = @(); audit = @(); security = @() }
         if ($k -eq 'security') { $bad.security = @([pscustomobject]@{ cis = 'x'; section = 'System Access'; key = 'LockoutBadCount'; value = '1' }) } else { $bad | Add-Member securityFilter 'optional' }

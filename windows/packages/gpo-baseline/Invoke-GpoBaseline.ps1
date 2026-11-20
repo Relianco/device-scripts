@@ -26,9 +26,9 @@
                           Users keep GpoRead (MS16-072) and ApplyTo gets GpoApply. Without
                           them an "optional" filter gives Authenticated Users GpoApply.
       AdoptGpo            GUID of an existing GPO without the marker, for an adopt definition
-      AllowUnmarked       "true", required with AdoptGpo. An adopt definition only adds
-                          registry values or a WMI filter link; an existing different value
-                          or link is refused, and nothing is deleted.
+      AllowUnmarked       "true", required with AdoptGpo. An adopt definition only adds a
+                          WMI filter link; an existing link, or a shared filter with other
+                          queries, is refused, and nothing is deleted.
 
     Definitions: cis-ws2022-dc-low-risk, comet-vss-provider-qemu, workstations-only (adopt:
     adds the workstation WMI filter), onedrive-workstations (TenantId), onedrive-users,
@@ -44,8 +44,8 @@
 
     Uninstall with Apply=true backs up and removes the GPO this package created, or,
     for an allowed default policy, restores the backup taken before the last change. For an
-    adopted GPO it backs up, then undoes only what adopt added (values that still match, and
-    its own WMI link); the backup taken before adoption stays for a manual Restore-GPO.
+    adopted GPO it backs up, then clears only the WMI link adopt recorded setting, if still
+    its own; the backup taken before adoption stays for a manual Restore-GPO.
 
     Mechanism (Microsoft documentation):
     - Registry policy: Set-GPRegistryValue, which writes Registry.pol and updates the
@@ -295,9 +295,10 @@ function Test-GpbDefinition {
     $sf = Get-GpbProp $Def 'securityFilter'
     if ($null -ne $sf -and @('required', 'optional') -cnotcontains [string]$sf) { return 'securityFilter must be required or optional.' }
     if ((Get-GpbProp $Def 'adopt') -eq $true) {
-        # Adopt is add-only: no security template, audit, task, permission or default-policy change.
+        # Adopt is add-only and adds only a WMI filter link.
         if ($null -ne (Get-GpbProp $Def 'gpoName')) { return 'An adopt definition names its GPO only through AdoptGpo.' }
-        foreach ($k in @('security', 'audit', 'tasks')) { if (@(Get-GpbProp $Def $k).Count) { return "An adopt definition may not carry $k." } }
+        # No registry either: a failed Get-GPRegistryValue cannot be told from an absent value, so a value could be overwritten.
+        foreach ($k in @('registry', 'security', 'audit', 'tasks')) { if (@(Get-GpbProp $Def $k).Count) { return "An adopt definition may not carry $k; it adds only a WMI filter link." } }
         if ($null -ne $sf -or (Get-GpbProp $Def 'allowDefaultPolicy') -eq $true -or (Get-GpbProp $Def 'linkDomainRoot') -eq $true) { return 'An adopt definition may not change permissions, default policies or links.' }
     } elseif ([string](Get-GpbProp $Def 'gpoName') -notmatch '^[A-Za-z0-9 ._()-]{1,128}$') { return 'gpoName is invalid.' }
     foreach ($i in @(Get-GpbProp $Def 'registry')) {
@@ -838,20 +839,9 @@ function Initialize-GpbStateDir {
     return $dir
 }
 
+# Present while an adopt definition owns the WMI link it set on this GPO.
 function Get-GpbAdoptRecordPath { param($Context, $Gpo, [string]$Id) Join-Path (Get-GpbStateDir $Context $Gpo) "adopted-$Id.json" }
 
-# What an adopt definition added to this GPO: "key|valueName" strings and whether it set the WMI link.
-function Get-GpbAdoptRecord {
-    param($Context, $Gpo, [string]$Id)
-    $added = @{ values = @(); wmiLink = $false }
-    $path = Get-GpbAdoptRecordPath $Context $Gpo $Id
-    if ([IO.File]::Exists($path)) {
-        $o = [IO.File]::ReadAllText($path) | ConvertFrom-Json
-        $added.values = @($o.values | Where-Object { $_ })
-        $added.wmiLink = $o.wmiLink -eq $true
-    }
-    return $added
-}
 
 function Get-GpbStateDir { param($Context, $Gpo) Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}') }
 
@@ -928,12 +918,9 @@ function Invoke-GpbApplyWrites {
         # A publish-only retry backs up settings this package already wrote: it must not become the restore point.
         $settingChange = [bool]@($Changes | Where-Object { $_.kind -ne 'publish' }).Count
         $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record:$settingChange
-        if ((Get-GpbProp $Def 'adopt') -eq $true) {
-            # Record what adopt adds before adding it (the plan only holds absent values and an empty link), so Uninstall undoes exactly that.
-            $added = Get-GpbAdoptRecord $Context $Gpo $Def.id
-            foreach ($c in @($Changes | Where-Object { $_.kind -eq 'registry' })) { $v = "$($c.item.key)|$($c.item.valueName)"; if ($added.values -notcontains $v) { $added.values += $v } }
-            if (@($Changes | Where-Object { $_.kind -eq 'wmiLink' }).Count) { $added.wmiLink = $true }
-            [IO.File]::WriteAllText((Get-GpbAdoptRecordPath $Context $Gpo $Def.id), ($added | ConvertTo-Json -Compress))
+        # Record the link adopt sets before setting it (the plan holds a link change only when none was set), so Uninstall undoes exactly that.
+        if ((Get-GpbProp $Def 'adopt') -eq $true -and @($Changes | Where-Object { $_.kind -eq 'wmiLink' }).Count) {
+            [IO.File]::WriteAllText((Get-GpbAdoptRecordPath $Context $Gpo $Def.id), [datetime]::UtcNow.ToString('o'))
         }
     }
     # Security filtering before any setting: a run that stops here applies to fewer, never more.
@@ -1119,19 +1106,11 @@ function Invoke-GpoBaseline {
             if (-not $gpo) { $report.status = 'nothingToUninstall'; return @{ report = $report; exitCode = 0 } }
             if ($isDefault -and -not $lastBackup) { return (& $refuse 'No Relian backup of this default policy to restore.') }
             if ($adopt) {
-                # Undo only what adopt recorded adding (still matching), so pre-existing settings and later edits by others survive.
+                # Undo only a WMI link adopt recorded setting and that is still ours, so a link that predates adoption,
+                # or one set again later by someone else, stays.
                 $undo = @()
-                $added = Get-GpbAdoptRecord $Context $gpo $def.id
-                $unresolved = @()
-                foreach ($item in @($def.registry | Where-Object { $added.values -contains "$($_.key)|$($_.valueName)" })) {
-                    $cur = $null
-                    # shortcut: Get-GPRegistryValue reports a missing value as an error too, so a value someone removed stays
-                    # recorded; it is removed later only if it then holds exactly the definition's value again.
-                    try { $cur = Get-GPRegistryValue -Guid $gpo.Id -Key $item.key -ValueName $item.valueName -Server $Context.Server -ErrorAction Stop } catch { $unresolved += "$($item.key)|$($item.valueName)"; continue }
-                    # Read and changed by someone else: no longer ours, dropped from the record below.
-                    if ($cur -and [string]$cur.Value -eq [string]$item.value -and [string]$cur.Type -eq [string]$item.type) { $undo += [ordered]@{ kind = 'removeValue'; target = "$($item.key)\$($item.valueName)"; current = [string]$cur.Value; desired = $null; item = $item } }
-                }
-                if ($ownFilter -and $added.wmiLink) {
+                $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id
+                if ($ownFilter -and [IO.File]::Exists($rp)) {
                     $linked = [string](Get-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter
                     if ($linked -eq "[$($Context.DnsRoot);$($ownFilter.'msWMI-ID');0]") { $undo += [ordered]@{ kind = 'unlinkWmi'; target = $w.name; current = $linked; desired = $null } }
                 }
@@ -1139,20 +1118,13 @@ function Invoke-GpoBaseline {
                 $report.lastBackupId = $lastBackup
                 if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
                 if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
-                # After this run the record keeps only values whose read failed; the rest is undone or no longer ours.
-                $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id
-                $retire = {
-                    if ($unresolved.Count) { [IO.File]::WriteAllText($rp, (@{ values = $unresolved; wmiLink = $false } | ConvertTo-Json -Compress)) }
-                    elseif ([IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }
-                }
-                if ($undo.Count -eq 0) { & $retire; $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
-                $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
-                foreach ($u in $undo) {
-                    if ($u.kind -eq 'removeValue') { Remove-GPRegistryValue -Guid $gpo.Id -Key $u.item.key -ValueName $u.item.valueName -Server $Context.Server -ErrorAction Stop | Out-Null }
-                    else { Set-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop }
-                }
-                & $retire
-                $report.status = 'undone'
+                if ($undo.Count) {
+                    $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
+                    Set-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop
+                    $report.status = 'undone'
+                } else { $report.status = 'noChange' }
+                # Undone, or no longer ours: retire the record.
+                if ([IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }
                 return @{ report = $report; exitCode = 0 }
             }
             $kind = 'remove'; if ($isDefault) { $kind = 'restore' }
@@ -1192,7 +1164,7 @@ function Invoke-GpoBaseline {
         $report.changes = @(Get-GpbPublicChanges $changes)
         $report.changeCount = $changes.Count
         # Adopt only adds: an existing different value or WMI link is never replaced.
-        if ($adopt -and @($changes | Where-Object { ($_.kind -eq 'registry' -and $null -ne $_.current) -or ($_.kind -eq 'wmiLink' -and $_.current) -or ($_.kind -eq 'wmiFilter' -and $null -ne $_.current) }).Count) { return (& $refuse 'The adopted GPO already holds a different value or WMI link, or the shared WMI filter has other queries. Adopt only adds; nothing was changed.') }
+        if ($adopt -and @($changes | Where-Object { ($_.kind -eq 'wmiLink' -and $_.current) -or ($_.kind -eq 'wmiFilter' -and $null -ne $_.current) }).Count) { return (& $refuse 'The adopted GPO already has a WMI link, or the shared WMI filter has other queries. Adopt only adds; nothing was changed.') }
         # Security filtering only moves trustees between none, read and apply; edit rights are never lowered.
         if (@($changes | Where-Object { $_.kind -eq 'permission' -and @('None', 'GpoRead', 'GpoApply') -notcontains $_.current }).Count) { return (& $refuse 'A security filter trustee holds more than apply on this GPO. It was not changed.') }
         if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
