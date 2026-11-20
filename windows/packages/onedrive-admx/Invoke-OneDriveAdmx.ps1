@@ -103,11 +103,19 @@ function Get-OaState([string]$Path, [string]$Root) {
     $state
 }
 
-# A timeout, connection or DNS failure (no HTTP response), or HTTP 408, 429, 500, 502, 503, 504.
+# Same classes as the runner: a timeout, connection or DNS failure, or HTTP 408, 429, 500, 502, 503, 504.
 function Test-OaRetryable($Exception) {
     $response = $Exception.PSObject.Properties['Response']
     if ($response -and $response.Value) { return @(408, 429, 500, 502, 503, 504) -contains [int]$response.Value.StatusCode }
-    $true
+    $webTransient = @('Timeout', 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'PipelineFailure', 'ConnectionClosed', 'KeepAliveFailure')
+    $requestTransient = @('NameResolutionError', 'ConnectionError', 'ResponseEnded')
+    for ($current = $Exception; $null -ne $current; $current = $current.InnerException) {
+        if ($current -is [TimeoutException] -or $current -is [Threading.Tasks.TaskCanceledException] -or $current -is [Net.Sockets.SocketException]) { return $true }
+        if ($current -is [Net.WebException] -and $webTransient -contains [string]$current.Status) { return $true }
+        $request = $current.PSObject.Properties['HttpRequestError']
+        if ($request -and $requestTransient -contains [string]$request.Value) { return $true }
+    }
+    $false
 }
 
 function Test-OaHttpsNoUserInfo([string]$Url) {

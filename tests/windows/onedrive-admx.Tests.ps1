@@ -94,8 +94,11 @@ Assert ((Invoke-OaMain @early).ExitCode -eq 1 -and $script:Downloads -eq 0) 'bad
 # A transient failure is retried; a hash mismatch is not.
 $script:OaDelay = { param($s) }
 $script:Calls = 0
-$script:OaDownload = { param($u) $script:Calls++; if ($script:Calls -lt 3) { throw 'timeout' }; if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
+$script:OaDownload = { param($u) $script:Calls++; if ($script:Calls -lt 3) { throw [TimeoutException]::new('timeout') }; if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
 Assert ((Invoke-OaMain @ok).Result.status -eq 'current' -and $script:Calls -eq 4) 'transient download failure retried'
+$script:Calls = 0
+$script:OaDownload = { param($u) $script:Calls++; throw [Net.WebException]::new('tls', [Net.WebExceptionStatus]::TrustFailure) }
+Assert ((Invoke-OaMain @ok).ExitCode -eq 1 -and $script:Calls -eq 1) 'a permanent failure is not retried'
 $script:OaDownload = { param($u) if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
 
 # Each case is its own full splat: PowerShell 5.1 cannot override a splatted key with an explicit parameter.
