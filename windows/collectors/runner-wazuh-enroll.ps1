@@ -83,8 +83,9 @@ function Test-RelianRetryable {
 
 function Invoke-RelianWazuhEnroll {
     param([string]$RunnerUrl, [string]$RunnerSha256, [string]$WazuhManager, [string[]]$RunnerArguments)
+    # -Name:value means -Name value to PowerShell: split it so every check below and the runner see the same pair.
+    $RunnerArguments = @(foreach ($a in $RunnerArguments) { if ($a -match '\A(-[A-Za-z][A-Za-z0-9]*):(.*)\z') { $Matches[1]; $Matches[2] } else { $a } })
     # Checked before the off switch, as in the runner: a credential in a URL is already in NinjaOne's history.
-    # Not anchored, so -PackageUrl:https://user@host is caught too.
     if (@(@($RunnerUrl) + @($RunnerArguments) | Where-Object { $_ -match '[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@' }).Count) { Write-Host 'refusing a URL that contains userinfo'; return 1 }
     # An empty hash is the off switch, as in the runner: exit 0 before anything is read or downloaded.
     if ([string]::IsNullOrWhiteSpace($RunnerSha256)) { return 0 }

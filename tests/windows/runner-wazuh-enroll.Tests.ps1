@@ -121,6 +121,9 @@ foreach ($x in @(@('-Action', 'Uninstall'), @('-Action', 'Reinstall'), @('-Actio
     $r = Invoke-Case -Extra $extraArgs; if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail "action [$($x -join ' ')] was accepted" }
 }
 $null = Invoke-Case -Extra @('-PackageUrl', 'p', '-PackageSha256', ('ab' * 32), '-action', 'install'); if ($script:ran.Count -ne 1) { Fail 'lowercase install was refused' }
+# Colon form is split into the same pair: an empty pin is still the off switch, and the runner gets separate tokens.
+$r = Invoke-Case -Extra @('-PackageUrl', 'p', '-PackageSha256:', '-Action', 'Install'); if ($r.Code -ne 0 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail 'colon-form empty pin was not a no-op' }
+$null = Invoke-Case -Extra @('-PackageUrl:p', '-Action:Install'); if ($script:ran.Count -ne 1 -or (@($script:ran[0].Args) -join '|') -cne '-PackageUrl|p|-Action|Install') { Fail "colon form was forwarded as [$(@($script:ran[0].Args) -join '|')]" }
 # Windows PowerShell 5.1 drops an empty native argument, which would shift the runner's parameters.
 $r = Invoke-Case -Extra (@($forward) + @('-CancelPath', '')); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail 'an empty forwarded argument was accepted' }
 
