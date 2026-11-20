@@ -25,7 +25,8 @@ $script:genCount = 0
 function New-TestKey { param([int]$Seed) return [Convert]::ToBase64String([byte[]]@(($Seed)..($Seed + 31))) }
 function Get-TestPub { param([string]$Key) return [Convert]::ToBase64String([byte[]]@([Convert]::FromBase64String($Key) | ForEach-Object { 255 - $_ })) }
 
-function New-Rsa { param([int]$Bits) $r = [Security.Cryptography.RSA]::Create(); $r.KeySize = $Bits; return $r }
+# RSA.Create(Int32) exists in .NET Framework 4.7.2+ and .NET; setting KeySize on the .NET Framework provider throws.
+function New-Rsa { param([int]$Bits) return [Security.Cryptography.RSA]::Create($Bits) }
 $signer = New-Rsa 3072
 $mapKey = $signer.ToXmlString($false)
 $otherSigner = New-Rsa 3072
@@ -111,7 +112,8 @@ $script:WriteConfig = { param($Path, $Text) if ($state.Folder -eq 0) { $state.Wr
 $script:RemoveFile = { param($Path) $leaf = Get-Leaf $Path; [void]$files.Remove($leaf); $state.Removed.Add($leaf) }
 $script:StageFiles = { param([string[]]$Sources, $Destination) $state.Staged = @($Sources | ForEach-Object { Get-Leaf $_ }) }
 $script:InvokeGuard = { param($ScriptPath, [hashtable]$Parameters) $state.GuardCalls.Add($Parameters); 0 }
-$script:RunGuardTask = { }
+$script:guardRuns = 0
+$script:RunGuardTask = { $script:guardRuns++ }
 $script:GetService = { param($Name) $state.Service }
 $script:InstallTunnelService = { param($ConfigPath) $state.Service = [pscustomobject]@{ Name = 'WireGuardTunnel$office'; Status = 'Running'; StartType = 'Automatic' }; 0 }
 $script:UninstallTunnelService = {
@@ -257,9 +259,18 @@ $files.Remove('office.conf')
 Set-Map 'active' -Address '10.99.10.30/32' -Serial 9
 $out = Invoke-Act 'Apply'
 if ($out.ExitCode -ne 0 -or $null -eq $state.Service -or (Get-WgcAddressFromConfig -Text $files['office.conf']) -cne '10.99.10.30/32') { Fail 'apply active' }
+if ($script:guardRuns -lt 1) { Fail 'guard task not started after a new tunnel' }
 $state.Map = New-Map -Serial 9 -Entries @{ (Get-WgcSha256Hex -Text (Get-TestPub $privNow)) = @{ state = 'revoked' } } -Tamper
 $out = Invoke-Act 'Apply'
 if ($out.ExitCode -ne 0 -or $null -eq $state.Service -or ([string]$files['office.key']).Trim() -cne $privNow) { Fail 'a tampered map changed the device' }
+
+# Apply with a bad map URL or key in tenant.json fails and fetches nothing.
+$script:fetches = 0
+$script:FetchMap = { param($Url) $script:fetches++; $state.Map }
+foreach ($over in @(@{ MapUrl = 'https://u@example.invalid/m.json' }, @{ MapUrl = 'http://example.invalid/m.json' }, @{ MapKey = 'x' })) {
+    if ((Invoke-Act 'Apply' (New-Settings $over)).ExitCode -ne 1 -or $script:fetches -ne 0) { Fail "apply accepted $(@($over.Values)[0])" }
+}
+$script:FetchMap = { param($Url) if ($state.MapFails) { throw 'offline' }; $state.Map }
 
 # Revoke through Apply: tunnel and NRPT gone, config and key replaced by a new key.
 $state.Rules.Add([pscustomobject]@{ Name = 'foreign'; Namespace = @('.x.example.invalid'); NameServers = @('192.0.2.53'); Comment = 'other' })

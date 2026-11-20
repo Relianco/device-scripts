@@ -92,7 +92,8 @@ $script:WriteConfig = {
     if ($Path.EndsWith('.key')) { $state.Key = $Text } else { $state.Config = $Text; $state.Written++ }
 }
 $script:RemoveFile = { param($Path) }
-$script:RunGuardTask = { }
+# No tenant.json, so no guard task is expected: a call would add an error.
+$script:RunGuardTask = { throw 'no guard task' }
 $script:GetTunnelServices = { @() }
 $script:GetService = { param($Name) $state.Service }
 $script:InstallTunnelService = { param($ConfigPath) $state.Service = [pscustomobject]@{ Name = 'WireGuardTunnel$office'; Status = 'Running'; StartType = 'Automatic' }; 0 }
@@ -112,6 +113,7 @@ if (-not $state.FolderBeforeWrite) { Fail 'config written before the folder ACL'
 if ($state.Rules.Count -ne 2) { Fail 'nrpt rules not added' }
 $json = $out.Report | ConvertTo-Json -Compress -Depth 4
 if ($json.Contains($devKey)) { Fail 'private key in the report' }
+if ($script:WgcErrors.Count -ne 0) { Fail ('errors after install: ' + ($script:WgcErrors -join '; ')) }
 if ($out.Report.publicKey -cne $devPub) { Fail 'public key missing from the report' }
 
 # Second run: same key, nothing rewritten, no restart, no duplicate rules.

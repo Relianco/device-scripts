@@ -50,7 +50,7 @@ The same package runs as the Win32 app **Relian Managed - WireGuard** (`intune.j
 | `Prepare` | Installs or upgrades the MSI, secures `%ProgramData%\Relian\WireGuard`, then makes the key in `<tunnel>.key` with `wg.exe genkey` (a key already in `<tunnel>.conf` is copied there, never replaced). Writes `tenant.json`, copies the package scripts to `bin\` and installs `wireguard-network-guard` with `TrustedGateways` and `TrustedGatewayMacs`. No tunnel. Prints the public key. Exit 1 if a required setting is empty or still a literal `%name%` |
 | `Install` | As before, but the key comes from `<tunnel>.key`, then the config. A second key is never made. With `LegacyPattern`, removes matching legacy tunnels (below) |
 | `Report` | Remediation detection. Prints one JSON line (below). Exit 1 when the device must change |
-| `Apply` | Remediation. Fetches and verifies the map again, then runs `Install` with the mapped address, `Revoke` or `Rotate` |
+| `Apply` | Remediation. Fetches and verifies the map again, then runs `Install` with the mapped address, `Revoke` or `Rotate`. Exit 1, with no fetch, when `mapUrl` or `mapKey` in `tenant.json` is not valid |
 | `Revoke` | Uninstalls the tunnel, removes its NRPT rules, deletes `<tunnel>.conf` and `<tunnel>.key`, makes a new key |
 | `Rotate` | Uninstalls the tunnel, deletes `<tunnel>.conf` and `<tunnel>.key`, makes a new key. NRPT rules stay |
 | `Uninstall` | As before. If `tenant.json` exists it also uninstalls the network guard and then deletes `bin\`, `tenant.json` and `map-serial.txt` (kept for a retry if the guard uninstall fails). The key stays |

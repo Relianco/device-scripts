@@ -993,6 +993,10 @@ function Invoke-WireGuardClientAction {
     }
     if ($Action -ceq 'Apply') {
         # The map is fetched and verified again here. Detection output is not trusted.
+        if (-not (Test-WgcMapUrl -Url $Settings.MapUrl) -or -not (Test-WgcMapKey -Xml $Settings.MapKey)) {
+            Write-WgcError 'MapUrl or MapKey in tenant.json is not valid'
+            return (& $result 1)
+        }
         $key = Read-WgcDeviceKey -KeyPath $keyPath -ConfigText ([string](& $script:ReadConfig -Path $configPath))
         $entry = Get-WgcMapState -Settings $Settings -PublicKey ([string](Get-WgcPublicKey -PrivateKey $key))
         $key = $null
@@ -1127,8 +1131,10 @@ function Invoke-WireGuardClientAction {
             Write-WgcError "installtunnelservice failed with $code"
             return (& $result 1)
         }
-        # A new tunnel starts running. The guard stops it again if this is the office LAN.
-        try { & $script:RunGuardTask } catch { Write-WgcError 'could not start the network guard task' }
+        # A new tunnel starts running. The guard Prepare installed stops it again if this is the office LAN.
+        if (([string](& $script:ReadConfig -Path $tenantPath)) -ne '') {
+            try { & $script:RunGuardTask } catch { Write-WgcError 'could not start the network guard task' }
+        }
     } elseif ($changed -and $svc.Status -ceq 'Running') {
         # Only a running tunnel is restarted. A tunnel the network guard stopped stays stopped.
         & $script:RestartService -Name $serviceName
