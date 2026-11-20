@@ -315,10 +315,18 @@ function Read-GpeRsop {
 
 function Read-GpeRsopFile { param([string]$Path, [string]$Scope = 'Computer') return Read-GpeRsop (Read-GpeXmlFile $Path) $Scope }
 
-# gpresult /user needs the NetBIOS domain; a DC or member reports it as Win32_NTDomain.DomainName.
+# gpresult /user needs the NetBIOS domain of the joined domain. Domain Users of the joined DNS domain is
+# translated to its SID and back, which names that domain explicitly; the first DNS label is the fallback.
 function Get-GpeNetbiosDomain {
-    try { $n = @(Get-CimInstance -ClassName Win32_NTDomain -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.DomainName })[0]; if ($n) { return [string]$n.DomainName } } catch { }
-    return ([string](Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 5 -ErrorAction Stop).Domain).Split('.')[0].ToUpperInvariant()
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 5 -ErrorAction Stop
+    if (-not $cs.PartOfDomain) { throw 'This computer is not joined to a domain.' }
+    $dns = [string]$cs.Domain
+    try {
+        $sid = ([Security.Principal.NTAccount]($dns + '\Domain Users')).Translate([Security.Principal.SecurityIdentifier])
+        $name = $sid.Translate([Security.Principal.NTAccount]).Value
+        if ($name -match '^([^\\]+)\\') { return $Matches[1] }
+    } catch { }
+    return $dns.Split('.')[0].ToUpperInvariant()
 }
 
 function Get-GpeContext {
