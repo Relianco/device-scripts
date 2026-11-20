@@ -487,40 +487,73 @@ function Get-GpeRsopSection {
     } finally { if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) } }
 }
 
-# Folder Redirection: [FolderStatus] gives each folder's state, then a section per folder holds
-# "<group sid>=<target path>" lines and Flags. Type: home when the target uses a home variable.
+# Folder Redirection. fdeploy.ini: [FolderStatus] gives each folder's state, then a section per folder
+# holds "<group sid>=<target path>" lines and Flags. fdeploy1.ini (version one, [Folder_Redirection]):
+# "{known folder guid}=<sid>;<sid>" lines, then a "[{guid}_<sid>]" section with Flags and FullPath.
+# Type: home when the target uses a home variable. A target with no path (a follow-parent entry) is not redirected.
+$GpeKnownFolders = @{ 'FDD39AD0-238F-46AF-ADB4-6C85480369C7' = 'Documents'; '33E28130-4E1E-4676-835A-98395C3BC3BB' = 'Pictures'; 'B4BFCC3A-DB2C-424C-B029-7FE99A87C641' = 'Desktop'
+    '3EB685DB-65F9-4CF6-A03A-E3EF65729F3D' = 'AppData(Roaming)'; '625B53C3-AB48-4EC1-BA1F-A1EF4146FC19' = 'Start Menu'; '4BD8D571-6D19-48D3-BE97-422220080E43' = 'Music'
+    '18989B1D-99B5-455B-841C-AB7C74E4DDFC' = 'Videos'; '374DE290-123F-4565-9164-39C4925E467B' = 'Downloads'; '56784854-C6CB-462B-8169-88E350ACB882' = 'Contacts'
+    '1777F761-68AD-4D8A-87BD-30B759FA33DD' = 'Favorites'; 'BFB9D5E0-C6A9-404C-B2B2-AE6DB6AF4968' = 'Links'; '4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4' = 'Saved Games'; '7D1D3A04-DEBB-4115-95CF-2F29DA2920DA' = 'Searches' }
+
+function ConvertTo-GpeFdeployTarget {
+    param([string]$Sid, [string]$Path, $Flags)
+    $type = 'local'
+    if ($Path -match '(?i)%home(share|path|drive)%') { $type = 'home' } elseif ($Path.StartsWith('\\')) { $type = 'unc' }
+    return [ordered]@{ sid = (Protect-GpeText $Sid -Max 60); type = $type; path = (Protect-GpeText $Path -Max 120); flags = $Flags }
+}
+
+function ConvertTo-GpeFdeployRow {
+    param([string]$Folder, $Status, $Targets)
+    $flags = $null; foreach ($t in $Targets) { if ($null -eq $flags -and $null -ne $t.flags) { $flags = $t.flags } }
+    $withPath = @($Targets | Where-Object { $_.path })
+    return [ordered]@{ folder = (Protect-GpeText $Folder -Max 40); status = $Status; redirected = ($withPath.Count -gt 0 -and $Status -ne 0); flags = $flags; targetCount = $Targets.Count; targets = @($Targets | Select-Object -First 3) }
+}
+
 function Read-GpeFdeploy {
     param([AllowEmptyString()][string]$Text)
     $ini = ConvertFrom-GpeInf $Text
+    $get = { param($Name) foreach ($k in @($ini.Keys)) { if ($k -ieq $Name) { return ,$ini[$k] } } return ,@() }
+    $kv = { param($Lines) $h = [ordered]@{}; foreach ($l in $Lines) { if ($l -match '^([^=]+?)\s*=\s*(.*)$') { $h[$Matches[1]] = $Matches[2] } }; return $h }
+    if ($ini.Keys | Where-Object { $_ -ieq 'Folder_Redirection' }) {
+        $map = & $kv (& $get 'Folder_Redirection')
+        foreach ($guid in @($map.Keys)) {
+            $name = [string]$guid; $bare = $name.Trim('{', '}').ToUpperInvariant()
+            if ($GpeKnownFolders.ContainsKey($bare)) { $name = $GpeKnownFolders[$bare] }
+            $targets = [Collections.Generic.List[object]]::new()
+            foreach ($sid in @($map[$guid] -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+                $sec = & $kv (& $get ($guid + '_' + $sid))
+                $path = ''; if ($sec.Contains('FullPath')) { $path = $sec['FullPath'] } elseif ($sec.Contains('RelativePath')) { $path = ([string]$sec['ParentFolder'] + '\' + $sec['RelativePath']).TrimStart('\') }
+                $flags = $null; if ($sec.Contains('Flags')) { $flags = $sec['Flags'] }
+                $targets.Add((ConvertTo-GpeFdeployTarget $sid $path $flags))
+            }
+            ConvertTo-GpeFdeployRow $name $null $targets
+        }
+        return
+    }
     $status = [ordered]@{}
-    if ($ini.Contains('FolderStatus')) { foreach ($l in $ini['FolderStatus']) { if ($l -match '^([^=]+?)\s*=\s*(\d+)$') { $status[$Matches[1]] = [int]$Matches[2] } } }
+    foreach ($e in (& $kv (& $get 'FolderStatus')).GetEnumerator()) { $n = 0; if ([int]::TryParse($e.Value, [ref]$n)) { $status[$e.Key] = $n } }
     $names = [Collections.Generic.List[string]]::new()
     foreach ($n in @($status.Keys) + @($ini.Keys | Where-Object { $_ -ne 'FolderStatus' })) { if (-not $names.Contains($n)) { $names.Add($n) } }
     foreach ($name in $names) {
         $targets = [Collections.Generic.List[object]]::new(); $flags = $null
-        if ($ini.Contains($name)) {
-            foreach ($l in $ini[$name]) {
-                if ($l -notmatch '^([^=]+?)\s*=\s*(.*)$') { continue }
-                $k = $Matches[1]; $v = $Matches[2]
-                if ($k -eq 'Flags') { $flags = $v; continue }
-                $type = 'local'
-                if ($v -match '(?i)%home(share|path|drive)%') { $type = 'home' } elseif ($v.StartsWith('\\')) { $type = 'unc' }
-                $targets.Add([ordered]@{ sid = (Protect-GpeText $k -Max 60); type = $type; path = (Protect-GpeText $v -Max 120) })
-            }
-        }
+        foreach ($e in (& $kv (& $get $name)).GetEnumerator()) { if ($e.Key -eq 'Flags') { $flags = $e.Value } else { $targets.Add((ConvertTo-GpeFdeployTarget $e.Key $e.Value $null)) } }
         $st = $null; if ($status.Contains($name)) { $st = $status[$name] }
-        [ordered]@{ folder = (Protect-GpeText $name -Max 40); status = $st; redirected = ($targets.Count -gt 0 -and $st -ne 0); flags = $flags; targets = @($targets | Select-Object -First 3) }
+        $row = ConvertTo-GpeFdeployRow $name $st $targets
+        $row.flags = $flags
+        $row
     }
 }
 
 # scripts.ini: "<n>CmdLine=<path>" under [Logon], [Logoff], [Startup], [Shutdown]. Names only; the
-# parameters are never read into the report.
+# parameters are never read into the report, and arguments typed into CmdLine are cut off.
 function Read-GpeScriptsIni {
     param([AllowEmptyString()][string]$Text, [string]$Side)
     $ini = ConvertFrom-GpeInf $Text
     foreach ($ev in @($ini.Keys)) {
         foreach ($l in $ini[$ev]) {
-            if ($l -match '^\d+CmdLine\s*=\s*(.+)$') { [ordered]@{ side = $Side; event = (Protect-GpeText $ev -Max 20); name = (Protect-GpeText (($Matches[1].Trim() -split '[\\/]')[-1]) -Max 80) } }
+            if ($l -match '^\d+CmdLine\s*=\s*(.+)$') { $c = $Matches[1].Trim(); if ($c -match '^"([^"]*)"') { $c = $Matches[1] } else { $c = $c -replace '\s+[-/]\S.*$', '' }
+                [ordered]@{ side = $Side; event = (Protect-GpeText $ev -Max 20); name = (Protect-GpeText (($c -split '[\\/]')[-1]) -Max 80) } }
         }
     }
 }
@@ -621,11 +654,13 @@ function Get-GpeProfilesSection {
     $p.badPwdCountAboveZero = @($users | Where-Object { [int]$_.badPwdCount -gt 0 }).Count
     $p.badPwdCountNote = 'one DC only; the count is not replicated'
     $Report.profiles = $p
+    $Report.fdeployScanComplete = $true
     Invoke-GpeStep $Report 'fdeployGpos' -AsList {
-        Get-GPO -All -Server $Context.Server -ErrorAction Stop | ForEach-Object {
-            $d = Get-GpeGpoDir $Context $_.Id
+        foreach ($g in @(Get-GPO -All -Server $Context.Server -ErrorAction Stop)) {
+            if ($script:GpeClock.Elapsed.TotalSeconds -gt 40) { $Report.fdeployScanComplete = $false; break }
+            $d = Get-GpeGpoDir $Context $g.Id
             $found = @('fdeploy.ini', 'fdeploy1.ini' | Where-Object { [IO.File]::Exists((Join-Path $d "User\Documents & Settings\$_")) })
-            if ($found.Count) { [ordered]@{ name = (Protect-GpeText $_.DisplayName -Max 80); id = $_.Id.ToString().ToLowerInvariant(); files = $found } }
+            if ($found.Count) { [ordered]@{ name = (Protect-GpeText $g.DisplayName -Max 80); id = $g.Id.ToString().ToLowerInvariant(); files = $found } }
         }
     }
 }
@@ -650,7 +685,9 @@ function Get-GpeDcSection {
     $Report.fsmo = [ordered]@{ pdc = [string]$d.PDCEmulator; rid = [string]$d.RIDMaster; infrastructure = [string]$d.InfrastructureMaster; schema = $null; naming = $null }
     $dnsRoot = [string]$d.DNSRoot
     if ($f) { $Report.fsmo.schema = [string]$f.SchemaMaster; $Report.fsmo.naming = [string]$f.DomainNamingMaster; if ($f.RootDomain) { $dnsRoot = [string]$f.RootDomain } }
-    Invoke-GpeStep $Report 'dcs' -AsList { Limit-GpeItems (Get-ADDomainController -Filter * -ErrorAction Stop) 20 $Report | ForEach-Object { [ordered]@{ name = [string]$_.HostName; site = [string]$_.Site; os = (Protect-GpeText ([string]$_.OperatingSystem) -Max 40); gc = [bool]$_.IsGlobalCatalog; rodc = [bool]$_.IsReadOnly } } }
+    # shortcut: the live set is this domain's DCs; names from a child domain show as candidates. Upgrade for multi-domain forests.
+    $script:GpeLive = $null
+    Invoke-GpeStep $Report 'dcs' -AsList { $all = @(Get-ADDomainController -Filter * -ErrorAction Stop); $script:GpeLive = @($all | ForEach-Object { Get-GpeShortName ([string]$_.HostName) }); Limit-GpeItems $all 20 $Report | ForEach-Object { [ordered]@{ name = [string]$_.HostName; site = [string]$_.Site; os = (Protect-GpeText ([string]$_.OperatingSystem) -Max 40); gc = [bool]$_.IsGlobalCatalog; rodc = [bool]$_.IsReadOnly } } }
     Invoke-GpeStep $Report 'ntds' -AsList {
         Limit-GpeItems (Get-ADObject -SearchBase ('CN=Sites,' + $Context.ConfigDN) -LDAPFilter '(objectClass=nTDSDSA)' -Server $srv -ErrorAction Stop) 20 $Report | ForEach-Object {
             if ([string]$_.DistinguishedName -match '^CN=NTDS Settings,CN=([^,]+),CN=Servers,CN=([^,]+),') { [ordered]@{ server = (Protect-GpeText $Matches[1] -Max 40); site = (Protect-GpeText $Matches[2] -Max 40) } }
@@ -684,8 +721,8 @@ function Get-GpeDcSection {
     Invoke-GpeStep $Report 'dnsNs' -AsList { Resolve-DnsName -Name ('_msdcs.' + $dnsRoot) -Type NS -Server $srv -DnsOnly -ErrorAction Stop | Where-Object { $_.NameHost } | ForEach-Object { Protect-GpeText ([string]$_.NameHost) -Max 80 } }
     Invoke-GpeStep $Report 'dnsSrv' -AsList { Resolve-DnsName -Name ('_ldap._tcp.dc._msdcs.' + [string]$d.DNSRoot) -Type SRV -Server $srv -DnsOnly -ErrorAction Stop | Where-Object { $_.NameTarget } | ForEach-Object { Protect-GpeText ([string]$_.NameTarget) -Max 80 } }
     # Any name that shows up as a DC in some source but is not a live domain controller.
-    if ($Report.dcs -is [array]) {
-        $live = @{}; foreach ($x in $Report.dcs) { $live[(Get-GpeShortName ([string]$x.name))] = $true }
+    if ($null -ne $script:GpeLive) {
+        $live = @{}; foreach ($x in $script:GpeLive) { $live[[string]$x] = $true }
         $seen = [ordered]@{}
         $sources = @(@('ntds', 'server'), @('trust', 'name'), @('dfsr', ''), @('ns', ''), @('srv', ''))
         $lists = @($Report.ntds, $Report.serverTrust, $Report.dfsrMembers, $Report.dnsNs, $Report.dnsSrv)

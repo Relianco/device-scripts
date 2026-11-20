@@ -314,10 +314,10 @@ try {
     $uds = Join-Path $fdDir 'User\Documents & Settings'
     [void](New-Item -ItemType Directory -Path $uds -Force)
     [IO.File]::WriteAllText((Join-Path $uds 'fdeploy.ini'), "[FolderStatus]`r`nDesktop=3`r`nMusic=0`r`n[Desktop]`r`ns-1-1-0=\\fs1\Redirected$\%username%\Desktop`r`nFlags=1F001F`r`n[Music]`r`nFlags=1F001F`r`n", [Text.Encoding]::Unicode)
-    [IO.File]::WriteAllText((Join-Path $uds 'fdeploy1.ini'), "[FolderStatus]`r`nDocuments=1`r`n[Documents]`r`ns-1-5-21-1-2-3-1105=%HOMESHARE%\Documents`r`ns-1-1-0=\\fs1\Home\%USERNAME%`r`nFlags=1F001F`r`n", [Text.Encoding]::Unicode)
+    [IO.File]::WriteAllText((Join-Path $uds 'fdeploy1.ini'), "[version]`r`nversion=100`r`n[Folder_Redirection]`r`n{FDD39AD0-238F-46AF-ADB4-6C85480369C7}=S-1-1-0; S-1-5-21-1-2-3-1105`r`n{33E28130-4E1E-4676-835A-98395C3BC3BB}=S-1-1-0`r`n[{FDD39AD0-238F-46AF-ADB4-6C85480369C7}_S-1-1-0]`r`nFlags=1001`r`nFullPath=\\fs1\Home\%USERNAME%\Documents`r`n[{FDD39AD0-238F-46AF-ADB4-6C85480369C7}_S-1-5-21-1-2-3-1105]`r`nFlags=1001`r`nFullPath=%HOMESHARE%\Documents`r`n[{33E28130-4E1E-4676-835A-98395C3BC3BB}_S-1-1-0]`r`nFlags=2001`r`n", [Text.Encoding]::Unicode)
     [void](New-Item -ItemType Directory -Path (Join-Path $fdDir 'User\Scripts') -Force)
     [void](New-Item -ItemType Directory -Path (Join-Path $fdDir 'Machine\Scripts') -Force)
-    [IO.File]::WriteAllText((Join-Path $fdDir 'User\Scripts\scripts.ini'), "[Logon]`r`n0CmdLine=\\example.invalid\netlogon\map.bat`r`n0Parameters=-flag secretflag`r`n1CmdLine=logon.vbs`r`n1Parameters=`r`n", [Text.Encoding]::Unicode)
+    [IO.File]::WriteAllText((Join-Path $fdDir 'User\Scripts\scripts.ini'), "[Logon]`r`n0CmdLine=\\example.invalid\netlogon\map.bat`r`n0Parameters=-flag secretflag`r`n1CmdLine=logon.vbs`r`n2CmdLine=`"C:\Program Files\x\tool.exe`" -flag zzzsecret1`r`n1Parameters=`r`n", [Text.Encoding]::Unicode)
     [IO.File]::WriteAllText((Join-Path $fdDir 'Machine\Scripts\scripts.ini'), "[Startup]`r`n0CmdLine=C:\Windows\SYSVOL\boot.cmd`r`n0Parameters=`r`n", [Text.Encoding]::Unicode)
     $script:fakeGpos = @($script:fakeGpos) + (New-FakeGpo $fdId 'Folder redirection' 1 1)
     $fd = Invoke-GpoEvidence -Section Gpo -Gpo $fdId.ToString() -Context $ctx
@@ -327,11 +327,14 @@ try {
     Assert ($desk.redirected -eq $true -and $desk.status -eq 3 -and $desk.flags -eq '1F001F' -and $desk.targets[0].type -eq 'unc' -and $desk.targets[0].path -like '\\fs1\Redirected$\*') 'fdeploy.ini redirected folder'
     $music = @($fdep.folders | Where-Object { $_.folder -eq 'Music' })[0]
     Assert ($music.redirected -eq $false -and @($music.targets).Count -eq 0) 'fdeploy.ini folder not redirected'
-    $docs = @((@($fr.folderRedirection | Where-Object { $_.file -eq 'fdeploy1.ini' })[0]).folders)[0]
-    Assert ($docs.folder -eq 'Documents' -and @($docs.targets).Count -eq 2 -and @($docs.targets | Where-Object { $_.type -eq 'home' }).Count -eq 1 -and @($docs.targets | Where-Object { $_.type -eq 'unc' }).Count -eq 1) 'fdeploy1.ini unc and home targets'
+    $v1 = @((@($fr.folderRedirection | Where-Object { $_.file -eq 'fdeploy1.ini' })[0]).folders)
+    $docs = @($v1 | Where-Object { $_.folder -eq 'Documents' })[0]
+    Assert ($v1.Count -eq 2 -and $docs.redirected -eq $true -and $docs.flags -eq '1001' -and $docs.targetCount -eq 2 -and @($docs.targets | Where-Object { $_.type -eq 'home' }).Count -eq 1 -and @($docs.targets | Where-Object { $_.type -eq 'unc' -and $_.path -like '\\fs1\Home\*' }).Count -eq 1) 'fdeploy1.ini known folder, unc and home targets'
+    $pics = @($v1 | Where-Object { $_.folder -eq 'Pictures' })[0]
+    Assert ($pics.redirected -eq $false -and $pics.flags -eq '2001') 'fdeploy1.ini follow-parent entry is not redirected'
     $names = @($fr.scripts | ForEach-Object { $_.side + ':' + $_.event + ':' + $_.name })
-    Assert (($names -contains 'User:Logon:map.bat') -and ($names -contains 'User:Logon:logon.vbs') -and ($names -contains 'Machine:Startup:boot.cmd')) 'scripts.ini script names'
-    Assert ($fd -notmatch 'secretflag' -and [Text.Encoding]::UTF8.GetByteCount($fd) -le 8000) 'script parameters never printed'
+    Assert (($names -contains 'User:Logon:map.bat') -and ($names -contains 'User:Logon:logon.vbs') -and ($names -contains 'User:Logon:tool.exe') -and ($names -contains 'Machine:Startup:boot.cmd')) 'scripts.ini script names'
+    Assert ($fd -notmatch 'secretflag' -and $fd -notmatch 'zzzsecret1' -and [Text.Encoding]::UTF8.GetByteCount($fd) -le 8000) 'script parameters never printed'
     $plain = Invoke-GpoEvidence -Section Gpo -Gpo $gppId.ToString() -Context $ctx | ConvertFrom-Json
     Assert (@($plain.folderRedirection).Count -eq 0 -and @($plain.scripts).Count -eq 0) 'GPO without these files reports none'
 
@@ -367,7 +370,16 @@ try {
     Assert ($pr.profiles.homeDrive.count -eq 2 -and $pr.profiles.scriptPath.count -eq 1) 'homeDrive and scriptPath counts'
     Assert ($pj -notmatch 'alice|bob|carol|dave') 'no user names in the Profiles output'
     Assert (@($pr.fdeployGpos | Where-Object { $_.name -eq 'Folder redirection' -and $_.files -contains 'fdeploy.ini' -and $_.files -contains 'fdeploy1.ini' }).Count -eq 1) 'GPOs holding fdeploy files'
-    Assert (@($pr.fdeployGpos).Count -eq 1) 'only GPOs with fdeploy files listed'
+    Assert (@($pr.fdeployGpos).Count -eq 1 -and $pr.fdeployScanComplete -eq $true) 'only GPOs with fdeploy files listed'
+    # The SYSVOL scan checks the clock for every GPO and says when it stopped early.
+    $savedClock = $script:GpeClock
+    $script:tick = 0
+    $tickClock = [pscustomobject]@{}
+    Add-Member -InputObject $tickClock -MemberType ScriptProperty -Name Elapsed -Value { $script:tick++; [timespan]::FromSeconds($(if ($script:tick -gt 6) { 41 } else { 0 })) }
+    $script:GpeClock = $tickClock
+    $pt = Invoke-GpoEvidence -Section Profiles -Context $ctx | ConvertFrom-Json
+    $script:GpeClock = $savedClock
+    Assert ($pt.fdeployScanComplete -eq $false) 'Profiles scan stops at the time budget and says so'
 
     # Dc section.
     $ctx.Domain = [pscustomobject]@{ DNSRoot = 'example.invalid'; NetBIOSName = 'EXAMPLE'; DomainMode = 'Windows2016Domain'; PDCEmulator = 'dc1.example.invalid'; RIDMaster = 'dc1.example.invalid'; InfrastructureMaster = 'dc1.example.invalid' }
@@ -409,6 +421,11 @@ showrepl_INFO,Site1,DC1,"DC=example,DC=invalid",Site1,DC2,RPC,0,0,2026-11-19 10:
     Assert ($stale -and $stale.sources -match 'ntds' -and $stale.sources -match 'trust' -and $stale.sources -match 'dfsr' -and $stale.sources -match 'ns' -and $stale.sources -match 'srv') 'stale DC-like object found across sources'
     Assert (@($dr.staleCandidates | Where-Object { $_.name -eq 'dc1' }).Count -eq 0) 'live DC not stale'
     Assert ([Text.Encoding]::UTF8.GetByteCount($dj) -le 8000) 'Dc output bounded'
+    # A live DC beyond the 20-row display cap is not stale.
+    function Get-ADDomainController { param($Filter, $ErrorAction) @(1..21 | ForEach-Object { [pscustomobject]@{ HostName = "dc$_.example.invalid"; Site = 'Site1'; OperatingSystem = 'Windows Server 2022'; IsGlobalCatalog = $false; IsReadOnly = $false } }) }
+    function Resolve-DnsName { param($Name, $Type, $Server, [switch]$DnsOnly, $ErrorAction) @([pscustomobject]@{ Name = $Name; NameTarget = 'dc21.example.invalid' }, [pscustomobject]@{ Name = $Name; NameTarget = 'gone9.example.invalid' }) }
+    $d21 = Invoke-GpoEvidence -Section Dc -Context $ctx | ConvertFrom-Json
+    Assert (@($d21.dcs).Count -eq 20 -and $d21.truncated -and @($d21.staleCandidates | Where-Object { $_.name -eq 'dc21' }).Count -eq 0 -and @($d21.staleCandidates | Where-Object { $_.name -eq 'gone9' }).Count -eq 1) 'live DC past the display cap is not stale'
     # One failing source is reported, not fatal.
     function Get-ADComputer { throw [UnauthorizedAccessException]::new('denied') }
     $df = Invoke-GpoEvidence -Section Dc -Context $ctx | ConvertFrom-Json
