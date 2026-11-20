@@ -315,18 +315,20 @@ function Read-GpeRsop {
 
 function Read-GpeRsopFile { param([string]$Path, [string]$Scope = 'Computer') return Read-GpeRsop (Read-GpeXmlFile $Path) $Scope }
 
-# gpresult /user needs the NetBIOS domain of the joined domain. Domain Users of the joined DNS domain is
-# translated to its SID and back, which names that domain explicitly; the first DNS label is the fallback.
+# gpresult /user needs the NetBIOS domain of the joined domain. The crossRef of the domain naming
+# context in the Partitions container holds it (nETBIOSName); the first DNS label is the fallback.
 function Get-GpeNetbiosDomain {
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 5 -ErrorAction Stop
     if (-not $cs.PartOfDomain) { throw 'This computer is not joined to a domain.' }
-    $dns = [string]$cs.Domain
     try {
-        $sid = ([Security.Principal.NTAccount]($dns + '\Domain Users')).Translate([Security.Principal.SecurityIdentifier])
-        $name = $sid.Translate([Security.Principal.NTAccount]).Value
-        if ($name -match '^([^\\]+)\\') { return $Matches[1] }
+        $rd = [adsi]'LDAP://RootDSE'
+        $nc = [string]$rd.Properties['defaultNamingContext'][0] -replace '([\\*()])', '\$1'
+        $cfg = [string]$rd.Properties['configurationNamingContext'][0]
+        $searcher = [DirectoryServices.DirectorySearcher]::new([adsi]('LDAP://CN=Partitions,' + $cfg), "(&(objectCategory=crossRef)(nCName=$nc))", [string[]]@('nETBIOSName'), [DirectoryServices.SearchScope]::OneLevel)
+        try { $hit = $searcher.FindOne() } finally { $searcher.Dispose() }
+        if ($hit -and $hit.Properties['netbiosname'].Count) { return [string]$hit.Properties['netbiosname'][0] }
     } catch { }
-    return $dns.Split('.')[0].ToUpperInvariant()
+    return ([string]$cs.Domain).Split('.')[0].ToUpperInvariant()
 }
 
 function Get-GpeContext {
