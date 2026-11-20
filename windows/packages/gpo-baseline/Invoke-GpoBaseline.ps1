@@ -14,6 +14,27 @@
       AllowDefaultPolicy  "true" allows a definition that targets the Default Domain
                           Policy or Default Domain Controllers Policy, and only when the
                           definition itself sets allowDefaultPolicy.
+      TenantId            Entra tenant GUID, for {{TenantId}}
+      LibraryIdHex        hex of the UTF-8 SharePoint library ID ("Copy library ID"), for
+                          {{LibraryId}}. Over 128 hex characters, split it in order into
+                          LibraryIdHex, LibraryIdHex2 ... LibraryIdHex8, each at most 128.
+                          Hex, because the ID holds & and =. Its tenantId must equal TenantId.
+      LibraryName         [A-Za-z0-9 ]{1,40}, for {{LibraryName}}; also part of the marker
+                          ([relian-gpo-baseline:<id>:<LibraryName>]) when the GPO name uses it
+      ApplyTo, ApplyType  sAMAccountName (a computer without the $) and Group, User or
+                          Computer. Only for a definition with securityFilter: Authenticated
+                          Users keep GpoRead (MS16-072) and ApplyTo gets GpoApply. Without
+                          them an "optional" filter gives Authenticated Users GpoApply.
+      AdoptGpo            GUID of an existing GPO without the marker, for an adopt definition
+      AllowUnmarked       "true", required with AdoptGpo. An adopt definition only adds
+                          registry values or a WMI filter link; an existing different value
+                          or link is refused, and nothing is deleted.
+
+    Definitions: cis-ws2022-dc-low-risk, comet-vss-provider-qemu, workstations-only (adopt:
+    adds the workstation WMI filter), onedrive-workstations (TenantId), onedrive-users,
+    onedrive-automount (TenantId, LibraryIdHex, LibraryName, ApplyTo), password-lockout
+    (Default Domain Policy, AllowDefaultPolicy). The OneDrive definitions may be linked at
+    the domain root (LinkTo = the domain DN).
 
     Install, Update, Repair and Reinstall compare the GPO with the definition and print
     the differences. With Apply=true they create the GPO (description carries the
@@ -22,7 +43,8 @@
     values. A GPO with the same name but without the marker is never touched.
 
     Uninstall with Apply=true backs up and removes the GPO this package created, or,
-    for an allowed default policy, restores the backup taken before the last change.
+    for an allowed default policy or an adopted GPO, restores the backup taken before the
+    last change (Restore-GPO; for an adopted GPO the WMI link is then set back as it was).
 
     Mechanism (Microsoft documentation):
     - Registry policy: Set-GPRegistryValue, which writes Registry.pol and updates the
@@ -64,7 +86,15 @@ param(
     [string]$Apply = '',
     [string]$LinkTo = '',
     [string]$LinkEnabled = '',
-    [string]$AllowDefaultPolicy = ''
+    [string]$AllowDefaultPolicy = '',
+    [string]$TenantId = '',
+    [string]$LibraryIdHex = '', [string]$LibraryIdHex2 = '', [string]$LibraryIdHex3 = '', [string]$LibraryIdHex4 = '',
+    [string]$LibraryIdHex5 = '', [string]$LibraryIdHex6 = '', [string]$LibraryIdHex7 = '', [string]$LibraryIdHex8 = '',
+    [string]$LibraryName = '',
+    [string]$ApplyTo = '',
+    [string]$ApplyType = '',
+    [string]$AdoptGpo = '',
+    [string]$AllowUnmarked = ''
 )
 $ProgressPreference = 'SilentlyContinue'
 
@@ -157,6 +187,90 @@ $GpbDefinitionJson = @'
     "bootDelayMinutes": 5
    }
   ]
+ },
+ {
+  "id": "workstations-only",
+  "adopt": true,
+  "description": "Adds the workstation WMI filter to the existing GPO named by AdoptGpo, so it stops applying to servers. Adds only.",
+  "allowDefaultPolicy": false,
+  "registry": [],
+  "security": [],
+  "audit": [],
+  "wmiFilter": {
+   "name": "Relian - Workstations",
+   "description": "Windows client editions only (Win32_OperatingSystem ProductType 1): no servers, no domain controllers.",
+   "queries": ["SELECT * FROM Win32_OperatingSystem WHERE ProductType = 1"]
+  }
+ },
+ {
+  "id": "onedrive-workstations",
+  "gpoName": "Relian - OneDrive (workstations)",
+  "description": "OneDrive and Storage Sense for workstations: sync only the TenantId tenant, confirm shared deletes, stop downloads under 2 GB free, Storage Sense weekly (cloud files offline after 30 days unused, Recycle Bin after 60 days, Downloads never).",
+  "allowDefaultPolicy": false,
+  "securityFilter": "optional",
+  "linkDomainRoot": true,
+  "registry": [
+   {"cis": "none: OneDrive AllowTenantList", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\OneDrive\\AllowTenantList", "valueName": "{{TenantId}}", "type": "String", "value": "{{TenantId}}"},
+   {"cis": "none: OneDrive SharedContentDeleteConfirmation", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\OneDrive", "valueName": "SharedContentDeleteConfirmation", "type": "DWord", "value": 1},
+   {"cis": "none: OneDrive MinDiskSpaceLimitInMB", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\OneDrive", "valueName": "MinDiskSpaceLimitInMB", "type": "DWord", "value": 2048},
+   {"cis": "none: Storage Sense", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\StorageSense", "valueName": "AllowStorageSenseGlobal", "type": "DWord", "value": 1},
+   {"cis": "none: Storage Sense", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\StorageSense", "valueName": "ConfigStorageSenseGlobalCadence", "type": "DWord", "value": 7},
+   {"cis": "none: Storage Sense", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\StorageSense", "valueName": "ConfigStorageSenseCloudContentDehydrationThreshold", "type": "DWord", "value": 30},
+   {"cis": "none: Storage Sense", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\StorageSense", "valueName": "ConfigStorageSenseRecycleBinCleanupThreshold", "type": "DWord", "value": 60},
+   {"cis": "none: Storage Sense", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\StorageSense", "valueName": "ConfigStorageSenseDownloadsCleanupThreshold", "type": "DWord", "value": 0}
+  ],
+  "security": [],
+  "audit": [],
+  "wmiFilter": {
+   "name": "Relian - Workstations",
+   "description": "Windows client editions only (Win32_OperatingSystem ProductType 1): no servers, no domain controllers.",
+   "queries": ["SELECT * FROM Win32_OperatingSystem WHERE ProductType = 1"]
+  }
+ },
+ {
+  "id": "onedrive-users",
+  "gpoName": "Relian - OneDrive (users)",
+  "description": "OneDrive user policy: no personal OneDrive accounts.",
+  "allowDefaultPolicy": false,
+  "securityFilter": "optional",
+  "linkDomainRoot": true,
+  "registry": [
+   {"cis": "none: OneDrive DisablePersonalSync", "key": "HKCU\\SOFTWARE\\Policies\\Microsoft\\OneDrive", "valueName": "DisablePersonalSync", "type": "DWord", "value": 1}
+  ],
+  "security": [],
+  "audit": []
+ },
+ {
+  "id": "onedrive-automount",
+  "gpoName": "Relian - OneDrive AutoMount {{LibraryName}}",
+  "description": "Mounts one SharePoint library in OneDrive (TenantAutoMount) for the ApplyTo account only, on workstations. Users cannot stop syncing it while the policy applies.",
+  "allowDefaultPolicy": false,
+  "securityFilter": "required",
+  "linkDomainRoot": true,
+  "registry": [
+   {"cis": "none: OneDrive TenantAutoMount", "key": "HKCU\\Software\\Policies\\Microsoft\\OneDrive\\TenantAutoMount", "valueName": "{{LibraryName}}", "type": "String", "value": "{{LibraryId}}"}
+  ],
+  "security": [],
+  "audit": [],
+  "wmiFilter": {
+   "name": "Relian - Workstations",
+   "description": "Windows client editions only (Win32_OperatingSystem ProductType 1): no servers, no domain controllers.",
+   "queries": ["SELECT * FROM Win32_OperatingSystem WHERE ProductType = 1"]
+  }
+ },
+ {
+  "id": "password-lockout",
+  "gpoName": "Default Domain Policy",
+  "description": "Domain password and lockout policy: 12-character minimum (enforced at each user's next change; no expiry is set), lockout after 10 bad passwords for 15 minutes, counter reset after 15 minutes.",
+  "allowDefaultPolicy": true,
+  "registry": [],
+  "security": [
+   {"cis": "none: minimum length 12", "section": "System Access", "key": "MinimumPasswordLength", "value": "12"},
+   {"cis": "none: lockout threshold 10", "section": "System Access", "key": "LockoutBadCount", "value": "10"},
+   {"cis": "1.2.4", "section": "System Access", "key": "ResetLockoutCount", "value": "15"},
+   {"cis": "1.2.1", "section": "System Access", "key": "LockoutDuration", "value": "15"}
+  ],
+  "audit": []
  }
 ]
 '@
@@ -177,9 +291,17 @@ function Get-GpbProp { param($Object, [string]$Name) if ($null -ne $Object -and 
 function Test-GpbDefinition {
     param($Def, [string]$Action = 'Install')
     if ([string](Get-GpbProp $Def 'id') -notmatch '^[a-z0-9][a-z0-9-]{0,63}$') { return 'Definition id is invalid.' }
-    if ([string](Get-GpbProp $Def 'gpoName') -notmatch '^[A-Za-z0-9 ._()-]{1,128}$') { return 'gpoName is invalid.' }
+    $sf = Get-GpbProp $Def 'securityFilter'
+    if ($null -ne $sf -and @('required', 'optional') -cnotcontains [string]$sf) { return 'securityFilter must be required or optional.' }
+    if ((Get-GpbProp $Def 'adopt') -eq $true) {
+        # Adopt is add-only: no security template, audit, task, permission or default-policy change.
+        if ($null -ne (Get-GpbProp $Def 'gpoName')) { return 'An adopt definition names its GPO only through AdoptGpo.' }
+        foreach ($k in @('security', 'audit', 'tasks')) { if (@(Get-GpbProp $Def $k).Count) { return "An adopt definition may not carry $k." } }
+        if ($null -ne $sf -or (Get-GpbProp $Def 'allowDefaultPolicy') -eq $true -or (Get-GpbProp $Def 'linkDomainRoot') -eq $true) { return 'An adopt definition may not change permissions, default policies or links.' }
+    } elseif ([string](Get-GpbProp $Def 'gpoName') -notmatch '^[A-Za-z0-9 ._()-]{1,128}$') { return 'gpoName is invalid.' }
     foreach ($i in @(Get-GpbProp $Def 'registry')) {
-        if ([string]$i.key -notmatch '^HKLM\\[^\x00-\x1F]+$') { return "Registry key must be under HKLM: $($i.key)" }
+        if ([string]$i.key -cnotmatch '^HK(LM|CU)\\[^\x00-\x1F]+$') { return "Registry key must be under HKLM or HKCU: $($i.key)" }
+        if ([string]$i.valueName -notmatch '^[^\x00-\x1F\\]{1,255}$') { return "Registry value name is invalid: $($i.valueName)" }
         if (@('DWord', 'String', 'ExpandString', 'QWord') -notcontains [string]$i.type) { return "Registry type not supported: $($i.type)" }
     }
     foreach ($i in @(Get-GpbProp $Def 'security')) {
@@ -208,6 +330,105 @@ function Test-GpbDefinition {
         if ([int](Get-GpbProp $t 'bootDelayMinutes') -lt 0 -or [int](Get-GpbProp $t 'bootDelayMinutes') -gt 60) { return 'Task bootDelayMinutes must be 0 to 60.' }
     }
     return $null
+}
+
+# ---- Arguments, placeholders and security filtering ----
+
+$GpbGuid = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+
+# The tenant of a SharePoint library ID ("Copy library ID": tenantId, siteId, webId, listId,
+# webUrl and version, URL-encoded), or $null when it is not one.
+function Get-GpbLibraryTenant {
+    param([string]$Id)
+    if ($Id -cnotmatch '\A[A-Za-z0-9%&=._:/{}-]{1,512}\z') { return $null }
+    $pairs = @{}
+    foreach ($part in $Id.Split('&')) {
+        $kv = $part.Split('=', 2)
+        if ($kv.Count -ne 2 -or $pairs.ContainsKey($kv[0])) { return $null }
+        try { $pairs[$kv[0]] = [Uri]::UnescapeDataString($kv[1]) } catch { return $null }
+    }
+    if ($pairs.Count -ne 6) { return $null }
+    if ([string]$pairs['tenantId'] -notmatch "\A$GpbGuid\z") { return $null }
+    foreach ($k in @('siteId', 'webId', 'listId')) { if ([string]$pairs[$k] -notmatch "\A\{?$GpbGuid\}?\z") { return $null } }
+    if ([string]$pairs['webUrl'] -notmatch '\Ahttps://[A-Za-z0-9-]+\.sharepoint\.com(/[^\s?#]*)?\z' -or [string]$pairs['version'] -notmatch '\A[0-9]{1,4}\z') { return $null }
+    return ([string]$pairs['tenantId']).ToLowerInvariant()
+}
+
+# Validates every argument before anything is read. Throws the reason; returns the placeholder values and the filter target.
+function ConvertFrom-GpbArguments {
+    param([string]$TenantId, [string[]]$LibraryIdHex, [string]$LibraryName, [string]$ApplyTo, [string]$ApplyType, [string]$AdoptGpo)
+    $values = @{}
+    if ($TenantId) {
+        if ($TenantId -notmatch "\A$GpbGuid\z") { throw 'TenantId must be a GUID.' }
+        $values.TenantId = $TenantId.ToLowerInvariant()
+    }
+    # Parts joined in order; a part after an empty one is refused, so a dropped part cannot shorten the ID.
+    $hex = ''; $gap = $false
+    foreach ($p in @($LibraryIdHex)) {
+        if (-not $p) { $gap = $true; continue }
+        if ($gap) { throw 'LibraryIdHex parts must follow each other with no empty part between.' }
+        if ($p -notmatch '\A(?:[0-9A-Fa-f]{2}){1,64}\z') { throw 'Each LibraryIdHex part must be 2 to 128 hex characters.' }
+        $hex += $p
+    }
+    if ($hex) {
+        $bytes = [byte[]]::new($hex.Length / 2)
+        for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
+        try { $id = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) } catch { throw 'LibraryIdHex is not UTF-8.' }
+        $libTenant = Get-GpbLibraryTenant $id
+        if (-not $libTenant) { throw 'LibraryIdHex is not a SharePoint Online library ID.' }
+        if ($values.TenantId -and $libTenant -ne $values.TenantId) { throw 'The library ID belongs to another tenant than TenantId.' }
+        $values.LibraryId = $id
+    }
+    if ($LibraryName) {
+        if ($LibraryName -cnotmatch '\A[A-Za-z0-9](?:[A-Za-z0-9 ]{0,38}[A-Za-z0-9])?\z') { throw 'LibraryName must be 1 to 40 letters, digits or inner spaces.' }
+        $values.LibraryName = $LibraryName
+    }
+    if ([bool]$ApplyTo -ne [bool]$ApplyType) { throw 'ApplyTo and ApplyType go together.' }
+    if ($ApplyTo) {
+        # The name goes into an LDAP filter and Set-GPPermission: no metacharacters.
+        if ($ApplyTo -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}\z') { throw 'ApplyTo must be an account name (letters, digits, space . _ -; a computer without the $).' }
+        if (@('Group', 'User', 'Computer') -cnotcontains $ApplyType) { throw 'ApplyType must be Group, User or Computer.' }
+    }
+    if ($AdoptGpo -and $AdoptGpo -notmatch "\A\{?$GpbGuid\}?\z") { throw 'AdoptGpo must be a GPO GUID.' }
+    return @{ Values = $values; ApplyTo = $ApplyTo; ApplyType = $ApplyType; AdoptGpo = $AdoptGpo.Trim('{', '}') }
+}
+
+# A copy of the definition with {{Name}} replaced in gpoName and the registry key, valueName and
+# value (the only places placeholders are read), its marker added, and the names it lacked.
+function Resolve-GpbDefinition {
+    param($Def, [hashtable]$Values)
+    $missing = [Collections.Generic.List[string]]::new()
+    $sub = {
+        param($Text)
+        if ($Text -isnot [string]) { return $Text }
+        foreach ($m in [regex]::Matches($Text, '\{\{([A-Za-z]+)\}\}')) {
+            $n = $m.Groups[1].Value
+            if ($Values.ContainsKey($n)) { $Text = $Text.Replace($m.Value, [string]$Values[$n]) } elseif (-not $missing.Contains($n)) { $missing.Add($n) }
+        }
+        return $Text
+    }
+    $out = $Def.PSObject.Copy()
+    if ($null -ne (Get-GpbProp $Def 'gpoName')) { $out.gpoName = & $sub $Def.gpoName }
+    $registry = @()
+    foreach ($i in @(Get-GpbProp $Def 'registry')) {
+        $c = $i.PSObject.Copy()
+        foreach ($k in @('key', 'valueName', 'value')) { if ($c.PSObject.Properties[$k]) { $c.$k = & $sub $c.$k } }
+        $registry += $c
+    }
+    if ($out.PSObject.Properties['registry']) { $out.registry = $registry }
+    $marker = "[relian-gpo-baseline:$($Def.id)]"
+    if ([string](Get-GpbProp $Def 'gpoName') -match '\{\{LibraryName\}\}') { $marker = "[relian-gpo-baseline:$($Def.id):$($Values['LibraryName'])]" }
+    $out | Add-Member -NotePropertyName marker -NotePropertyValue $marker -Force
+    return @{ Def = $out; Missing = @($missing) }
+}
+
+# objectSid of the one account with this sAMAccountName and class, or $null.
+function Get-GpbTrusteeSid {
+    param($Context, [string]$Name, [string]$Type)
+    $filter = @{ Group = "(&(objectClass=group)(sAMAccountName=$Name))"; User = "(&(objectCategory=person)(objectClass=user)(sAMAccountName=$Name))"; Computer = "(&(objectClass=computer)(sAMAccountName=$($Name)$))" }[$Type]
+    $found = @(Get-ADObject -LDAPFilter $filter -Properties objectSid -Server $Context.Server -ErrorAction Stop)
+    if ($found.Count -ne 1) { return $null }
+    return [string]$found[0].objectSid
 }
 
 function Get-GpbSha256 {
@@ -497,9 +718,22 @@ function Get-GpbAuditPath { param($Context, $Gpo) Join-Path (Get-GpbGpoDir $Cont
 function Read-GpbText { param([string]$Path) if ([IO.File]::Exists($Path)) { return [IO.File]::ReadAllText($Path) } return '' }
 
 function Get-GpbPlan {
-    param($Context, $Def, $Gpo, [string]$LinkTo, [bool]$LinkOn)
+    param($Context, $Def, $Gpo, [string]$LinkTo, [bool]$LinkOn, $Filter)
     $changes = [Collections.Generic.List[object]]::new()
     if (-not $Gpo) { $changes.Add([ordered]@{ kind = 'create'; target = $Def.gpoName; current = $null; desired = 'new GPO' }) }
+    if ($Filter) {
+        $perms = @()
+        if ($Gpo) { $perms = @(Get-GPPermission -Guid $Gpo.Id -All -Server $Context.Server -ErrorAction Stop | Where-Object { -not $_.Denied }) }
+        $level = { param($Sid) $p = @($perms | Where-Object { [string]$_.Trustee.Sid -eq $Sid }) | Select-Object -First 1; if ($p) { [string]$p.Permission } else { 'None' } }
+        # New-GPO grants Authenticated Users GpoApply.
+        $au = 'GpoApply'; if ($Gpo) { $au = & $level 'S-1-5-11' }
+        $want = 'GpoApply'; if ($Filter.Name) { $want = 'GpoRead' }
+        if ($au -ne $want) { $changes.Add([ordered]@{ kind = 'permission'; target = 'Authenticated Users'; current = $au; desired = $want; trustee = 'Authenticated Users'; trusteeType = 'Group' }) }
+        if ($Filter.Name) {
+            $cur = 'None'; if ($Gpo) { $cur = & $level $Filter.Sid }
+            if ($cur -ne 'GpoApply') { $changes.Add([ordered]@{ kind = 'permission'; target = "$($Filter.Type) $($Filter.Name)"; current = $cur; desired = 'GpoApply'; trustee = $Filter.Name; trusteeType = $Filter.Type }) }
+        }
+    }
     foreach ($item in @($Def.registry)) {
         $cur = $null
         # shortcut: any read error counts as "not set"; the write that follows then reports the real failure.
@@ -591,15 +825,16 @@ function Initialize-GpbStateDir {
 function Get-GpbStateDir { param($Context, $Gpo) Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}') }
 
 function Save-GpbBackup {
-    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record)
+    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record, [hashtable]$Extra)
     $dir = Initialize-GpbStateDir $Context $Gpo
     $backup = Backup-GPO -Guid $Gpo.Id -Path $dir -Comment "relian-gpo-baseline $DefinitionId" -Server $Context.Server -ErrorAction Stop
     $id = ''
     if ($backup -and $backup.PSObject.Properties['Id']) { $id = [string]$backup.Id }
     if (-not $id) { throw 'Backup-GPO returned no backup id. Nothing was changed.' }
     if ($Record) {
-        $state = [ordered]@{ backupId = $id; gpoId = [string]$Gpo.Id; definition = $DefinitionId; utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
-        [IO.File]::WriteAllText((Join-Path $dir 'last-backup.json'), $state)
+        $state = [ordered]@{ backupId = $id; gpoId = [string]$Gpo.Id; definition = $DefinitionId; utc = [datetime]::UtcNow.ToString('o') }
+        if ($Extra) { foreach ($k in $Extra.Keys) { $state[$k] = $Extra[$k] } }
+        [IO.File]::WriteAllText((Join-Path $dir 'last-backup.json'), ($state | ConvertTo-Json -Compress))
     }
     return $id
 }
@@ -657,10 +892,17 @@ function Invoke-GpbApply {
 function Invoke-GpbApplyWrites {
     param($Context, $Def, $Gpo, $Changes, [string]$LinkTo, [bool]$LinkOn, $Report, $Downloaded)
     if (-not $Gpo) {
-        $Gpo = New-GPO -Name $Def.gpoName -Comment ("[relian-gpo-baseline:$($Def.id)] Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server -ErrorAction Stop
+        $Gpo = New-GPO -Name $Def.gpoName -Comment ("$($Def.marker) Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server -ErrorAction Stop
         $Report.gpo.id = [string]$Gpo.Id; $Report.gpo.exists = $true; $Report.gpo.owned = $true
     } else {
-        $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record
+        # An adopted GPO's restore also puts its WMI link back, so record the link as backed up.
+        $extra = $null
+        if ((Get-GpbProp $Def 'adopt') -eq $true) { $extra = @{ wmiLinkBefore = [string](Get-ADObject -Identity (Get-GpbGpoDn $Context $Gpo) -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter } }
+        $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record -Extra $extra
+    }
+    # Security filtering before any setting: a run that stops here applies to fewer, never more.
+    foreach ($c in @($Changes | Where-Object { $_.kind -eq 'permission' })) {
+        Set-GPPermission -Guid $Gpo.Id -PermissionLevel $c.desired -TargetName $c.trustee -TargetType $c.trusteeType -Replace -Server $Context.Server -ErrorAction Stop | Out-Null
     }
     $filter = $null
     $w = Get-GpbProp $Def 'wmiFilter'
@@ -755,14 +997,16 @@ function Test-GpbFlag {
 }
 
 function Invoke-GpoBaseline {
-    param([string]$Action = 'Install', [string]$Definition = '', [string]$Apply = '', [string]$LinkTo = '', [string]$LinkEnabled = '', [string]$AllowDefaultPolicy = '', $Context, $DefinitionObject)
+    param([string]$Action = 'Install', [string]$Definition = '', [string]$Apply = '', [string]$LinkTo = '', [string]$LinkEnabled = '', [string]$AllowDefaultPolicy = '',
+        [string]$TenantId = '', [string[]]$LibraryIdHex = @(), [string]$LibraryName = '', [string]$ApplyTo = '', [string]$ApplyType = '', [string]$AdoptGpo = '', [string]$AllowUnmarked = '',
+        $Context, $DefinitionObject)
     # Binary cmdlets report most failures as non-terminating errors; every one must stop the run.
     $ErrorActionPreference = 'Stop'
     $report = [ordered]@{ version = '1'; status = 'plan'; action = $Action; definition = $Definition; gpo = [ordered]@{}; changes = @(); backupId = $null }
     $refuse = { param($Why) $report.status = 'refused'; $report.reason = $Why; return @{ report = $report; exitCode = 1 } }
     $def = $DefinitionObject
     if (-not $def) { $def = Get-GpbDefinition $Definition }
-    if (-not $def) { return (& $refuse 'Unknown Definition. Embedded: cis-ws2022-dc-low-risk.') }
+    if (-not $def) { return (& $refuse ('Unknown Definition. Embedded: ' + ((($GpbDefinitionJson | ConvertFrom-Json) | ForEach-Object { $_.id }) -join ', ') + '.')) }
     $report.definition = [string](Get-GpbProp $def 'id')
     # As with the runner's pins: an empty hash exits 0 and does nothing, before its URL is read.
     foreach ($t in @(Get-GpbProp $def 'tasks')) {
@@ -772,43 +1016,79 @@ function Invoke-GpoBaseline {
         $applyOn = Test-GpbFlag 'Apply' $Apply
         $linkOn = Test-GpbFlag 'LinkEnabled' $LinkEnabled
         $allowDefault = Test-GpbFlag 'AllowDefaultPolicy' $AllowDefaultPolicy
+        $allowUnmarkedOn = Test-GpbFlag 'AllowUnmarked' $AllowUnmarked
+        $a = ConvertFrom-GpbArguments -TenantId $TenantId -LibraryIdHex $LibraryIdHex -LibraryName $LibraryName -ApplyTo $ApplyTo -ApplyType $ApplyType -AdoptGpo $AdoptGpo
     } catch { return (& $refuse $_.Exception.Message) }
+    $adopt = (Get-GpbProp $def 'adopt') -eq $true
+    $sf = [string](Get-GpbProp $def 'securityFilter')
+    if (-not $adopt -and ($a.AdoptGpo -or $allowUnmarkedOn)) { return (& $refuse 'AdoptGpo and AllowUnmarked are only for adopt definitions.') }
+    if ($adopt -and -not ($a.AdoptGpo -and $allowUnmarkedOn)) { return (& $refuse 'An unmarked GPO is changed only when both AdoptGpo and AllowUnmarked=true are passed.') }
+    if ($a.ApplyTo -and -not $sf) { return (& $refuse 'ApplyTo is only for definitions with a security filter.') }
+    $resolved = Resolve-GpbDefinition $def $a.Values
+    $def = $resolved.Def
+    # Uninstall only needs the name.
+    if ($resolved.Missing.Count -and ($Action -ne 'Uninstall' -or [string](Get-GpbProp $def 'gpoName') -match '\{\{')) { return (& $refuse ('Missing arguments for {{' + ($resolved.Missing -join '}}, {{') + '}} (LibraryId comes from LibraryIdHex).')) }
     $problem = Test-GpbDefinition $def $Action
     if ($problem) { return (& $refuse $problem) }
+    if ($a.ApplyType -and $Action -ne 'Uninstall') {
+        # Computer policy is filtered on the computer, user policy on the user; a mismatch would never apply.
+        $hives = @(@(Get-GpbProp $def 'registry') | ForEach-Object { ([string]$_.key).Substring(0, 4) })
+        $machine = ($hives -contains 'HKLM') -or @(Get-GpbProp $def 'security').Count -or @(Get-GpbProp $def 'audit').Count -or @(Get-GpbProp $def 'tasks').Count
+        if (($a.ApplyType -eq 'Computer' -and -not $machine) -or ($a.ApplyType -eq 'User' -and $hives -notcontains 'HKCU')) { return (& $refuse "ApplyType $($a.ApplyType) would never receive this definition's settings.") }
+    }
     try {
         if (-not $Context) { $Context = Get-GpbContext }
-        $gpo = Get-GpbGpo -Context $Context -Name $def.gpoName
+        if ($adopt) {
+            # Adopted by GUID only, never by name, and never created.
+            $gpo = $null
+            try { $gpo = Get-GPO -Guid $a.AdoptGpo -Server $Context.Server -ErrorAction Stop } catch [System.ArgumentException] { $gpo = $null }
+            if (-not $gpo) { return (& $refuse 'AdoptGpo was not found. Nothing was changed.') }
+            $def | Add-Member -NotePropertyName gpoName -NotePropertyValue ([string]$gpo.DisplayName) -Force
+        } else { $gpo = Get-GpbGpo -Context $Context -Name $def.gpoName }
         $isDefault = $GpbDefaultPolicies.Values -contains $def.gpoName
         if ($gpo -and $GpbDefaultPolicies.ContainsKey($gpo.Id.ToString().ToLower())) { $isDefault = $true }
         $owned = $false
-        if ($gpo -and $gpo.Description) { $owned = ([string]$gpo.Description).Contains("[relian-gpo-baseline:$($def.id)]") }
-        $report.gpo = [ordered]@{ name = $def.gpoName; id = $null; exists = [bool]$gpo; owned = $owned; default = $isDefault }
+        if ($gpo -and $gpo.Description) { $owned = ([string]$gpo.Description).Contains($def.marker) }
+        $report.gpo = [ordered]@{ name = $def.gpoName; id = $null; exists = [bool]$gpo; owned = $owned; default = $isDefault; adopted = $adopt }
         if ($gpo) { $report.gpo.id = [string]$gpo.Id }
+        if ($adopt -and $isDefault) { return (& $refuse 'Default policies are changed only through their own definitions, never adopted.') }
         if ($isDefault -and -not ($def.allowDefaultPolicy -eq $true -and $allowDefault)) { return (& $refuse 'Default policies change only when the definition sets allowDefaultPolicy and AllowDefaultPolicy=true is passed.') }
         if ($isDefault -and -not $gpo) { return (& $refuse 'Default policy not found.') }
-        if ($gpo -and -not $isDefault -and -not $owned) { return (& $refuse 'A GPO with this name exists without the Relian marker. It was not changed.') }
+        if ($gpo -and -not $isDefault -and -not $owned -and -not $adopt) { return (& $refuse 'A GPO with this name exists without the Relian marker. It was not changed.') }
         $w = Get-GpbProp $def 'wmiFilter'
         $ownFilter = $null
         if ($w) {
+            # Definitions share a filter by name (same queries, checked by the tests); any Relian marker owns it.
             $ownFilter = Get-GpbWmiFilter -Context $Context -Name $w.name
-            if ($ownFilter -and -not ([string]$ownFilter.'msWMI-Parm1').Contains("[relian-gpo-baseline:$($def.id)]")) { return (& $refuse 'A WMI filter with this name exists without the Relian marker. It was not changed.') }
+            if ($ownFilter -and -not ([string]$ownFilter.'msWMI-Parm1').Contains('[relian-gpo-baseline:')) { return (& $refuse 'A WMI filter with this name exists without the Relian marker. It was not changed.') }
         }
-        $backupDir = $null; $lastBackup = $null
+        $backupDir = $null; $lastRecord = $null; $lastBackup = $null
         if ($gpo) {
             $backupDir = Join-Path $Context.BackupRoot ('{' + $gpo.Id.ToString().ToUpper() + '}')
             $lastPath = Join-Path $backupDir 'last-backup.json'
-            if ([IO.File]::Exists($lastPath)) { $lastBackup = ([IO.File]::ReadAllText($lastPath) | ConvertFrom-Json).backupId }
+            if ([IO.File]::Exists($lastPath)) { $lastRecord = [IO.File]::ReadAllText($lastPath) | ConvertFrom-Json; $lastBackup = $lastRecord.backupId }
         }
 
         if ($Action -eq 'Uninstall') {
             if (-not $gpo) { $report.status = 'nothingToUninstall'; return @{ report = $report; exitCode = 0 } }
-            if ($isDefault -and -not $lastBackup) { return (& $refuse 'No Relian backup of this default policy to restore.') }
-            $kind = 'remove'; if ($isDefault) { $kind = 'restore' }
+            if (($isDefault -or $adopt) -and -not $lastBackup) { return (& $refuse 'No Relian backup of this GPO to restore.') }
+            $kind = 'remove'; if ($isDefault -or $adopt) { $kind = 'restore' }
             $report.changes = @([ordered]@{ kind = $kind; target = $def.gpoName; current = $null; desired = $lastBackup })
             if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
             if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
             $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
-            if ($isDefault) { Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server -ErrorAction Stop | Out-Null; $report.status = 'restored' }
+            if ($isDefault -or $adopt) {
+                Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server -ErrorAction Stop | Out-Null
+                if ($adopt -and $lastRecord.PSObject.Properties['wmiLinkBefore']) {
+                    $dn = Get-GpbGpoDn $Context $gpo
+                    $before = [string]$lastRecord.wmiLinkBefore
+                    if ([string](Get-ADObject -Identity $dn -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter -ne $before) {
+                        if ($before) { Set-ADObject -Identity $dn -Replace @{ gPCWQLFilter = $before } -Server $Context.Server -ErrorAction Stop }
+                        else { Set-ADObject -Identity $dn -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop }
+                    }
+                }
+                $report.status = 'restored'
+            }
             else {
                 Remove-GPO -Guid $gpo.Id -Server $Context.Server -ErrorAction Stop | Out-Null
                 # The owned WMI filter goes too, unless another GPO still uses it.
@@ -822,13 +1102,28 @@ function Invoke-GpoBaseline {
         }
 
         if ($LinkTo) {
-            if ($isDefault) { return (& $refuse 'Default policies are not linked by this package.') }
+            if ($isDefault -or $adopt) { return (& $refuse 'Default and adopted policies are not linked by this package.') }
+            $domainRoot = (Get-GpbProp $def 'linkDomainRoot') -eq $true -and $LinkTo -ieq $Context.DomainDN
             # shortcut: DNs with escaped commas are refused rather than parsed.
-            if ($LinkTo -notmatch '^OU=[^,\\]+(,(OU|DC)=[^,\\]+)*$' -or -not $LinkTo.EndsWith(',' + $Context.DomainDN, [StringComparison]::OrdinalIgnoreCase)) { return (& $refuse 'LinkTo must be an OU distinguished name in this domain.') }
+            if (-not $domainRoot -and ($LinkTo -notmatch '^OU=[^,\\]+(,(OU|DC)=[^,\\]+)*$' -or -not $LinkTo.EndsWith(',' + $Context.DomainDN, [StringComparison]::OrdinalIgnoreCase))) { return (& $refuse 'LinkTo must be an OU distinguished name in this domain, or the domain itself for a definition that allows it.') }
         }
-        $changes = Get-GpbPlan -Context $Context -Def $def -Gpo $gpo -LinkTo $LinkTo -LinkOn $linkOn
+        $filter = $null
+        if ($sf) {
+            if ($sf -eq 'required' -and -not $a.ApplyTo) { return (& $refuse 'This definition applies only to the account named by ApplyTo and ApplyType.') }
+            $filter = @{ Name = $a.ApplyTo; Type = $a.ApplyType; Sid = $null }
+            if ($a.ApplyTo) {
+                $filter.Sid = Get-GpbTrusteeSid -Context $Context -Name $a.ApplyTo -Type $a.ApplyType
+                if (-not $filter.Sid) { return (& $refuse "ApplyTo was not found as exactly one $($a.ApplyType) in this domain.") }
+                $report.applyTo = "$($a.ApplyType) $($a.ApplyTo)"
+            }
+        }
+        $changes = Get-GpbPlan -Context $Context -Def $def -Gpo $gpo -LinkTo $LinkTo -LinkOn $linkOn -Filter $filter
         $report.changes = @(Get-GpbPublicChanges $changes)
         $report.changeCount = $changes.Count
+        # Adopt only adds: an existing different value or WMI link is never replaced.
+        if ($adopt -and @($changes | Where-Object { ($_.kind -eq 'registry' -and $null -ne $_.current) -or ($_.kind -eq 'wmiLink' -and $_.current) }).Count) { return (& $refuse 'The adopted GPO already holds a different value or WMI link. Adopt only adds; nothing was changed.') }
+        # Security filtering only moves trustees between none, read and apply; edit rights are never lowered.
+        if (@($changes | Where-Object { $_.kind -eq 'permission' -and @('None', 'GpoRead', 'GpoApply') -notcontains $_.current }).Count) { return (& $refuse 'A security filter trustee holds more than apply on this GPO. It was not changed.') }
         if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
         if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
         if ($changes.Count -eq 0) { $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
@@ -837,7 +1132,7 @@ function Invoke-GpoBaseline {
         catch { $err = Protect-GpbText $_.Exception.Message }
         if (-not $gpo) { $gpo = Get-GpbGpo -Context $Context -Name $def.gpoName }
         $left = @()
-        if ($gpo) { $left = @(Get-GpbPublicChanges (Get-GpbPlan -Context $Context -Def $def -Gpo $gpo -LinkTo $LinkTo -LinkOn $linkOn)) }
+        if ($gpo) { $left = @(Get-GpbPublicChanges (Get-GpbPlan -Context $Context -Def $def -Gpo $gpo -LinkTo $LinkTo -LinkOn $linkOn -Filter $filter)) }
         else { $left = @($report.changes) }
         if ($err -or $left.Count) {
             $report.status = 'partial'; $report.left = $left; $report.error = $err
@@ -853,6 +1148,8 @@ function Invoke-GpoBaseline {
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
 if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
-$run = Invoke-GpoBaseline -Action $Action -Definition $Definition -Apply $Apply -LinkTo $LinkTo -LinkEnabled $LinkEnabled -AllowDefaultPolicy $AllowDefaultPolicy
+$run = Invoke-GpoBaseline -Action $Action -Definition $Definition -Apply $Apply -LinkTo $LinkTo -LinkEnabled $LinkEnabled -AllowDefaultPolicy $AllowDefaultPolicy `
+    -TenantId $TenantId -LibraryIdHex @($LibraryIdHex, $LibraryIdHex2, $LibraryIdHex3, $LibraryIdHex4, $LibraryIdHex5, $LibraryIdHex6, $LibraryIdHex7, $LibraryIdHex8) `
+    -LibraryName $LibraryName -ApplyTo $ApplyTo -ApplyType $ApplyType -AdoptGpo $AdoptGpo -AllowUnmarked $AllowUnmarked
 Write-Output (ConvertTo-GpbBoundedJson $run.report)
 exit $run.exitCode
