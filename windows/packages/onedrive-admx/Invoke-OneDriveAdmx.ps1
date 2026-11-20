@@ -18,7 +18,7 @@
 
     Apply: files that already match the source byte for byte are left alone (idempotent, no backup). Otherwise
     the current OneDrive.admx/.adml are copied to C:\Relian\AdmxBackup\<UTC timestamp>\ (new folder every run,
-    SYSTEM and Administrators only, hash-checked) before any write. Then the .adml is written, then the .admx
+    SYSTEM and Administrators only, hash-checked; both files when either changes) before any write. Then the .adml is written, then the .admx
     (a new template never meets old strings), each through a temp file in the store and a replace. Last, both
     files are read back and compared with the source. Rollback: copy the backup files back.
 
@@ -188,7 +188,8 @@ function Invoke-OaMain {
         [void](New-Item -ItemType Directory -Path $backup)
         & $script:OaProtectDir $backup
         $result.backup = $backup
-        foreach ($c in @($changes | Where-Object { $_.Act -eq 'replace' })) {
+        # Both existing files, even when only one changes: the backup is a complete restore set.
+        foreach ($c in @($plan | Where-Object { $_.Before.present })) {
             $copy = Join-Path $backup $c.Spec.Name
             [IO.File]::Copy($c.Path, $copy)
             if ((Get-OaSha256 ([IO.File]::ReadAllBytes($copy))) -ne $c.Before.sha256) { throw "backup of $($c.Spec.Name) does not match" }

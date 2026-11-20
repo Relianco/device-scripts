@@ -73,18 +73,33 @@ $script:OaNow = { [DateTime]'2026-11-20T13:00:00' }
 $r = Invoke-OaMain -Mode Apply
 Assert ($r.Result.status -eq 'applied' -and @(Get-ChildItem -LiteralPath (Join-Path $script:OaBackupRoot '20261120T130000Z')).Count -eq 0) 'create applies with an empty backup'
 
+# Only the adml differs: the backup still holds both files, and the admx is rewritten byte for byte.
+[IO.File]::WriteAllText((Join-Path $lang 'OneDrive.adml'), $oldAdml)
+$script:OaNow = { [DateTime]'2026-11-20T14:00:00' }
+$r = Invoke-OaMain -Mode Apply
+$bk = Join-Path $script:OaBackupRoot '20261120T140000Z'
+Assert ($r.Result.status -eq 'applied' -and (Test-Path (Join-Path $bk 'OneDrive.admx')) -and (Test-Path (Join-Path $bk 'OneDrive.adml'))) 'backup holds both files when one changes'
+
 # Download: hash pinned, refused on mismatch or bad URL; bad XML refused before any write.
 $script:OaInstallRoots = { @() }
 $script:OaDownload = { param($u) if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
 $ax = Get-OaSha256 $newAdmx; $al = Get-OaSha256 $newAdml
 $ok = @{ AdmxUrl = 'https://h/x.admx'; AdmxSha256 = $ax; AdmlUrl = 'https://h/x.adml'; AdmlSha256 = $al }
 Assert ((Invoke-OaMain @ok).Result.status -eq 'current') 'download source matches'
-Assert ((Invoke-OaMain @ok -AdmxSha256 ('0' * 64)).ExitCode -eq 1) 'hash mismatch refused'
-Assert ((Invoke-OaMain @ok -AdmxUrl 'http://h/x.admx').ExitCode -eq 1) 'http refused'
-Assert ((Invoke-OaMain @ok -AdmxUrl 'https://u@h/x.admx').ExitCode -eq 1) 'userinfo refused'
+# Each case is its own full splat: PowerShell 5.1 cannot override a splatted key with an explicit parameter.
+$cases = @{
+    'hash mismatch refused' = @{ AdmxSha256 = ('0' * 64) }
+    'http refused'          = @{ AdmxUrl = 'http://h/x.admx' }
+    'userinfo refused'      = @{ AdmxUrl = 'https://u@h/x.admx' }
+}
+foreach ($name in $cases.Keys) {
+    $case = $ok.Clone(); foreach ($k in $cases[$name].Keys) { $case[$k] = $cases[$name][$k] }
+    Assert ((Invoke-OaMain @case).ExitCode -eq 1) $name
+}
 $bad = Utf8 '<!DOCTYPE a [<!ENTITY e "x">]><policyDefinitions/>'
 $script:OaDownload = { param($u) , $bad }
-Assert ((Invoke-OaMain @ok -AdmxSha256 (Get-OaSha256 $bad) -AdmlSha256 (Get-OaSha256 $bad)).ExitCode -eq 1) 'DTD refused'
+$badCase = $ok.Clone(); $badCase.AdmxSha256 = Get-OaSha256 $bad; $badCase.AdmlSha256 = Get-OaSha256 $bad
+Assert ((Invoke-OaMain @badCase).ExitCode -eq 1) 'DTD refused'
 Assert ((Invoke-OaMain).ExitCode -eq 1) 'no source refused'
 
 # Output stays under the cap.
