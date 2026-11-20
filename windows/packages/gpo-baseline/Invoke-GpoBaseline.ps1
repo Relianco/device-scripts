@@ -25,6 +25,9 @@
                           Computer. Only for a definition with securityFilter: Authenticated
                           Users keep GpoRead (MS16-072) and ApplyTo gets GpoApply. Without
                           them an "optional" filter gives Authenticated Users GpoApply.
+                          A Computer target gets only the computer settings and a User
+                          target only the user settings; to pilot a definition with both
+                          (quiet-windows), use a Group holding the computer and the user.
       AdoptGpo            GUID of an existing GPO without the marker, for an adopt definition
       AllowUnmarked       "true", required with AdoptGpo. An adopt definition only adds a
                           WMI filter link; an existing link, or a shared filter with other
@@ -32,9 +35,9 @@
 
     Definitions: cis-ws2022-dc-low-risk, comet-vss-provider-qemu, workstations-only (adopt:
     adds the workstation WMI filter), onedrive-workstations (TenantId), onedrive-users,
-    onedrive-automount (TenantId, LibraryIdHex, LibraryName, ApplyTo), password-lockout
-    (Default Domain Policy, AllowDefaultPolicy). The OneDrive definitions may be linked at
-    the domain root (LinkTo = the domain DN).
+    onedrive-automount (TenantId, LibraryIdHex, LibraryName, ApplyTo), quiet-windows,
+    password-lockout (Default Domain Policy, AllowDefaultPolicy). The OneDrive and
+    quiet-windows definitions may be linked at the domain root (LinkTo = the domain DN).
 
     Install, Update, Repair and Reinstall compare the GPO with the definition and print
     the differences. With Apply=true they create the GPO (description carries the
@@ -250,6 +253,31 @@ $GpbDefinitionJson = @'
   "linkDomainRoot": true,
   "registry": [
    {"cis": "none: OneDrive TenantAutoMount", "key": "HKCU\\Software\\Policies\\Microsoft\\OneDrive\\TenantAutoMount", "valueName": "{{LibraryName}}", "type": "String", "value": "{{LibraryId}}"}
+  ],
+  "security": [],
+  "audit": [],
+  "wmiFilter": {
+   "name": "Relian - Workstations",
+   "description": "Windows client editions only (Win32_OperatingSystem ProductType 1): no servers, no domain controllers.",
+   "queries": ["SELECT * FROM Win32_OperatingSystem WHERE ProductType = 1"]
+  }
+ },
+ {
+  "id": "quiet-windows",
+  "gpoName": "Relian - Quiet Windows",
+  "description": "Fewer consumer prompts on workstations: no Microsoft consumer experiences, consumer account-state content or Windows tips (consumer experiences and tips apply on Enterprise and Education only), no tailored experiences or third-party Spotlight suggestions per user, Edge without its first-run experience, recommendations or promotional tabs. The lock screen Spotlight is left alone.",
+  "allowDefaultPolicy": false,
+  "securityFilter": "optional",
+  "linkDomainRoot": true,
+  "registry": [
+   {"cis": "none: Experience/AllowWindowsConsumerFeatures", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent", "valueName": "DisableWindowsConsumerFeatures", "type": "DWord", "value": 1},
+   {"cis": "none: Experience/DisableConsumerAccountStateContent", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent", "valueName": "DisableConsumerAccountStateContent", "type": "DWord", "value": 1},
+   {"cis": "none: Experience/AllowWindowsTips", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\CloudContent", "valueName": "DisableSoftLanding", "type": "DWord", "value": 1},
+   {"cis": "none: Edge HideFirstRunExperience", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge", "valueName": "HideFirstRunExperience", "type": "DWord", "value": 1},
+   {"cis": "none: Edge ShowRecommendationsEnabled", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge", "valueName": "ShowRecommendationsEnabled", "type": "DWord", "value": 0},
+   {"cis": "none: Edge PromotionalTabsEnabled (deprecated, still supported)", "key": "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge", "valueName": "PromotionalTabsEnabled", "type": "DWord", "value": 0},
+   {"cis": "none: Experience/AllowTailoredExperiencesWithDiagnosticData", "key": "HKCU\\Software\\Policies\\Microsoft\\Windows\\CloudContent", "valueName": "DisableTailoredExperiencesWithDiagnosticData", "type": "DWord", "value": 1},
+   {"cis": "none: Experience/AllowThirdPartySuggestionsInWindowsSpotlight", "key": "HKCU\\Software\\Policies\\Microsoft\\Windows\\CloudContent", "valueName": "DisableThirdPartySuggestions", "type": "DWord", "value": 1}
   ],
   "security": [],
   "audit": [],
