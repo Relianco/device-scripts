@@ -51,8 +51,10 @@ $script:SlTail = {
 }
 $script:SlEvents = {
     param([datetime]$SinceUtc)
-    @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = $SinceUtc.ToLocalTime() } -MaxEvents 2000 -ErrorAction SilentlyContinue |
-        Where-Object { $_.ProviderName -match '(?i)sentinel|MsiInstaller' } |
+    # Filter by provider inside the query, so unrelated events cannot use up the limit.
+    $providers = @('MsiInstaller') + @(Get-WinEvent -ListProvider '*Sentinel*' -ErrorAction SilentlyContinue |
+        Where-Object { @($_.LogLinks | ForEach-Object LogName) -contains 'Application' } | ForEach-Object Name)
+    @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = $providers; StartTime = $SinceUtc.ToLocalTime() } -MaxEvents 200 -ErrorAction SilentlyContinue |
         ForEach-Object { [pscustomobject]@{ TimeUtc = $_.TimeCreated.ToUniversalTime(); Provider = $_.ProviderName; Id = $_.Id; Message = [string]$_.Message } })
 }
 
