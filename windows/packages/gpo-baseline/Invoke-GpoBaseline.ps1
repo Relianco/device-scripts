@@ -15,8 +15,8 @@
                           Policy or Default Domain Controllers Policy, and only when the
                           definition itself sets allowDefaultPolicy.
       TenantId            Entra tenant GUID, for {{TenantId}}
-      LibraryIdHex        hex of the UTF-8 SharePoint library ID ("Copy library ID"), for
-                          {{LibraryId}}. Over 128 hex characters, split it in order into
+      LibraryIdHex        hex of the UTF-8 SharePoint library ID ("Copy library ID", encoded or
+                          decoded), for {{LibraryId}}, which is written URL-decoded. Over 128 hex characters, split it in order into
                           LibraryIdHex, LibraryIdHex2 ... LibraryIdHex8, each at most 128.
                           Hex, because the ID holds & and =. Its tenantId must equal TenantId.
       LibraryName         [A-Za-z0-9 ]{1,40}, for {{LibraryName}}; also part of the marker
@@ -380,7 +380,10 @@ function ConvertFrom-GpbArguments {
         if (-not $libTenant) { throw 'LibraryIdHex is not a SharePoint Online library ID.' }
         if (-not $values['TenantId']) { throw 'LibraryIdHex needs TenantId, to check the library is in that tenant.' }
         if ($libTenant -ne $values['TenantId']) { throw 'The library ID belongs to another tenant than TenantId.' }
-        $values.LibraryId = $id
+        # OneDrive wants the ID decoded (the TenantAutoMount docs: "[uri]::UnescapeDataString"); the decoded form must still be one.
+        $decoded = [Uri]::UnescapeDataString($id)
+        if ((Get-GpbLibraryTenant $decoded) -ne $libTenant) { throw 'LibraryIdHex does not decode to a SharePoint Online library ID.' }
+        $values.LibraryId = $decoded
     }
     if ($LibraryName) {
         if ($LibraryName -cnotmatch '\A[A-Za-z0-9](?:[A-Za-z0-9 ]{0,38}[A-Za-z0-9])?\z') { throw 'LibraryName must be 1 to 40 letters, digits or inner spaces.' }

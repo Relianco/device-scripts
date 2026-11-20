@@ -595,6 +595,8 @@ try {
     $libId = "tenantId=$tenant&siteId=%7B00000000-0000-4000-8000-000000000002%7D&webId=%7B00000000-0000-4000-8000-000000000003%7D&listId=%7B00000000-0000-4000-8000-000000000004%7D&webUrl=https%3A%2F%2Fexample%2Esharepoint%2Ecom%2Fsites%2FAccounting&version=1"
     $toParts = { param($s) $h = & $toHex $s; $parts = @(); for ($i = 0; $i -lt $h.Length; $i += 128) { $parts += $h.Substring($i, [Math]::Min(128, $h.Length - $i)) }; ,$parts }
     $libHex = & $toParts $libId
+    $libDecoded = [Uri]::UnescapeDataString($libId)
+    Assert ($libDecoded -match '\{00000000-0000-4000-8000-000000000002\}' -and $libDecoded -match 'webUrl=https://example\.sharepoint\.com/sites/Accounting&') 'test library ID is the encoded form'
     Assert ($libHex.Count -gt 1) 'library ID needs several hex parts'
     $am = @{ Definition = 'onedrive-automount'; TenantId = $tenant; LibraryIdHex = $libHex; LibraryName = 'Accounting'; ApplyTo = 'Pilot'; ApplyType = 'User' }
     $amName = 'Relian - OneDrive AutoMount Accounting'
@@ -627,6 +629,7 @@ try {
         @{ label = 'gap between hex parts'; a = @{ LibraryIdHex = @($libHex[0], '', $libHex[1]) } },
         @{ label = 'hex that is not UTF-8'; a = @{ LibraryIdHex = @('C3') } },
         @{ label = 'not a library ID'; why = 'not a SharePoint Online library ID'; a = @{ LibraryIdHex = @(& $toHex 'hello=world') } },
+        @{ label = 'library ID with an encoded extra key'; why = 'does not decode'; a = @{ LibraryIdHex = (& $toParts ($libId -replace '&version=1', '%26x%3D1&version=1')) } },
         @{ label = 'library ID with an extra key'; why = 'not a SharePoint Online library ID'; a = @{ LibraryIdHex = (& $toParts ($libId + '&x=1')) } },
         @{ label = 'library ID outside SharePoint Online'; why = 'not a SharePoint Online library ID'; a = @{ LibraryIdHex = (& $toParts ($libId -replace 'example%2Esharepoint%2Ecom', 'evil%2Eexample')) } },
         @{ label = 'library ID of another tenant'; a = @{ TenantId = '00000000-0000-4000-8000-0000000000ff' } },
@@ -664,7 +667,7 @@ try {
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan' -and (Get-Writes).Count -eq 0) "automount plan makes zero writes: $($r.report | ConvertTo-Json -Depth 5 -Compress)"
     Assert ($r.report.gpo.name -eq $amName) 'gpoName placeholder resolved'
     $amReg = @($r.report.changes | Where-Object { $_.kind -eq 'registry' })
-    Assert ($amReg.Count -eq 1 -and $amReg[0].target -eq "$amKey\Accounting" -and $amReg[0].desired -eq $libId) 'TenantAutoMount name and library ID from the arguments'
+    Assert ($amReg.Count -eq 1 -and $amReg[0].target -eq "$amKey\Accounting" -and $amReg[0].desired -ceq $libDecoded) 'TenantAutoMount name and decoded library ID from the arguments'
     $kinds = @($r.report.changes | ForEach-Object { $_.kind })
     foreach ($k in @('create', 'permission', 'registry', 'wmiFilter', 'wmiLink', 'link')) { Assert ($kinds -contains $k) "automount plan lists $k" }
 
@@ -681,7 +684,7 @@ try {
     Assert ((Get-FakePermission $g 'S-1-5-11') -eq 'GpoRead' -and (Get-FakePermission $g 'S-1-5-21-9-1102') -eq 'GpoApply') 'Authenticated Users read, ApplyTo apply'
     Assert ((Get-FakePermission $g 'S-1-5-21-9-512') -eq 'GpoEditDeleteModifySecurity') 'admin permissions untouched'
     Assert ($script:pol -contains "$($g.Id)|User|$amKey\Accounting" -and -not @($script:pol | Where-Object { $_ -like "$($g.Id)|Machine|*" })) 'HKCU value lands in the user Registry.pol only'
-    Assert ([string]$script:regValues["$($g.Id)|$amKey|Accounting"].Value -ceq $libId -and [string]$script:regValues["$($g.Id)|$amKey|Accounting"].Type -eq 'String') 'library ID written verbatim as REG_SZ'
+    Assert ([string]$script:regValues["$($g.Id)|$amKey|Accounting"].Value -ceq $libDecoded -and [string]$script:regValues["$($g.Id)|$amKey|Accounting"].Type -eq 'String') 'library ID written URL-decoded as REG_SZ'
     $wf = @($script:wmi.Values | Where-Object { $_.'msWMI-Name' -eq 'Relian - Workstations' })
     Assert ($wf.Count -eq 1 -and $script:ad[$g.Id.ToString()].gPCWQLFilter -eq "[example.invalid;$($wf[0].'msWMI-ID');0]") 'workstation WMI filter linked'
     Assert ($script:calls -contains 'New-GPLink No') 'domain-root link created disabled'
