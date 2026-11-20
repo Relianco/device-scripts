@@ -25,6 +25,9 @@
                           Computer. Only for a definition with securityFilter: Authenticated
                           Users keep GpoRead (MS16-072) and ApplyTo gets GpoApply. Without
                           them an "optional" filter gives Authenticated Users GpoApply.
+                          A Computer target gets only the computer settings and a User
+                          target only the user settings; to pilot a definition with both
+                          (quiet-windows), use a Group holding the computer and the user.
       AdoptGpo            GUID of an existing GPO without the marker, for an adopt definition
       AllowUnmarked       "true", required with AdoptGpo. An adopt definition only adds a
                           WMI filter link; an existing link, or a shared filter with other

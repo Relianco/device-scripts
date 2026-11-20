@@ -787,6 +787,9 @@ try {
     Assert ($r.exitCode -eq 0 -and $writes[1] -eq 'Backup-GPO' -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoRead' -and (Get-FakePermission $g 'S-1-5-21-9-1103') -eq 'GpoApply') "quiet-windows pilot on one computer: $($writes -join ', ')"
     $r = Invoke-GpoBaseline @qw -ApplyTo 'Pilot' -ApplyType 'User' -Context $script:ctx
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan') 'quiet-windows: a user pilot is accepted, the definition has user settings'
+    # Both halves reach a pilot only through a group holding the computer and the user.
+    $r = Invoke-GpoBaseline @qw -ApplyTo 'Accounting' -ApplyType 'Group' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and (Get-FakePermission $g 'S-1-5-21-9-1101') -eq 'GpoApply' -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoRead') 'quiet-windows: group pilot gets apply'
     $r = Invoke-GpoBaseline @qw -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 0 -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoApply') 'quiet-windows fleet run gives Authenticated Users apply again'
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'quiet-windows' -Apply 'true' -Context $script:ctx
