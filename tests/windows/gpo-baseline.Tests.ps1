@@ -82,7 +82,7 @@ function Add-FakeGpo {
     $script:gpos[$Name] = [pscustomobject]@{ Id = $Id; DisplayName = $Name; Description = $Comment }
     $script:ad[$Id.ToString()] = @{ versionNumber = 0; gPCMachineExtensionNames = ''; gPCWQLFilter = $null }
     # New-GPO's default security: Authenticated Users apply, admins edit.
-    $script:perms[$Id.ToString()] = [Collections.Generic.List[object]]@(@{ Name = 'Authenticated Users'; Sid = 'S-1-5-11'; Permission = 'GpoApply' }, @{ Name = 'Domain Admins'; Sid = 'S-1-5-21-9-512'; Permission = 'GpoEditDeleteModifySecurity' })
+    $script:perms[$Id.ToString()] = [Collections.Generic.List[object]]@(@{ Name = 'Authenticated Users'; Sid = 'S-1-5-11'; Type = 'WellKnownGroup'; Permission = 'GpoApply' }, @{ Name = 'Domain Admins'; Sid = 'S-1-5-21-9-512'; Type = 'Group'; Permission = 'GpoEditDeleteModifySecurity' })
     $dir = Join-Path $Context.PoliciesPath ('{' + $Id.ToString().ToUpper() + '}')
     [void](New-Item -ItemType Directory -Path $dir -Force)
     [IO.File]::WriteAllText((Join-Path $dir 'GPT.INI'), "[General]`r`nVersion=0`r`ndisplayName=New Group Policy Object`r`n")
@@ -139,6 +139,7 @@ function Backup-GPO {
     Assert (Test-Path -LiteralPath $Path) 'backup folder exists before Backup-GPO'
     return [pscustomobject]@{ Id = [guid]'11111111-2222-3333-4444-555555555555' }
 }
+function Remove-GPRegistryValue { [CmdletBinding()] param($Guid, $Key, $ValueName, $Server) $script:calls.Add("Remove-GPRegistryValue $Key\$ValueName"); $script:regValues.Remove("$Guid|$Key|$ValueName") }
 function Restore-GPO { [CmdletBinding()] param($BackupId, $Path, $Server) $script:calls.Add("Restore-GPO $BackupId") }
 function Remove-GPO { [CmdletBinding()] param($Guid, $Server) $script:calls.Add('Remove-GPO'); if ($script:removeFails) { Write-Error 'remove failed'; return }; $g = Find-FakeGpo $Guid; $script:gpos.Remove($g.DisplayName); $script:ad.Remove($g.Id.ToString()) }
 function Get-ADObject {
@@ -195,7 +196,7 @@ function Get-GPPermission {
     [CmdletBinding()]
     param($Guid, [switch]$All, $Server)
     Assert $All 'permissions read with -All'
-    return @($script:perms[([guid]$Guid).ToString()] | ForEach-Object { [pscustomobject]@{ Trustee = [pscustomobject]@{ Name = $_.Name; Sid = $_.Sid }; Permission = $_.Permission; Denied = $false; Inherited = $false } })
+    return @($script:perms[([guid]$Guid).ToString()] | ForEach-Object { [pscustomobject]@{ Trustee = [pscustomobject]@{ Name = $_.Name; Sid = $_.Sid; SidType = $_.Type }; Permission = $_.Permission; Denied = $false; Inherited = $false } })
 }
 function Set-GPPermission {
     [CmdletBinding()]
@@ -206,7 +207,10 @@ function Set-GPPermission {
     Assert $sid "Set-GPPermission target resolves: $TargetType $TargetName"
     $list = $script:perms[([guid]$Guid).ToString()]
     $e = @($list | Where-Object { $_.Sid -eq $sid }) | Select-Object -First 1
-    if ($e) { $e.Permission = $PermissionLevel } else { $list.Add(@{ Name = $TargetName; Sid = $sid; Permission = $PermissionLevel }) }
+    # GPMC lists a computer trustee by its sAMAccountName, with the $.
+    $listed = $TargetName; if ($TargetType -eq 'Computer') { $listed = "$TargetName$" }
+    if ($PermissionLevel -eq 'None') { if ($e) { [void]$list.Remove($e) } }
+    elseif ($e) { $e.Permission = $PermissionLevel } else { $list.Add(@{ Name = $listed; Sid = $sid; Type = $TargetType; Permission = $PermissionLevel }) }
 }
 function Get-FakePermission { param($Gpo, [string]$Sid) $e = @($script:perms[$Gpo.Id.ToString()] | Where-Object { $_.Sid -eq $Sid }) | Select-Object -First 1; if ($e) { return $e.Permission }; return 'None' }
 function Get-GPInheritance {
@@ -632,6 +636,7 @@ try {
         @{ label = 'ApplyTo without ApplyType'; a = @{ ApplyType = '' } },
         @{ label = 'unknown ApplyType'; a = @{ ApplyType = 'OU' } },
         @{ label = 'ApplyTo with LDAP metacharacters'; a = @{ ApplyTo = 'Pilot*)(x' } },
+        @{ label = 'ApplyTo with a trailing space'; a = @{ ApplyTo = 'Pilot ' } },
         @{ label = 'ApplyTo not in the directory'; a = @{ ApplyTo = 'Nobody' } },
         @{ label = 'ApplyType Computer on a user-side definition'; a = @{ ApplyTo = 'PILOT-PC'; ApplyType = 'Computer' } },
         @{ label = 'required filter without ApplyTo'; a = @{ ApplyTo = ''; ApplyType = '' } },
@@ -646,6 +651,7 @@ try {
         $script:calls.Clear()
         $r = Invoke-GpoBaseline @p -Apply 'true' -Context $script:ctx
         Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) "refused: $($case.label) ($($r.report.status) $($r.report['reason']))"
+        if ($case.label -eq 'required filter without ApplyTo') { Assert ($script:calls.Count -eq 0) 'required filter refused before any read' }
         if ($case.Contains('why')) { Assert ($r.report.reason -like "*$($case.why)*") "refused for the right reason: $($case.label) ($($r.report.reason))" }
     }
     $r = Invoke-GpoBaseline -Definition 'password-lockout' -ApplyTo 'Pilot' -ApplyType 'User' -AllowDefaultPolicy 'true' -Context $script:ctx
@@ -688,14 +694,28 @@ try {
     $r = Invoke-GpoBaseline @p -Apply 'true' -Context $script:ctx
     $writes = Get-Writes
     Assert ($r.exitCode -eq 0 -and $writes[1] -eq 'Backup-GPO' -and $writes[2] -eq 'Set-GPPermission Accounting GpoApply' -and $r.report.backupId) "ApplyTo switch backed up first: $($writes -join ', ')"
+    Assert ((Get-FakePermission $g 'S-1-5-21-9-1102') -eq 'None' -and (Get-FakePermission $g 'S-1-5-21-9-1101') -eq 'GpoApply' -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoRead') 'ApplyTo switch removes the previous target'
+    $script:calls.Clear()
+    $r = Invoke-GpoBaseline @p -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and (Get-Writes).Count -eq 0) 'ApplyTo switch is idempotent'
+    # A computer target from an earlier pilot is removed by its name without the $.
+    $script:perms[$g.Id.ToString()].Add(@{ Name = 'PILOT-PC$'; Sid = 'S-1-5-21-9-1103'; Type = 'Computer'; Permission = 'GpoApply' })
+    $r = Invoke-GpoBaseline @p -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and ($script:calls -contains 'Set-GPPermission PILOT-PC None') -and (Get-FakePermission $g 'S-1-5-21-9-1103') -eq 'None') 'stale computer grant removed'
 
     # A trustee that already holds more than apply is never lowered.
-    $script:perms[$g.Id.ToString()].Add(@{ Name = 'PILOT-PC'; Sid = 'S-1-5-21-9-1103'; Permission = 'GpoEditDeleteModifySecurity' })
+    $script:perms[$g.Id.ToString()].Add(@{ Name = 'PILOT-PC$'; Sid = 'S-1-5-21-9-1103'; Type = 'Computer'; Permission = 'GpoEditDeleteModifySecurity' })
     $script:sids['User|Pilot'] = 'S-1-5-21-9-1103'
     $script:calls.Clear()
     $r = Invoke-GpoBaseline @am -Apply 'true' -Context $script:ctx
-    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'ApplyTo with edit rights refused, not lowered'
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) "ApplyTo with edit rights refused, not lowered: $($r.report | ConvertTo-Json -Depth 5 -Compress) $($script:calls -join ',')"
     $script:sids['User|Pilot'] = 'S-1-5-21-9-1102'
+
+    # A new GPO's own admin grants are seen at write time and never lowered.
+    $script:calls.Clear()
+    $r = Invoke-GpoBaseline -Definition 'onedrive-users' -ApplyTo 'Domain Admins' -ApplyType 'Group' -Apply 'true' -Context $script:ctx
+    $nu = $script:gpos['Relian - OneDrive (users)']
+    Assert ($r.exitCode -eq 1 -and -not @($script:calls | Where-Object { $_ -like 'Set-GP*' }) -and (Get-FakePermission $nu 'S-1-5-21-9-512') -eq 'GpoEditDeleteModifySecurity') "new GPO admin rights never lowered: $($script:calls -join ', ')"
 
     # The cis definition still may not link at the domain root.
     $r = Invoke-GpoBaseline -Definition 'cis-ws2022-dc-low-risk' -LinkTo 'DC=example,DC=invalid' -Context $script:ctx
@@ -764,14 +784,22 @@ try {
     $r = Invoke-GpoBaseline -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'noChange' -and (Get-Writes).Count -eq 0) 'second adopt apply changes nothing'
 
-    # Restore path: plan names the backup, Apply restores it and puts the WMI link back as it was.
+    # Restore path: undo only what adopt added, after a backup; later edits by others survive.
+    $script:regValues["$($so.Id)|HKLM\Software\Policies\Later|ByClient"] = [pscustomobject]@{ Value = 1; Type = 'DWord' }
     $script:calls.Clear()
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Context $script:ctx
-    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan' -and $r.report.changes[0].kind -eq 'restore' -and $r.report.changes[0].desired -eq '11111111-2222-3333-4444-555555555555' -and (Get-Writes).Count -eq 0) 'adopt restore plan names the backup and writes nothing'
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan' -and @($r.report.changes).Count -eq 1 -and $r.report.changes[0].kind -eq 'unlinkWmi' -and $r.report.lastBackupId -eq '11111111-2222-3333-4444-555555555555' -and (Get-Writes).Count -eq 0) "adopt undo plan writes nothing and names the pre-adopt backup: $($r.report | ConvertTo-Json -Depth 5 -Compress)"
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
-    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'restored' -and ($script:calls -contains 'Restore-GPO 11111111-2222-3333-4444-555555555555') -and -not ($script:calls -contains 'Remove-GPO')) 'adopted GPO restored from its backup, never removed'
-    Assert (-not $script:ad[$adoptId].gPCWQLFilter -and $script:gpos.ContainsKey('Set OneDrive')) 'restore clears the WMI link it added'
-    Assert ($r.report.backupId) 'restore prints the backup taken before it'
+    $writes = Get-Writes
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'undone' -and $writes[1] -eq 'Backup-GPO' -and $r.report.backupId -and -not @($writes | Where-Object { $_ -match '^(Restore-GPO|Remove-GPO|Remove-ADObject)' })) "adopt undo backs up first, never restores or removes: $($writes -join ', ')"
+    Assert (-not $script:ad[$adoptId].gPCWQLFilter -and $script:gpos.ContainsKey('Set OneDrive')) 'undo clears the WMI link adopt added'
+    Assert ([string]$script:regValues["$($so.Id)|HKLM\Software\Policies\Later|ByClient"].Value -eq '1' -and [string]$script:regValues["$($so.Id)|$officeKey|updatebranch"].Value -eq 'Current') 'undo keeps settings adopt did not add'
+    $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'noChange') 'second undo changes nothing'
+    # A link someone else set later is not ours to clear.
+    $script:ad[$adoptId].gPCWQLFilter = '[example.invalid;{CCCCCCCC-0000-0000-0000-000000000000};0]'
+    $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and $script:ad[$adoptId].gPCWQLFilter -like '*CCCCCCCC*') 'undo leaves a foreign WMI link'
 
     # Add-only: an existing different WMI link or value is a conflict, never replaced.
     $script:ctx = New-FakeWorld
@@ -781,11 +809,22 @@ try {
     $r = Invoke-GpoBaseline -Definition 'workstations-only' -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'adopt never replaces an existing WMI link'
     $script:ad[$so.Id.ToString()].gPCWQLFilter = $null
+    $script:wmi['{BBBBBBBB-0000-0000-0000-000000000000}'] = @{ DistinguishedName = 'CN={BBBBBBBB-0000-0000-0000-000000000000},CN=SOM,CN=WMIPolicy,CN=System,DC=example,DC=invalid'; 'msWMI-Name' = 'Relian - Workstations'; 'msWMI-Parm1' = '[relian-gpo-baseline:onedrive-workstations] x'; 'msWMI-Parm2' = 'other'; 'msWMI-ID' = '{BBBBBBBB-0000-0000-0000-000000000000}' }
+    $r = Invoke-GpoBaseline -Definition 'workstations-only' -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0 -and $script:wmi['{BBBBBBBB-0000-0000-0000-000000000000}'].'msWMI-Parm2' -eq 'other') 'adopt never rewrites a shared WMI filter'
+    $script:wmi.Clear()
     $adoptReg = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; security = @(); audit = @()
         registry = @([pscustomobject]@{ cis = 'x'; key = $officeKey; valueName = 'updatebranch'; type = 'String'; value = 'MonthlyEnterprise' }) }
     $script:regValues["$($so.Id)|$officeKey|updatebranch"] = [pscustomobject]@{ Value = 'Current'; Type = 'String' }
     $r = Invoke-GpoBaseline -DefinitionObject $adoptReg -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'refused' -and (Get-Writes).Count -eq 0) 'adopt never replaces an existing value'
+    $newKey = 'HKLM\Software\Policies\Relian\Test'
+    $adoptAdd = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; security = @(); audit = @()
+        registry = @([pscustomobject]@{ cis = 'x'; key = $newKey; valueName = 'Added'; type = 'DWord'; value = 1 }) }
+    $r = Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'adopt adds an absent value'
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'undone' -and -not $script:regValues.ContainsKey("$($so.Id)|$newKey|Added") -and [string]$script:regValues["$($so.Id)|$officeKey|updatebranch"].Value -eq 'Current') 'undo removes only the value adopt added'
     foreach ($k in @('security', 'securityFilter')) {
         $bad = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; registry = @(); audit = @(); security = @() }
         if ($k -eq 'security') { $bad.security = @([pscustomobject]@{ cis = 'x'; section = 'System Access'; key = 'LockoutBadCount'; value = '1' }) } else { $bad | Add-Member securityFilter 'optional' }
@@ -810,5 +849,12 @@ try {
     Assert ($sa['MinimumPasswordLength'] -eq '12' -and $sa['LockoutBadCount'] -eq '10' -and $sa['ResetLockoutCount'] -eq '15' -and $sa['LockoutDuration'] -eq '15' -and -not $sa.Contains('MaximumPasswordAge')) 'G5 values, no expiry set'
     $r = Invoke-GpoBaseline -Definition 'password-lockout' -AllowDefaultPolicy 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'noChange') 'password-lockout is idempotent'
+    # A publish-only retry after a partial apply keeps the restore point taken before the values changed.
+    $stateDir = Join-Path $script:ctx.BackupRoot '{31B2F340-016D-11D2-945F-00C04FB984F9}'
+    $restorePoint = [IO.File]::ReadAllText((Join-Path $stateDir 'last-backup.json'))
+    [IO.File]::WriteAllText((Join-Path $stateDir 'pending-publish'), 'x')
+    Start-Sleep -Milliseconds 20
+    $r = Invoke-GpoBaseline -Definition 'password-lockout' -AllowDefaultPolicy 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and @($r.report.changes).Count -eq 1 -and $r.report.changes[0].kind -eq 'publish' -and [IO.File]::ReadAllText((Join-Path $stateDir 'last-backup.json')) -eq $restorePoint) 'publish-only retry keeps the restore point'
 } finally { Remove-Item -LiteralPath $tmp -Recurse -Force }
 'gpo-baseline tests passed'

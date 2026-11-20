@@ -43,8 +43,9 @@
     values. A GPO with the same name but without the marker is never touched.
 
     Uninstall with Apply=true backs up and removes the GPO this package created, or,
-    for an allowed default policy or an adopted GPO, restores the backup taken before the
-    last change (Restore-GPO; for an adopted GPO the WMI link is then set back as it was).
+    for an allowed default policy, restores the backup taken before the last change. For an
+    adopted GPO it backs up, then undoes only what adopt added (values that still match, and
+    its own WMI link); the backup taken before adoption stays for a manual Restore-GPO.
 
     Mechanism (Microsoft documentation):
     - Registry policy: Set-GPRegistryValue, which writes Registry.pol and updates the
@@ -386,7 +387,7 @@ function ConvertFrom-GpbArguments {
     if ([bool]$ApplyTo -ne [bool]$ApplyType) { throw 'ApplyTo and ApplyType go together.' }
     if ($ApplyTo) {
         # The name goes into an LDAP filter and Set-GPPermission: no metacharacters.
-        if ($ApplyTo -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}\z') { throw 'ApplyTo must be an account name (letters, digits, space . _ -; a computer without the $).' }
+        if ($ApplyTo -cnotmatch '\A[A-Za-z0-9](?:[A-Za-z0-9 ._-]{0,62}[A-Za-z0-9_-])?\z') { throw 'ApplyTo must be an account name (letters, digits, space . _ -; a computer without the $).' }
         if (@('Group', 'User', 'Computer') -cnotcontains $ApplyType) { throw 'ApplyType must be Group, User or Computer.' }
     }
     if ($AdoptGpo -and $AdoptGpo -notmatch "\A\{?$GpbGuid\}?\z") { throw 'AdoptGpo must be a GPO GUID.' }
@@ -728,10 +729,17 @@ function Get-GpbPlan {
         # New-GPO grants Authenticated Users GpoApply.
         $au = 'GpoApply'; if ($Gpo) { $au = & $level 'S-1-5-11' }
         $want = 'GpoApply'; if ($Filter.Name) { $want = 'GpoRead' }
-        if ($au -ne $want) { $changes.Add([ordered]@{ kind = 'permission'; target = 'Authenticated Users'; current = $au; desired = $want; trustee = 'Authenticated Users'; trusteeType = 'Group' }) }
+        if ($au -ne $want) { $changes.Add([ordered]@{ kind = 'permission'; target = 'Authenticated Users'; current = $au; desired = $want; trustee = 'Authenticated Users'; trusteeType = 'Group'; sid = 'S-1-5-11' }) }
         if ($Filter.Name) {
             $cur = 'None'; if ($Gpo) { $cur = & $level $Filter.Sid }
-            if ($cur -ne 'GpoApply') { $changes.Add([ordered]@{ kind = 'permission'; target = "$($Filter.Type) $($Filter.Name)"; current = $cur; desired = 'GpoApply'; trustee = $Filter.Name; trusteeType = $Filter.Type }) }
+            if ($cur -ne 'GpoApply') { $changes.Add([ordered]@{ kind = 'permission'; target = "$($Filter.Type) $($Filter.Name)"; current = $cur; desired = 'GpoApply'; trustee = $Filter.Name; trusteeType = $Filter.Type; sid = $Filter.Sid }) }
+            # A previous ApplyTo keeps apply unless removed: ApplyTo names the one account the GPO applies to.
+            foreach ($p in @($perms | Where-Object { [string]$_.Permission -eq 'GpoApply' -and @('S-1-5-11', $Filter.Sid) -notcontains [string]$_.Trustee.Sid })) {
+                $type = 'Group'; if (@('User', 'Computer') -contains [string]$p.Trustee.SidType) { $type = [string]$p.Trustee.SidType }
+                # Set-GPPermission names a computer without its $.
+                $name = [string]$p.Trustee.Name; if ($type -eq 'Computer') { $name = $name.TrimEnd('$') }
+                $changes.Add([ordered]@{ kind = 'permission'; target = "$type $name"; current = 'GpoApply'; desired = 'None'; trustee = $name; trusteeType = $type; sid = [string]$p.Trustee.Sid })
+            }
         }
     }
     foreach ($item in @($Def.registry)) {
@@ -825,16 +833,15 @@ function Initialize-GpbStateDir {
 function Get-GpbStateDir { param($Context, $Gpo) Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}') }
 
 function Save-GpbBackup {
-    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record, [hashtable]$Extra)
+    param($Context, $Gpo, [string]$DefinitionId, [switch]$Record)
     $dir = Initialize-GpbStateDir $Context $Gpo
     $backup = Backup-GPO -Guid $Gpo.Id -Path $dir -Comment "relian-gpo-baseline $DefinitionId" -Server $Context.Server -ErrorAction Stop
     $id = ''
     if ($backup -and $backup.PSObject.Properties['Id']) { $id = [string]$backup.Id }
     if (-not $id) { throw 'Backup-GPO returned no backup id. Nothing was changed.' }
     if ($Record) {
-        $state = [ordered]@{ backupId = $id; gpoId = [string]$Gpo.Id; definition = $DefinitionId; utc = [datetime]::UtcNow.ToString('o') }
-        if ($Extra) { foreach ($k in $Extra.Keys) { $state[$k] = $Extra[$k] } }
-        [IO.File]::WriteAllText((Join-Path $dir 'last-backup.json'), ($state | ConvertTo-Json -Compress))
+        $state = [ordered]@{ backupId = $id; gpoId = [string]$Gpo.Id; definition = $DefinitionId; utc = [datetime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress
+        [IO.File]::WriteAllText((Join-Path $dir 'last-backup.json'), $state)
     }
     return $id
 }
@@ -895,13 +902,21 @@ function Invoke-GpbApplyWrites {
         $Gpo = New-GPO -Name $Def.gpoName -Comment ("$($Def.marker) Managed by the Relian gpo-baseline package. " + $Def.description) -Server $Context.Server -ErrorAction Stop
         $Report.gpo.id = [string]$Gpo.Id; $Report.gpo.exists = $true; $Report.gpo.owned = $true
     } else {
-        # An adopted GPO's restore also puts its WMI link back, so record the link as backed up.
-        $extra = $null
-        if ((Get-GpbProp $Def 'adopt') -eq $true) { $extra = @{ wmiLinkBefore = [string](Get-ADObject -Identity (Get-GpbGpoDn $Context $Gpo) -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter } }
-        $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record -Extra $extra
+        # A publish-only retry backs up settings this package already wrote: it must not become the restore point.
+        $settingChange = [bool]@($Changes | Where-Object { $_.kind -ne 'publish' }).Count
+        $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record:$settingChange
     }
     # Security filtering before any setting: a run that stops here applies to fewer, never more.
-    foreach ($c in @($Changes | Where-Object { $_.kind -eq 'permission' })) {
+    $permChanges = @($Changes | Where-Object { $_.kind -eq 'permission' })
+    if ($permChanges.Count) {
+        # Read again: a GPO created this run carries New-GPO's ACL, which the plan could not see.
+        $now = @(Get-GPPermission -Guid $Gpo.Id -All -Server $Context.Server -ErrorAction Stop | Where-Object { -not $_.Denied })
+        foreach ($c in $permChanges) {
+            $p = @($now | Where-Object { [string]$_.Trustee.Sid -eq $c.sid }) | Select-Object -First 1
+            if ($p -and @('GpoRead', 'GpoApply') -notcontains [string]$p.Permission) { throw "$($c.target) holds $($p.Permission) on this GPO; security filtering never lowers it." }
+        }
+    }
+    foreach ($c in $permChanges) {
         Set-GPPermission -Guid $Gpo.Id -PermissionLevel $c.desired -TargetName $c.trustee -TargetType $c.trusteeType -Replace -Server $Context.Server -ErrorAction Stop | Out-Null
     }
     $filter = $null
@@ -1030,6 +1045,7 @@ function Invoke-GpoBaseline {
     if ($resolved.Missing.Count -and ($Action -ne 'Uninstall' -or [string](Get-GpbProp $def 'gpoName') -match '\{\{')) { return (& $refuse ('Missing arguments for {{' + ($resolved.Missing -join '}}, {{') + '}} (LibraryId comes from LibraryIdHex).')) }
     $problem = Test-GpbDefinition $def $Action
     if ($problem) { return (& $refuse $problem) }
+    if ($sf -eq 'required' -and -not $a.ApplyTo -and $Action -ne 'Uninstall') { return (& $refuse 'This definition applies only to the account named by ApplyTo and ApplyType.') }
     if ($a.ApplyType -and $Action -ne 'Uninstall') {
         # Computer policy is filtered on the computer, user policy on the user; a mismatch would never apply.
         $hives = @(@(Get-GpbProp $def 'registry') | ForEach-Object { ([string]$_.key).Substring(0, 4) })
@@ -1062,33 +1078,47 @@ function Invoke-GpoBaseline {
             $ownFilter = Get-GpbWmiFilter -Context $Context -Name $w.name
             if ($ownFilter -and -not ([string]$ownFilter.'msWMI-Parm1').Contains('[relian-gpo-baseline:')) { return (& $refuse 'A WMI filter with this name exists without the Relian marker. It was not changed.') }
         }
-        $backupDir = $null; $lastRecord = $null; $lastBackup = $null
+        $backupDir = $null; $lastBackup = $null
         if ($gpo) {
             $backupDir = Join-Path $Context.BackupRoot ('{' + $gpo.Id.ToString().ToUpper() + '}')
             $lastPath = Join-Path $backupDir 'last-backup.json'
-            if ([IO.File]::Exists($lastPath)) { $lastRecord = [IO.File]::ReadAllText($lastPath) | ConvertFrom-Json; $lastBackup = $lastRecord.backupId }
+            if ([IO.File]::Exists($lastPath)) { $lastBackup = ([IO.File]::ReadAllText($lastPath) | ConvertFrom-Json).backupId }
         }
 
         if ($Action -eq 'Uninstall') {
             if (-not $gpo) { $report.status = 'nothingToUninstall'; return @{ report = $report; exitCode = 0 } }
-            if (($isDefault -or $adopt) -and -not $lastBackup) { return (& $refuse 'No Relian backup of this GPO to restore.') }
-            $kind = 'remove'; if ($isDefault -or $adopt) { $kind = 'restore' }
+            if ($isDefault -and -not $lastBackup) { return (& $refuse 'No Relian backup of this default policy to restore.') }
+            if ($adopt) {
+                # Undo only what adopt added (it refused to replace anything), so later edits by others survive.
+                $undo = @()
+                foreach ($item in @($def.registry)) {
+                    $cur = $null
+                    try { $cur = Get-GPRegistryValue -Guid $gpo.Id -Key $item.key -ValueName $item.valueName -Server $Context.Server -ErrorAction Stop } catch { $cur = $null }
+                    if ($cur -and [string]$cur.Value -eq [string]$item.value -and [string]$cur.Type -eq [string]$item.type) { $undo += [ordered]@{ kind = 'removeValue'; target = "$($item.key)\$($item.valueName)"; current = [string]$cur.Value; desired = $null; item = $item } }
+                }
+                if ($ownFilter) {
+                    $linked = [string](Get-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter
+                    if ($linked -eq "[$($Context.DnsRoot);$($ownFilter.'msWMI-ID');0]") { $undo += [ordered]@{ kind = 'unlinkWmi'; target = $w.name; current = $linked; desired = $null } }
+                }
+                $report.changes = @(Get-GpbPublicChanges $undo)
+                $report.lastBackupId = $lastBackup
+                if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
+                if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
+                if ($undo.Count -eq 0) { $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
+                $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
+                foreach ($u in $undo) {
+                    if ($u.kind -eq 'removeValue') { Remove-GPRegistryValue -Guid $gpo.Id -Key $u.item.key -ValueName $u.item.valueName -Server $Context.Server -ErrorAction Stop | Out-Null }
+                    else { Set-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop }
+                }
+                $report.status = 'undone'
+                return @{ report = $report; exitCode = 0 }
+            }
+            $kind = 'remove'; if ($isDefault) { $kind = 'restore' }
             $report.changes = @([ordered]@{ kind = $kind; target = $def.gpoName; current = $null; desired = $lastBackup })
             if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
             if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
             $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
-            if ($isDefault -or $adopt) {
-                Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server -ErrorAction Stop | Out-Null
-                if ($adopt -and $lastRecord.PSObject.Properties['wmiLinkBefore']) {
-                    $dn = Get-GpbGpoDn $Context $gpo
-                    $before = [string]$lastRecord.wmiLinkBefore
-                    if ([string](Get-ADObject -Identity $dn -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter -ne $before) {
-                        if ($before) { Set-ADObject -Identity $dn -Replace @{ gPCWQLFilter = $before } -Server $Context.Server -ErrorAction Stop }
-                        else { Set-ADObject -Identity $dn -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop }
-                    }
-                }
-                $report.status = 'restored'
-            }
+            if ($isDefault) { Restore-GPO -BackupId $lastBackup -Path $backupDir -Server $Context.Server -ErrorAction Stop | Out-Null; $report.status = 'restored' }
             else {
                 Remove-GPO -Guid $gpo.Id -Server $Context.Server -ErrorAction Stop | Out-Null
                 # The owned WMI filter goes too, unless another GPO still uses it.
@@ -1109,7 +1139,6 @@ function Invoke-GpoBaseline {
         }
         $filter = $null
         if ($sf) {
-            if ($sf -eq 'required' -and -not $a.ApplyTo) { return (& $refuse 'This definition applies only to the account named by ApplyTo and ApplyType.') }
             $filter = @{ Name = $a.ApplyTo; Type = $a.ApplyType; Sid = $null }
             if ($a.ApplyTo) {
                 $filter.Sid = Get-GpbTrusteeSid -Context $Context -Name $a.ApplyTo -Type $a.ApplyType
@@ -1121,7 +1150,7 @@ function Invoke-GpoBaseline {
         $report.changes = @(Get-GpbPublicChanges $changes)
         $report.changeCount = $changes.Count
         # Adopt only adds: an existing different value or WMI link is never replaced.
-        if ($adopt -and @($changes | Where-Object { ($_.kind -eq 'registry' -and $null -ne $_.current) -or ($_.kind -eq 'wmiLink' -and $_.current) }).Count) { return (& $refuse 'The adopted GPO already holds a different value or WMI link. Adopt only adds; nothing was changed.') }
+        if ($adopt -and @($changes | Where-Object { ($_.kind -eq 'registry' -and $null -ne $_.current) -or ($_.kind -eq 'wmiLink' -and $_.current) -or ($_.kind -eq 'wmiFilter' -and $null -ne $_.current) }).Count) { return (& $refuse 'The adopted GPO already holds a different value or WMI link, or the shared WMI filter has other queries. Adopt only adds; nothing was changed.') }
         # Security filtering only moves trustees between none, read and apply; edit rights are never lowered.
         if (@($changes | Where-Object { $_.kind -eq 'permission' -and @('None', 'GpoRead', 'GpoApply') -notcontains $_.current }).Count) { return (& $refuse 'A security filter trustee holds more than apply on this GPO. It was not changed.') }
         if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
