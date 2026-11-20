@@ -830,6 +830,21 @@ function Initialize-GpbStateDir {
     return $dir
 }
 
+function Get-GpbAdoptRecordPath { param($Context, $Gpo, [string]$Id) Join-Path (Get-GpbStateDir $Context $Gpo) "adopted-$Id.json" }
+
+# What an adopt definition added to this GPO: "key|valueName" strings and whether it set the WMI link.
+function Get-GpbAdoptRecord {
+    param($Context, $Gpo, [string]$Id)
+    $added = @{ values = @(); wmiLink = $false }
+    $path = Get-GpbAdoptRecordPath $Context $Gpo $Id
+    if ([IO.File]::Exists($path)) {
+        $o = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+        $added.values = @($o.values | Where-Object { $_ })
+        $added.wmiLink = $o.wmiLink -eq $true
+    }
+    return $added
+}
+
 function Get-GpbStateDir { param($Context, $Gpo) Join-Path $Context.BackupRoot ('{' + $Gpo.Id.ToString().ToUpper() + '}') }
 
 function Save-GpbBackup {
@@ -905,6 +920,13 @@ function Invoke-GpbApplyWrites {
         # A publish-only retry backs up settings this package already wrote: it must not become the restore point.
         $settingChange = [bool]@($Changes | Where-Object { $_.kind -ne 'publish' }).Count
         $Report.backupId = Save-GpbBackup -Context $Context -Gpo $Gpo -DefinitionId $Def.id -Record:$settingChange
+        if ((Get-GpbProp $Def 'adopt') -eq $true) {
+            # Record what adopt adds before adding it (the plan only holds absent values and an empty link), so Uninstall undoes exactly that.
+            $added = Get-GpbAdoptRecord $Context $Gpo $Def.id
+            foreach ($c in @($Changes | Where-Object { $_.kind -eq 'registry' })) { $v = "$($c.item.key)|$($c.item.valueName)"; if ($added.values -notcontains $v) { $added.values += $v } }
+            if (@($Changes | Where-Object { $_.kind -eq 'wmiLink' }).Count) { $added.wmiLink = $true }
+            [IO.File]::WriteAllText((Get-GpbAdoptRecordPath $Context $Gpo $Def.id), ($added | ConvertTo-Json -Compress))
+        }
     }
     # Security filtering before any setting: a run that stops here applies to fewer, never more.
     $permChanges = @($Changes | Where-Object { $_.kind -eq 'permission' })
@@ -1089,14 +1111,15 @@ function Invoke-GpoBaseline {
             if (-not $gpo) { $report.status = 'nothingToUninstall'; return @{ report = $report; exitCode = 0 } }
             if ($isDefault -and -not $lastBackup) { return (& $refuse 'No Relian backup of this default policy to restore.') }
             if ($adopt) {
-                # Undo only what adopt added (it refused to replace anything), so later edits by others survive.
+                # Undo only what adopt recorded adding (still matching), so pre-existing settings and later edits by others survive.
                 $undo = @()
-                foreach ($item in @($def.registry)) {
+                $added = Get-GpbAdoptRecord $Context $gpo $def.id
+                foreach ($item in @($def.registry | Where-Object { $added.values -contains "$($_.key)|$($_.valueName)" })) {
                     $cur = $null
                     try { $cur = Get-GPRegistryValue -Guid $gpo.Id -Key $item.key -ValueName $item.valueName -Server $Context.Server -ErrorAction Stop } catch { $cur = $null }
                     if ($cur -and [string]$cur.Value -eq [string]$item.value -and [string]$cur.Type -eq [string]$item.type) { $undo += [ordered]@{ kind = 'removeValue'; target = "$($item.key)\$($item.valueName)"; current = [string]$cur.Value; desired = $null; item = $item } }
                 }
-                if ($ownFilter) {
+                if ($ownFilter -and $added.wmiLink) {
                     $linked = [string](Get-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Properties gPCWQLFilter -Server $Context.Server -ErrorAction Stop).gPCWQLFilter
                     if ($linked -eq "[$($Context.DnsRoot);$($ownFilter.'msWMI-ID');0]") { $undo += [ordered]@{ kind = 'unlinkWmi'; target = $w.name; current = $linked; desired = $null } }
                 }
@@ -1110,6 +1133,7 @@ function Invoke-GpoBaseline {
                     if ($u.kind -eq 'removeValue') { Remove-GPRegistryValue -Guid $gpo.Id -Key $u.item.key -ValueName $u.item.valueName -Server $Context.Server -ErrorAction Stop | Out-Null }
                     else { Set-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop }
                 }
+                [IO.File]::Delete((Get-GpbAdoptRecordPath $Context $gpo $def.id))
                 $report.status = 'undone'
                 return @{ report = $report; exitCode = 0 }
             }

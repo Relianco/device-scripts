@@ -800,6 +800,14 @@ try {
     $script:ad[$adoptId].gPCWQLFilter = '[example.invalid;{CCCCCCCC-0000-0000-0000-000000000000};0]'
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'noChange' -and $script:ad[$adoptId].gPCWQLFilter -like '*CCCCCCCC*') 'undo leaves a foreign WMI link'
+    # A GPO that already used the workstation filter before adoption keeps it: adopt added nothing, so there is nothing to undo.
+    $pre = Add-FakeGpo -Context $script:ctx -Name 'Already Filtered' -Comment ''
+    $wfNow = @($script:wmi.Values | Where-Object { $_.'msWMI-Name' -eq 'Relian - Workstations' })[0]
+    $script:ad[$pre.Id.ToString()].gPCWQLFilter = "[example.invalid;$($wfNow.'msWMI-ID');0]"
+    $r = Invoke-GpoBaseline -Definition 'workstations-only' -AdoptGpo $pre.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange') 'adopting an already filtered GPO changes nothing'
+    $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $pre.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and $script:ad[$pre.Id.ToString()].gPCWQLFilter -eq "[example.invalid;$($wfNow.'msWMI-ID');0]") 'undo keeps a WMI link that predates adoption'
 
     # Add-only: an existing different WMI link or value is a conflict, never replaced.
     $script:ctx = New-FakeWorld
@@ -825,6 +833,12 @@ try {
     Assert ($r.exitCode -eq 0 -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'adopt adds an absent value'
     $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'undone' -and -not $script:regValues.ContainsKey("$($so.Id)|$newKey|Added") -and [string]$script:regValues["$($so.Id)|$officeKey|updatebranch"].Value -eq 'Current') 'undo removes only the value adopt added'
+    # A value that already matched before adoption is not adopt's to remove.
+    $script:regValues["$($so.Id)|$newKey|Added"] = [pscustomobject]@{ Value = 1; Type = 'DWord' }
+    $r = Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange') 'adopting a GPO that already holds the value changes nothing'
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'undo keeps a value that predates adoption'
     foreach ($k in @('security', 'securityFilter')) {
         $bad = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; registry = @(); audit = @(); security = @() }
         if ($k -eq 'security') { $bad.security = @([pscustomobject]@{ cis = 'x'; section = 'System Access'; key = 'LockoutBadCount'; value = '1' }) } else { $bad | Add-Member securityFilter 'optional' }
