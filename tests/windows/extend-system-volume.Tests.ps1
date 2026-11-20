@@ -69,4 +69,11 @@ Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -like 'read-back*') 'Read-back m
 $line = ConvertTo-EsLine $r.Result
 Assert ([System.Text.Encoding]::UTF8.GetByteCount($line) -le 2000 -and $line -notmatch "`n") 'One line under 2000 bytes'
 
+# Unvalidated input is clipped, so a refusal stays bounded too.
+$r = Invoke-EsMain -Action ('x' * 5000) -Section ('y' * 5000)
+$line = ConvertTo-EsLine $r.Result
+Assert ($r.ExitCode -eq 1 -and $r.Result.Action.Length -le 40 -and [System.Text.Encoding]::UTF8.GetByteCount($line) -le 2000) 'Long Action/Section clipped'
+$big = [ordered]@{ Package = 'extend-system-volume'; Status = 'error'; Other = ('z' * 5000) }
+Assert ([System.Text.Encoding]::UTF8.GetByteCount((ConvertTo-EsLine $big)) -le 2000) 'Final fallback keeps the line bounded'
+
 Write-Output 'extend-system-volume tests passed'

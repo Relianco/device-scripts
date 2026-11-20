@@ -62,7 +62,8 @@ function Get-EsState {
 
 function Invoke-EsMain {
     param([string]$Action = '', [string]$Section = '', [string]$PinVersion = 'pinned')
-    $result = [ordered]@{ Package = 'extend-system-volume'; Action = $Action; Section = $Section; Status = 'error' }
+    $clip = { param($v) ([string]$v).Substring(0, [Math]::Min(40, ([string]$v).Length)) }
+    $result = [ordered]@{ Package = 'extend-system-volume'; Action = (& $clip $Action); Section = (& $clip $Section); Status = 'error' }
     if ([string]::IsNullOrWhiteSpace($PinVersion)) { $result.Status = 'disabled'; return @{ ExitCode = 0; Result = $result } }
     $fail = { param($reason) $result.Reason = $reason; return @{ ExitCode = 1; Result = $result } }
     if ($Section -notin @('', 'Evidence')) { return & $fail 'unsupported section' }
@@ -99,6 +100,9 @@ function ConvertTo-EsLine($Result) {
         foreach ($k in @('After', 'Before')) { if ($Result.Contains($k)) { $Result[$k].PartitionsAfter = @() } }
         if ($Result.Contains('Reason')) { $Result.Reason = ([string]$Result.Reason).Substring(0, [Math]::Min(200, ([string]$Result.Reason).Length)) }
         $line = ConvertTo-Json -InputObject $Result -Depth 5 -Compress
+    }
+    if ([System.Text.Encoding]::UTF8.GetByteCount($line) -gt $script:EsMaxBytes) {
+        $line = ConvertTo-Json -InputObject ([ordered]@{ Package = 'extend-system-volume'; Status = [string]$Result.Status; Reason = 'output over limit; see device log' }) -Compress
     }
     return $line
 }
