@@ -354,19 +354,20 @@ try {
     Assert (-not (Invoke-GpoEvidence -Section Store -Context $ctx | ConvertFrom-Json).store.oneDriveAdml.present) 'missing adml reported'
 
     # Profiles section.
+    function Get-FixturePath { param($Share, $Leaf, $Root = '\\fs1') $Root + '\' + $Share + '\' + $Leaf }
     function New-FakeUser { param($Sam, $ProfDir = $null, $HomeDir = $null, $Drive = $null, $Logon = $null, [int]$Bad = 0)
         [pscustomobject]@{ SamAccountName = $Sam; profilePath = $ProfDir; homeDirectory = $HomeDir; homeDrive = $Drive; scriptPath = $Logon; badPwdCount = $Bad } }
     $script:fakeUsers = @(
-        (New-FakeUser 'usr1' '\\fs1\profiles\usr1' '\\fs1\dirs\usr1' 'H:' 'logon.bat' 0),
-        (New-FakeUser 'usr2' '\\fs1\profiles\USR2.V2' '\\fs1\dirs\usr2' 'H:' $null 3),
-        (New-FakeUser 'usr3' $null 'D:\Data\usr3' $null $null 1),
+        (New-FakeUser 'usr1' (Get-FixturePath 'profiles' 'usr1') (Get-FixturePath 'dirs' 'usr1') 'H:' 'logon.bat' 0),
+        (New-FakeUser 'usr2' ((Get-FixturePath 'profiles' 'USR2') + '.V2') (Get-FixturePath 'dirs' 'usr2') 'H:' $null 3),
+        (New-FakeUser 'usr3' $null (Get-FixturePath 'data' 'usr3' 'D:') $null $null 1),
         (New-FakeUser 'usr4'))
     function Get-ADUser { param($Filter, $LDAPFilter, $Properties, $Server, $ResultPageSize, $ErrorAction) $script:fakeUsers }
     $pj = Invoke-GpoEvidence -Section Profiles -Context $ctx
     $pr = $pj | ConvertFrom-Json
     Assert ($pr.section -eq 'Profiles' -and $pr.profiles.enabledUsers -eq 4 -and $pr.profiles.badPwdCountAboveZero -eq 2) 'profile user counts'
-    Assert ($pr.profiles.profilePath.count -eq 2 -and $pr.profiles.profilePath.shapes[0].shape -eq '\\fs1\profiles\<user>' -and $pr.profiles.profilePath.shapes[0].count -eq 2) 'profilePath folded by shape'
-    Assert ($pr.profiles.homeDirectory.count -eq 3 -and @($pr.profiles.homeDirectory.shapes | Where-Object { $_.shape -eq 'D:\Data\<user>' }).Count -eq 1) 'homeDirectory shapes'
+    Assert ($pr.profiles.profilePath.count -eq 2 -and $pr.profiles.profilePath.shapes[0].shape -eq (Get-FixturePath 'profiles' '<user>') -and $pr.profiles.profilePath.shapes[0].count -eq 2) 'profilePath folded by shape'
+    Assert ($pr.profiles.homeDirectory.count -eq 3 -and @($pr.profiles.homeDirectory.shapes | Where-Object { $_.shape -eq (Get-FixturePath 'data' '<user>' 'D:') }).Count -eq 1) 'homeDirectory shapes'
     Assert ($pr.profiles.homeDrive.count -eq 2 -and $pr.profiles.scriptPath.count -eq 1) 'homeDrive and scriptPath counts'
     Assert ($pj -notmatch 'usr1|usr2|usr3|usr4') 'no user names in the Profiles output'
     Assert (@($pr.fdeployGpos | Where-Object { $_.name -eq 'Folder redirection' -and $_.files -contains 'fdeploy.ini' -and $_.files -contains 'fdeploy1.ini' }).Count -eq 1) 'GPOs holding fdeploy files'
@@ -385,7 +386,7 @@ try {
     $ctx.Domain = [pscustomobject]@{ DNSRoot = 'example.invalid'; NetBIOSName = 'EXAMPLE'; DomainMode = 'Windows2016Domain'; PDCEmulator = 'dc1.example.invalid'; RIDMaster = 'dc1.example.invalid'; InfrastructureMaster = 'dc1.example.invalid' }
     $ctx.Forest = [pscustomobject]@{ ForestMode = 'Windows2016Forest'; RootDomain = 'example.invalid'; SchemaMaster = 'dc1.example.invalid'; DomainNamingMaster = 'dc1.example.invalid' }
     $ctx.ConfigDN = 'CN=Configuration,DC=example,DC=invalid'
-    function Get-ADDomainController { param($Filter, $ErrorAction) @([pscustomobject]@{ HostName = 'dc1.example.invalid'; Site = 'Site1'; OperatingSystem = 'Windows Server 2022 Datacenter'; IsGlobalCatalog = $true; IsReadOnly = $false }) }
+    function Get-ADDomainController { param($Filter, $Server, $ErrorAction) @([pscustomobject]@{ HostName = 'dc1.example.invalid'; Site = 'Site1'; OperatingSystem = 'Windows Server 2022 Datacenter'; IsGlobalCatalog = $true; IsReadOnly = $false }) }
     function Get-ADObject { param($LDAPFilter, $SearchBase, $Identity, $Properties, $Server, $ErrorAction)
         if ($LDAPFilter -eq '(objectClass=nTDSDSA)') { return @('DC1', 'OLD1' | ForEach-Object { [pscustomobject]@{ DistinguishedName = "CN=NTDS Settings,CN=$_,CN=Servers,CN=Site1,CN=Sites,CN=Configuration,DC=example,DC=invalid" } }) }
         if ($LDAPFilter -eq '(objectClass=msDFSR-Member)') { return @('DC1', 'OLD1' | ForEach-Object { [pscustomobject]@{ Name = $_ } }) }
@@ -422,10 +423,23 @@ showrepl_INFO,Site1,DC1,"DC=example,DC=invalid",Site1,DC2,RPC,0,0,2026-11-19 10:
     Assert (@($dr.staleCandidates | Where-Object { $_.name -eq 'dc1' }).Count -eq 0) 'live DC not stale'
     Assert ([Text.Encoding]::UTF8.GetByteCount($dj) -le 8000) 'Dc output bounded'
     # A live DC beyond the 20-row display cap is not stale.
-    function Get-ADDomainController { param($Filter, $ErrorAction) @(1..21 | ForEach-Object { [pscustomobject]@{ HostName = "dc$_.example.invalid"; Site = 'Site1'; OperatingSystem = 'Windows Server 2022'; IsGlobalCatalog = $false; IsReadOnly = $false } }) }
+    function Get-ADDomainController { param($Filter, $Server, $ErrorAction) @(1..21 | ForEach-Object { [pscustomobject]@{ HostName = "dc$_.example.invalid"; Site = 'Site1'; OperatingSystem = 'Windows Server 2022'; IsGlobalCatalog = $false; IsReadOnly = $false } }) }
     function Resolve-DnsName { param($Name, $Type, $Server, [switch]$DnsOnly, $ErrorAction) @([pscustomobject]@{ Name = $Name; NameTarget = 'dc21.example.invalid' }, [pscustomobject]@{ Name = $Name; NameTarget = 'gone9.example.invalid' }) }
     $d21 = Invoke-GpoEvidence -Section Dc -Context $ctx | ConvertFrom-Json
     Assert (@($d21.dcs).Count -eq 20 -and $d21.truncated -and @($d21.staleCandidates | Where-Object { $_.name -eq 'dc21' }).Count -eq 0 -and @($d21.staleCandidates | Where-Object { $_.name -eq 'gone9' }).Count -eq 1) 'live DC past the display cap is not stale'
+    # A DC of another domain in the forest is live, and an unreadable domain withholds the stale list.
+    function Get-ADDomainController { param($Filter, $Server, $ErrorAction)
+        if ($Server -eq 'child.example.invalid') { if ($script:childDown) { throw [UnauthorizedAccessException]::new('denied') }; return @([pscustomobject]@{ HostName = 'chdc1.child.example.invalid'; Site = 'Site2'; OperatingSystem = 'Windows Server 2022'; IsGlobalCatalog = $false; IsReadOnly = $false }) }
+        @([pscustomobject]@{ HostName = 'dc1.example.invalid'; Site = 'Site1'; OperatingSystem = 'Windows Server 2022'; IsGlobalCatalog = $true; IsReadOnly = $false }) }
+    function Resolve-DnsName { param($Name, $Type, $Server, [switch]$DnsOnly, $ErrorAction) @([pscustomobject]@{ Name = $Name; NameTarget = 'dc1.example.invalid' }, [pscustomobject]@{ Name = $Name; NameTarget = 'chdc1.child.example.invalid' }, [pscustomobject]@{ Name = $Name; NameTarget = 'gone9.example.invalid' }) }
+    $ctx.Forest = [pscustomobject]@{ ForestMode = 'Windows2016Forest'; RootDomain = 'example.invalid'; SchemaMaster = 'dc1.example.invalid'; DomainNamingMaster = 'dc1.example.invalid'; Domains = @('example.invalid', 'child.example.invalid') }
+    $script:childDown = $false
+    $dm = Invoke-GpoEvidence -Section Dc -Context $ctx | ConvertFrom-Json
+    Assert (@($dm.staleCandidates | Where-Object { $_.name -eq 'chdc1' }).Count -eq 0 -and @($dm.staleCandidates | Where-Object { $_.name -eq 'gone9' }).Count -eq 1) 'a child-domain DC is not stale'
+    $script:childDown = $true
+    $dm = Invoke-GpoEvidence -Section Dc -Context $ctx | ConvertFrom-Json
+    Assert ($null -eq $dm.PSObject.Properties['staleCandidates'] -and @($dm.dcs).Count -eq 1) 'stale list withheld when a domain cannot be read'
+    $ctx.Forest = [pscustomobject]@{ ForestMode = 'Windows2016Forest'; RootDomain = 'example.invalid'; SchemaMaster = 'dc1.example.invalid'; DomainNamingMaster = 'dc1.example.invalid' }
     # One failing source is reported, not fatal.
     function Get-ADComputer { throw [UnauthorizedAccessException]::new('denied') }
     $df = Invoke-GpoEvidence -Section Dc -Context $ctx | ConvertFrom-Json

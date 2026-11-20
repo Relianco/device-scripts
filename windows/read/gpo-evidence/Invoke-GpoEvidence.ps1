@@ -654,14 +654,16 @@ function Get-GpeProfilesSection {
     $p.badPwdCountAboveZero = @($users | Where-Object { [int]$_.badPwdCount -gt 0 }).Count
     $p.badPwdCountNote = 'one DC only; the count is not replicated'
     $Report.profiles = $p
-    $Report.fdeployScanComplete = $true
+    $Report.fdeployScanComplete = $false
     Invoke-GpeStep $Report 'fdeployGpos' -AsList {
+        $stopped = $false
         foreach ($g in @(Get-GPO -All -Server $Context.Server -ErrorAction Stop)) {
-            if ($script:GpeClock.Elapsed.TotalSeconds -gt 40) { $Report.fdeployScanComplete = $false; break }
+            if ($script:GpeClock.Elapsed.TotalSeconds -gt 40) { $stopped = $true; break }
             $d = Get-GpeGpoDir $Context $g.Id
             $found = @('fdeploy.ini', 'fdeploy1.ini' | Where-Object { [IO.File]::Exists((Join-Path $d "User\Documents & Settings\$_")) })
             if ($found.Count) { [ordered]@{ name = (Protect-GpeText $g.DisplayName -Max 80); id = $g.Id.ToString().ToLowerInvariant(); files = $found } }
         }
+        $Report.fdeployScanComplete = -not $stopped
     }
 }
 
@@ -685,9 +687,18 @@ function Get-GpeDcSection {
     $Report.fsmo = [ordered]@{ pdc = [string]$d.PDCEmulator; rid = [string]$d.RIDMaster; infrastructure = [string]$d.InfrastructureMaster; schema = $null; naming = $null }
     $dnsRoot = [string]$d.DNSRoot
     if ($f) { $Report.fsmo.schema = [string]$f.SchemaMaster; $Report.fsmo.naming = [string]$f.DomainNamingMaster; if ($f.RootDomain) { $dnsRoot = [string]$f.RootDomain } }
-    # shortcut: the live set is this domain's DCs; names from a child domain show as candidates. Upgrade for multi-domain forests.
+    # The live set covers every domain of the forest; if one cannot be read, stale candidates are not computed.
     $script:GpeLive = $null
-    Invoke-GpeStep $Report 'dcs' -AsList { $all = @(Get-ADDomainController -Filter * -ErrorAction Stop); $script:GpeLive = @($all | ForEach-Object { Get-GpeShortName ([string]$_.HostName) }); Limit-GpeItems $all 20 $Report | ForEach-Object { [ordered]@{ name = [string]$_.HostName; site = [string]$_.Site; os = (Protect-GpeText ([string]$_.OperatingSystem) -Max 40); gc = [bool]$_.IsGlobalCatalog; rodc = [bool]$_.IsReadOnly } } }
+    Invoke-GpeStep $Report 'dcs' -AsList {
+        $all = @(Get-ADDomainController -Filter * -ErrorAction Stop)
+        $live = @($all | ForEach-Object { Get-GpeShortName ([string]$_.HostName) })
+        if ($f -and $f.PSObject.Properties['Domains']) {
+            foreach ($dom in @($f.Domains | Where-Object { [string]$_ -ne [string]$d.DNSRoot })) {
+                try { $live += @(Get-ADDomainController -Filter * -Server ([string]$dom) -ErrorAction Stop | ForEach-Object { Get-GpeShortName ([string]$_.HostName) }) } catch { $live = $null; break }
+            }
+        }
+        $script:GpeLive = $live
+        Limit-GpeItems $all 20 $Report | ForEach-Object { [ordered]@{ name = [string]$_.HostName; site = [string]$_.Site; os = (Protect-GpeText ([string]$_.OperatingSystem) -Max 40); gc = [bool]$_.IsGlobalCatalog; rodc = [bool]$_.IsReadOnly } } }
     Invoke-GpeStep $Report 'ntds' -AsList {
         Limit-GpeItems (Get-ADObject -SearchBase ('CN=Sites,' + $Context.ConfigDN) -LDAPFilter '(objectClass=nTDSDSA)' -Server $srv -ErrorAction Stop) 20 $Report | ForEach-Object {
             if ([string]$_.DistinguishedName -match '^CN=NTDS Settings,CN=([^,]+),CN=Servers,CN=([^,]+),') { [ordered]@{ server = (Protect-GpeText $Matches[1] -Max 40); site = (Protect-GpeText $Matches[2] -Max 40) } }
