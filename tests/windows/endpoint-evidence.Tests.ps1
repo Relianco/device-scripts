@@ -296,7 +296,7 @@ try {
     $mp = "HKEY_USERS\$sid\Software\SyncEngines\Providers\OneDrive"
     Add-Reg "$mp\lib1" @{ UrlNamespace = 'https://example.sharepoint.com/sites/Accounting/Shared Documents?id=secret'; MountPoint = (Join-Path $profileDir 'Example\Accounting - Documents'); LibraryType = 'teamsite' }
     Add-Reg "$mp\lib2" @{ UrlNamespace = 'https://example-my.sharepoint.com/personal/alex_example_com/Documents'; MountPoint = (Join-Path $profileDir 'OneDrive - Example'); LibraryType = 'mysite' }
-    Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Accounting = 'tenantId=abc&listId={x}&webUrl=https://example.sharepoint.com/sites/Accounting&version=1' }
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive\TenantAutoMount" @{ 'carol@example.net' = 'x'; Accounting = 'tenantId=abc&listId={x}&webUrl=https://example.sharepoint.com/sites/Accounting&version=1' }
     Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Other = 'tenantId=abc&listId={y}' }
     $od = Get-EeOneDrive
     $u0 = $od.users[0]; $b1 = $u0.business[0]
@@ -324,6 +324,8 @@ try {
     function Invoke-EeNative { param([string]$Name, [string[]]$Arguments) return @('AzureAdJoined : YES', 'DomainJoined : NO') }
     $j2 = Get-EeJoin
     Assert ($j2.device.AzureAdJoined -eq 'YES' -and $j2.dc.status -eq 'notDomainJoined') 'no DomainName: nltest is not run'
+    function Invoke-EeNative { param([string]$Name, [string[]]$Arguments) return @('garbage') }
+    Assert ((Get-EeJoin).device.status -eq 'unavailable') 'output without device state is unavailable, not notJoined'
     function Invoke-EeNative { param([string]$Name, [string[]]$Arguments) throw 'nope' }
     Assert ((Get-EeJoin).device.status -eq 'unavailable') 'a failing native is reported, not thrown'
 

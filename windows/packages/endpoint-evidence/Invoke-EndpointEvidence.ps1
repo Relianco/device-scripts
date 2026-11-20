@@ -606,7 +606,7 @@ function Get-EeAutoMount {
     param([string]$PolicyRoot)
     $r = [ordered]@{}
     $v = Get-EeValues "$PolicyRoot\TenantAutoMount"
-    foreach ($n in @($v.Keys)) { $r[(Protect-EeText $n -Max 60)] = Hide-EeAddress (ConvertTo-EeValue $v[$n] -Max 400) }
+    foreach ($n in @($v.Keys)) { $r[(Protect-EeText (Hide-EeAddress $n) -Max 60)] = Hide-EeAddress (ConvertTo-EeValue $v[$n] -Max 400) }
     return $r
 }
 
@@ -661,7 +661,7 @@ function Get-EeOneDrive {
             $libs += $row
         }
         $r.users += [ordered]@{
-            user = $u.Name; version = $version; policy = Get-EeOneDrivePolicy "$($u.Hive)\Software\Policies\Microsoft\OneDrive" -Max 20
+            user = $u.Name; version = (Protect-EeText (Hide-EeAddress ([string]$version)) -Max 40); policy = Get-EeOneDrivePolicy "$($u.Hive)\Software\Policies\Microsoft\OneDrive" -Max 20
             autoMount = Get-EeAutoMount "$($u.Hive)\Software\Policies\Microsoft\OneDrive"; business = $business; knownFolders = $folders; libraries = $libs
         }
     }
@@ -677,6 +677,7 @@ function Invoke-EeNative {
     $p = [Diagnostics.Process]::Start($psi)
     $out = $p.StandardOutput.ReadToEndAsync()
     if (-not $p.WaitForExit(20000)) { $p.Kill(); throw 'timeout' }
+    if ($p.ExitCode -ne 0) { throw "exit $($p.ExitCode)" }
     return @($out.Result -split '\r?\n')
 }
 
@@ -686,6 +687,7 @@ function Get-EeJoin {
         $kv = @{}
         foreach ($line in @(Invoke-EeNative 'dsregcmd' @('/status'))) { if ($line -match '^\W*(\w+)\s*:\s*(\S.*?)\s*$' -and -not $kv.ContainsKey($Matches[1])) { $kv[$Matches[1]] = $Matches[2] } }
         foreach ($n in @('AzureAdJoined', 'EnterpriseJoined', 'DomainJoined', 'DomainName', 'TenantId')) { $device[$n] = $null; if ($kv.ContainsKey($n)) { $device[$n] = Protect-EeText $kv[$n] -Max 80 } }
+        if (-not $kv.ContainsKey('AzureAdJoined')) { throw 'no device state in output' }
         $device.deviceIdPresent = $kv.ContainsKey('DeviceId')
     } catch { $device = [ordered]@{ status = 'unavailable'; error = $_.Exception.Message.Substring(0, [Math]::Min(40, $_.Exception.Message.Length)) } }
     $dc = [ordered]@{ status = 'notDomainJoined' }
@@ -706,7 +708,7 @@ function Get-EeJoin {
         $root = "$($u.Hive)\Software\Microsoft\Windows NT\CurrentVersion\WorkplaceJoin\JoinInfo"
         foreach ($k in @(Get-EeSubKeys $root)) {
             $v = Get-EeValues "$root\$k"
-            $wj += [ordered]@{ user = Get-EeAddressId ([string]$v['UserEmail']); tenantId = $v['TenantId'] }
+            $wj += [ordered]@{ user = Get-EeAddressId ([string]$v['UserEmail']); tenantId = (Protect-EeText (Hide-EeAddress ([string]$v['TenantId'])) -Max 60) }
         }
         $users += [ordered]@{ user = $u.Name; workplaceJoin = $wj }
     }
