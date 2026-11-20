@@ -109,6 +109,13 @@ $r = Invoke-Case -Hash 'abc'; if ($r.Code -ne 1 -or $script:downloads -ne 0) { F
 $r = Invoke-Case -Hash ('cd' * 32); if ($r.Code -ne 1 -or $script:ran.Count -ne 0) { Fail 'hash mismatch ran the runner' }
 $r = Invoke-Case -Url ('https://' + 'u' + [char]58 + 'p' + [char]64 + 'example.invalid/r.ps1'); if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 'userinfo URL accepted' }
 $r = Invoke-Case -Url ''; if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 'empty RunnerUrl accepted' }
+# A forwarded URL with userinfo is refused before any field is read, even with the off switch.
+$ui = 'https://' + 'u' + [char]58 + 'p' + [char]64 + 'example.invalid/p.ps1'
+foreach ($h in @($sha, '')) {
+    $r = Invoke-Case -Hash $h -Extra @('-PackageUrl', $ui, '-Action', 'Install'); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail "forwarded userinfo URL accepted (hash [$h])" }
+}
+# Windows PowerShell 5.1 drops an empty native argument, which would shift the runner's parameters.
+$r = Invoke-Case -Extra (@($forward) + @('-CancelPath', '')); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail 'an empty forwarded argument was accepted' }
 
 # Retry: transient failures retry up to three attempts, others stop at once.
 $script:failFirst = 2; $script:failWith = [TimeoutException]::new('slow')
@@ -126,6 +133,16 @@ $env:RELIAN_WAZUH_GROUP = 'seen'
 $launched = @(& $script:RunRunner $child @())
 Remove-Item -LiteralPath Env:RELIAN_WAZUH_GROUP
 if ($launched.Count -ne 1 -or $launched[0] -isnot [int] -or $launched[0] -ne 7) { Fail "launcher returned [$($launched -join '|')]" }
+
+# The real handoff directory is SYSTEM and Administrators only (Windows hosts; CI runs this under 5.1 too).
+if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+    $dir = & $script:NewHandoffDir
+    try {
+        $acl = Get-Acl -LiteralPath $dir
+        $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+        if (-not $acl.AreAccessRulesProtected -or ($sids -join ',') -cne 'S-1-5-18,S-1-5-32-544') { Fail "handoff dir ACL was [$($sids -join ',')]" }
+    } finally { Remove-Item -LiteralPath $dir -Recurse -Force }
+}
 
 $text = [IO.File]::ReadAllText($wrapper)
 foreach ($banned in @('Start-Transcript', 'Ninja-Property-Set')) { if ($text.Contains($banned)) { Fail "wrapper contains $banned" } }

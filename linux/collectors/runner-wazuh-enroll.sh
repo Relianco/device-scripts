@@ -19,7 +19,14 @@
 
 RWE_CLI='/opt/NinjaRMMAgent/programdata/ninjarmm-cli'
 
+RWE_WORK=''
+
 rwe_error() { printf '%s\n' "$1" >&2; }
+# Removes the password file and its directory.
+rwe_cleanup() {
+  [[ -z "$RWE_WORK" ]] || rm -rf -- "$RWE_WORK"
+  RWE_WORK=''
+}
 rwe_trim() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
@@ -29,9 +36,27 @@ rwe_trim() {
 
 # Seams. Tests replace them.
 rwe_get_field() { "$RWE_CLI" get "$1"; }
-# curl retries timeouts and HTTP 408, 429, 500, 502, 503 and 504, as the runner does.
-rwe_fetch() { curl --fail --silent --show-error --retry 2 --retry-delay 5 --max-time 120 --output "$2" -- "$1"; }
+# Prints the HTTP status. Returns curl's exit code.
+rwe_curl() { curl --silent --show-error --max-time 120 --output "$2" --write-out '%{http_code}' -- "$1"; }
+rwe_sleep() { sleep "$1"; }
 rwe_run_runner() { bash -- "$@"; }
+
+# Three attempts, as in the runner: retry a timeout, a connection or DNS failure, or HTTP 408, 429 or 5xx gateway codes.
+rwe_fetch() {
+  local url="$1" dest="$2" attempt status code
+  for attempt in 1 2 3; do
+    code=0
+    status="$(rwe_curl "$url" "$dest")" || code=$?
+    [[ "$code" -eq 0 && "$status" == '200' ]] && return 0
+    rm -f -- "$dest"
+    case "$code/$status" in
+      0/408|0/429|0/500|0/502|0/503|0/504|6/*|7/*|28/*|35/*) ;;
+      *) return 1 ;;
+    esac
+    [[ "$attempt" -eq 3 ]] || rwe_sleep $((attempt == 1 ? 5 : 20))
+  done
+  return 1
+}
 
 rwe_main() {
   local runner_url='' runner_sha='' manager='' forward=() i
@@ -49,9 +74,12 @@ rwe_main() {
       *) forward+=("$1"); shift ;;
     esac
   done
-  if [[ "$runner_url" =~ ^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*@ ]]; then
-    rwe_error 'refusing a URL that contains userinfo'; return 1
-  fi
+  # Checked before the off switch, as in the runner: a credential in a URL is already in NinjaOne's history.
+  for i in "$runner_url" "${forward[@]}"; do
+    if [[ "$i" =~ ^[[:space:]]*[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*@ ]]; then
+      rwe_error 'refusing a URL that contains userinfo'; return 1
+    fi
+  done
   # An empty hash is the off switch, as in the runner: exit 0 before anything is read or downloaded.
   [[ -n "$(rwe_trim "$runner_sha")" ]] || return 0
   for ((i = 0; i + 1 < ${#forward[@]}; i++)); do
@@ -77,7 +105,10 @@ rwe_main() {
   [[ -n "$(rwe_trim "$password")" ]] || { rwe_error 'wazuhRegistrationPassword is empty'; return 1; }
 
   local work code=0
+  # Bash runs the EXIT trap on HUP, INT and TERM too (a NinjaOne timeout or cancel).
+  trap rwe_cleanup EXIT
   work="$(mktemp -d)" || { rwe_error 'could not create a work directory'; return 1; }
+  RWE_WORK="$work"
   # printf is a builtin: the password is not on any process command line.
   if ! (umask 077 && printf '%s' "$password" > "$work/authd.pass"); then
     rm -rf -- "$work"; rwe_error 'could not write the password file'; return 1
@@ -95,7 +126,7 @@ rwe_main() {
     export WazuhManager="$manager" WazuhGroup="default,$group" WazuhNamePrefix="${group%_group}" WazuhPasswordFile="$work/authd.pass"
     rwe_run_runner "$work/runner.sh" "${forward[@]}"
   ) || code=$?
-  rm -rf -- "$work"
+  rwe_cleanup
   return "$code"
 }
 

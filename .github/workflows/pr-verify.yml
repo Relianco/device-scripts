@@ -131,3 +131,6 @@ jobs:
           # Collectors are job modules under NinjaOne's Windows PowerShell 5.1: storage-health runs real CIM through the loader.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/collectors-piped-field.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The Wazuh enrollment wrapper runs under NinjaOne's 5.1: real handoff-directory ACL and child launcher.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/runner-wazuh-enroll.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

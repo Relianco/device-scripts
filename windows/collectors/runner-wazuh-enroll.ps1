@@ -82,13 +82,17 @@ function Test-RelianRetryable {
 
 function Invoke-RelianWazuhEnroll {
     param([string]$RunnerUrl, [string]$RunnerSha256, [string]$WazuhManager, [string[]]$RunnerArguments)
-    if ($RunnerUrl -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { Write-Host 'refusing a URL that contains userinfo'; return 1 }
+    # Checked before the off switch, as in the runner: a credential in a URL is already in NinjaOne's history.
+    if (@(@($RunnerUrl) + @($RunnerArguments) | Where-Object { $_ -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@' }).Count) { Write-Host 'refusing a URL that contains userinfo'; return 1 }
     # An empty hash is the off switch, as in the runner: exit 0 before anything is read or downloaded.
     if ([string]::IsNullOrWhiteSpace($RunnerSha256)) { return 0 }
     # An empty forwarded pin is the runner's off switch, but 5.1 drops an empty native argument: honour it here.
+    # An omitted pin is not empty: the runner exits 1 with "missing parameter", so it is not an off switch.
     for ($i = 0; $i -lt @($RunnerArguments).Count - 1; $i++) {
         if ($RunnerArguments[$i] -match '\A-(Package|Toolkit|BrandPack)Sha256\z' -and [string]::IsNullOrWhiteSpace($RunnerArguments[$i + 1])) { return 0 }
     }
+    # 5.1 drops any other empty native argument too, which would shift the runner's parameters.
+    if (@($RunnerArguments | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count) { Write-Host 'an empty runner argument would be dropped: leave the parameter out'; return 1 }
     if ($RunnerSha256 -cnotmatch '\A[0-9a-f]{64}\z') { Write-Host 'RunnerSha256 must be 64 lowercase hex characters'; return 1 }
     if ([string]::IsNullOrWhiteSpace($RunnerUrl)) { Write-Host 'RunnerUrl is required'; return 1 }
     if ([string]::IsNullOrWhiteSpace($WazuhManager)) { Write-Host 'WazuhManager is required'; return 1 }
