@@ -61,6 +61,7 @@ $script:OaDownload = {
         , [IO.File]::ReadAllBytes($temp)
     } finally { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
 }
+$script:OaDelay = { param($Seconds) Start-Sleep -Seconds $Seconds }
 $script:OaNow = { [DateTime]::UtcNow }
 $script:OaProtectDir = {
     param($Path)
@@ -102,6 +103,13 @@ function Get-OaState([string]$Path, [string]$Root) {
     $state
 }
 
+# A timeout, connection or DNS failure (no HTTP response), or HTTP 408, 429, 500, 502, 503, 504.
+function Test-OaRetryable($Exception) {
+    $response = $Exception.PSObject.Properties['Response']
+    if ($response -and $response.Value) { return @(408, 429, 500, 502, 503, 504) -contains [int]$response.Value.StatusCode }
+    $true
+}
+
 function Test-OaHttpsNoUserInfo([string]$Url) {
     if ($Url -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@') { return $false }
     $uri = $null
@@ -134,12 +142,21 @@ function Get-OaSource {
                   admx = [IO.File]::ReadAllBytes($install.Admx); adml = [IO.File]::ReadAllBytes($install.Adml) }
     }
     if ($given.Count -ne 4) { throw 'give all of AdmxUrl, AdmxSha256, AdmlUrl, AdmlSha256 or none' }
+    # Validate all four values before the first download.
+    foreach ($kind in 'Admx', 'Adml') {
+        if ($Params.($kind + 'Sha256') -cnotmatch '\A[0-9a-f]{64}\z') { throw "$($kind)Sha256 is not 64 lowercase hex characters" }
+        if (-not (Test-OaHttpsNoUserInfo $Params.($kind + 'Url'))) { throw "$($kind)Url is not https without userinfo" }
+    }
     $out = @{ from = 'download'; version = $null }
     foreach ($kind in 'Admx', 'Adml') {
         $url = $Params.($kind + 'Url'); $pin = $Params.($kind + 'Sha256')
-        if ($pin -cnotmatch '\A[0-9a-f]{64}\z') { throw "$($kind)Sha256 is not 64 lowercase hex characters" }
-        if (-not (Test-OaHttpsNoUserInfo $url)) { throw "$($kind)Url is not https without userinfo" }
-        $bytes = [byte[]](& $script:OaDownload $url)
+        $bytes = $null
+        for ($attempt = 1; $null -eq $bytes; $attempt++) {
+            try { $bytes = [byte[]](& $script:OaDownload $url) } catch {
+                if ($attempt -ge 3 -or -not (Test-OaRetryable $_.Exception)) { throw }
+                & $script:OaDelay (@(5, 20)[$attempt - 1])
+            }
+        }
         if ((Get-OaSha256 $bytes) -ne $pin) { throw "hash mismatch for the $kind download" }
         $out[$kind.ToLowerInvariant()] = $bytes
     }

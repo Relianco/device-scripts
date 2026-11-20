@@ -86,6 +86,18 @@ $script:OaDownload = { param($u) if ($u -like '*admx') { , $newAdmx } else { , $
 $ax = Get-OaSha256 $newAdmx; $al = Get-OaSha256 $newAdml
 $ok = @{ AdmxUrl = 'https://h/x.admx'; AdmxSha256 = $ax; AdmlUrl = 'https://h/x.adml'; AdmlSha256 = $al }
 Assert ((Invoke-OaMain @ok).Result.status -eq 'current') 'download source matches'
+# Both URLs are checked before any download.
+$script:Downloads = 0
+$script:OaDownload = { param($u) $script:Downloads++; if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
+$early = $ok.Clone(); $early.AdmlUrl = 'https://u@h/x.adml'
+Assert ((Invoke-OaMain @early).ExitCode -eq 1 -and $script:Downloads -eq 0) 'bad adml URL refused before the admx download'
+# A transient failure is retried; a hash mismatch is not.
+$script:OaDelay = { param($s) }
+$script:Calls = 0
+$script:OaDownload = { param($u) $script:Calls++; if ($script:Calls -lt 3) { throw 'timeout' }; if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
+Assert ((Invoke-OaMain @ok).Result.status -eq 'current' -and $script:Calls -eq 4) 'transient download failure retried'
+$script:OaDownload = { param($u) if ($u -like '*admx') { , $newAdmx } else { , $newAdml } }
+
 # Each case is its own full splat: PowerShell 5.1 cannot override a splatted key with an explicit parameter.
 $cases = @{
     'hash mismatch refused' = @{ AdmxSha256 = ('0' * 64) }
