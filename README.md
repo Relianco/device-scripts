@@ -245,6 +245,7 @@ These report by default and change the device only when you ask. None reboots un
 - `feature-update`: why Windows Update has not offered the next feature update. `Fix` `true` re-enables only the appraiser tasks.
 - `feature-upgrade`: an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task.
 - `restart-notice`: restarts a device with a pending restart after a notice. `ReportOnly` `true` restarts nothing.
+- `mdm-checkin`: shows why a device's Intune check-in is late, or starts one. The default `Mode` `Report` is read-only: the MDM enrollment's EnterpriseMgmt task times, the `NoCloudApplicationNotification` policy values, and the push and IME services and log. `CheckIn` starts the enrollment's "Schedule #3" check-in task and restarts the IntuneManagementExtension service, nothing else.
 - `stay-awake`: keeps a device awake on AC power for a maintenance window. `Mode` `Hold` saves the sleep-after and unattended-sleep timeouts and sets both AC values to never; `Restore` (or `Uninstall`) puts the saved values back. The default, `Report`, changes nothing.
 - `outlook-autocomplete`: counts matching rows in Classic Outlook autocomplete caches. `Fix` `true` removes them.
 
