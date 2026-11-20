@@ -84,7 +84,8 @@ function Test-RelianRetryable {
 function Invoke-RelianWazuhEnroll {
     param([string]$RunnerUrl, [string]$RunnerSha256, [string]$WazuhManager, [string[]]$RunnerArguments)
     # Checked before the off switch, as in the runner: a credential in a URL is already in NinjaOne's history.
-    if (@(@($RunnerUrl) + @($RunnerArguments) | Where-Object { $_ -match '\A\s*[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@' }).Count) { Write-Host 'refusing a URL that contains userinfo'; return 1 }
+    # Not anchored, so -PackageUrl:https://user@host is caught too.
+    if (@(@($RunnerUrl) + @($RunnerArguments) | Where-Object { $_ -match '[a-z][a-z0-9+.-]*:[\\/]{2}[^\\/?#]*@' }).Count) { Write-Host 'refusing a URL that contains userinfo'; return 1 }
     # An empty hash is the off switch, as in the runner: exit 0 before anything is read or downloaded.
     if ([string]::IsNullOrWhiteSpace($RunnerSha256)) { return 0 }
     # An empty forwarded pin is the runner's off switch, but 5.1 drops an empty native argument: honour it here.

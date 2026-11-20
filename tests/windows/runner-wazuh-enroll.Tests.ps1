@@ -112,6 +112,7 @@ $r = Invoke-Case -Url ''; if ($r.Code -ne 1 -or $script:downloads -ne 0) { Fail 
 # A forwarded URL with userinfo is refused before any field is read, even with the off switch.
 $ui = 'https://' + 'u' + [char]58 + 'p' + [char]64 + 'example.invalid/p.ps1'
 foreach ($h in @($sha, '')) {
+    $r = Invoke-Case -Hash $h -Extra @(('-PackageUrl:' + $ui), '-Action', 'Install'); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail "colon-form userinfo URL accepted (hash [$h])" }
     $r = Invoke-Case -Hash $h -Extra @('-PackageUrl', $ui, '-Action', 'Install'); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail "forwarded userinfo URL accepted (hash [$h])" }
 }
 # Install only: another action or none is refused before any read or download.
