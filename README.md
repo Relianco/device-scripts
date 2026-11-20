@@ -208,7 +208,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `wau`: Winget-AutoUpdate. Updates only the app IDs in the allow list at `ListUrl`; self-update is off. Install `winget` first, or it exits 1618.
 - `wazuh`: the Wazuh agent. `Enroll` (for Intune) enrolls a fresh install from `RELIAN_WAZUH_*` variables and never re-enrolls or downgrades.
 - `winget`: Microsoft App Installer (winget) only.
-- `wireguard-client`: WireGuard and one split tunnel as a service. The private key is made and kept on the device; the run prints the public key. See `docs/wireguard-client.md`.
+- `wireguard-client`: WireGuard and one split tunnel as a service. The private key is made and kept on the device; the run prints the public key. Also an Intune app (key only) and a Remediation that applies a signed address map. See `docs/wireguard-client.md`.
 - `zoom`: Zoom.
 
 ### Settings and policy
