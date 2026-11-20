@@ -11,7 +11,7 @@
     Package arguments (base64 JSON in -PackageArguments):
       Sections        "all" (default) or a comma list of Start, Outlook, Edge,
                       Session, Cis, Apps, Intune, Edition, Taskbar, DefaultApps,
-                      QuietWindows, Notifications, Acrobat, EdgeExtras, OneDrive, Drives
+                      QuietWindows, Notifications, Acrobat, EdgeExtras, OneDrive, Drives, Join
       AppRegex        uninstall DisplayName and Intune log lines to report (Apps, Intune)
       ShortcutRegex   .lnk/.rdp/.appref-ms names on desktops and Start Menus (Apps)
       ClickOnceRegex  ClickOnce folders under each user's AppData\Local\Apps\2.0 (Apps)
@@ -20,6 +20,9 @@
     Per-user state comes from hives loaded under HKEY_USERS (signed-in users) and
     their profile folders. No hive is loaded. Each section is one Get-Ee<Name>
     function that returns a hashtable; add a section by adding one function.
+    OneDrive and Join print no e-mail: an address is shown as its domain plus the first
+    12 hex of the SHA256 of the lowercased address. Join runs dsregcmd /status and
+    nltest /dsgetdc (20 second limit each), and reads WorkplaceJoin per user.
     Nothing is changed: no registry, file, service, policy refresh or custom field.
     Files are read by name only, except a local DefaultAssociations XML (hashed
     and counted) and Network Shortcuts target.lnk files (icon location only).
@@ -38,7 +41,7 @@ param(
 $ProgressPreference = 'SilentlyContinue'
 
 $script:EeSectionNames = @('Start', 'Outlook', 'Edge', 'Session', 'Cis', 'Apps', 'Intune', 'Edition', 'Taskbar', 'DefaultApps',
-    'QuietWindows', 'Notifications', 'Acrobat', 'EdgeExtras', 'OneDrive', 'Drives')
+    'QuietWindows', 'Notifications', 'Acrobat', 'EdgeExtras', 'OneDrive', 'Drives', 'Join')
 $script:EeWatchedTypes = @('.pdf', 'http', 'https', 'mailto')
 $script:EeProgramData = $env:ProgramData
 $script:EePublic = $env:PUBLIC
@@ -576,16 +579,63 @@ function Get-EeEdgeExtras {
     return $r
 }
 
+# Domain and the first 12 hex of SHA256(lowercased address): the operator compares the hash offline. The address is never returned.
+function Get-EeAddressId {
+    param([AllowEmptyString()][string]$Address)
+    $a = ([string]$Address).Trim().ToLowerInvariant()
+    if (-not $a) { return $null }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $hex = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($a)) | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 12)
+    $domain = $null; if ($a.Contains('@')) { $domain = Protect-EeText $a.Substring($a.LastIndexOf('@') + 1) -Max 80 }
+    return [ordered]@{ domain = $domain; id = $hex }
+}
+
+# Text with any e-mail address replaced, so a value copied from the registry cannot leak one.
+function Hide-EeAddress { param($Value) if ($Value -is [string]) { return ($Value -replace '[^\s@|;,<>"'']+@[^\s|;,<>"'']+', '[email omitted]') } return $Value }
+
+function Get-EeUrlParts {
+    param([string]$Url)
+    $u = $null
+    if (-not [uri]::TryCreate($Url, [UriKind]::Absolute, [ref]$u)) { return [ordered]@{ urlHost = $null; urlPath = $null } }
+    # A personal site path carries the user's name; the query carries ids.
+    $path = [uri]::UnescapeDataString($u.AbsolutePath) -replace '^/personal/[^/]+', '/personal/[user]'
+    return [ordered]@{ urlHost = $u.Host; urlPath = (Protect-EeText (Hide-EeAddress $path) -Max 120) }
+}
+
+function Get-EeAutoMount {
+    param([string]$PolicyRoot)
+    $r = [ordered]@{}
+    $v = Get-EeValues "$PolicyRoot\TenantAutoMount"
+    foreach ($n in @($v.Keys)) { $r[(Protect-EeText (Hide-EeAddress $n) -Max 60)] = Hide-EeAddress (ConvertTo-EeValue $v[$n] -Max 400) }
+    return $r
+}
+
+# Policy trees without the TenantAutoMount subtree, which has its own field.
+function Get-EeOneDrivePolicy {
+    param([string]$PolicyRoot, [int]$Max)
+    $t = Get-EeTree $PolicyRoot -Max $Max
+    foreach ($k in @($t.Keys | Where-Object { $_ -like 'TenantAutoMount\*' })) { $t.Remove($k) }
+    return $t
+}
+
 function Get-EeOneDrive {
-    $r = [ordered]@{ devicePolicy = Get-EeTree "$HKLM\SOFTWARE\Policies\Microsoft\OneDrive" -Max 30; users = @() }
+    $deviceRoot = "$HKLM\SOFTWARE\Policies\Microsoft\OneDrive"
+    $r = [ordered]@{ devicePolicy = Get-EeOneDrivePolicy $deviceRoot -Max 30; autoMount = [ordered]@{ device = Get-EeAutoMount $deviceRoot }; users = @() }
+    # Tenants the device policy names: the silent opt-in tenant and the AllowTenantList entries.
+    $policyTenants = @()
+    $dv = Get-EeValues $deviceRoot
+    if ($dv['KFMSilentOptIn']) { $policyTenants += [string]$dv['KFMSilentOptIn'] }
+    $policyTenants += @((Get-EeValues "$deviceRoot\AllowTenantList").Values | ForEach-Object { [string]$_ }) + @((Get-EeValues "$deviceRoot\AllowTenantList").Keys)
     foreach ($u in @(Get-EeUsers)) {
         $accounts = "$($u.Hive)\Software\Microsoft\OneDrive\Accounts"
         $business = @()
         foreach ($k in @(Get-EeSubKeys $accounts | Where-Object { $_ -match '^Business\d+$' })) {
             $v = Get-EeValues "$accounts\$k"
-            # The account e-mail and folder path are personal, so only their presence is shown.
-            $row = [ordered]@{ account = $k; tenantId = $v['ConfiguredTenantId']; signedIn = [bool]$v['UserEmail']; hasFolder = [bool]$v['UserFolder'] }
-            foreach ($n in @($v.Keys | Where-Object { $_ -match '^(Kfm|FilesOnDemand|Timerautomount)' })) { $row[$n] = ConvertTo-EeValue $v[$n] }
+            $tenant = [string]$v['ConfiguredTenantId']
+            $match = $null; if ($policyTenants.Count -and $tenant) { $match = [bool]($policyTenants -contains $tenant) }
+            # The account e-mail and folder path are personal: only a hash, the domain and presence are shown.
+            $row = [ordered]@{ account = $k; tenantId = $tenant; tenantMatchesPolicy = $match; user = Get-EeAddressId ([string]$v['UserEmail']); signedIn = [bool]$v['UserEmail']; hasFolder = [bool]$v['UserFolder'] }
+            foreach ($n in @($v.Keys | Where-Object { $_ -match '^(Kfm|FilesOnDemand|Timerautomount)|Error' })) { $row[$n] = Hide-EeAddress (ConvertTo-EeValue $v[$n]) }
             $business += $row
         }
         $folders = [ordered]@{}
@@ -595,9 +645,74 @@ function Get-EeOneDrive {
             if ($shell.Contains($pair[1])) { $where = 'local'; if ([string]$shell[$pair[1]] -match '(?i)\\OneDrive') { $where = 'oneDrive' } }
             $folders[$pair[0]] = $where
         }
-        $r.users += [ordered]@{ user = $u.Name; policy = Get-EeTree "$($u.Hive)\Software\Policies\Microsoft\OneDrive" -Max 20; business = $business; knownFolders = $folders }
+        $version = Get-EeValue "$($u.Hive)\Software\Microsoft\OneDrive" 'Version'
+        if (-not $version -and $u.Profile) {
+            $exe = Join-Path $u.Profile 'AppData\Local\Microsoft\OneDrive\OneDrive.exe'
+            if ([IO.File]::Exists($exe)) { $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion }
+        }
+        # Mounted libraries and shortcuts. shortcut: no documented value marks a shortcut, so the raw type and a name match are shown; confirm against a real device.
+        $libs = @()
+        $prov = "$($u.Hive)\Software\SyncEngines\Providers\OneDrive"
+        foreach ($id in @(Get-EeSubKeys $prov)) {
+            $v = Get-EeValues "$prov\$id"
+            $mount = [string]$v['MountPoint']; $leaf = $null; if ($mount) { $leaf = Protect-EeText (Hide-EeAddress (Split-Path -Leaf $mount.TrimEnd('\', '/'))) -Max 80 }
+            $row = [ordered]@{ mount = $leaf; libraryType = (Protect-EeText ([string]$v['LibraryType']) -Max 40); shortcut = [bool](@($v.Keys) -match '(?i)shortcut') }
+            foreach ($p in (Get-EeUrlParts ([string]$v['UrlNamespace'])).GetEnumerator()) { $row[$p.Key] = $p.Value }
+            $libs += $row
+        }
+        $r.users += [ordered]@{
+            user = $u.Name; version = (Protect-EeText (Hide-EeAddress ([string]$version)) -Max 40); policy = Get-EeOneDrivePolicy "$($u.Hive)\Software\Policies\Microsoft\OneDrive" -Max 20
+            autoMount = Get-EeAutoMount "$($u.Hive)\Software\Policies\Microsoft\OneDrive"; business = $business; knownFolders = $folders; libraries = $libs
+        }
     }
     return $r
+}
+
+# Runs one system tool with a 20 second limit and returns its output lines. Tests replace this function.
+function Invoke-EeNative {
+    param([string]$Name, [string[]]$Arguments)
+    $psi = [Diagnostics.ProcessStartInfo]::new((Join-Path $env:SystemRoot "System32\$Name.exe"))
+    $psi.Arguments = ($Arguments -join ' ')
+    $psi.RedirectStandardOutput = $true; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $p = [Diagnostics.Process]::Start($psi)
+    $out = $p.StandardOutput.ReadToEndAsync()
+    if (-not $p.WaitForExit(20000)) { $p.Kill(); throw 'timeout' }
+    if ($p.ExitCode -ne 0) { throw "exit $($p.ExitCode)" }
+    return @($out.Result -split '\r?\n')
+}
+
+function Get-EeJoin {
+    $device = [ordered]@{}
+    try {
+        $kv = @{}
+        foreach ($line in @(Invoke-EeNative 'dsregcmd' @('/status'))) { if ($line -match '^\W*(\w+)\s*:\s*(\S.*?)\s*$' -and -not $kv.ContainsKey($Matches[1])) { $kv[$Matches[1]] = $Matches[2] } }
+        foreach ($n in @('AzureAdJoined', 'EnterpriseJoined', 'DomainJoined', 'DomainName', 'TenantId')) { $device[$n] = $null; if ($kv.ContainsKey($n)) { $device[$n] = Protect-EeText $kv[$n] -Max 80 } }
+        if (-not $kv.ContainsKey('AzureAdJoined')) { throw 'no device state in output' }
+        $device.deviceIdPresent = $kv.ContainsKey('DeviceId')
+    } catch { $device = [ordered]@{ status = 'unavailable'; error = $_.Exception.Message.Substring(0, [Math]::Min(40, $_.Exception.Message.Length)) } }
+    $dc = [ordered]@{ status = 'notDomainJoined' }
+    $domain = [string]$device['DomainName']
+    # The domain goes to a tool's command line, so only host-name characters pass.
+    if ($domain -match '^[A-Za-z0-9._-]{1,255}$') {
+        try {
+            $dc = [ordered]@{ name = $null; site = $null }
+            foreach ($line in @(Invoke-EeNative 'nltest' @("/dsgetdc:$domain"))) {
+                if ($line -match '^\s*DC:\s*\\\\(\S+)') { $dc.name = Protect-EeText $Matches[1] -Max 80 }
+                if ($line -match '^\s*Dc Site Name:\s*(\S+)') { $dc.site = Protect-EeText $Matches[1] -Max 60 }
+            }
+        } catch { $dc = [ordered]@{ status = 'unavailable' } }
+    }
+    $users = @()
+    foreach ($u in @(Get-EeUsers)) {
+        $wj = @()
+        $root = "$($u.Hive)\Software\Microsoft\Windows NT\CurrentVersion\WorkplaceJoin\JoinInfo"
+        foreach ($k in @(Get-EeSubKeys $root)) {
+            $v = Get-EeValues "$root\$k"
+            $wj += [ordered]@{ user = Get-EeAddressId ([string]$v['UserEmail']); tenantId = (Protect-EeText (Hide-EeAddress ([string]$v['TenantId'])) -Max 60) }
+        }
+        $users += [ordered]@{ user = $u.Name; workplaceJoin = $wj }
+    }
+    return [ordered]@{ device = $device; dc = $dc; users = $users }
 }
 
 # IconLocation from a .lnk (MS-SHLLINK StringData), read without COM. $null when the link has none.
