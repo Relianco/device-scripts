@@ -377,7 +377,8 @@ function ConvertFrom-GpbArguments {
         try { $id = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) } catch { throw 'LibraryIdHex is not UTF-8.' }
         $libTenant = Get-GpbLibraryTenant $id
         if (-not $libTenant) { throw 'LibraryIdHex is not a SharePoint Online library ID.' }
-        if ($values.TenantId -and $libTenant -ne $values.TenantId) { throw 'The library ID belongs to another tenant than TenantId.' }
+        if (-not $values['TenantId']) { throw 'LibraryIdHex needs TenantId, to check the library is in that tenant.' }
+        if ($libTenant -ne $values['TenantId']) { throw 'The library ID belongs to another tenant than TenantId.' }
         $values.LibraryId = $id
     }
     if ($LibraryName) {
@@ -1127,7 +1128,8 @@ function Invoke-GpoBaseline {
                 $report.lastBackupId = $lastBackup
                 if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
                 if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
-                if ($undo.Count -eq 0) { $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
+                # Nothing left to undo: retire the record, so a link or value set again later by someone else is not ours.
+                if ($undo.Count -eq 0) { $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id; if ([IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }; $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
                 $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
                 foreach ($u in $undo) {
                     if ($u.kind -eq 'removeValue') { Remove-GPRegistryValue -Guid $gpo.Id -Key $u.item.key -ValueName $u.item.valueName -Server $Context.Server -ErrorAction Stop | Out-Null }

@@ -630,6 +630,7 @@ try {
         @{ label = 'library ID with an extra key'; why = 'not a SharePoint Online library ID'; a = @{ LibraryIdHex = (& $toParts ($libId + '&x=1')) } },
         @{ label = 'library ID outside SharePoint Online'; why = 'not a SharePoint Online library ID'; a = @{ LibraryIdHex = (& $toParts ($libId -replace 'example%2Esharepoint%2Ecom', 'evil%2Eexample')) } },
         @{ label = 'library ID of another tenant'; a = @{ TenantId = '00000000-0000-4000-8000-0000000000ff' } },
+        @{ label = 'library ID without TenantId'; why = 'needs TenantId'; a = @{ TenantId = '' } },
         @{ label = 'LibraryName with punctuation'; a = @{ LibraryName = 'Acc;ounting' } },
         @{ label = 'LibraryName over 40 characters'; a = @{ LibraryName = 'A' * 41 } },
         @{ label = 'ApplyType without ApplyTo'; a = @{ ApplyTo = '' } },
@@ -796,6 +797,16 @@ try {
     Assert ([string]$script:regValues["$($so.Id)|HKLM\Software\Policies\Later|ByClient"].Value -eq '1' -and [string]$script:regValues["$($so.Id)|$officeKey|updatebranch"].Value -eq 'Current') 'undo keeps settings adopt did not add'
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'noChange') 'second undo changes nothing'
+    # Adopt, someone clears the link, uninstall finds nothing: the record retires, so a link set again later stays.
+    [void](Invoke-GpoBaseline -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx)
+    $relink = $script:ad[$adoptId].gPCWQLFilter
+    $script:ad[$adoptId].gPCWQLFilter = $null
+    $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange') 'undo with the link already gone changes nothing'
+    $script:ad[$adoptId].gPCWQLFilter = $relink
+    $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and $script:ad[$adoptId].gPCWQLFilter -eq $relink) 'retired record never clears a link set again by someone else'
+    $script:ad[$adoptId].gPCWQLFilter = $null
     # A link someone else set later is not ours to clear.
     $script:ad[$adoptId].gPCWQLFilter = '[example.invalid;{CCCCCCCC-0000-0000-0000-000000000000};0]'
     $r = Invoke-GpoBaseline -Action Uninstall -Definition 'workstations-only' -AdoptGpo $adoptId -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
