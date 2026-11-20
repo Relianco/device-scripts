@@ -256,6 +256,18 @@ if ($childExit -ne 1) { Fail "script run exit $childExit" }
 if (-not $childOutput.Contains('RELIAN_WAZUH_MANAGER is empty or not substituted')) { Fail 'script run did not name the variable' }
 if ($childOutput.Contains($script:Secret)) { Fail 'script run leaked the enrollment secret' }
 
+# The runner passes package arguments as -Name Value pairs and cannot set a switch: -Enrollment Environment is Enroll mode.
+Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST' -ErrorAction SilentlyContinue
+$childOutput = (& pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Install -PinVersion $pin -Enrollment Environment -FloorVersion $floor -InstallerUrl 'https://example.invalid/wazuh.msi' -InstallerSha256 $script:GoodSha 2>&1 | Out-String)
+$childExit = $LASTEXITCODE
+if ($childExit -ne 1 -or -not $childOutput.Contains('RELIAN_WAZUH_MANAGER is empty or not substituted')) { Fail "-Enrollment Environment did not run Enroll mode: $childExit $childOutput" }
+if ($childOutput.Contains($script:Secret)) { Fail '-Enrollment run leaked the enrollment secret' }
+foreach ($bad in @('environment', 'true', 'x')) {
+    $childOutput = (& pwsh -NoProfile -File $scriptPath -DeploymentType Install -Action Install -PinVersion $pin -Enrollment $bad -InstallerUrl 'https://example.invalid/wazuh.msi' -InstallerSha256 $script:GoodSha 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 1 -or -not $childOutput.Contains('Enrollment must be Environment')) { Fail "-Enrollment $bad was not refused: $LASTEXITCODE $childOutput" }
+}
+$env:RELIAN_DEPLOY_TEST = '1'
+
 $scriptText = [System.IO.File]::ReadAllText($scriptPath)
 foreach ($banned in @('Start-Transcript', 'WAZUH_REGISTRATION_')) {
     if ($scriptText.Contains($banned)) { Fail "script contains $banned" }

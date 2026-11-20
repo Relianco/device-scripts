@@ -13,7 +13,9 @@ param(
     [string]$MarkerRoot = '',
     # Intune only: install and enrol from RELIAN_WAZUH_* environment variables.
     [string]$FloorVersion = '',
-    [switch]$Enroll
+    [switch]$Enroll,
+    # The runner passes package arguments as -Name Value pairs and cannot set a switch. Environment is -Enroll.
+    [string]$Enrollment = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -950,8 +952,13 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     }
 }
 
+if ($Enrollment -ne '' -and $Enrollment -cne 'Environment') {
+    [Console]::Error.WriteLine('Enrollment must be Environment')
+    exit 1
+}
+
 try {
-    if ($Enroll) {
+    if ($Enroll -or $Enrollment -ceq 'Environment') {
         exit ([int](Invoke-WazuhEnrollAction -Action $Action -PinVersion $PinVersion -FloorVersion $FloorVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath))
     }
     $wazuhExit = [int](Invoke-WazuhAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot)
