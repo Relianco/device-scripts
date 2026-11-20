@@ -286,6 +286,28 @@ if ($state.Rules.Count -ne $rulesBefore) { Fail 'rotate changed NRPT rules' }
 $out = Invoke-Act 'Uninstall'
 if ($out.ExitCode -ne 0 -or $files.ContainsKey('tenant.json') -or -not $files.ContainsKey('office.key') -or @($state.Removed) -notcontains 'bin') { Fail 'uninstall after prepare' }
 
+# Map fetch: a 503 is tried three times, a 404 once; both leave the device as it is.
+$script:RetryDelay = { param($Seconds) }
+$script:fetches = 0
+$script:FetchMap = { param($Url) $script:fetches++; throw [System.Net.WebException]::new('x', [System.Net.WebExceptionStatus]::Timeout) }
+if ((Invoke-Act 'Report').Report.mapState -cne 'unavailable' -or $script:fetches -ne 3) { Fail "timeout fetched $script:fetches times" }
+$script:fetches = 0
+$script:FetchMap = { param($Url) $script:fetches++; throw [System.Net.WebException]::new('x', [System.Net.WebExceptionStatus]::TrustFailure) }
+if ((Invoke-Act 'Report').Report.mapState -cne 'unavailable' -or $script:fetches -ne 1) { Fail "trust failure fetched $script:fetches times" }
+$script:fetches = 0
+$script:FetchMap = { param($Url) $script:fetches++; if ($script:fetches -lt 2) { throw [System.TimeoutException]::new('x') }; $state.Map }
+if ((Invoke-Act 'Report').Report.mapState -ceq 'unavailable' -or $script:fetches -ne 2) { Fail 'retry did not recover' }
+
+# A failed guard uninstall keeps tenant.json and bin for the next try.
+$files['tenant.json'] = '{"tunnel":"office"}'
+$script:InvokeGuard = { param($ScriptPath, [hashtable]$Parameters) 1 }
+$realTestPath = Get-Command Test-Path
+function Test-Path { param([string]$LiteralPath, $PathType) if ($LiteralPath.EndsWith('Invoke-WireGuardNetworkGuard.ps1')) { return $true }; & $realTestPath -LiteralPath $LiteralPath }
+$state.Removed.Clear()
+$out = Invoke-Act 'Uninstall'
+Remove-Item Function:\Test-Path
+if ($out.ExitCode -ne 1 -or -not $files.ContainsKey('tenant.json') -or @($state.Removed) -contains 'bin') { Fail 'failed guard uninstall removed the staged files' }
+
 # ---- Detect-WireGuardClient.ps1 ----
 . $detectPath
 $floorLines = @([regex]::Matches((Get-Content -LiteralPath $detectPath -Raw), "(?m)^\`$RelianWireGuardFloor = '([0-9.]+)'\r?$"))
@@ -323,10 +345,30 @@ foreach ($f in @($meta.setupFile, $meta.detectionScript)) { if (-not (Test-Path 
 if (-not ([string]$meta.installCommand).StartsWith('powershell.exe ') -or ([string]$meta.installCommand).Length -gt 1024) { Fail 'install command' }
 if (-not ([string]$meta.uninstallCommand).Contains('-Action Uninstall -PinVersion 1.1.1')) { Fail 'uninstall command' }
 $wrapper = Get-Content -LiteralPath (Join-Path $packageDir $meta.setupFile) -Raw
-foreach ($token in @('wgtunnel', 'wgendpoint', 'wgserverkey', 'wgallowedips', 'wgnrptns', 'wgnrptdns', 'wggateways', 'wggatewaymacs', 'wgmapurl', 'wgmapkey', 'wglegacy', 'wgdisablepa')) {
-    if (([regex]::Matches($wrapper, "'%$token%'")).Count -ne 1) { Fail "wrapper token $token" }
+$tokens = @('wgtunnel', 'wgendpoint', 'wgserverkey', 'wgallowedips', 'wgnrptns', 'wgnrptdns', 'wggateways', 'wggatewaymacs', 'wgmapurl', 'wgmapkey', 'wglegacy', 'wgdisablepa')
+foreach ($token in $tokens) {
+    if (([regex]::Matches($wrapper, "(?m)^[A-Za-z]+=%$token%\r?$")).Count -ne 1) { Fail "wrapper token $token" }
 }
 if (@([regex]::Matches($wrapper, '%[A-Za-z0-9]+%')).Count -ne 12) { Fail 'wrapper has a %token% CIPP might replace' }
 if (-not $wrapper.Contains('-Action Prepare')) { Fail 'wrapper does not run Prepare' }
+
+# Substituted values are data: quotes, $() and backticks reach Prepare verbatim and run nothing.
+$dir = Join-Path ([IO.Path]::GetTempPath()) ('wgc-wrap-' + [guid]::NewGuid().ToString('n'))
+New-Item -ItemType Directory -Path $dir -Force | Out-Null
+try {
+    $hostile = "x' ; `$(Set-Content -LiteralPath '$dir/pwned' -Value 1) ``n '@"
+    $filled = $wrapper
+    foreach ($token in $tokens) { $filled = $filled.Replace("%$token%", "$token-$hostile") }
+    Set-Content -LiteralPath (Join-Path $dir 'Install-WireGuardIntune.ps1') -Value $filled
+    Set-Content -LiteralPath (Join-Path $dir 'Invoke-WireGuardClient.ps1') -Value 'param([string]$DeploymentType, [string]$Action, [string]$PinVersion, [string]$TunnelName, [string]$MapKey, [string]$LegacyPattern) [IO.File]::WriteAllText((Join-Path $PSScriptRoot "got.json"), (@{ a = $Action; t = $TunnelName; k = $MapKey; l = $LegacyPattern } | ConvertTo-Json -Compress)); exit 0'
+    $exe = (Get-Process -Id $PID).Path
+    & $exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dir 'Install-WireGuardIntune.ps1') | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "wrapper exit $LASTEXITCODE" }
+    if (Test-Path -LiteralPath (Join-Path $dir 'pwned')) { Fail 'a substituted value ran code' }
+    $got = Get-Content -LiteralPath (Join-Path $dir 'got.json') -Raw | ConvertFrom-Json
+    if ($got.a -cne 'Prepare' -or $got.t -cne "wgtunnel-$($hostile.Trim())" -or $got.k -cne "wgmapkey-$($hostile.Trim())") { Fail "wrapper values: $($got.t)" }
+} finally {
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Write-Output 'wireguard-intune tests passed'

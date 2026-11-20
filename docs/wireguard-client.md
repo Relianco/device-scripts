@@ -53,7 +53,7 @@ The same package runs as the Win32 app **Relian Managed - WireGuard** (`intune.j
 | `Apply` | Remediation. Fetches and verifies the map again, then runs `Install` with the mapped address, `Revoke` or `Rotate` |
 | `Revoke` | Uninstalls the tunnel, removes its NRPT rules, deletes `<tunnel>.conf` and `<tunnel>.key`, makes a new key |
 | `Rotate` | Uninstalls the tunnel, deletes `<tunnel>.conf` and `<tunnel>.key`, makes a new key. NRPT rules stay |
-| `Uninstall` | As before. If `tenant.json` exists it also uninstalls the network guard and deletes `bin\`, `tenant.json` and `map-serial.txt`. The key stays |
+| `Uninstall` | As before. If `tenant.json` exists it also uninstalls the network guard and then deletes `bin\`, `tenant.json` and `map-serial.txt` (kept for a retry if the guard uninstall fails). The key stays |
 
 Without `TunnelName`, every action except `Prepare` reads its settings from `tenant.json`.
 
@@ -67,7 +67,7 @@ Written by `Prepare`. Every value is a string: `tunnel`, `endpoint`, `serverPubl
 
 ### The map
 
-`Report` and `Apply` fetch `mapUrl` over HTTPS (no redirect, 20 s timeout, at most 1 MB):
+`Report` and `Apply` fetch `mapUrl` over HTTPS (no redirect, 20 s timeout, at most 1 MB, three attempts for a timeout, connection failure or HTTP 408, 429 or 5xx retry status):
 
 ```json
 {"payload":"<base64 of UTF-8 JSON>","sig":"<base64 RSA PKCS#1 v1.5 SHA-256 signature over the decoded payload bytes>"}
@@ -96,7 +96,7 @@ One compressed JSON line of at most 2048 characters. It never holds the private 
 
 ### Win32 app
 
-- **Install:** `Install-WireGuardIntune.ps1`. The template builder puts its text in the app's install script, and CIPP replaces the tokens `%wgtunnel%`, `%wgendpoint%`, `%wgserverkey%`, `%wgallowedips%`, `%wgnrptns%`, `%wgnrptdns%`, `%wggateways%`, `%wggatewaymacs%`, `%wgmapurl%`, `%wgmapkey%`, `%wglegacy%` and `%wgdisablepa%`. The values go to `Prepare` as parameters in the same process, not on a command line, because Intune caps the install command at 1024 characters and the map key alone is over 500. A value must not contain a single quote.
+- **Install:** `Install-WireGuardIntune.ps1`. The template builder puts its text in the app's install script, and CIPP replaces the tokens `%wgtunnel%`, `%wgendpoint%`, `%wgserverkey%`, `%wgallowedips%`, `%wgnrptns%`, `%wgnrptdns%`, `%wggateways%`, `%wggatewaymacs%`, `%wgmapurl%`, `%wgmapkey%`, `%wglegacy%` and `%wgdisablepa%`. The tokens sit in one single-quoted here-string as `Name=value` lines, so a one-line value is data and cannot run code. The values go to `Prepare` as parameters in the same process, not on a command line, because Intune caps the install command at 1024 characters and the map key alone is over 500.
 - **Uninstall:** `Invoke-WireGuardClient.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.1.1`, which reads `tenant.json`.
 - **Detection:** `Detect-WireGuardClient.ps1`. Exit 0 when WireGuard is at or above the floor (the one `$RelianWireGuardFloor` line), `tenant.json` parses, `<tunnel>.key` and the four staged scripts exist, and the task `\Relian\Relian-WireGuardNetworkGuard` exists.
 - **Content:** this folder plus `Invoke-WireGuardNetworkGuard.ps1`, either next to the script or in `../wireguard-network-guard/`.

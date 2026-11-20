@@ -807,10 +807,18 @@ function Get-WgcMapState {
     if (-not (Test-WgcMapUrl -Url $Settings.MapUrl) -or -not (Test-WgcMapKey -Xml $Settings.MapKey)) {
         return [pscustomobject]@{ State = 'invalid'; Address = $null; Serial = $null }
     }
-    try {
-        $text = [string](& $script:FetchMap -Url $Settings.MapUrl)
-    } catch {
-        return [pscustomobject]@{ State = 'unavailable'; Address = $null; Serial = $null }
+    # Three attempts for a transient failure, one for anything else, as for the installer.
+    $text = $null
+    $delays = @(5, 20)
+    for ($attempt = 1; $null -eq $text; $attempt++) {
+        try {
+            $text = [string](& $script:FetchMap -Url $Settings.MapUrl)
+        } catch {
+            if ($attempt -ge 3 -or -not (Test-WgcDownloadIsTransient -Exception $_.Exception)) {
+                return [pscustomobject]@{ State = 'unavailable'; Address = $null; Serial = $null }
+            }
+            [void](& $script:RetryDelay -Seconds $delays[$attempt - 1])
+        }
     }
     $serialPath = [IO.Path]::Combine((Get-WgcConfigRoot), 'map-serial.txt')
     $last = [int64]0
@@ -1019,7 +1027,11 @@ function Invoke-WireGuardClientAction {
             $guard = [IO.Path]::Combine($binPath, 'Invoke-WireGuardNetworkGuard.ps1')
             if (Test-Path -LiteralPath $guard) {
                 $code = [int](& $script:InvokeGuard -ScriptPath $guard -Parameters @{ Action = 'Uninstall' })
-                if ($code -ne 0) { Write-WgcError "network guard uninstall failed with $code" }
+                if ($code -ne 0) {
+                    # Keep bin\ and tenant.json so the next uninstall can retry the guard.
+                    Write-WgcError "network guard uninstall failed with $code"
+                    return (& $result 1)
+                }
             }
             foreach ($path in @($binPath, $tenantPath, [IO.Path]::Combine($folder, 'map-serial.txt'))) { & $script:RemoveFile -Path $path }
         }
