@@ -35,10 +35,10 @@ if ($env:OS -eq 'Windows_NT') {
         Assert (-not $ro.$k.PSObject.Properties['status']) "real run section $k collected"
     }
     Assert (@($ro.apps.installed).Count -gt 0 -and @($ro.apps.paths.PSObject.Properties).Count -eq 1) 'real run reads the uninstall registry'
-    $managed = Invoke-EndpointEvidence -Sections 'Edition,Taskbar,DefaultApps,QuietWindows,Notifications,Acrobat,EdgeExtras,OneDrive,Drives'
+    $managed = Invoke-EndpointEvidence -Sections 'Edition,Taskbar,DefaultApps,QuietWindows,Notifications,Acrobat,EdgeExtras,OneDrive,Drives,Join'
     $mo = $managed | ConvertFrom-Json
     Assert ([Text.Encoding]::UTF8.GetByteCount($managed) -le 8000 -and $mo.status -eq 'collected') 'real managed run bounded'
-    foreach ($k in @('edition', 'taskbar', 'defaultapps', 'quietwindows', 'notifications', 'acrobat', 'edgeextras', 'onedrive', 'drives')) {
+    foreach ($k in @('edition', 'taskbar', 'defaultapps', 'quietwindows', 'notifications', 'acrobat', 'edgeextras', 'onedrive', 'drives', 'join')) {
         Assert ($mo.PSObject.Properties[$k] -and -not $mo.$k.PSObject.Properties["status"]) "real run section $k collected"
     }
     Assert ($mo.edition.editionId -and $mo.edition.build) 'real run reads the edition'
@@ -283,6 +283,48 @@ try {
     Assert (@($od.users[0].business).Count -eq 1 -and $b1.tenantId -eq $tenant -and $b1.signedIn -and $b1.hasFolder -and $b1.KfmFoldersProtectedNow -eq 3584) 'business account state'
     Assert (-not (($od | ConvertTo-Json -Depth 6) -match '@example')) 'account e-mail not printed'
     Assert ($od.users[0].knownFolders.desktop -eq 'oneDrive' -and $od.users[0].knownFolders.documents -eq 'local' -and $null -eq $od.users[0].knownFolders.pictures) 'known folder redirection'
+
+    # OneDrive R2: hashed identity, tenant match, version, errors, mounted libraries, auto-mount policy.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $expectId = (($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes('alex@example.com')) | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 12)
+    Assert ($b1.user.domain -eq 'example.com' -and $b1.user.id -eq $expectId -and $b1.tenantMatchesPolicy -eq $true) 'business account hashed identity and tenant match'
+    Assert ((Get-EeAddressId '  Alex@Example.COM ').id -eq $expectId) 'address id is trimmed and lowercased'
+    Assert ($null -eq (Get-EeAddressId '')) 'no address, no id'
+    $acct = "HKEY_USERS\$sid\Software\Microsoft\OneDrive\Accounts\Business1"
+    Add-Reg $acct @{ ConfiguredTenantId = [guid]::NewGuid().ToString(); UserEmail = 'alex@example.com'; UserFolder = 'x'; KfmFoldersProtectedNow = 3584; KfmSilentOptInDesktop = 1; FilesOnDemandEnabled = 1; LastSyncError = 'cannot reach bob@example.org'; Unrelated = 'zzz' }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive" @{ Version = '24.200.1.0001' }
+    $mp = "HKEY_USERS\$sid\Software\SyncEngines\Providers\OneDrive"
+    Add-Reg "$mp\lib1" @{ UrlNamespace = 'https://contoso.sharepoint.com/sites/Accounting/Shared Documents?id=secret'; MountPoint = (Join-Path $profileDir 'Contoso\Accounting - Documents'); LibraryType = 'teamsite' }
+    Add-Reg "$mp\lib2" @{ UrlNamespace = 'https://contoso-my.sharepoint.com/personal/alex_example_com/Documents'; MountPoint = (Join-Path $profileDir 'OneDrive - Contoso'); LibraryType = 'mysite' }
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Accounting = 'tenantId=abc&listId={x}&webUrl=https://contoso.sharepoint.com/sites/Accounting&version=1' }
+    Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Other = 'tenantId=abc&listId={y}' }
+    $od = Get-EeOneDrive
+    $u0 = $od.users[0]; $b1 = $u0.business[0]
+    Assert ($b1.tenantMatchesPolicy -eq $false -and $b1.LastSyncError -eq 'cannot reach [email omitted]' -and $b1.KfmFoldersProtectedNow -eq 3584 -and $b1.KfmSilentOptInDesktop -eq 1 -and $b1.FilesOnDemandEnabled -eq 1 -and -not $b1.Contains('Unrelated')) 'KFM, files on-demand and error values; mismatched tenant; e-mail scrubbed'
+    Assert ($u0.version -eq '24.200.1.0001') 'OneDrive version'
+    $libs = @{}; foreach ($lib in $u0.libraries) { $libs[$lib.mount] = $lib }
+    Assert ($libs['Accounting - Documents'].urlHost -eq 'contoso.sharepoint.com' -and $libs['Accounting - Documents'].urlPath -eq '/sites/Accounting/Shared Documents' -and $libs['Accounting - Documents'].libraryType -eq 'teamsite') 'mounted library host, path, leaf, type'
+    Assert ($libs['OneDrive - Contoso'].urlPath -eq '/personal/[user]/Documents') 'personal site path hides the user segment'
+    Assert ($od.autoMount.device['Accounting'] -like 'tenantId=abc&listId={x}*' -and $u0.autoMount['Other'] -like '*listId={y}') 'TenantAutoMount values, device and user'
+    Assert (-not (($od | ConvertTo-Json -Depth 8) -match '@|secret|alex_example')) 'no e-mail, query or user segment in the OneDrive section'
+
+    # Join: dsregcmd parsed, nltest DC, WorkplaceJoin per user hashed. Natives are stubbed.
+    function Invoke-EeNative {
+        param([string]$Name, [string[]]$Arguments)
+        if ($Name -eq 'dsregcmd') { return @('+---+', '| Device State', '+---+', '', '             AzureAdJoined : NO', '          EnterpriseJoined : NO', '              DomainJoined : YES', '                DomainName : CORP', '                  DeviceId : 11111111-2222-3333-4444-555555555555', '              TenantId : 99999999-0000-0000-0000-000000000000', '        UserEmail : leak@example.com') }
+        if ($Name -eq 'nltest') { Assert ($Arguments -contains '/dsgetdc:CORP') 'nltest asks the joined domain'; return @('           DC: \\DC01.corp.local', '      Address: \\10.0.0.5', '     Dom Name: CORP', 'Dc Site Name: Default-First-Site-Name', 'The command completed successfully') }
+    }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows NT\CurrentVersion\WorkplaceJoin\JoinInfo\ABCDEF" @{ UserEmail = 'alex@example.com'; TenantId = 'tid-1' }
+    $j = Get-EeJoin
+    Assert ($j.device.AzureAdJoined -eq 'NO' -and $j.device.DomainJoined -eq 'YES' -and $j.device.EnterpriseJoined -eq 'NO' -and $j.device.deviceIdPresent -and $j.device.TenantId -like '99999999*') 'dsregcmd device state parsed'
+    Assert ($j.dc.name -eq 'DC01.corp.local' -and $j.dc.site -eq 'Default-First-Site-Name') 'nltest DC name and site'
+    Assert ($j.users[0].workplaceJoin[0].user.id -eq $expectId -and $j.users[0].workplaceJoin[0].user.domain -eq 'example.com' -and $j.users[0].workplaceJoin[0].tenantId -eq 'tid-1') 'WorkplaceJoin hashed'
+    Assert (-not (($j | ConvertTo-Json -Depth 8) -match '@|11111111-2222')) 'no e-mail and no device id in the Join section'
+    function Invoke-EeNative { param([string]$Name, [string[]]$Arguments) return @('AzureAdJoined : YES', 'DomainJoined : NO') }
+    $j2 = Get-EeJoin
+    Assert ($j2.device.AzureAdJoined -eq 'YES' -and $j2.dc.status -eq 'notDomainJoined') 'no DomainName: nltest is not run'
+    function Invoke-EeNative { param([string]$Name, [string[]]$Arguments) throw 'nope' }
+    Assert ((Get-EeJoin).device.status -eq 'unavailable') 'a failing native is reported, not thrown'
 
     # Drives: mapped drives, drive icons and a network place's target.lnk icon.
     Add-Reg "HKEY_USERS\$sid\Network\F" @{ RemotePath = '\\fs01\files'; ProviderName = 'Microsoft Windows Network' }
