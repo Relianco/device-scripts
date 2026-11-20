@@ -46,6 +46,7 @@ Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Y:", "\\fs1\scans", False, 
 Assert ((ConvertTo-FiMapLine ('oNet.MapNetworkDrive "Z:", sharePath, False, "dom\u", "C:\' + $secret + '"')) -eq 'wsh|Z:|') 'a path-shaped password after a variable target is not printed'
 Assert ((ConvertTo-FiMapLine 'net use X: "\\fs1\Shared Data" /persistent:no') -eq 'netUse|X:|\\fs1\Shared Data') 'quoted UNC with a space kept whole'
 Assert ((ConvertTo-FiMapLine 'subst S: D:\Shared') -eq 'subst|S:|D:\Shared' -and $null -eq (ConvertTo-FiMapLine 'echo hello')) 'subst and non-mapping lines'
+if ($onWindows) { Assert ((ConvertTo-FiRootPath 'F:/Share/Sub/') -eq 'F:\Share\Sub') 'a forward-slash path is made canonical' }
 Assert ((ConvertTo-FiRootPath 'C:\') -eq 'C:\' -and (ConvertTo-FiRootPath 'F:\Data\') -eq 'F:\Data' -and (ConvertTo-FiRootPath 'C:') -eq 'C:\') 'a volume root keeps its separator'
 $page = Select-FiPage @(1..100 | ForEach-Object { 'row' + $_ }) 10 120
 Assert ($page.Rows.Count -gt 0 -and $page.Rows[0] -eq 'row11' -and $page.Next -eq (10 + $page.Rows.Count)) 'page helper'
@@ -119,6 +120,69 @@ try {
     Assert ($s.paths.maxRelative -gt 20 -and $s.paths.localOver250 -eq 0) 'path stats'
     Assert ([Text.Encoding]::UTF8.GetByteCount($sj) -le 7200) 'summary within cap'
 
+    # --- FolderHex: any name or path through the loader's [A-Za-z0-9{}.-] values.
+    function ConvertTo-TestHex { param([string]$Text) -join @([Text.Encoding]::UTF8.GetBytes($Text) | ForEach-Object { '{0:x2}' -f $_ }) }
+    $sep = [IO.Path]::DirectorySeparatorChar
+    Assert ((ConvertFrom-FiFolderHex (ConvertTo-TestHex 'Client Files')) -eq 'Client Files' -and (ConvertFrom-FiFolderHex '436C69656E74') -eq 'Client') 'hex name with a space; upper-case hex'
+    Assert ((ConvertFrom-FiFolderHex '436166c3a9') -eq ('Caf' + [char]0xE9)) 'hex is UTF-8'
+    foreach ($ok in @('F:\Client Files\Sub Folder', 'F:\', 'Client Files\Sub Folder', 'F:/Share/Sub')) { Assert ((ConvertFrom-FiFolderHex (ConvertTo-TestHex $ok)) -eq $ok) "hex accepted: $ok" }
+    $refused = @('', 'abc', 'zz', 'c3', ('61' * 257)) + @(@('..', '.', 'a\..\b', '\\srv\share', '\', 'a\\b', 'C:rel', 'a|b', ('a' + [char]9 + 'b'), 'F:\x\..') | ForEach-Object { ConvertTo-TestHex $_ })
+    foreach ($bad in $refused) { $threw = $false; try { [void](ConvertFrom-FiFolderHex $bad) } catch { $threw = $true }; Assert $threw "hex refused: $bad" }
+    Assert ((Join-FiHexParts @('6162', '63', '', '')) -eq '616263') 'hex parts join in order'
+    $threw = $false; try { [void](Join-FiHexParts @('61', '', '62')) } catch { $threw = $true }
+    Assert $threw 'a hex part after a missing one is refused'
+    $spaced = Join-Path $data 'Client Files'
+    [void][IO.Directory]::CreateDirectory((Join-Path $spaced 'Sub Folder'))
+    [IO.File]::WriteAllBytes((Join-Path (Join-Path $spaced 'Sub Folder') 'a.pdf'), [byte[]]::new(3))
+    $h1 = Invoke-FolderInventory -Section Summary -FolderHex (ConvertTo-TestHex 'Client Files') | ConvertFrom-Json
+    Assert ($h1.status -eq 'ok' -and $h1.root -eq $spaced -and $h1.totals.files -eq 1) 'FolderHex name with a space found under a share'
+    $h2 = Invoke-FolderInventory -Section Summary -FolderHex (ConvertTo-TestHex ('Client Files' + $sep + 'Sub Folder')) | ConvertFrom-Json
+    Assert ($h2.root -eq (Join-Path $spaced 'Sub Folder') -and $h2.totals.bytes -eq 3) 'FolderHex relative subfolder'
+    $h3 = Invoke-FolderInventory -Section Summary -FolderHex (ConvertTo-TestHex $acct) | ConvertFrom-Json
+    Assert ($h3.root -eq $acct -and @($h3.candidates).Count -eq 1 -and $h3.totals.files -eq 14) 'FolderHex full path used as is'
+    Assert ((Invoke-FolderInventory -Section Summary -FolderHex (ConvertTo-TestHex (Join-Path $tmp 'Missing')) | ConvertFrom-Json).status -eq 'notFound') 'FolderHex missing path'
+    Assert ((Invoke-FolderInventory -Section Summary -FolderHex (ConvertTo-TestHex $acct) -Pick 1 | ConvertFrom-Json).status -eq 'badPick') 'FolderHex full path has one candidate'
+    # Through the script entry, split into parts as the loader would pass them.
+    $hx = ConvertTo-TestHex $acct
+    $parts = @(for ($i = 0; $i -lt $hx.Length; $i += 40) { $hx.Substring($i, [Math]::Min(40, $hx.Length - $i)) })
+    $partArgs = @(); for ($i = 0; $i -lt $parts.Count; $i++) { $partArgs += @(('-FolderHex' + $(if ($i) { [string]($i + 1) } else { '' })), $parts[$i]) }
+    $env:RELIAN_DEPLOY_TEST = ''
+    try {
+        $hostExe = (Get-Process -Id $PID).Path
+        $eo = & $hostExe -NoProfile -ExecutionPolicy Bypass -File $path -Action Install -Section TopLevel @partArgs
+        Assert ($LASTEXITCODE -eq 0 -and (@($eo)[-1] | ConvertFrom-Json).root -eq $acct) "entry: FolderHex parts joined ($($parts.Count) parts)"
+        $eo = & $hostExe -NoProfile -ExecutionPolicy Bypass -File $path -Action Install -Section TopLevel -FolderHex2 61
+        Assert ($LASTEXITCODE -eq 1 -and (@($eo)[-1] | ConvertFrom-Json).status -eq 'error') 'entry: a gap in FolderHex parts is an error line'
+    } finally { $env:RELIAN_DEPLOY_TEST = '1' }
+
+    # --- TopLevel: child folders with totals, cut only at a child boundary.
+    $tl = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+    Assert ($tl.status -eq 'ok' -and $tl.childCount -eq 6 -and $null -eq $tl.nextOffset -and $tl.rootFiles -eq '0|0') "toplevel: $($tl | ConvertTo-Json -Compress)"
+    Assert ((@($tl.rows | ForEach-Object { $_.Split('|')[0] }) -join ',') -eq 'AppData,Btrieve,Clients,Docs,Empty,forms') 'toplevel children in order'
+    Assert ($tl.rows[0] -like 'AppData|done|4|440|0|*|0' -and $tl.rows[2] -like 'Clients|done|4|18|5|*|0' -and $tl.rows[4] -eq 'Empty|done|0|0|0||0') "toplevel totals: $($tl.rows -join ';')"
+    & {
+        $saved = $script:FiBudgetSeconds
+        # A stub walk: 'Clients' runs out of time (the real walk sets the flag and the clock is past the budget).
+        function Measure-FiTree { param($Path) $cut = (Split-Path -Leaf $Path) -eq 'Clients'; if ($cut) { $script:FiOutOfTime = $true; $script:FiBudgetSeconds = 0 }; @{ files = 1; bytes = [int64]1; dirs = 0; newest = [DateTime]::MinValue; unreadable = 0; partial = $cut } }
+        $c1 = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+        $script:FiBudgetSeconds = $saved
+        Assert (@($c1.rows).Count -eq 2 -and $c1.nextOffset -eq 2 -and $c1.status -eq 'ok') "a child cut after other rows waits for the next call: $($c1 | ConvertTo-Json -Compress)"
+        $c2 = Invoke-FolderInventory -Section TopLevel -Offset 2 | ConvertFrom-Json
+        $script:FiBudgetSeconds = $saved; $script:FiOutOfTime = $false
+        Assert (@($c2.rows).Count -eq 1 -and $c2.rows[0] -like 'Clients|partial|*' -and $c2.nextOffset -eq 3 -and $c2.status -eq 'partial' -and -not $c2.PSObject.Properties['rootFiles']) "a child too big for one call is printed partial: $($c2 | ConvertTo-Json -Compress)"
+        function Measure-FiTree { param($Path) @{ files = 1; bytes = [int64]1; dirs = 0; newest = [DateTime]::MinValue; unreadable = [int]((Split-Path -Leaf $Path) -eq 'Docs'); partial = $false } }
+        $c3 = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+        Assert ($c3.rows[3] -like 'Docs|unreadable|*|1' -and $c3.rows[0] -like 'AppData|done|*' -and $c3.status -eq 'partial') 'a child with unreadable folders is labelled and makes the page partial'
+        function Get-FiChildFolders { param($Path, $Depth, $Report) if ($Report) { $Report['unreadable'] = 1 }; @() }
+        $c4 = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+        Assert ($c4.status -eq 'partial' -and $c4.errors -contains 'children:unreadable' -and $c4.childCount -eq 0) 'an unreadable root is partial, not an empty success'
+    }
+    # Root files are counted on the last page.
+    [IO.File]::WriteAllBytes((Join-Path $acct 'root.txt'), [byte[]]::new(5))
+    $rf = Invoke-FolderInventory -Section TopLevel | ConvertFrom-Json
+    Assert ($rf.rootFiles -eq '1|5' -and $rf.status -eq 'ok') "root files: $($rf.rootFiles)"
+    Remove-Item -LiteralPath (Join-Path $acct 'root.txt')
+
     # --- Tree, paged.
     1..150 | ForEach-Object { [void][IO.Directory]::CreateDirectory((Join-Path $acct ("Matters/Matter number $_ with a long name/Sub"))) }
     $t1j = Invoke-FolderInventory -Section Tree
@@ -130,6 +194,14 @@ try {
     Assert ($seen.Count -eq $t1.totalRows -and @($seen | Sort-Object -Unique).Count -eq $seen.Count) "tree pages cover every row once ($pages pages)"
     Assert (@($seen | Where-Object { $_ -like 'Clients\A\2019\Q1|4|1|2|1|*' }).Count -eq 1) 'depth-4 folder with recursive totals'
     Assert (-not @($seen | Where-Object { $_ -like 'Clients\A\2019\Q1\deep|*' }).Count) 'nothing deeper than 4'
+
+    # --- TopLevel paged by bytes: 150 children over two or more calls, each row once.
+    $mh = ConvertTo-TestHex ('Accounting' + $sep + 'Matters')
+    $tp = Invoke-FolderInventory -Section TopLevel -FolderHex $mh
+    Assert ([Text.Encoding]::UTF8.GetByteCount($tp) -le 7200) 'toplevel page within cap'
+    $tp = $tp | ConvertFrom-Json; $tseen = @($tp.rows); $pages = 1
+    while ($null -ne $tp.nextOffset) { $tp = Invoke-FolderInventory -Section TopLevel -FolderHex $mh -Offset ([string]$tp.nextOffset) | ConvertFrom-Json; $tseen += @($tp.rows); $pages++; Assert ($pages -lt 10) 'toplevel paging ends' }
+    Assert ($pages -ge 2 -and $tseen.Count -eq 150 -and @($tseen | Sort-Object -Unique).Count -eq 150 -and @($tseen | Where-Object { $_ -notlike '*|done|0|0|1||0' }).Count -eq 0) "toplevel pages cover 150 children once ($pages pages)"
 
     # --- A folder that cannot be read makes the walk partial, never an empty success.
     & {
