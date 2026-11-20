@@ -695,7 +695,7 @@ try {
     $script:calls.Clear()
     $r = Invoke-GpoBaseline @p -Apply 'true' -Context $script:ctx
     $writes = Get-Writes
-    Assert ($r.exitCode -eq 0 -and $writes[1] -eq 'Backup-GPO' -and $writes[2] -eq 'Set-GPPermission Accounting GpoApply' -and $r.report.backupId) "ApplyTo switch backed up first: $($writes -join ', ')"
+    Assert ($r.exitCode -eq 0 -and $writes[1] -eq 'Backup-GPO' -and $writes[2] -eq 'Set-GPPermission Pilot None' -and $writes[3] -eq 'Set-GPPermission Accounting GpoApply' -and $r.report.backupId) "ApplyTo switch backs up, revokes the old target, then grants the new: $($writes -join ', ')"
     Assert ((Get-FakePermission $g 'S-1-5-21-9-1102') -eq 'None' -and (Get-FakePermission $g 'S-1-5-21-9-1101') -eq 'GpoApply' -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoRead') 'ApplyTo switch removes the previous target'
     $script:calls.Clear()
     $r = Invoke-GpoBaseline @p -Apply 'true' -Context $script:ctx
@@ -859,6 +859,14 @@ try {
     $script:regValues["$($so.Id)|$newKey|Added"] = $saved
     $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
     Assert ($r.report.status -eq 'undone' -and -not $script:regValues.ContainsKey("$($so.Id)|$newKey|Added")) 'failed value read keeps the adopt record'
+    # A value someone changed is no longer ours: setting it back later is not undone.
+    [void](Invoke-GpoBaseline -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx)
+    $script:regValues["$($so.Id)|$newKey|Added"] = [pscustomobject]@{ Value = 2; Type = 'DWord' }
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange') 'changed value is not undone'
+    $script:regValues["$($so.Id)|$newKey|Added"] = [pscustomobject]@{ Value = 1; Type = 'DWord' }
+    $r = Invoke-GpoBaseline -Action Uninstall -DefinitionObject $adoptAdd -AdoptGpo $so.Id.ToString() -AllowUnmarked 'true' -Apply 'true' -Context $script:ctx
+    Assert ($r.report.status -eq 'noChange' -and [string]$script:regValues["$($so.Id)|$newKey|Added"].Value -eq '1') 'a value changed and set back by someone else is kept'
     foreach ($k in @('security', 'securityFilter')) {
         $bad = [pscustomobject]@{ id = 'test-adopt'; adopt = $true; description = 'd'; allowDefaultPolicy = $false; registry = @(); audit = @(); security = @() }
         if ($k -eq 'security') { $bad.security = @([pscustomobject]@{ cis = 'x'; section = 'System Access'; key = 'LockoutBadCount'; value = '1' }) } else { $bad | Add-Member securityFilter 'optional' }

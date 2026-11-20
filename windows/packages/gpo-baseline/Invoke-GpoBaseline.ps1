@@ -738,8 +738,7 @@ function Get-GpbPlan {
         $want = 'GpoApply'; if ($Filter.Name) { $want = 'GpoRead' }
         if ($au -ne $want) { $changes.Add([ordered]@{ kind = 'permission'; target = 'Authenticated Users'; current = $au; desired = $want; trustee = (Get-GpbAuthenticatedUsersName); trusteeType = 'Group'; sid = 'S-1-5-11' }) }
         if ($Filter.Name) {
-            $cur = 'None'; if ($Gpo) { $cur = & $level $Filter.Sid }
-            if ($cur -ne 'GpoApply') { $changes.Add([ordered]@{ kind = 'permission'; target = "$($Filter.Type) $($Filter.Name)"; current = $cur; desired = 'GpoApply'; trustee = $Filter.Name; trusteeType = $Filter.Type; sid = $Filter.Sid }) }
+            # Narrowing first, the new grant last: a run that stops part way applies to fewer, never to two targets.
             # A previous ApplyTo keeps apply unless removed: ApplyTo names the one account the GPO applies to.
             foreach ($p in @($perms | Where-Object { [string]$_.Permission -eq 'GpoApply' -and @('S-1-5-11', $Filter.Sid) -notcontains [string]$_.Trustee.Sid })) {
                 $type = 'Group'; if (@('User', 'Computer') -contains [string]$p.Trustee.SidType) { $type = [string]$p.Trustee.SidType }
@@ -747,6 +746,8 @@ function Get-GpbPlan {
                 $name = [string]$p.Trustee.Name; if ($type -eq 'Computer') { $name = $name.TrimEnd('$') }
                 $changes.Add([ordered]@{ kind = 'permission'; target = "$type $name"; current = 'GpoApply'; desired = 'None'; trustee = $name; trusteeType = $type; sid = [string]$p.Trustee.Sid })
             }
+            $cur = 'None'; if ($Gpo) { $cur = & $level $Filter.Sid }
+            if ($cur -ne 'GpoApply') { $changes.Add([ordered]@{ kind = 'permission'; target = "$($Filter.Type) $($Filter.Name)"; current = $cur; desired = 'GpoApply'; trustee = $Filter.Name; trusteeType = $Filter.Type; sid = $Filter.Sid }) }
         }
     }
     foreach ($item in @($Def.registry)) {
@@ -1121,9 +1122,13 @@ function Invoke-GpoBaseline {
                 # Undo only what adopt recorded adding (still matching), so pre-existing settings and later edits by others survive.
                 $undo = @()
                 $added = Get-GpbAdoptRecord $Context $gpo $def.id
+                $unresolved = @()
                 foreach ($item in @($def.registry | Where-Object { $added.values -contains "$($_.key)|$($_.valueName)" })) {
                     $cur = $null
-                    try { $cur = Get-GPRegistryValue -Guid $gpo.Id -Key $item.key -ValueName $item.valueName -Server $Context.Server -ErrorAction Stop } catch { $cur = $null }
+                    # shortcut: Get-GPRegistryValue reports a missing value as an error too, so a value someone removed stays
+                    # recorded; it is removed later only if it then holds exactly the definition's value again.
+                    try { $cur = Get-GPRegistryValue -Guid $gpo.Id -Key $item.key -ValueName $item.valueName -Server $Context.Server -ErrorAction Stop } catch { $unresolved += "$($item.key)|$($item.valueName)"; continue }
+                    # Read and changed by someone else: no longer ours, dropped from the record below.
                     if ($cur -and [string]$cur.Value -eq [string]$item.value -and [string]$cur.Type -eq [string]$item.type) { $undo += [ordered]@{ kind = 'removeValue'; target = "$($item.key)\$($item.valueName)"; current = [string]$cur.Value; desired = $null; item = $item } }
                 }
                 if ($ownFilter -and $added.wmiLink) {
@@ -1134,15 +1139,19 @@ function Invoke-GpoBaseline {
                 $report.lastBackupId = $lastBackup
                 if (-not $applyOn) { return @{ report = $report; exitCode = 0 } }
                 if (-not $Context.IsPdc) { return (& $refuse 'Run changes on the PDC emulator.') }
-                # Nothing left to undo: retire a link-only record, so a link set again later by someone else is not ours.
-                # A record with values stays: a value read that failed looks like an absent value.
-                if ($undo.Count -eq 0) { $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id; if ($added.values.Count -eq 0 -and [IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }; $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
+                # After this run the record keeps only values whose read failed; the rest is undone or no longer ours.
+                $rp = Get-GpbAdoptRecordPath $Context $gpo $def.id
+                $retire = {
+                    if ($unresolved.Count) { [IO.File]::WriteAllText($rp, (@{ values = $unresolved; wmiLink = $false } | ConvertTo-Json -Compress)) }
+                    elseif ([IO.File]::Exists($rp)) { [IO.File]::Delete($rp) }
+                }
+                if ($undo.Count -eq 0) { & $retire; $report.status = 'noChange'; return @{ report = $report; exitCode = 0 } }
                 $report.backupId = Save-GpbBackup -Context $Context -Gpo $gpo -DefinitionId $def.id
                 foreach ($u in $undo) {
                     if ($u.kind -eq 'removeValue') { Remove-GPRegistryValue -Guid $gpo.Id -Key $u.item.key -ValueName $u.item.valueName -Server $Context.Server -ErrorAction Stop | Out-Null }
                     else { Set-ADObject -Identity (Get-GpbGpoDn $Context $gpo) -Clear gPCWQLFilter -Server $Context.Server -ErrorAction Stop }
                 }
-                [IO.File]::Delete((Get-GpbAdoptRecordPath $Context $gpo $def.id))
+                & $retire
                 $report.status = 'undone'
                 return @{ report = $report; exitCode = 0 }
             }
