@@ -69,6 +69,20 @@ if ($r.exitCode -ne 1 -or $script:calls.Count) { Fail 'unknown user must change 
 Reset-Fake -RestartFails $true
 $r = Invoke-GpaRun -Mode 'Disable' -User 'user.one@example.invalid' -DnsName ''
 if ($r.exitCode -ne 1) { Fail 'restart failure must fail' }
-if ((($r.record | ConvertTo-Json -Depth 6 -Compress) -split "`n").Count -ne 1) { Fail 'one line of JSON' }
+# The entry point prints Format-GpaOutput; it must be one line that parses back.
+$line = Format-GpaOutput -Record $r.record
+if (([string]$line -split "`r?`n").Count -ne 1) { Fail 'one line of JSON' }
+if ((($line | ConvertFrom-Json).mode) -ne 'Disable') { Fail 'output does not parse back' }
+if ((Get-Content -LiteralPath $scriptPath -Raw) -notmatch 'Write-Output \(Format-GpaOutput -Record \$run\.record\)') { Fail 'entry point must print Format-GpaOutput' }
+
+# Enable's read-back needs the value gone: a value left at 0 fails.
+Reset-Fake
+$script:values[$SidA] = 0
+$script:GpaRemoveValue = { param([string]$Sid) $script:calls.Add("remove $Sid") }  # pretends, leaves the value
+$r = Invoke-GpaRun -Mode 'Enable' -User 'user.one@example.invalid' -DnsName ''
+if ($r.exitCode -ne 1) { Fail 'Enable must fail when the value is still there' }
+$script:GpaRemoveValue = { param([string]$Sid) throw 'access denied' }
+$r = Invoke-GpaRun -Mode 'Enable' -User 'user.one@example.invalid' -DnsName ''
+if ($r.exitCode -ne 1 -or @($r.record.errors) -notcontains 'write failed') { Fail 'a removal error must fail' }
 
 Write-Output 'gsa-private-access tests passed'

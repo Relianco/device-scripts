@@ -68,7 +68,10 @@ $script:GpaSetValue = {
 $script:GpaRemoveValue = {
     param([string]$Sid)
     $k = "Registry::HKEY_USERS\$Sid\$script:GpaKey"
-    if (Test-Path -LiteralPath $k) { Remove-ItemProperty -LiteralPath $k -Name $script:GpaValue -ErrorAction SilentlyContinue }
+    # Only an already-absent value is fine; any other failure stops the run.
+    if ($null -ne (Get-ItemProperty -LiteralPath $k -Name $script:GpaValue -ErrorAction SilentlyContinue)) {
+        Remove-ItemProperty -LiteralPath $k -Name $script:GpaValue -ErrorAction Stop
+    }
 }
 $script:GpaGetServices = {
     return @(Get-Service -Name 'GlobalSecureAccess*' -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ Name = $_.Name; Status = [string]$_.Status } })
@@ -113,6 +116,12 @@ function Get-GpaReport {
     return $r
 }
 
+# The one output line: compact JSON, printed last by the entry point.
+function Format-GpaOutput {
+    param($Record)
+    return ($Record | ConvertTo-Json -Depth 6 -Compress)
+}
+
 function Invoke-GpaRun {
     param([string]$Mode, [string]$User, [string]$DnsName)
     $record = [ordered]@{ mode = $Mode; timestamp = [datetime]::UtcNow.ToString('o'); changed = @(); errors = @() }
@@ -129,8 +138,9 @@ function Invoke-GpaRun {
                     try { & $script:GpaRestartService -Name $s.Name; $record.changed += "restart $($s.Name)" }
                     catch { $record.errors += "restart failed: $($s.Name)"; $code = 1 }
                 }
-                $want = ($Mode -eq 'Disable')
-                if (((& $script:GpaGetValue -Sid $hive[0].Sid) -eq 1) -ne $want) { $record.errors += 'read-back differs'; $code = 1 }
+                $after = & $script:GpaGetValue -Sid $hive[0].Sid
+                $ok = if ($Mode -eq 'Disable') { $after -eq 1 } else { $null -eq $after }
+                if (-not $ok) { $record.errors += 'read-back differs'; $code = 1 }
             } catch { $record.errors += 'write failed'; $code = 1 }
         }
     }
@@ -143,6 +153,6 @@ if ($env:RELIAN_DEPLOY_TEST -ne '1') {
     catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     if ($gpaMode -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
     $run = Invoke-GpaRun -Mode $gpaMode -User $User -DnsName $DnsName
-    Write-Output ($run.record | ConvertTo-Json -Depth 6 -Compress)
+    Write-Output (Format-GpaOutput -Record $run.record)
     exit $run.exitCode
 }
