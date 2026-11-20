@@ -294,32 +294,33 @@ try {
     Add-Reg $acct @{ ConfiguredTenantId = [guid]::NewGuid().ToString(); UserEmail = 'alex@example.com'; UserFolder = 'x'; KfmFoldersProtectedNow = 3584; KfmSilentOptInDesktop = 1; FilesOnDemandEnabled = 1; LastSyncError = 'cannot reach bob@example.org'; Unrelated = 'zzz' }
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive" @{ Version = '24.200.1.0001' }
     $mp = "HKEY_USERS\$sid\Software\SyncEngines\Providers\OneDrive"
-    Add-Reg "$mp\lib1" @{ UrlNamespace = 'https://contoso.sharepoint.com/sites/Accounting/Shared Documents?id=secret'; MountPoint = (Join-Path $profileDir 'Contoso\Accounting - Documents'); LibraryType = 'teamsite' }
-    Add-Reg "$mp\lib2" @{ UrlNamespace = 'https://contoso-my.sharepoint.com/personal/alex_example_com/Documents'; MountPoint = (Join-Path $profileDir 'OneDrive - Contoso'); LibraryType = 'mysite' }
-    Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Accounting = 'tenantId=abc&listId={x}&webUrl=https://contoso.sharepoint.com/sites/Accounting&version=1' }
+    Add-Reg "$mp\lib1" @{ UrlNamespace = 'https://example.sharepoint.com/sites/Accounting/Shared Documents?id=secret'; MountPoint = (Join-Path $profileDir 'Example\Accounting - Documents'); LibraryType = 'teamsite' }
+    Add-Reg "$mp\lib2" @{ UrlNamespace = 'https://example-my.sharepoint.com/personal/alex_example_com/Documents'; MountPoint = (Join-Path $profileDir 'OneDrive - Example'); LibraryType = 'mysite' }
+    Add-Reg "$L\SOFTWARE\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Accounting = 'tenantId=abc&listId={x}&webUrl=https://example.sharepoint.com/sites/Accounting&version=1' }
     Add-Reg "HKEY_USERS\$sid\Software\Policies\Microsoft\OneDrive\TenantAutoMount" @{ Other = 'tenantId=abc&listId={y}' }
     $od = Get-EeOneDrive
     $u0 = $od.users[0]; $b1 = $u0.business[0]
     Assert ($b1.tenantMatchesPolicy -eq $false -and $b1.LastSyncError -eq 'cannot reach [email omitted]' -and $b1.KfmFoldersProtectedNow -eq 3584 -and $b1.KfmSilentOptInDesktop -eq 1 -and $b1.FilesOnDemandEnabled -eq 1 -and -not $b1.Contains('Unrelated')) 'KFM, files on-demand and error values; mismatched tenant; e-mail scrubbed'
     Assert ($u0.version -eq '24.200.1.0001') 'OneDrive version'
     $libs = @{}; foreach ($lib in $u0.libraries) { $libs[$lib.mount] = $lib }
-    Assert ($libs['Accounting - Documents'].urlHost -eq 'contoso.sharepoint.com' -and $libs['Accounting - Documents'].urlPath -eq '/sites/Accounting/Shared Documents' -and $libs['Accounting - Documents'].libraryType -eq 'teamsite') 'mounted library host, path, leaf, type'
-    Assert ($libs['OneDrive - Contoso'].urlPath -eq '/personal/[user]/Documents') 'personal site path hides the user segment'
+    Assert ($libs['Accounting - Documents'].urlHost -eq 'example.sharepoint.com' -and $libs['Accounting - Documents'].urlPath -eq '/sites/Accounting/Shared Documents' -and $libs['Accounting - Documents'].libraryType -eq 'teamsite') 'mounted library host, path, leaf, type'
+    Assert ($libs['OneDrive - Example'].urlPath -eq '/personal/[user]/Documents') 'personal site path hides the user segment'
     Assert ($od.autoMount.device['Accounting'] -like 'tenantId=abc&listId={x}*' -and $u0.autoMount['Other'] -like '*listId={y}') 'TenantAutoMount values, device and user'
     Assert (-not (($od | ConvertTo-Json -Depth 8) -match '@|secret|alex_example')) 'no e-mail, query or user segment in the OneDrive section'
 
     # Join: dsregcmd parsed, nltest DC, WorkplaceJoin per user hashed. Natives are stubbed.
+    $fakeDevice = [guid]::NewGuid().ToString(); $fakeTenant = [guid]::NewGuid().ToString()
     function Invoke-EeNative {
         param([string]$Name, [string[]]$Arguments)
-        if ($Name -eq 'dsregcmd') { return @('+---+', '| Device State', '+---+', '', '             AzureAdJoined : NO', '          EnterpriseJoined : NO', '              DomainJoined : YES', '                DomainName : CORP', '                  DeviceId : 11111111-2222-3333-4444-555555555555', '              TenantId : 99999999-0000-0000-0000-000000000000', '        UserEmail : leak@example.com') }
+        if ($Name -eq 'dsregcmd') { return @('+---+', '| Device State', '+---+', '', '             AzureAdJoined : NO', '          EnterpriseJoined : NO', '              DomainJoined : YES', '                DomainName : CORP', "                  DeviceId : $fakeDevice", "              TenantId : $fakeTenant", '        UserEmail : leak@example.com') }
         if ($Name -eq 'nltest') { Assert ($Arguments -contains '/dsgetdc:CORP') 'nltest asks the joined domain'; return @('           DC: \\DC01.corp.local', '      Address: \\10.0.0.5', '     Dom Name: CORP', 'Dc Site Name: Default-First-Site-Name', 'The command completed successfully') }
     }
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows NT\CurrentVersion\WorkplaceJoin\JoinInfo\ABCDEF" @{ UserEmail = 'alex@example.com'; TenantId = 'tid-1' }
     $j = Get-EeJoin
-    Assert ($j.device.AzureAdJoined -eq 'NO' -and $j.device.DomainJoined -eq 'YES' -and $j.device.EnterpriseJoined -eq 'NO' -and $j.device.deviceIdPresent -and $j.device.TenantId -like '99999999*') 'dsregcmd device state parsed'
+    Assert ($j.device.AzureAdJoined -eq 'NO' -and $j.device.DomainJoined -eq 'YES' -and $j.device.EnterpriseJoined -eq 'NO' -and $j.device.deviceIdPresent -and $j.device.TenantId -eq $fakeTenant) 'dsregcmd device state parsed'
     Assert ($j.dc.name -eq 'DC01.corp.local' -and $j.dc.site -eq 'Default-First-Site-Name') 'nltest DC name and site'
     Assert ($j.users[0].workplaceJoin[0].user.id -eq $expectId -and $j.users[0].workplaceJoin[0].user.domain -eq 'example.com' -and $j.users[0].workplaceJoin[0].tenantId -eq 'tid-1') 'WorkplaceJoin hashed'
-    Assert (-not (($j | ConvertTo-Json -Depth 8) -match '@|11111111-2222')) 'no e-mail and no device id in the Join section'
+    Assert (-not (($j | ConvertTo-Json -Depth 8) -match ('@|' + $fakeDevice))) 'no e-mail and no device id in the Join section'
     function Invoke-EeNative { param([string]$Name, [string[]]$Arguments) return @('AzureAdJoined : YES', 'DomainJoined : NO') }
     $j2 = Get-EeJoin
     Assert ($j2.device.AzureAdJoined -eq 'YES' -and $j2.dc.status -eq 'notDomainJoined') 'no DomainName: nltest is not run'
