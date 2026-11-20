@@ -13,6 +13,7 @@ Each loader does a different job. Paste the one that matches the task.
 - **Read-only evidence for the forge (Windows):** `windows/runner/Invoke-RelianReadJob.ps1`.
 - **CPU, hardware, network or storage inventory (Windows):** `Invoke-RelianJob.ps1`, with a collector from `windows/collectors/`.
 - **Linux:** `linux/runner/relian-runner.sh`.
+- **Wazuh agent enrollment:** `windows/collectors/runner-wazuh-enroll.ps1` or `linux/collectors/runner-wazuh-enroll.sh`. See [Wazuh enrollment from NinjaOne](#wazuh-enrollment-from-ninjaone).
 - **macOS:** `macos/runner/relian-runner.sh`.
 
 Run every one as System (Windows) or root (Linux, macOS).
@@ -43,6 +44,7 @@ A pasted loader can run only what you pinned. This is what each piece can and ca
 - **Pinned bytes.** A pin names exact bytes, so moving `main` cannot change what a pinned device runs.
 - **No NinjaOne calls from packages.** The runners and packages read and write no NinjaOne field and call no NinjaOne API. A package reports one JSON line on stdout and an exit code.
 - **Field writers are named.** Only `Invoke-RelianReadJob` (its result line), the inventory collectors, and `windows/collectors/runner-report-field.ps1` (the storage ProfileReport) write NinjaOne fields.
+- **Field readers are named.** Only the two `runner-wazuh-enroll` wrappers read NinjaOne fields: `wazuhGroup` and the Secure `wazuhRegistrationPassword`.
 - **Secrets stay off the command line, with one exception.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyData` for PDF-XChange. `autoelevate` also accepts a `LicenseKey` package argument, which NinjaOne keeps in activity history; prefer `AE_LICENSE_KEY`.
 - **Read-only means tested.** Read-only packages are scanned for write commands or run against stubs.
 - **Changing packages say so.** Each header names what it changes, what it backs up first, and what it never does.
@@ -206,7 +208,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `teams`: Microsoft Teams from a pinned bootstrapper and MSIX.
 - `vlc`: VLC.
 - `wau`: Winget-AutoUpdate. Updates only the app IDs in the allow list at `ListUrl`; self-update is off. Install `winget` first, or it exits 1618.
-- `wazuh`: the Wazuh agent. `Enroll` (for Intune) enrolls a fresh install from `RELIAN_WAZUH_*` variables and never re-enrolls or downgrades.
+- `wazuh`: the Wazuh agent. `Enroll` (for Intune) enrolls a fresh install from `RELIAN_WAZUH_*` variables and never re-enrolls or downgrades. The runner cannot pass a switch, so the package argument `Enrollment` `Environment` does the same. See [Wazuh enrollment from NinjaOne](#wazuh-enrollment-from-ninjaone).
 - `winget`: Microsoft App Installer (winget) only.
 - `wireguard-client`: WireGuard and one split tunnel as a service. The private key is made and kept on the device; the run prints the public key. Also an Intune app (key only) and a Remediation that applies a signed address map. See `docs/wireguard-client.md`.
 - `zoom`: Zoom.
@@ -290,6 +292,47 @@ One module per file under `windows/jobs/`, run by `Invoke-RelianJob`.
 - `hide-recovery-partitions`: removes drive letters assigned to Windows Recovery or EFI System partitions (4 GiB or smaller) after writing a backup under `C:\ProgramData\Relian\RecoveryPartitionLetterBackup`. A failed backup changes nothing.
 - `remove-eol-dotnet`: removes end-of-life Microsoft .NET 5 and .NET 7 runtimes (Runtime, Windows Desktop Runtime, ASP.NET Core Shared Framework, Host, Host FX Resolver) after writing a SYSTEM-only backup under `C:\ProgramData\Relian\EolDotnetBackup`. Verified WiX Burn bundles under `C:\ProgramData\Package Cache\{GUID}\*.exe` run silently first, then any remaining matched Windows Installer `{GUID}` products run via `msiexec.exe /x`. Leaves .NET 6, .NET 8, .NET 9, .NET 10, .NET Framework and third-party runtimes untouched. `-ReportOnly` changes and writes nothing (`drift`, exit 1).
 
+## Wazuh enrollment from NinjaOne
+
+The Wazuh manager requires the registration password. NinjaOne enrolls agents through one wrapper per platform. Each wrapper reads two organization fields, downloads the pinned runner and runs it. The runner and the package still call no NinjaOne.
+
+- `wazuhGroup` (text): the agent group. Empty means the organization is not on Wazuh, and the wrapper exits 0 before it downloads anything.
+- `wazuhRegistrationPassword` (type Secure, script read): the password. Empty exits 1.
+
+The agent name is `<prefix>--<host name>`, where the prefix is `wazuhGroup` without a trailing `_group`. The groups are `default` and `wazuhGroup`. An agent that already has a key is not enrolled again.
+
+The password never goes on a command line or into the output.
+
+- **Windows:** paste `windows/collectors/runner-wazuh-enroll.ps1`. It hands the password to the package in `RELIAN_WAZUH_AUTHD_PASS`, which the package clears before `msiexec` runs. The variables are removed when the runner returns. Do not turn on transcript logging.
+- **Linux:** paste `linux/collectors/runner-wazuh-enroll.sh`. It writes the password to a root-only `0600` file in a `0700` directory and passes the path in `WazuhPasswordFile`. The file is removed when the runner returns.
+
+Windows Parameters box, one line:
+
+```
+-RunnerUrl "<raw>/windows/runner/Invoke-RelianRunner.ps1"
+-RunnerSha256 "<runner-sha256>"
+-WazuhManager "<manager host>"
+-PackageUrl "<raw>/windows/packages/wazuh/Invoke-Wazuh.ps1"
+-PackageSha256 "<package-sha256>"
+-ToolkitUrl "<toolkit-url>" -ToolkitSha256 "<toolkit-sha256>"
+-BrandPackUrl "<brand-pack-url>" -BrandPackSha256 "<brand-pack-sha256>"
+-Action "Install" -PinVersion "4.14.9"
+-PackageArguments "eyJFbnJvbGxtZW50IjoiRW52aXJvbm1lbnQiLCJGbG9vclZlcnNpb24iOiI0LjE0LjMifQ=="
+```
+
+That base64 is `{"Enrollment":"Environment","FloorVersion":"4.14.3"}`. `PinVersion` is the MSI pinned in the package. An agent below `FloorVersion` is upgraded in place.
+
+Linux Parameters box, one line:
+
+```
+--runner-url "<raw>/linux/runner/relian-runner.sh"
+--runner-sha256 "<runner-sha256>"
+--wazuh-manager "<manager host>"
+--package-url "<raw>/linux/packages/wazuh/wazuh.sh"
+--package-sha256 "<package-sha256>"
+--action "Install" --pin-version "4.14.3"
+```
+
 ## Linux
 
 Paste `linux/runner/relian-runner.sh` as a shell script and run it as root. It follows the hash rule above.
@@ -315,7 +358,7 @@ That base64 is `ClientTag=tag:client-example`. Put the auth key in the runner's 
 Packages in `linux/packages/`, pinned in `linux/releases/<name>.json`:
 
 - `tailscale`: Tailscale from the signed apt repo on Debian and Proxmox VE, joined with a tag. The pin is a floor. The key reaches tailscale through a `0600` file. It never touches the firewall, sshd or Proxmox config.
-- `wazuh`: the Wazuh agent from the official repo, key pinned by fingerprint. The pin is a floor and is never downgraded. Reads `WazuhManager`, `WazuhGroup`, `WazuhNamePrefix` and `WazuhPasswordFile` from the environment.
+- `wazuh`: the Wazuh agent from the official repo, key pinned by fingerprint. The pin is a floor and is never downgraded. Reads `WazuhManager`, `WazuhGroup`, `WazuhNamePrefix` and `WazuhPasswordFile` from the environment. From NinjaOne, run it through `linux/collectors/runner-wazuh-enroll.sh`.
 - `diagnose-pve`: read-only plain-text diagnostics for Proxmox VE and Debian hosts: memory, ZFS, RAID, LVM and sampled disk activity.
 - `noop`: installs nothing and exits 0. Proves the runner, the pin and the NinjaOne wiring work.
 
