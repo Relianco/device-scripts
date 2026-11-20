@@ -54,7 +54,7 @@ $script:OaInstallRoots = {
 }
 $script:OaDownload = {
     param($Url)
-    $tls = [int][Net.ServicePointManager]::SecurityProtocol; if ($tls -ne 0 -and ($tls -band 3072) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tls -bor 3072 }
+    $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     $temp = [IO.Path]::GetTempFileName()
     try {
         Invoke-WebRequest -Uri $Url -OutFile $temp -UseBasicParsing -TimeoutSec 120 -MaximumRedirection 0
