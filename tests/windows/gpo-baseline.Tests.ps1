@@ -603,7 +603,7 @@ try {
     $amKey = 'HKCU\Software\Policies\Microsoft\OneDrive\TenantAutoMount'
 
     Assert ((Get-GpbAuthenticatedUsersName) -match '\S') 'Authenticated Users name resolves or falls back'
-    foreach ($id in @('workstations-only', 'onedrive-workstations', 'onedrive-users', 'onedrive-automount', 'password-lockout')) {
+    foreach ($id in @('workstations-only', 'onedrive-workstations', 'onedrive-users', 'onedrive-automount', 'quiet-windows', 'password-lockout')) {
         $d = Get-GpbDefinition $id
         Assert ($null -ne $d) "embedded definition found: $id"
         $rd = Resolve-GpbDefinition $d @{ TenantId = $tenant; LibraryId = $libId; LibraryName = 'Accounting' }
@@ -752,6 +752,45 @@ try {
     $r = Invoke-GpoBaseline -Definition 'onedrive-users' -Apply 'true' -Context $script:ctx
     $g = $script:gpos['Relian - OneDrive (users)']
     Assert ($r.exitCode -eq 0 -and ($script:pol -contains "$($g.Id)|User|HKCU\SOFTWARE\Policies\Microsoft\OneDrive\DisablePersonalSync")) 'DisablePersonalSync in the user Registry.pol'
+
+    # quiet-windows: computer and user halves, workstation filter, everyone by default, a pilot, then everyone again.
+    $script:ctx = New-FakeWorld
+    $qw = @{ Definition = 'quiet-windows'; LinkTo = 'DC=example,DC=invalid' }
+    $r = Invoke-GpoBaseline @qw -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan' -and (Get-Writes).Count -eq 0) "quiet-windows plan makes zero writes: $($r.report | ConvertTo-Json -Depth 5 -Compress)"
+    $r = Invoke-GpoBaseline @qw -Apply 'true' -Context $script:ctx
+    $g = $script:gpos['Relian - Quiet Windows']
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'applied' -and $g.Description.Contains('[relian-gpo-baseline:quiet-windows]')) "quiet-windows apply: $($r.report | ConvertTo-Json -Depth 5 -Compress)"
+    Assert (-not @($script:calls | Where-Object { $_ -like 'Set-GPPermission*' }) -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoApply') 'quiet-windows: no ApplyTo keeps Authenticated Users apply'
+    $cc = 'HKLM\SOFTWARE\Policies\Microsoft\Windows\CloudContent'; $edge = 'HKLM\SOFTWARE\Policies\Microsoft\Edge'; $ucc = 'HKCU\Software\Policies\Microsoft\Windows\CloudContent'
+    $want = @{
+        "$cc|DisableWindowsConsumerFeatures" = 1; "$cc|DisableConsumerAccountStateContent" = 1; "$cc|DisableSoftLanding" = 1
+        "$edge|HideFirstRunExperience" = 1; "$edge|ShowRecommendationsEnabled" = 0; "$edge|PromotionalTabsEnabled" = 0
+        "$ucc|DisableTailoredExperiencesWithDiagnosticData" = 1; "$ucc|DisableThirdPartySuggestions" = 1
+    }
+    foreach ($k in $want.Keys) {
+        $v = $script:regValues["$($g.Id)|$k"]
+        Assert ($null -ne $v -and [int]$v.Value -eq $want[$k] -and [string]$v.Type -eq 'DWord') "quiet-windows value: $k"
+    }
+    $mine = @($script:pol | Where-Object { $_ -like "$($g.Id)|*" })
+    Assert (@($mine | Where-Object { $_ -like '*|Machine|HKLM\*' }).Count -eq 6 -and @($mine | Where-Object { $_ -like '*|User|HKCU\*' }).Count -eq 2 -and $mine.Count -eq 8) "quiet-windows: six computer values, two user values: $($mine -join ', ')"
+    Assert (-not @($mine | Where-Object { $_ -like '*Spotlight*' -or $_ -like '*UserProfileEngagement*' })) 'quiet-windows leaves Spotlight and the Settings toggle alone'
+    $wf = @($script:wmi.Values | Where-Object { $_.'msWMI-Name' -eq 'Relian - Workstations' })
+    Assert ($wf.Count -eq 1 -and $script:ad[$g.Id.ToString()].gPCWQLFilter -eq "[example.invalid;$($wf[0].'msWMI-ID');0]") 'quiet-windows: workstation WMI filter linked'
+    Assert ($script:calls -contains 'New-GPLink No') 'quiet-windows: domain-root link created disabled'
+    $script:calls.Clear()
+    $r = Invoke-GpoBaseline @qw -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'noChange' -and (Get-Writes).Count -eq 0) 'quiet-windows is idempotent'
+    $script:calls.Clear()
+    $r = Invoke-GpoBaseline @qw -ApplyTo 'PILOT-PC' -ApplyType 'Computer' -Apply 'true' -Context $script:ctx
+    $writes = Get-Writes
+    Assert ($r.exitCode -eq 0 -and $writes[1] -eq 'Backup-GPO' -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoRead' -and (Get-FakePermission $g 'S-1-5-21-9-1103') -eq 'GpoApply') "quiet-windows pilot on one computer: $($writes -join ', ')"
+    $r = Invoke-GpoBaseline @qw -ApplyTo 'Pilot' -ApplyType 'User' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'plan') 'quiet-windows: a user pilot is accepted, the definition has user settings'
+    $r = Invoke-GpoBaseline @qw -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and (Get-FakePermission $g 'S-1-5-11') -eq 'GpoApply') 'quiet-windows fleet run gives Authenticated Users apply again'
+    $r = Invoke-GpoBaseline -Action Uninstall -Definition 'quiet-windows' -Apply 'true' -Context $script:ctx
+    Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'removed' -and -not $script:gpos.ContainsKey('Relian - Quiet Windows')) 'quiet-windows uninstall removes its GPO'
 
     # ---- Adopt: an unmarked GPO, only by GUID, only with AllowUnmarked, add-only ----
     $script:ctx = New-FakeWorld
