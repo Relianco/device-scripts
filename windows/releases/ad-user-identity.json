@@ -1,0 +1,6 @@
+{
+  "name": "AD user identity",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Base64-encoded UTF-8 JSON object, run on a domain controller. {\"Identity\":\"jdoe\",\"UserPrincipalName\":\"jdoe@example.com\",\"Mail\":\"jdoe@example.com\",\"ProxyAddresses\":\"SMTP:jdoe@example.com;smtp:j.doe@example.com\",\"TargetOu\":\"OU=Unsynced,DC=example,DC=com\"} (Mode Plan, the default) prints the current and planned values, every other AD object holding a planned address or sAMAccountName, and the objectGUID base64 (ImmutableId), and changes nothing. Add \"Mode\":\"Apply\" to write: it refuses on a conflict or a missing OU, backs up to %ProgramData%\\Relian\\ad-user-identity\\<sam>-<yyyyMMdd-HHmmss>.json, sets only the given attributes, moves the user and reads it back. {\"Identity\":\"jdoe\",\"Mode\":\"Rollback\"} restores the newest backup (or \"Backup\":\"<file name>\"). Optional: GivenName, Surname, DisplayName, NewSamAccountName. Non-SMTP proxyAddresses are kept. Never touches the password, groups or enabled state, never deletes."
+}
