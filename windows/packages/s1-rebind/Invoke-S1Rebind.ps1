@@ -100,6 +100,24 @@ $script:SrAgentVersion = {
     if ($d) { $d[0].Name -replace '^Sentinel Agent ', '' } else { '' }
 }
 
+# The version the running SentinelAgent service was started from (its folder name), or '' when it is not running.
+$script:SrRunningVersion = {
+    $svc = Get-CimInstance Win32_Service -Filter "Name='SentinelAgent'" -ErrorAction SilentlyContinue
+    if ($svc -and $svc.State -eq 'Running' -and [string]$svc.PathName -match 'Sentinel Agent ([0-9][0-9.]*)\\') { return $Matches[1] }
+    ''
+}
+
+# Pure: did an in-place upgrade take? The installer exit code alone is not enough: SentinelOne's
+# installer has returned 12 after a completed upgrade (MSI "Installation completed successfully", new
+# agent running and connected). So: the agent version must have changed, and either the exit is 0 or
+# the running SentinelAgent service already runs from the new version.
+function Test-SrUpgradeTook {
+    param([int]$Exit, [string]$Before, [string]$After, [string]$Running)
+    if (-not $After -or $After -eq $Before) { return $false }
+    if ($Exit -eq 0) { return $true }
+    return ($Running -eq $After)
+}
+
 $script:SrSecrets = @()
 
 # Removes the token, its site key and anything token-shaped, then flattens whitespace.
@@ -255,7 +273,13 @@ function Invoke-SrMain {
     $after = [string](& $script:SrAgentVersion)
     Say "upgrade exit ${u}: agent '$before' -> '$after'"
     if ($reboot -contains $u) { Say "REBOOT NEEDED (exit $u): reboot, then run Section Report"; return Done 0 }
-    if (-not ($u -eq 0 -and $after -and $after -ne $before)) {
+    $running = ''
+    if ($u -ne 0 -and $after -and $after -ne $before) {
+        # A non-zero exit with a new version installed: trust the running service, given a minute to start.
+        for ($n = 0; $n -lt 6; $n++) { $running = [string](& $script:SrRunningVersion); if ($running -eq $after) { break }; & $script:SrSleep 10 }
+        Say "running agent service: '$running'"
+    }
+    if (-not (Test-SrUpgradeTook -Exit $u -Before $before -After $after -Running $running)) {
         if (-not $before) { Say 'install failed and no agent is present; Defender covers; see SC-exit-code.txt in C:\Windows\Temp'; return Done 1 }
         if ($AllowUninstall -ne 'true') { Say 'upgrade did not take; old agent left as it was; clean needs AllowUninstall true'; return Done 1 }
         $c = & $script:SrRunInstaller $exe @('-c', '-t', $SiteToken)

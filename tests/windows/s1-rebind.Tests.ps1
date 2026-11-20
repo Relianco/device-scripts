@@ -33,6 +33,9 @@ function Reset {
         $script:InstallExit }
     $script:SrFileSha256 = { param($p) 'a' * 64 }
     $script:SrAgentVersion = { $script:Version }
+    $script:Running = ''
+    $script:RunningChecks = 0
+    $script:SrRunningVersion = { $script:RunningChecks++; $script:Running }
     $script:SrSigner = { param($p) $script:Signer }
     $script:SrNewWorkDir = { $script:WorkDir }
     $script:SrDownload = { param($u, $p) $script:Downloads++; Set-Content -LiteralPath $p -Value 'zip' }
@@ -136,6 +139,51 @@ $script:Config = $bound
 $r = Rein -AllowUninstall true
 Assert ($r.ExitCode -eq 0 -and ($script:Installs -join ',') -eq '-t,-c,-t' -and $script:Version -eq '25.1.3.334') 'refused upgrade, clean and install'
 NoSecret $r 'clean and install'
+
+# Reinstall: exit 12 with the new agent installed AND running counts as success (seen live on 24.1.5 -> 25.1.3).
+Reset
+$script:Config = $bound
+$script:UpgradeTakes = $true
+$script:InstallExit = 12
+$script:Running = '25.1.3.334'
+$r = Rein
+Assert ($r.ExitCode -eq 0 -and ($script:Installs -join ',') -eq '-t' -and ($r.Lines -join ' ') -match "running agent service: '25.1.3.334'") 'exit 12 with the new agent running is success, no clean'
+
+# Reinstall: the same exit 12 and new version on disk, but the old agent still running: a failure (no clean
+# without AllowUninstall). The decision must come from the running service, so it is checked (the old code never
+# looked at it and failed every exit 12; the success case above proves the rule is not "exit 12 always fails").
+Reset
+$script:Config = $bound
+$script:UpgradeTakes = $true
+$script:InstallExit = 12
+$script:Running = '22.3.4.612'
+$r = Rein
+Assert ($r.ExitCode -eq 1 -and ($script:Installs -join ',') -eq '-t' -and ($r.Lines -join ' ') -match 'did not take') 'exit 12 with the old agent running is a failure'
+Assert ($script:RunningChecks -ge 1 -and ($r.Lines -join ' ') -match "running agent service: '22.3.4.612'") 'old-agent case was decided by the running service'
+
+# Same state, only the running service changes to the new version: success. Shows the result turns on the running agent.
+Reset
+$script:Config = $bound
+$script:UpgradeTakes = $true
+$script:InstallExit = 12
+$script:Running = '25.1.3.334'
+$r = Rein
+Assert ($r.ExitCode -eq 0 -and $script:RunningChecks -ge 1) 'flipping only the running version flips the result'
+
+# Reinstall: exit 12 with no version change is a failure, and the running service is not even consulted.
+Reset
+$script:Config = $bound
+$script:InstallExit = 12
+$script:Running = '22.3.4.612'
+$r = Rein
+Assert ($r.ExitCode -eq 1 -and ($r.Lines -join ' ') -notmatch 'running agent service' -and $script:RunningChecks -eq 0) 'exit 12 without a version change is a failure'
+
+# Pure rule.
+Assert (Test-SrUpgradeTook -Exit 0 -Before '24.1.5.277' -After '25.1.3.334' -Running '') 'exit 0 + new version'
+Assert (Test-SrUpgradeTook -Exit 12 -Before '24.1.5.277' -After '25.1.3.334' -Running '25.1.3.334') 'exit 12 + new version running'
+Assert (-not (Test-SrUpgradeTook -Exit 12 -Before '24.1.5.277' -After '25.1.3.334' -Running '24.1.5.277')) 'exit 12 + old running'
+Assert (-not (Test-SrUpgradeTook -Exit 0 -Before '24.1.5.277' -After '24.1.5.277' -Running '24.1.5.277')) 'no version change'
+Assert (-not (Test-SrUpgradeTook -Exit 0 -Before '24.1.5.277' -After '' -Running '')) 'no agent after'
 
 # Reinstall: an upgrade that loses the binding is bound again.
 Reset
