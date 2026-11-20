@@ -25,9 +25,10 @@ $script:genCount = 0
 function New-TestKey { param([int]$Seed) return [Convert]::ToBase64String([byte[]]@(($Seed)..($Seed + 31))) }
 function Get-TestPub { param([string]$Key) return [Convert]::ToBase64String([byte[]]@([Convert]::FromBase64String($Key) | ForEach-Object { 255 - $_ })) }
 
-$signer = [Security.Cryptography.RSA]::Create(3072)
+function New-Rsa { param([int]$Bits) $r = [Security.Cryptography.RSA]::Create(); $r.KeySize = $Bits; return $r }
+$signer = New-Rsa 3072
 $mapKey = $signer.ToXmlString($false)
-$otherSigner = [Security.Cryptography.RSA]::Create(3072)
+$otherSigner = New-Rsa 3072
 
 function New-Settings {
     param([hashtable]$Over = @{})
@@ -78,7 +79,7 @@ if ((Get-WgcMapEntry -MapText (New-Map -Entries $entries) -MapKey $otherSigner.T
 if ((Get-WgcMapEntry -MapText (New-Map -Entries $entries -Tunnel 'other') -MapKey $mapKey -Tunnel 'office' -LastSerial 0 -PublicKey $pubA).State -cne 'invalid') { Fail 'wrong tunnel accepted' }
 if ((Get-WgcMapEntry -MapText (New-Map -Entries $entries -Version 2) -MapKey $mapKey -Tunnel 'office' -LastSerial 0 -PublicKey $pubA).State -cne 'invalid') { Fail 'v 2 accepted' }
 if ((Get-WgcMapEntry -MapText 'not json' -MapKey $mapKey -Tunnel 'office' -LastSerial 0 -PublicKey $pubA).State -cne 'invalid') { Fail 'garbage accepted' }
-$small = [Security.Cryptography.RSA]::Create(2048)
+$small = New-Rsa 2048
 if ((Get-WgcMapEntry -MapText (New-Map -Entries $entries -Signer $small) -MapKey $small.ToXmlString($false) -Tunnel 'office' -LastSerial 0 -PublicKey $pubA).State -cne 'invalid') { Fail '2048-bit map key accepted' }
 if ((Get-WgcMapEntry -MapText (New-Map -Entries $entries) -MapKey $mapKey -Tunnel 'office' -LastSerial 0 -PublicKey (Get-TestPub (New-TestKey 99))).State -cne 'none') { Fail 'unknown key not none' }
 $badAddr = @{ $expectHash = @{ state = 'active'; address = '10.99.10.0/24' } }
