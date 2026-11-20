@@ -261,6 +261,7 @@ All read-only, and each prints bounded JSON. The six under `windows/read/` also 
 - `gpo-evidence` (read): Group Policy state for a domain. `Section` is `Summary`, `Gpos`, `Policy`, `Rsop`, `Store`, `Profiles` or `Dc`; `Gpo` picks one GPO, `RsopUser` runs Rsop for that user (no RSAT needed, so it runs on a PC). A `cpassword` is counted, never printed.
 - `maintenance-evidence` (read): reads back stored storage and update maintenance reports, in pages.
 - `wake-device` (read): sends a Wake-on-LAN packet from an online peer to `Mac` on the same subnet. A sent packet does not prove the target woke.
+- `s1-install-logs` (read, runner 374 only, plain text, not in the read-job allowlist): SentinelOne installer and upgrade logs (file list, newest tails) and SentinelOne/MsiInstaller events from the last `Days` days, to explain an installer exit code. Token-shaped text is redacted.
 - `endpoint-evidence`: device and user state that Intune or a script should have set. `Sections` picks the checks. Silent.
 - `outlook-suggestion-sources`: where on a PC one address (`Match`) could surface in Classic Outlook suggestions. Never prints the address or matched text.
 
