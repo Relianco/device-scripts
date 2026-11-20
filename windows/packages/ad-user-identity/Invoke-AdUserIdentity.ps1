@@ -24,8 +24,8 @@
                          Only complete backups owned by SYSTEM or Administrators are read.
 
     Plan: prints the current values, the changes, the move, every other AD object (user, contact, group, any class)
-    whose userPrincipalName, mail or SMTP proxyAddresses equal a planned address, or whose sAMAccountName equals the
-    planned one (case-insensitive), and the objectGUID with its base64. ImmutableId is the base64 of
+    whose userPrincipalName, mail or SMTP proxyAddresses equal an address the user will have after the change, or whose
+    sAMAccountName equals the user's resulting one (case-insensitive; given values plus the unchanged current ones), and the objectGUID with its base64. ImmutableId is the base64 of
     mS-DS-ConsistencyGuid when that is set (Cloud Sync anchors on it), else of objectGUID: set the cloud user's
     onPremisesImmutableId to it before the user comes into sync scope. Plan writes nothing and exits 0.
     Apply: refuses on any conflict or a TargetOu that is not an existing OU or container. When something differs, it writes a JSON backup of the identity
@@ -314,7 +314,10 @@ function Invoke-UiMain {
         $move = $target -ne '' -and -not $parent.Equals($target, [StringComparison]::OrdinalIgnoreCase)
         $problems = @()
         if ($move -and -not [bool](& $script:UiOuExists $target)) { $problems += "target $target does not exist" }
-        $conflicts = Get-UiConflicts $guid $planned
+        # Check the identity the user ends up with, not only the given values: a move alone can bring it into scope.
+        $resulting = [ordered]@{}
+        foreach ($k in $current.Keys) { $resulting[$k] = if ($planned.Contains($k)) { $planned[$k] } else { $current[$k] } }
+        $conflicts = Get-UiConflicts $guid $resulting
         $line.Changes = $changes
         $line.Move = if ($move) { [ordered]@{ from = $parent; to = $target } } else { $null }
         $line.Conflicts = $conflicts

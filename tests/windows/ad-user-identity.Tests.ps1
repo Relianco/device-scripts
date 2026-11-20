@@ -107,6 +107,12 @@ try {
     $r = Run @{ Mode = 'Apply'; Mail = 'new@example.com'; TargetOu = 'OU=Gone,DC=example,DC=com' }
     Assert ($r.ExitCode -eq 1 -and $script:Fake.Log.Count -eq 0) 'Missing OU blocks apply'
 
+    # A move alone is checked against the identity the user already has.
+    New-Std
+    $script:Fake.Objects += New-Obj 'old' -Mail 'JDOE@old.example'
+    $r = Run @{ Mode = 'Apply'; TargetOu = 'OU=Unsynced,DC=example,DC=com' }
+    Assert ($r.ExitCode -eq 1 -and $r.Line.Status -eq 'refused' -and $script:Fake.Log.Count -eq 0) 'Existing address conflict blocks a move'
+
     # Apply: backup first, then only the given attributes, then the move; read back.
     New-Std
     $r = Run @{ Mode = 'Apply'; UserPrincipalName = 'jdoe@example.com'; Mail = 'jdoe@example.com'; ProxyAddresses = 'SMTP:jdoe@example.com;smtp:j.doe@example.com'; TargetOu = 'OU=Unsynced,DC=example,DC=com' }
