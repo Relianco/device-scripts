@@ -50,7 +50,7 @@ rwe_fetch() {
     [[ "$code" -eq 0 && "$status" == '200' ]] && return 0
     rm -f -- "$dest"
     case "$code/$status" in
-      0/408|0/429|0/500|0/502|0/503|0/504|6/*|7/*|28/*|35/*) ;;
+      0/408|0/429|0/500|0/502|0/503|0/504|5/*|6/*|7/*|28/*|35/*) ;;
       *) return 1 ;;
     esac
     [[ "$attempt" -eq 3 ]] || rwe_sleep $((attempt == 1 ? 5 : 20))
@@ -82,11 +82,20 @@ rwe_main() {
   done
   # An empty hash is the off switch, as in the runner: exit 0 before anything is read or downloaded.
   [[ -n "$(rwe_trim "$runner_sha")" ]] || return 0
+  # An omitted --package-sha256 is not empty: the runner exits 1 with "missing parameter", so it is no off switch.
   for ((i = 0; i + 1 < ${#forward[@]}; i++)); do
     if [[ "${forward[$i]}" == '--package-sha256' && -z "$(rwe_trim "${forward[$((i + 1))]}")" ]]; then
       return 0
     fi
   done
+  # Install only: nothing is downloaded for another action.
+  local actions=()
+  for ((i = 0; i + 1 < ${#forward[@]}; i++)); do
+    [[ "${forward[$i]}" != '--action' ]] || actions+=("${forward[$((i + 1))]}")
+  done
+  if [[ ${#actions[@]} -ne 1 || "${actions[0]}" != 'Install' ]]; then
+    rwe_error 'this script runs --action Install only'; return 1
+  fi
   [[ "$runner_sha" =~ ^[0-9a-f]{64}$ ]] || { rwe_error '--runner-sha256 must be 64 lowercase hex characters'; return 1; }
   [[ -n "$runner_url" ]] || { rwe_error '--runner-url is required'; return 1; }
   manager="$(rwe_trim "$manager")"
@@ -105,8 +114,11 @@ rwe_main() {
   [[ -n "$(rwe_trim "$password")" ]] || { rwe_error 'wazuhRegistrationPassword is empty'; return 1; }
 
   local work code=0
-  # Bash runs the EXIT trap on HUP, INT and TERM too (a NinjaOne timeout or cancel).
+  # A NinjaOne timeout or cancel sends a signal: exit through the EXIT trap so the password file goes.
   trap rwe_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   work="$(mktemp -d)" || { rwe_error 'could not create a work directory'; return 1; }
   RWE_WORK="$work"
   # printf is a builtin: the password is not on any process command line.

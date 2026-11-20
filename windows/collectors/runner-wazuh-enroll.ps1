@@ -64,6 +64,7 @@ $script:RunRunner = {
     param($RunnerFile, $Arguments)
     $hostPath = (Get-Process -Id $PID).Path
     # Out-Host keeps the runner's output out of this function's return value: only the code is returned.
+    # No forwarded value carries a double quote: -PackageArguments is base64, the rest are URLs, hashes and words.
     & $hostPath -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $RunnerFile @Arguments | Out-Host
     return [int]$LASTEXITCODE
 }
@@ -91,6 +92,9 @@ function Invoke-RelianWazuhEnroll {
     for ($i = 0; $i -lt @($RunnerArguments).Count - 1; $i++) {
         if ($RunnerArguments[$i] -match '\A-(Package|Toolkit|BrandPack)Sha256\z' -and [string]::IsNullOrWhiteSpace($RunnerArguments[$i + 1])) { return 0 }
     }
+    # Enroll mode is Install only, and nothing is downloaded for another action.
+    $act = @(for ($i = 0; $i -lt @($RunnerArguments).Count - 1; $i++) { if ($RunnerArguments[$i] -ieq '-Action') { $RunnerArguments[$i + 1] } })
+    if ($act.Count -ne 1 -or $act[0] -ine 'Install') { Write-Host 'this script runs -Action Install only'; return 1 }
     # 5.1 drops any other empty native argument too, which would shift the runner's parameters.
     if (@($RunnerArguments | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count) { Write-Host 'an empty runner argument would be dropped: leave the parameter out'; return 1 }
     if ($RunnerSha256 -cnotmatch '\A[0-9a-f]{64}\z') { Write-Host 'RunnerSha256 must be 64 lowercase hex characters'; return 1 }

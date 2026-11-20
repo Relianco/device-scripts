@@ -146,6 +146,16 @@ for h in "$RUNNER_SHA" ''; do
   [[ "$LAST_CODE" -eq 1 && -z "$(calls)" && -z "$(reads)" ]] || fail "hash [$h] code $LAST_CODE"
 done
 
+begin 'Install only, before any read or download'
+for a in Uninstall Reinstall Repair install; do
+  reset_case
+  run_case "${GOOD[@]}" --package-url p --package-sha256 "$(printf 'ab%.0s' {1..32})" --action "$a" --pin-version 4.14.3
+  [[ "$LAST_CODE" -eq 1 && -z "$(calls)" && -z "$(reads)" ]] || fail "action $a code $LAST_CODE"
+done
+reset_case
+run_case "${GOOD[@]}" --package-url p --package-sha256 "$(printf 'ab%.0s' {1..32})" --pin-version 4.14.3
+[[ "$LAST_CODE" -eq 1 && -z "$(calls)" ]] || fail "no action code $LAST_CODE"
+
 begin 'TERM during the run removes the password file'
 reset_case
 : > "$WORK/term"
@@ -165,6 +175,7 @@ begin 'download retries: transient classes three attempts, others once'
   check 0 'curl,sleep 5,curl,sleep 20,curl,' 6/000 7/000 0/200
   check 0 'curl,sleep 5,curl,' 0/503 0/200
   check 1 'curl,sleep 5,curl,sleep 20,curl,' 28/000 35/000 0/429
+  check 0 'curl,sleep 5,curl,' 5/000 0/200
   check 1 'curl,' 0/404
   check 1 'curl,' 22/000
 ) || fail 'retry classes'

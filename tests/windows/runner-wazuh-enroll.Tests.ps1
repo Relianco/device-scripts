@@ -114,6 +114,12 @@ $ui = 'https://' + 'u' + [char]58 + 'p' + [char]64 + 'example.invalid/p.ps1'
 foreach ($h in @($sha, '')) {
     $r = Invoke-Case -Hash $h -Extra @('-PackageUrl', $ui, '-Action', 'Install'); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail "forwarded userinfo URL accepted (hash [$h])" }
 }
+# Install only: another action or none is refused before any read or download.
+foreach ($x in @(@('-Action', 'Uninstall'), @('-Action', 'Reinstall'), @('-Action', 'Repair'), @(), @('-Action', 'Install', '-Action', 'Install'))) {
+    $extraArgs = @('-PackageUrl', 'https://example.invalid/p.ps1', '-PackageSha256', ('ab' * 32), '-PinVersion', '4.14.9') + $x
+    $r = Invoke-Case -Extra $extraArgs; if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail "action [$($x -join ' ')] was accepted" }
+}
+$null = Invoke-Case -Extra @('-PackageUrl', 'p', '-PackageSha256', ('ab' * 32), '-action', 'install'); if ($script:ran.Count -ne 1) { Fail 'lowercase install was refused' }
 # Windows PowerShell 5.1 drops an empty native argument, which would shift the runner's parameters.
 $r = Invoke-Case -Extra (@($forward) + @('-CancelPath', '')); if ($r.Code -ne 1 -or $script:downloads -ne 0 -or $script:reads.Count -ne 0) { Fail 'an empty forwarded argument was accepted' }
 

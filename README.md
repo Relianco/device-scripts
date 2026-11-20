@@ -301,7 +301,7 @@ The Wazuh manager requires the registration password. NinjaOne enrolls agents th
 
 The agent name is `<prefix>--<host name>`, where the prefix is `wazuhGroup` without a trailing `_group`. The groups are `default` and `wazuhGroup`. An agent that already has a key is not enrolled again.
 
-The password never goes on a command line or into the output.
+The password never goes on a command line or into the output. Both wrappers run `Install` only and refuse any other action before they download anything.
 
 - **Windows:** paste `windows/collectors/runner-wazuh-enroll.ps1`. It hands the password to the package in `RELIAN_WAZUH_AUTHD_PASS`, which the package clears before `msiexec` runs. The variables are removed when the runner returns. Do not turn on transcript logging.
 - **Linux:** paste `linux/collectors/runner-wazuh-enroll.sh`. It writes the password to a root-only `0600` file in a `0700` directory and passes the path in `WazuhPasswordFile`. The file is removed when the runner returns.
