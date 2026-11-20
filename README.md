@@ -241,6 +241,7 @@ These change settings when you ask, and most have a read-only mode.
 These report by default and change the device only when you ask. None reboots unless named.
 
 - `storage-maintenance`: disk use and cleanup candidates. `Mode` `Cleanup` with `Tier` `Safe` or `Aggressive` frees caches and leftovers, never user files. `ProfileReport` `true` adds a per-profile census. Profile removal is a separate, gated opt-in. See `docs/maintenance.md`.
+- `extend-system-volume`: extends C: online into unallocated space right after it, after the virtual disk was grown on the host. Refuses when a partition follows C:, never shrinks, moves or deletes a partition. `Section` `Evidence` is read-only.
 - `update-maintenance`: update services, policy and servicing state. `Mode` `Repair` repairs them. Never starts Setup.
 - `feature-update`: why Windows Update has not offered the next feature update. `Fix` `true` re-enables only the appraiser tasks.
 - `feature-upgrade`: an in-place Windows upgrade from a pinned ISO (`IsoUrl`, `IsoSha256`). Setup runs detached as a scheduled task.
