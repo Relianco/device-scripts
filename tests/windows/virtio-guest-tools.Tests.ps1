@@ -192,6 +192,7 @@ try {
 $text = Get-Content -LiteralPath $scriptPath -Raw
 Assert ($text -match "'/install', '/quiet', '/norestart', '/log'") 'installer arguments'
 Assert ($text -notmatch '(?i)Restart-Computer|shutdown(\.exe)?\s+/r') 'the package must not reboot'
+Assert ($text -match "-UserAgent 'relian-device-scripts'") 'download must not send a Mozilla User-Agent (fedorapeople bot check)'
 
 Write-Output 'virtio-guest-tools tests passed'
 exit 0

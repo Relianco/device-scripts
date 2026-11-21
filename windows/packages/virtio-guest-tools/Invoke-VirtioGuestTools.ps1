@@ -81,7 +81,8 @@ $script:VgSetVssOption = { param([int]$Value) Set-ItemProperty -LiteralPath $scr
 $script:DownloadFile = {
     param($Url, $Destination)
     $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
-    Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 300
+    # fedorapeople's bot check serves an HTML challenge to any User-Agent containing Mozilla, which PS 5.1 sends by default.
+    Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -TimeoutSec 300 -UserAgent 'relian-device-scripts'
 }
 $script:RetryDelay = { param($Seconds) Start-Sleep -Seconds ([int]$Seconds) }
 # The bundle is waited on and never killed.
