@@ -14,6 +14,7 @@ $env:RELIAN_DEPLOY_TEST = '1'
 Set-StrictMode -Off
 . $scriptPath
 Set-StrictMode -Version Latest
+$realBackup = $script:HjWriteBackup
 
 $Tid = '00000000-0000-0000-0000-000000000000'
 $Tname = 'contoso.onmicrosoft.com'
@@ -150,6 +151,23 @@ $line = Format-HjLine $r.record
 if (($line -split "`n").Count -ne 1) { Fail 'one line of JSON' }
 if ([Text.Encoding]::UTF8.GetByteCount($line) -gt 8000) { Fail "line is $([Text.Encoding]::UTF8.GetByteCount($line)) bytes" }
 if (($line | ConvertFrom-Json).device.DomainJoined -ne 'YES') { Fail 'trimmed line keeps the join facts' }
+
+# Long registry values are bounded too; the line stays within the cap.
+Reset-Fake -Scp @{ TenantId = ('y' * 30000); TenantName = ('z' * 30000) }
+$r = Invoke-HjRun -Mode 'Report'
+$line = Format-HjLine $r.record
+if ([Text.Encoding]::UTF8.GetByteCount($line) -gt 8000) { Fail "long SCP values: line is $([Text.Encoding]::UTF8.GetByteCount($line)) bytes" }
+if (($line | ConvertFrom-Json).status -ne 'report') { Fail 'bounded line keeps the status' }
+
+# The real backup writer never overwrites: two backups in the same second are two files.
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('hj-test-' + [guid]::NewGuid().ToString('N'))
+$script:HjBackupDir = $tmp
+try {
+    $a = & $realBackup '{"n":1}'
+    $b = & $realBackup '{"n":2}'
+    if ($a -eq $b) { Fail 'two backups share a path' }
+    if ([IO.File]::ReadAllText($a) -ne '{"n":1}' -or [IO.File]::ReadAllText($b) -ne '{"n":2}') { Fail 'backup content' }
+} finally { if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force } }
 
 # The source holds no tenant default and the param block is the runner's.
 $source = [IO.File]::ReadAllText($scriptPath)

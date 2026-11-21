@@ -14,7 +14,7 @@
               and whether the computer's AD domain answers.
       Scp     writes CDJ\AAD TenantId and TenantName, then reads them back. Needs TenantId (a GUID) and TenantName
               (a domain name, for example contoso.onmicrosoft.com); there are no defaults. The previous values are
-              saved first to C:\ProgramData\Relian\hybrid-join\cdj-aad-<yyyyMMdd-HHmmss>.json. Values already equal
+              saved first to C:\ProgramData\Relian\hybrid-join\cdj-aad-<yyyyMMdd-HHmmss>-<id>.json, never overwriting an older one. Values already equal
               are left alone. Does not start the join task.
       Join    does Scp when TenantId and TenantName are given, then starts the join task, waits up to 90 seconds,
               and reports dsregcmd and the task again. A device already AzureAdJoined is reported and nothing is
@@ -77,12 +77,15 @@ $script:HjWriteAad = {
     [void](New-ItemProperty -LiteralPath $script:HjAadKey -Name 'TenantId' -Value $TenantId -PropertyType String -Force -ErrorAction Stop)
     [void](New-ItemProperty -LiteralPath $script:HjAadKey -Name 'TenantName' -Value $TenantName -PropertyType String -Force -ErrorAction Stop)
 }
+$script:HjBackupDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\hybrid-join'
 $script:HjWriteBackup = {
     param([string]$Json)
-    $dir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\hybrid-join'
-    [void][IO.Directory]::CreateDirectory($dir)
-    $file = Join-Path $dir ('cdj-aad-{0}.json' -f [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss'))
-    [IO.File]::WriteAllText($file, $Json, (New-Object Text.UTF8Encoding($false)))
+    [void][IO.Directory]::CreateDirectory($script:HjBackupDir)
+    # A unique name and CreateNew: a second run never overwrites the backup of the first.
+    $file = Join-Path $script:HjBackupDir ('cdj-aad-{0}-{1}.json' -f [datetime]::UtcNow.ToString('yyyyMMdd-HHmmss'), [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Json)
+    $fs = New-Object IO.FileStream($file, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
     if ([IO.File]::ReadAllText($file) -cne $Json) { throw 'backup readback differs' }
     return $file
 }
@@ -139,7 +142,8 @@ function ConvertFrom-HjDsreg {
     return $out
 }
 
-# Pure: one compact JSON line, at most 8,000 UTF-8 bytes; over that, dsregcmd keeps only the join facts.
+# Pure: one compact JSON line, at most 8,000 UTF-8 bytes. Over that, dsregcmd keeps only the join facts and the
+# CDJ\AAD values are cut to 256 characters; if it still does not fit, only mode, status and error remain.
 function Format-HjLine {
     param([System.Collections.IDictionary]$Record)
     $line = $Record | ConvertTo-Json -Depth 5 -Compress
@@ -150,8 +154,17 @@ function Format-HjLine {
         foreach ($f in $script:HjCoreFields) { if ($Record[$k].Contains($f)) { $core[$f] = $Record[$k][$f] } }
         $Record[$k] = $core
     }
+    foreach ($k in 'aad', 'aadAfter') {
+        if ($null -eq $Record[$k]) { continue }
+        foreach ($f in 'TenantId', 'TenantName') {
+            $v = [string]$Record[$k][$f]
+            if ($v.Length -gt 256) { $Record[$k][$f] = $v.Substring(0, 256) }
+        }
+    }
     $Record['truncated'] = $true
-    return ($Record | ConvertTo-Json -Depth 5 -Compress)
+    $line = $Record | ConvertTo-Json -Depth 5 -Compress
+    if ([Text.Encoding]::UTF8.GetByteCount($line) -le 8000) { return $line }
+    return ([ordered]@{ mode = $Record['mode']; status = $Record['status']; error = $Record['error']; truncated = $true } | ConvertTo-Json -Compress)
 }
 
 # Fills $Rec; returns the exit code. Each refusal returns before any change.
