@@ -100,9 +100,11 @@ function New-VgPrivateDir([string]$Path) {
     foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
         if ((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "$p is a reparse point" }
     }
-    # A parent a local user created (and so owns) lets that user swap our folder after the hash check.
-    $parent = Split-Path -Path $Path -Parent
-    if ((Test-Path -LiteralPath $parent) -and (& $script:VgOwnerSid $parent) -notin @('S-1-5-18', 'S-1-5-32-544')) { throw "$parent is not owned by SYSTEM or Administrators" }
+    # A folder a local user created first (and so owns) is refused, never re-ACLed: the user could swap our folder
+    # through the parent, or keep a WRITE_DAC handle open on the folder itself.
+    foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
+        if ((Test-Path -LiteralPath $p) -and (& $script:VgOwnerSid $p) -notin @('S-1-5-18', 'S-1-5-32-544')) { throw "$p is not owned by SYSTEM or Administrators" }
+    }
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
     & $script:VgLockDir $Path
 }
@@ -382,19 +384,23 @@ function Invoke-VgMain {
             Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    $r.DriverVersion = [string](Get-VgInstalledVersion 'Virtio-win-driver-installer')
-    $r.AgentVersion = [string](Get-VgInstalledVersion 'QEMU guest agent')
-    if ($agentCode -eq 0 -and -not (Test-VgAtLeast $r.AgentVersion $AgentVersion)) { $agentCode = 22; $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = 'agent is still below the pin' }
-
-    # Runs after a skipped or failed agent step too: the old agent was stopped and must run again.
-    $ga = & $script:VgGetService $script:VgAgent
-    if ($null -ne $ga) {
-        if ($ga.StartType -ne 'Automatic') { & $script:VgSetStartType $script:VgAgent 'Automatic' }
-        $vss = & $script:VgGetService $script:VgVss
-        if ($null -ne $vss -and $vss.StartType -eq 'Disabled') { & $script:VgSetStartType $script:VgVss 'Manual' }
-        if ($ga.Status -ne 'Running') { try { & $script:VgStartService $script:VgAgent } catch { $r.StartError = $_.Exception.Message } }
+    try {
+        $r.DriverVersion = [string](Get-VgInstalledVersion 'Virtio-win-driver-installer')
+        $r.AgentVersion = [string](Get-VgInstalledVersion 'QEMU guest agent')
+        if ($agentCode -eq 0 -and -not (Test-VgAtLeast $r.AgentVersion $AgentVersion)) { $agentCode = 22; $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = 'agent is still below the pin' }
+    } finally {
+        # Runs after a skipped or failed agent step, and after a throw above: an agent this run stopped must run again.
         $ga = & $script:VgGetService $script:VgAgent
-        $r.AgentStartType = $ga.StartType
+        if ($null -ne $ga) {
+            try {
+                if ($ga.StartType -ne 'Automatic') { & $script:VgSetStartType $script:VgAgent 'Automatic' }
+                $vss = & $script:VgGetService $script:VgVss
+                if ($null -ne $vss -and $vss.StartType -eq 'Disabled') { & $script:VgSetStartType $script:VgVss 'Manual' }
+            } catch { $r.StartTypeError = $_.Exception.Message }
+            if ($ga.Status -ne 'Running') { try { & $script:VgStartService $script:VgAgent } catch { $r.StartError = $_.Exception.Message } }
+            $ga = & $script:VgGetService $script:VgAgent
+            $r.AgentStartType = $ga.StartType
+        }
     }
     $r.AgentRunning = $null -ne $ga -and $ga.Status -eq 'Running'
     $vss = & $script:VgGetService $script:VgVss

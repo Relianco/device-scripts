@@ -36,7 +36,7 @@ The bundle is a WiX Burn chain with one rollback boundary. When the agent MSI fa
 4. If a step is needed and a backup runs, exit 20 (`backupRunning`) before anything changes.
 5. Drivers: download, save the network (below), check for a backup again (exit 20), `msiexec /i virtio-win-gt-x64.msi /qn /norestart /l*v`, restore the network (also after a failed MSI). Failure exits 1; the agent step does not run.
 6. Agent: download, then check for a cancel (exit 130) and a backup (exit 20) again. Send a stop to `QEMU-GA` and `QEMU Guest Agent VSS Provider` (without waiting on it), then wait up to 120 s until neither runs nor is marked for delete (`DeleteFlag` under the service key). If one still is, skip the MSI: exit 21 (`agentServiceHeld`). Check for a backup once more (exit 20). Then `msiexec /i qemu-ga-x86_64.msi /qn /norestart /l*v`; a failure exits 22 (`agentInstallFailed`).
-7. Always: set `QEMU-GA` to Automatic and start it (also the old one after a skipped or failed agent step), keep the VSS provider from Disabled, and write `VssOption` when given.
+7. Always, also after an error past the agent stop: set `QEMU-GA` to Automatic and start it (a failed start-type change goes to `StartTypeError` and does not skip the start) (also the old one after a skipped or failed agent step), keep the VSS provider from Disabled, and write `VssOption` when given.
 
 The package never restarts the machine. `RebootRequired` is true when an MSI exits 3010 or 1641.
 
@@ -64,7 +64,7 @@ After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up 
 | 22 | `agentInstallFailed` | The agent MSI failed (`AgentExit`) or left the agent below the pin. The drivers are installed. |
 | 130 | `cancelled` | Cancelled before an installer started. |
 
-Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>-<guid>.log`, `agent-<time>-<guid>.log` and `network-<time>-<guid>.json`. Downloads go to a `cache-<guid>` folder inside the log folder, which is removed after the run. The log folder and the cache folder get an ACL with only SYSTEM and Administrators (full control), inheritance off, owner Administrators. The run stops with exit 1, before it writes anything, if the log folder or its parent is a reparse point (a junction or symlink), or if the parent is not owned by SYSTEM or Administrators (a folder a local user created first). If the driver MSI fails, `Reason` names the snapshot file and says whether the restore finished. If a service stop throws, `StopError` holds the error, and the 120 s wait decides what happens next.
+Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>-<guid>.log`, `agent-<time>-<guid>.log` and `network-<time>-<guid>.json`. Downloads go to a `cache-<guid>` folder inside the log folder, which is removed after the run. The log folder and the cache folder get an ACL with only SYSTEM and Administrators (full control), inheritance off, owner Administrators. The run stops with exit 1, before it writes anything, if the log folder or its parent is a reparse point (a junction or symlink), or if the folder or its parent already exists and is not owned by SYSTEM or Administrators (a folder a local user created first is refused, never re-ACLed). If the driver MSI fails, `Reason` names the snapshot file and says whether the restore finished. If a service stop throws, `StopError` holds the error, and the 120 s wait decides what happens next.
 
 ## Recovery
 

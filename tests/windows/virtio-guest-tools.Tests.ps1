@@ -57,7 +57,7 @@ function New-Fake {
         Manufacturer = $Manufacturer; Pnp = $Pnp; DriverExit = $DriverExit; AgentExit = $AgentExit; AgentStarts = $AgentStarts; Held = $Held
         Versions = @{ 'Virtio-win-driver-installer' = $Driver; 'QEMU guest agent' = $Agent; 'Virtio-win-guest-tools' = $Bundle }
         Services = @{}; Calls = [System.Collections.Generic.List[string]]::new(); Delays = 0
-        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; Locked = [System.Collections.Generic.List[string]]::new()
+        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Locked = [System.Collections.Generic.List[string]]::new()
     }
     if ($Services) {
         $f.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' }
@@ -75,7 +75,7 @@ function New-Fake {
         }
     }
     $script:VgLockDir = { param($Path) $script:Fake.Locked.Add($Path) }
-    $script:VgOwnerSid = { param($Path) $script:Fake.Owner }
+    $script:VgOwnerSid = { param($Path) if ($script:Fake.OwnerOf.ContainsKey($Path)) { $script:Fake.OwnerOf[$Path] } else { $script:Fake.Owner } }
     $script:VgGetService = { param($Name) $script:Fake.Services[$Name] }
     $script:VgSetStartType = { param($Name, $Type) $script:Fake.Calls.Add("start-type $Name $Type"); $script:Fake.Services[$Name].StartType = $Type }
     $script:VgStartService = {
@@ -323,6 +323,27 @@ try {
     $err = ''
     try { [void](Run) } catch { $err = $_.Exception.Message }
     Assert ($err -match 'not owned by SYSTEM or Administrators' -and (Calls) -ceq '' -and @($f.Locked).Count -eq 0) "user-owned parent: $err $(Calls)"
+    # A log folder a local user created first is refused, not re-ACLed: an open WRITE_DAC handle would survive.
+    $f = New-Fake
+    $f.OwnerOf[$dir] = 'S-1-5-21-1-2-3-1001'
+    $err = ''
+    try { [void](Run) } catch { $err = $_.Exception.Message }
+    Assert ($err -match [regex]::Escape($dir) -and $err -match 'not owned' -and (Calls) -ceq '' -and @($f.Locked).Count -eq 0) "user-owned log folder: $err $(Calls)"
+
+    # After the agent services were stopped, a throw while reading versions still starts the agent again.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $entries = $script:VgUninstallEntries
+    $script:EntryReads = 0
+    $script:VgUninstallEntries = { $script:EntryReads++; if ($script:EntryReads -gt 3) { throw 'registry read failed' }; & $entries }
+    $err = ''
+    try { [void](Run) } catch { $err = $_.Exception.Message }
+    Assert ($err -match 'registry read failed' -and (Calls) -clike "*$stopBoth,msi agent,*start QEMU-GA") "restart after a throw: $err $(Calls)"
+    # A failed start-type change does not skip the start.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $script:VgSetStartType = { param($Name, $Type) throw 'set-service failed' }
+    $f.AgentExit = 1603
+    $r = Run
+    Assert ((Calls) -clike '*start QEMU-GA' -and $r.Result.StartTypeError -match 'set-service failed') "start after a start-type failure: $(Calls)"
 
     # Network: hand-set DNS on a DHCP adapter is lost by the new NIC instance and set again, matched by MAC.
     $dns = @('192.0.2.53', '192.0.2.54')
