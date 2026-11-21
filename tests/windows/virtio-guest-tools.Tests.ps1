@@ -191,7 +191,7 @@ try {
     # Agent registered at the pin but its service is gone: msiexec repair of the agent only.
     $f = New-Fake -Driver '0.1.302' -Agent '110.2.3' -Services $false
     $r = Run
-    Assert ((Calls) -clike 'download,msi agent,*' -and $f.Modes['agent'] -ceq '/famus') "missing agent service repairs: $(Calls) $($f.Modes['agent'])"
+    Assert ((Calls) -clike 'msi agent,*' -and $f.Modes['agent'] -ceq '/famus') "missing agent service repairs: $(Calls) $($f.Modes['agent'])"
 
     # A qemu-ga failure never touches the drivers: driver step done, agent reported on its own, exit 22.
     $f = New-Fake -Bundle '0.1.285' -Agent '109.1.0' -AgentExit 1603
@@ -230,6 +230,11 @@ try {
     Assert ($f.Modes['agent'] -ceq '/famus' -and $f.Args[1] -ceq ('"' + $f.AgentCode + '"')) "repair by product code: $($f.Args -join ' ')"
     $f = New-Fake -Driver '0.1.302' -Agent '111.0.0' -Services $false
     $f.AgentCode = 'QEMU guest agent'
+    $r = Run
+    Assert ($r.Result.Status -eq 'agentRepairUnavailable') 'non-GUID product code refused'
+    # A product code followed by a newline is not a product code.
+    $f = New-Fake -Driver '0.1.302' -Agent '111.0.0' -Services $false
+    $f.AgentCode = '{00000000-0000-4000-8000-000000000001}' + [char]10
     $r = Run
     Assert ($r.ExitCode -eq 22 -and $r.Result.Status -eq 'agentRepairUnavailable' -and (Calls) -notmatch 'msi agent') "no product code: $($r.Result.Status) $(Calls)"
 
@@ -471,7 +476,12 @@ try {
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Gateways @('198.51.100.1')))
     $f.UnreachableAfter = @('198.51.100.1')
     $r = Run
+    Assert ($f.Delays -eq 6) "gateway retried for 30 s: $($f.Delays)"
     Assert ($r.ExitCode -eq 1 -and (@($r.Result.NetError) -join ' ') -match '198\.51\.100\.1 .*unreachable') "gateway lost: $($r.ExitCode) $(@($r.Result['NetError']) -join ' ')"
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Gateways @('198.51.100.1')))
+    $f.UnreachableAfter = @('198.51.100.1')
+    $script:VgPing = { param($Ip) $script:Fake.Delays -ge 2 -or $Ip -notin @($script:Fake.Unreachable) }
+    Assert ((Run).ExitCode -eq 0) 'a gateway that answers again within 30 s is fine'
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Gateways @('198.51.100.1')))
     $f.Unreachable = @('198.51.100.1')
     Assert ((Run).ExitCode -eq 0) 'a gateway that never answered ping is not a failure'

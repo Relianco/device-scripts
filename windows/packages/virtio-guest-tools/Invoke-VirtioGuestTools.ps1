@@ -279,6 +279,10 @@ function Test-VgNicBack($s, $c) {
 }
 function Find-VgNic($Now, [string]$Mac) { $m = @($Now | Where-Object { $_.Mac -eq $Mac }); if ($m.Count -eq 1) { $m[0] } }
 
+function Wait-VgPing([string]$Ip) {
+    for ($i = 0; ; $i++) { if (& $script:VgPing $Ip) { return $true }; if ($i -ge 6) { return $false }; [void](& $script:RetryDelay -Seconds 5) }
+}
+
 # Waits for the saved adapters (by MAC), sets back what was set by hand and is missing, then checks the result.
 function Restore-VgNetwork($Saved, $r) {
     for ($i = 0; ; $i++) {
@@ -320,7 +324,8 @@ function Restore-VgNetwork($Saved, $r) {
         foreach ($a in @($s.Addresses | Where-Object { $_.Manual -and ($_.Ip -match ':' -or -not $s.Dhcp) })) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { $errors.Add("$($c.Alias) is missing $($a.Ip)") }
         }
-        foreach ($g in @($s.Reachable)) { if (-not (& $script:VgPing $g)) { $errors.Add("$($c.Alias) gateway $g answered before the driver update and is unreachable now") } }
+        # A new NIC instance can take a few seconds to resolve its gateway: up to 30 s.
+        foreach ($g in @($s.Reachable)) { if (-not (Wait-VgPing $g)) { $errors.Add("$($c.Alias) gateway $g answered before the driver update and is unreachable now") } }
     }
     $r.NetReapplied = @($applied)
     if ($errors.Count -gt 0) { $r.NetError = @($errors) }
@@ -332,10 +337,11 @@ function Restore-VgNetwork($Saved, $r) {
 # $RepairCode: the installed agent's ProductCode when it is current but its service is gone; '' installs or upgrades.
 function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp, [string]$AgentUrl, [string]$AgentSha256, [bool]$Repair, [string]$RepairCode, [string]$CancelPath) {
     # The repair runs from the installed product's cached MSI, which may be newer than the pin.
-    if ($Repair -and $RepairCode -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { $r.AgentStep = 'agentRepairUnavailable'; $r.AgentReason = 'the agent is registered but its service is gone, and its ProductCode is unknown: reinstall it by hand'; return 22 }
+    if ($Repair -and $RepairCode -notmatch '^\{[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}\z') { $r.AgentStep = 'agentRepairUnavailable'; $r.AgentReason = 'the agent is registered but its service is gone, and its ProductCode is unknown: reinstall it by hand'; return 22 }
     $msi = Join-Path $Cache 'qemu-ga-x86_64.msi'
     $script:VgDownloadError = ''
-    if ((Save-VgPayload -Url $AgentUrl -Destination $msi -Sha256 $AgentSha256) -ne 0) { $r.AgentStep = 'error'; $r.AgentReason = 'agent download failed or hash mismatch'; $r.DownloadError = $script:VgDownloadError; return 1 }
+    # A repair needs no download.
+    if (-not $Repair -and (Save-VgPayload -Url $AgentUrl -Destination $msi -Sha256 $AgentSha256) -ne 0) { $r.AgentStep = 'error'; $r.AgentReason = 'agent download failed or hash mismatch'; $r.DownloadError = $script:VgDownloadError; return 1 }
     # Checked after the download, right before the services are stopped.
     if (Test-VgCancelled $CancelPath) { $r.AgentStep = 'cancelled'; $r.AgentReason = 'cancelled after the agent download'; return 130 }
     $busy = Get-VgBackupBusy
@@ -350,7 +356,7 @@ function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp
     $busy = Get-VgBackupBusy
     if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = $busy; return 20 }
     # Hashed again just before msiexec, so a file swapped after the download check never runs.
-    if (-not (Test-VgSha $msi $AgentSha256)) { $r.AgentStep = 'error'; $r.AgentReason = 'agent MSI hash mismatch before install'; return 1 }
+    if (-not $Repair -and -not (Test-VgSha $msi $AgentSha256)) { $r.AgentStep = 'error'; $r.AgentReason = 'agent MSI hash mismatch before install'; return 1 }
     # /famus reinstalls the registered agent whose service is gone; /i installs or upgrades.
     $code = if ($Repair) { Invoke-VgMsi -Mode '/famus' -Path $RepairCode -Log (Join-Path $LogRoot "agent-$Stamp.log") } else { Invoke-VgMsi -Mode '/i' -Path $msi -Log (Join-Path $LogRoot "agent-$Stamp.log") }
     $r.AgentExit = $code
