@@ -213,7 +213,11 @@ try {
     $json = ConvertTo-GrvJson $r.report
     Assert ($json -match '^\{"job":"gpo-registry-value",' -and $json -notmatch "\n") "one JSON line: $json"
     # ---- Entry point: an empty PinVersion is the off switch ----
-    $out = & pwsh -NoProfile -File $path -Action Install -PinVersion '' -Mode Apply -Gpo 'Example Policy' -Key $key -ValueName Flag -Value 1 2>&1
+    # PinVersion left out (Windows PowerShell 5.1 drops an empty native argument), and the production entry point:
+    # without RELIAN_DEPLOY_TEST.
+    $env:RELIAN_DEPLOY_TEST = $null
+    try { $out = & pwsh -NoProfile -File $path -Action Install -Mode Apply -Gpo 'Example Policy' -Key $key -ValueName Flag -Value 1 2>&1 }
+    finally { $env:RELIAN_DEPLOY_TEST = '1' }
     Assert ($LASTEXITCODE -eq 0 -and -not $out) "empty PinVersion exits 0 and does nothing: $LASTEXITCODE $out"
 
     # ---- Real ACL on Windows: only SYSTEM and Administrators, inheritance off ----
