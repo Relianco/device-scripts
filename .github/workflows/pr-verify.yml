@@ -122,6 +122,11 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/read-job.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Component store report and repair run under Windows PowerShell 5.1 on servers.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/component-store.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/component-store-repair.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # NinjaOne runs jobs in Windows PowerShell 5.1.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/nable-agent-removal.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
