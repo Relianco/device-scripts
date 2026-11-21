@@ -212,6 +212,13 @@ try {
     $f.HeldAfterFail = -1
     $r = Run
     Assert ($r.ExitCode -eq 22 -and $r.Result.Reason -match 'reboot' -and @($f.Calls | Where-Object { $_ -eq 'msi agent' }).Count -eq 1) "removed agent still held: $($r.ExitCode) $($r.Result['Reason'])"
+    # A backup that starts during that wait: no retry, exit 20.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603, 0)
+    $f.FailRemovesAgent = $true
+    $f.HeldAfterFail = 1
+    $script:VgVssWriters = { if ($script:Fake.Delays -gt 0) { 'State: [2] Waiting for freeze' } else { $stable } }
+    $r = Run
+    Assert ($r.ExitCode -eq 20 -and @($f.Calls | Where-Object { $_ -eq 'msi agent' }).Count -eq 1) "backup before the retry: $($r.ExitCode) $(Calls)"
     # A failure that leaves the old agent in place is not retried.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603, 0)
     $r = Run

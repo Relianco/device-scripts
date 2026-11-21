@@ -360,6 +360,8 @@ function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp
         if (@(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ }).Count -gt 0) {
             $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = "agent installer failed with $code and removed the old agent; its service is still marked for delete: reboot, then run again"; return 22
         }
+        $busy = Get-VgBackupBusy
+        if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = "agent installer failed with $code and removed the old agent; not retried: $busy"; return 20 }
         if (-not (Test-VgSha $msi $AgentSha256)) { $r.AgentStep = 'error'; $r.AgentReason = 'agent MSI hash mismatch before install'; return 1 }
         $code = Invoke-VgMsi -Mode '/i' -Path $msi -Log (Join-Path $LogRoot "agent-retry-$Stamp.log")
         $r.AgentRetryExit = $code
