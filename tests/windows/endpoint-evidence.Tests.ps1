@@ -417,9 +417,12 @@ try {
         # A junction or link as the folder itself is counted, not followed.
         $elsewhere = New-Dir (Join-Path $tmp 'elsewhere')
         New-File (Join-Path $elsewhere 'a.txt')
-        [void][IO.Directory]::CreateSymbolicLink((Join-Path $profileDir 'Pictures'), $elsewhere)
-        $pic = @((Get-EeKfm).users[0].folders | Where-Object { $_.folder -eq 'Pictures' })[0]
-        Assert ($pic.exists -and $pic.reparse -eq 1 -and $pic.files -eq 0) 'reparse-point root not followed'
+        # Windows without elevation or Developer Mode refuses to create a link: skip only this case.
+        $linked = $true; try { [void][IO.Directory]::CreateSymbolicLink((Join-Path $profileDir 'Pictures'), $elsewhere) } catch { $linked = $false }
+        if ($linked) {
+            $pic = @((Get-EeKfm).users[0].folders | Where-Object { $_.folder -eq 'Pictures' })[0]
+            Assert ($pic.exists -and $pic.reparse -eq 1 -and $pic.files -eq 0) 'reparse-point root not followed'
+        }
     }
     $script:EeKfmMaxEntries = 3
     $cut = (Get-EeKfm).users[0].folders[0]
