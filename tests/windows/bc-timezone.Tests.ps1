@@ -25,18 +25,25 @@ Set-StrictMode -Off
 . $scriptPath
 Set-StrictMode -Version Latest
 
+$bc = 'British Columbia Standard Time'
+$yukon = 'Yukon Standard Time'
+$pacific = 'Pacific Standard Time'
+
 function Reset-Fake {
     param(
         [string]$CurrentId = 'Pacific Standard Time',
-        [string[]]$AvailableIds = @('Pacific Standard Time', 'Yukon Standard Time', 'Eastern Standard Time')
+        [string[]]$AvailableIds = @('Pacific Standard Time', 'Yukon Standard Time', 'Eastern Standard Time'),
+        [string[]]$Comet = @()
     )
     $script:fakeCurrent = $CurrentId
     $script:fakeAvailable = @($AvailableIds | ForEach-Object { [pscustomobject]@{ Id = $_ } })
+    $script:fakeComet = $Comet
     $script:calls = New-Object System.Collections.Generic.List[string]
     $script:readFails = $false
     $script:setFails = $false
     $script:readFailAfterSet = $false
     $script:setDoesNotStick = $false
+    $script:restartFails = $false
 }
 
 function Get-BctzCurrentZone {
@@ -57,111 +64,143 @@ function Set-BctzZone {
     if (-not $script:setDoesNotStick) { $script:fakeCurrent = $Id }
 }
 
+function Get-BctzCometServices {
+    return @($script:fakeComet)
+}
+
+function Restart-BctzService {
+    param([string]$Name)
+    $script:calls.Add("restart $Name")
+    if ($script:restartFails) { throw 'service did not stop' }
+}
+
 function Get-BctzNow {
     return [datetimeoffset]::Parse('2026-11-18T13:23:00-07:00')
 }
 
-# 1. Unpatched machine on Pacific Standard Time (no British Columbia Standard Time available):
-#    check mode reports wrong zone (want Yukon Standard Time) and changes nothing.
-Reset-Fake -CurrentId 'Pacific Standard Time' -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time')
+# 1. Unpatched machine on Pacific Standard Time, no fallback: exit 3 (needs the update) in check mode, nothing written.
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $yukon)
 $run = Invoke-BctzRun
-Assert-Same $run.exitCode 0 'unpatched check exit'
+Assert-Same $run.exitCode 3 'unpatched check exit'
 Assert-Same $run.record.mode 'check' 'unpatched check mode'
-Assert-Same $run.record.before 'Pacific Standard Time' 'unpatched check before'
-Assert-Same $run.record.after 'Pacific Standard Time' 'unpatched check after'
-Assert-Same $run.record.target 'Yukon Standard Time' 'unpatched check target'
-Assert-Same $run.record.hasBritishColumbia $false 'unpatched hasBritishColumbia'
+Assert-Same $run.record.before $pacific 'unpatched check before'
+Assert-Same $run.record.after $pacific 'unpatched check after'
+Assert-Same $run.record.target $bc 'unpatched check target'
+Assert-Same $run.record.hasTarget $false 'unpatched hasTarget'
 Assert-Same $run.record.changed $false 'unpatched check changed'
-Assert-Same $run.record.verdict 'wrong zone: Pacific Standard Time (want Yukon Standard Time)' 'unpatched check verdict'
+Assert-Same $run.record.verdict "needs update: $bc is not available on this device" 'unpatched check verdict'
 Assert-Same $script:calls.Count 0 'unpatched check writes nothing'
 
-# 2. Unpatched machine on Pacific Standard Time with Fix: switches to Yukon Standard Time.
+# 2. Same with Fix: still exit 3, no silent fallback, nothing written.
 $run = Invoke-BctzRun -Fix
-Assert-Same $run.exitCode 0 'unpatched fix exit'
-Assert-Same $run.record.mode 'fix' 'unpatched fix mode'
-Assert-Same $run.record.before 'Pacific Standard Time' 'unpatched fix before'
-Assert-Same $run.record.after 'Yukon Standard Time' 'unpatched fix after'
-Assert-Same $run.record.target 'Yukon Standard Time' 'unpatched fix target'
-Assert-Same $run.record.changed $true 'unpatched fix changed'
-Assert-Same $run.record.verdict 'fixed: set Yukon Standard Time (was Pacific Standard Time)' 'unpatched fix verdict'
-Assert-Same ($script:calls -join ',') 'set Yukon Standard Time' 'unpatched fix call'
+Assert-Same $run.exitCode 3 'unpatched fix exit'
+Assert-Same $run.record.verdict "needs update: $bc is not available on this device" 'unpatched fix verdict'
+Assert-Same $script:calls.Count 0 'unpatched fix writes nothing'
 
-# 3. Second run on unpatched machine now on Yukon Standard Time: compliant, no change.
+# 3. Unpatched with the explicit Yukon fallback and Fix: switches to Yukon Standard Time.
+$run = Invoke-BctzRun -Fix -FallbackZone $yukon
+Assert-Same $run.exitCode 0 'fallback fix exit'
+Assert-Same $run.record.after $yukon 'fallback fix after'
+Assert-Same $run.record.target $yukon 'fallback fix target'
+Assert-Same $run.record.changed $true 'fallback fix changed'
+Assert-Same $run.record.verdict "fixed: set $yukon (was $pacific)" 'fallback fix verdict'
+Assert-Same ($script:calls -join ',') "set $yukon" 'fallback fix call'
+
+# 4. Second fallback run, now on Yukon: compliant, no change.
 $script:calls.Clear()
-$run = Invoke-BctzRun -Fix
-Assert-Same $run.exitCode 0 'unpatched second run exit'
-Assert-Same $run.record.changed $false 'unpatched second run changed'
-Assert-Same $run.record.verdict 'compliant: Yukon Standard Time' 'unpatched second run verdict'
-Assert-Same $script:calls.Count 0 'unpatched second run is a no-op'
+$run = Invoke-BctzRun -Fix -FallbackZone $yukon
+Assert-Same $run.exitCode 0 'fallback second run exit'
+Assert-Same $run.record.verdict "compliant: $yukon" 'fallback second run verdict'
+Assert-Same $script:calls.Count 0 'fallback second run is a no-op'
 
-# 4. Patched machine (has British Columbia Standard Time) still on Yukon Standard Time:
-#    check mode flags it to upgrade from Yukon fallback to British Columbia Standard Time.
-Reset-Fake -CurrentId 'Yukon Standard Time' -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time', 'British Columbia Standard Time')
-$run = Invoke-BctzRun
-Assert-Same $run.exitCode 0 'patched on Yukon check exit'
-Assert-Same $run.record.target 'British Columbia Standard Time' 'patched on Yukon target'
-Assert-Same $run.record.hasBritishColumbia $true 'patched hasBritishColumbia'
-Assert-Same $run.record.verdict 'wrong zone: Yukon Standard Time (want British Columbia Standard Time)' 'patched on Yukon check verdict'
+# 5. Patched machine on Yukon without the fallback switch: left alone (Yukon is UTC-7 already).
+Reset-Fake -CurrentId $yukon -AvailableIds @($pacific, $yukon, $bc)
+$run = Invoke-BctzRun -Fix
+Assert-Same $run.exitCode 0 'patched on Yukon no-fallback exit'
+Assert-Same $run.record.changed $false 'patched on Yukon no-fallback changed'
+Assert-Same $run.record.verdict "untouched zone: $yukon" 'patched on Yukon no-fallback verdict'
+Assert-Same $script:calls.Count 0 'patched on Yukon no-fallback writes nothing'
+
+# 6. Patched machine on Yukon with the fallback switch: check flags it, Fix upgrades to the target.
+$run = Invoke-BctzRun -FallbackZone $yukon
+Assert-Same $run.record.verdict "wrong zone: $yukon (want $bc)" 'patched on Yukon check verdict'
 Assert-Same $script:calls.Count 0 'patched on Yukon check writes nothing'
-
-# 5. Patched machine on Yukon Standard Time with Fix: upgrades to British Columbia Standard Time.
-$run = Invoke-BctzRun -Fix
+$run = Invoke-BctzRun -Fix -FallbackZone $yukon
 Assert-Same $run.exitCode 0 'patched on Yukon fix exit'
-Assert-Same $run.record.before 'Yukon Standard Time' 'patched on Yukon fix before'
-Assert-Same $run.record.after 'British Columbia Standard Time' 'patched on Yukon fix after'
-Assert-Same $run.record.changed $true 'patched on Yukon fix changed'
-Assert-Same $run.record.verdict 'fixed: set British Columbia Standard Time (was Yukon Standard Time)' 'patched on Yukon fix verdict'
-Assert-Same ($script:calls -join ',') 'set British Columbia Standard Time' 'patched on Yukon fix call'
+Assert-Same $run.record.after $bc 'patched on Yukon fix after'
+Assert-Same $run.record.verdict "fixed: set $bc (was $yukon)" 'patched on Yukon fix verdict'
 
-# 6. Patched machine on Pacific Standard Time with Fix: switches directly to British Columbia Standard Time.
-Reset-Fake -CurrentId 'Pacific Standard Time' -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time', 'British Columbia Standard Time')
+# 7. Patched machine on Pacific with Comet installed: Fix switches, then restarts both Comet services.
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $yukon, $bc) -Comet @('backup.delegate', 'backup.elevator')
+$run = Invoke-BctzRun
+Assert-Same $run.record.verdict "wrong zone: $pacific (want $bc)" 'patched on Pacific check verdict'
+Assert-Same $script:calls.Count 0 'check mode restarts nothing'
 $run = Invoke-BctzRun -Fix
-Assert-Same $run.exitCode 0 'patched on Pacific fix exit'
-Assert-Same $run.record.after 'British Columbia Standard Time' 'patched on Pacific fix after'
-Assert-Same $run.record.changed $true 'patched on Pacific fix changed'
-Assert-Same ($script:calls -join ',') 'set British Columbia Standard Time' 'patched on Pacific fix call'
+Assert-Same $run.exitCode 0 'comet fix exit'
+Assert-Same $run.record.changed $true 'comet fix changed'
+Assert-Same ($script:calls -join ',') "set $bc,restart backup.delegate,restart backup.elevator" 'comet fix calls'
+Assert-Same ($run.record.restarted -join ',') 'backup.delegate,backup.elevator' 'comet restarted list'
 
-# 7. Patched machine already on British Columbia Standard Time: compliant in both check and fix modes.
+# 8. Already on the target with Comet installed: compliant, no restart.
 $script:calls.Clear()
 $run = Invoke-BctzRun -Fix
-Assert-Same $run.exitCode 0 'patched compliant exit'
-Assert-Same $run.record.changed $false 'patched compliant changed'
-Assert-Same $run.record.verdict 'compliant: British Columbia Standard Time' 'patched compliant verdict'
-Assert-Same $script:calls.Count 0 'patched compliant no-op'
+Assert-Same $run.exitCode 0 'compliant exit'
+Assert-Same $run.record.verdict "compliant: $bc" 'compliant verdict'
+Assert-Same $script:calls.Count 0 'compliant no-op, no restart'
 
-# 8. Traveller on another zone (e.g. Eastern Standard Time or Mountain Standard Time): left untouched even with Fix.
+# 9. Patched machine on Pacific without Comet: switches, restarts nothing.
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $bc)
+$run = Invoke-BctzRun -Fix
+Assert-Same $run.exitCode 0 'no comet fix exit'
+Assert-Same ($script:calls -join ',') "set $bc" 'no comet fix calls'
+Assert-Same @($run.record.restarted).Count 0 'no comet restarted list'
+
+# 10. Comet restart failure: zone changed, exit 1 so the run shows as failed.
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $bc) -Comet @('backup.delegate')
+$script:restartFails = $true
+$run = Invoke-BctzRun -Fix
+Assert-Same $run.exitCode 1 'restart failure exit'
+Assert-Same $run.record.after $bc 'restart failure after'
+Assert-Same $run.record.changed $true 'restart failure changed'
+Assert-Like $run.record.verdict "fixed: set $bc (was $pacific); restart failed backup.delegate:*" 'restart failure verdict'
+
+# 11. Travellers on other zones are left untouched even with Fix.
 foreach ($otherZone in @('Eastern Standard Time', 'Mountain Standard Time', 'UTC')) {
-    Reset-Fake -CurrentId $otherZone -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time', 'British Columbia Standard Time', $otherZone)
+    Reset-Fake -CurrentId $otherZone -AvailableIds @($pacific, $yukon, $bc, $otherZone) -Comet @('backup.delegate')
     $run = Invoke-BctzRun -Fix
     Assert-Same $run.exitCode 0 "traveller $otherZone exit"
-    Assert-Same $run.record.before $otherZone "traveller $otherZone before"
-    Assert-Same $run.record.after $otherZone "traveller $otherZone after"
     Assert-Same $run.record.changed $false "traveller $otherZone changed"
-    Assert-Same $run.record.verdict "untouched non-Pacific zone: $otherZone" "traveller $otherZone verdict"
+    Assert-Same $run.record.verdict "untouched zone: $otherZone" "traveller $otherZone verdict"
     Assert-Same $script:calls.Count 0 "traveller $otherZone writes nothing"
 }
+# A traveller is untouched even when the target is missing (no exit 3).
+Reset-Fake -CurrentId 'Eastern Standard Time' -AvailableIds @($pacific, 'Eastern Standard Time')
+$run = Invoke-BctzRun -Fix
+Assert-Same $run.exitCode 0 'traveller unpatched exit'
 
-# 9. Error paths: initial read failure, missing target zone, Set-TimeZone failure, read-back failure, or zone did not stick.
-Reset-Fake -CurrentId 'Pacific Standard Time'
+# 12. Generic: another target and a list of source zones.
+Reset-Fake -CurrentId 'Mountain Standard Time' -AvailableIds @('Mountain Standard Time', 'US Mountain Standard Time')
+$run = Invoke-BctzRun -Fix -TargetZone 'US Mountain Standard Time' -FromZone 'Pacific Standard Time,Mountain Standard Time'
+Assert-Same $run.exitCode 0 'generic fix exit'
+Assert-Same $run.record.after 'US Mountain Standard Time' 'generic fix after'
+Assert-Same ($script:calls -join ',') 'set US Mountain Standard Time' 'generic fix call'
+
+# 13. Error paths.
+Reset-Fake -CurrentId $pacific
 $script:readFails = $true
 $run = Invoke-BctzRun -Fix
 Assert-Same $run.exitCode 1 'read failure exit'
 Assert-Like $run.record.verdict 'time zone read failed, not changed:*' 'read failure verdict'
 Assert-Same $script:calls.Count 0 'read failure writes nothing'
 
-Reset-Fake -CurrentId 'Pacific Standard Time' -AvailableIds @('Pacific Standard Time')
-$run = Invoke-BctzRun -Fix
-Assert-Same $run.exitCode 1 'missing target zone exit'
-Assert-Same $run.record.verdict 'target zone Yukon Standard Time is not available on this device' 'missing target zone verdict'
-Assert-Same $script:calls.Count 0 'missing target zone writes nothing'
-
-Reset-Fake -CurrentId 'Pacific Standard Time' -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time')
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $bc) -Comet @('backup.delegate')
 $script:setFails = $true
 $run = Invoke-BctzRun -Fix
 Assert-Same $run.exitCode 1 'set failure exit'
-Assert-Like $run.record.verdict 'fix failed setting Yukon Standard Time:*' 'set failure verdict'
+Assert-Like $run.record.verdict "fix failed setting $($bc):*" 'set failure verdict'
+Assert-Same ($script:calls -join ',') "set $bc" 'set failure restarts nothing'
 
-Reset-Fake -CurrentId 'Pacific Standard Time' -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time')
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $bc)
 $script:readFailAfterSet = $true
 $run = Invoke-BctzRun -Fix
 Assert-Same $run.exitCode 1 'read-back failure exit'
@@ -169,13 +208,13 @@ Assert-Same $run.record.after $null 'read-back failure after is null'
 Assert-Same $run.record.changed $null 'read-back failure changed is null'
 Assert-Like $run.record.verdict 'fix not verified, read after set failed:*' 'read-back failure verdict'
 
-Reset-Fake -CurrentId 'Pacific Standard Time' -AvailableIds @('Pacific Standard Time', 'Yukon Standard Time')
+Reset-Fake -CurrentId $pacific -AvailableIds @($pacific, $bc)
 $script:setDoesNotStick = $true
 $run = Invoke-BctzRun -Fix
 Assert-Same $run.exitCode 1 'set did not stick exit'
-Assert-Same $run.record.verdict 'fix incomplete: still on Pacific Standard Time (wanted Yukon Standard Time)' 'set did not stick verdict'
+Assert-Same $run.record.verdict "fix incomplete: still on $pacific (wanted $bc)" 'set did not stick verdict'
 
-# 10. Runner Action, Fix, and empty PinVersion mapping.
+# 14. Runner Action, Fix, and empty PinVersion mapping.
 foreach ($a in @('Install', 'Update', 'Repair', 'Reinstall')) {
     Assert-Same (Get-BctzMode $a '') 'check' "$a is a read-only check"
     Assert-Same (Get-BctzMode $a 'false') 'check' "$a with Fix false"
@@ -191,12 +230,14 @@ foreach ($bad in @(@('Bogus', ''), @('', ''), @('Install', 'yes'), @('Install', 
     if (-not $threw) { Fail "Get-BctzMode accepted [$($bad[0])] [$($bad[1])]" }
 }
 
-# 11. Static checks on source and release metadata.
+# 15. Static checks on source and release metadata.
 $source = [IO.File]::ReadAllText($scriptPath)
 foreach ($bad in @('Restart-Computer', 'shutdown', 'Set-Service', 'Stop-Service', 'Start-Service')) {
-    if ($source.IndexOf($bad, [StringComparison]::OrdinalIgnoreCase) -ge 0) { Fail "source contains $bad" }
+    # Restart-Service is allowed (Comet only); a bare Start-Service is not.
+    if ($source -match ('(?i)(?<!Re)' + [regex]::Escape($bad))) { Fail "source contains $bad" }
 }
-foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinVersion', "[string]`$Fix = ''")) {
+if (([regex]::Matches($source, 'Restart-Service')).Count -ne 1) { Fail 'Restart-Service is used outside the Comet seam' }
+foreach ($need in @('[string]$DeploymentType', '[string]$Action', '[string]$PinVersion', '[string]$Fix', '[string]$TargetZone', '[string]$FallbackZone', '[string]$FromZone')) {
     if ($source.IndexOf($need, [StringComparison]::Ordinal) -lt 0) { Fail "param block lacks $need" }
 }
 
@@ -205,7 +246,7 @@ Assert-Same $release.installsSoftware $false 'pin record installsSoftware'
 if ($release.PSObject.Properties.Name -contains 'ninjaField') { Fail 'pin record names an RMM field; the package reports on stdout only' }
 if ($release.packageArguments.IndexOf('eyJGaXgiOiJ0cnVlIn0=', [StringComparison]::Ordinal) -lt 0) { Fail 'pin record lacks the base64 example' }
 
-# End to end through the runner's argument parser: Fix reaches the package as a named pair.
+# End to end through the runner's argument parser: Fix and FallbackZone reach the package as named pairs.
 Set-StrictMode -Off
 . (Join-Path $repoRoot 'windows/runner/Invoke-RelianRunner.ps1')
 Set-StrictMode -Version Latest
@@ -213,10 +254,14 @@ $pairs = @(ConvertFrom-RelianPackageArguments -PackageArguments 'eyJGaXgiOiJ0cnV
 Assert-Same $pairs.Count 1 'runner pair count'
 Assert-Same $pairs[0].Name 'Fix' 'runner pair name'
 Assert-Same $pairs[0].Value 'true' 'runner pair value'
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"Fix":"true","FallbackZone":"Yukon Standard Time"}'))
+$pairs = ConvertFrom-RelianPackageArguments -PackageArguments $b64
+Assert-Same $pairs.Count 2 'runner fallback pair count'
+Assert-Same ($pairs[1].Name + '=' + $pairs[1].Value) 'FallbackZone=Yukon Standard Time' 'runner fallback pairs'
 
 $self = [IO.File]::ReadAllText($PSCommandPath) -replace "`r`n", "`n"
 $firstExit = $self.IndexOf("exit 0`n", [StringComparison]::Ordinal)
-if ($firstExit -lt 0 -or $firstExit -lt $self.IndexOf('Assert-Same $pairs[0].Value', [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
+if ($firstExit -lt 0 -or $firstExit -lt $self.IndexOf('runner fallback pairs', [StringComparison]::Ordinal)) { Fail 'exit 0 comes before the last assertion' }
 
 Write-Output 'bc-timezone tests passed'
 exit 0
