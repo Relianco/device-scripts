@@ -28,7 +28,7 @@ function Reset-Fake {
 }
 $script:HjDsreg = {
     $aad = if ($script:fStarted) { $script:fAadAfter } else { $script:fAad }
-    @('+----+', '| Device State |', "             AzureAdJoined : $aad", '          EnterpriseJoined : NO', "              DomainJoined : $($script:fDomain)", '                DomainName : CONTOSO', '                  DeviceId : 11111111-2222-3333-4444-555555555555', '  Some Unknown Field : x')
+    @('+----+', '| Device State |', "             AzureAdJoined : $aad", '          EnterpriseJoined : NO', "              DomainJoined : $($script:fDomain)", '                DomainName : CONTOSO', '  Some Unknown Field : x')
 }
 $script:HjReadAad = {
     if ($null -eq $script:fScp) { return [ordered]@{ keyExists = $false; TenantId = $null; TenantName = $null } }
