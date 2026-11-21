@@ -298,9 +298,11 @@ function Restore-VgNetwork($Saved, $r) {
         foreach ($v in @('4', '6')) {
             $m = $s."MetricV$v"
             if ($null -ne $m -and $m -ne $c."MetricV$v") { Apply "$($c.Alias) metric IPv$v $m" { & $script:VgSetMetric $c "IPv$v" $m } }
-            $want = @($s."StaticDnsV$v")
-            if ($want.Count -gt 0 -and ($want -join ',') -ne (@($c."StaticDnsV$v") -join ',')) { Apply "$($c.Alias) dns $($want -join ' ')" { & $script:VgSetDns $c $want } }
         }
+        # Both families in one call, so setting one family's servers cannot replace the other's.
+        $want = @(@($s.StaticDnsV4) + @($s.StaticDnsV6) | Where-Object { $_ })
+        $have = @(@($c.StaticDnsV4) + @($c.StaticDnsV6) | Where-Object { $_ })
+        if ($want.Count -gt 0 -and ($want -join ',') -ne ($have -join ',')) { Apply "$($c.Alias) dns $($want -join ' ')" { & $script:VgSetDns $c $want } }
     }
     # Final state: each adapter that was Up is Up with its address, and each gateway that answered before still does.
     $final = @(& $script:VgGetNet | Where-Object { $_ })

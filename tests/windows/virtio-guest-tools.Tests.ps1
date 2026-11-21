@@ -443,7 +443,8 @@ try {
     # IPv4 and IPv6 hand-set DNS are separate lists and set separately.
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -StaticDns $dns -StaticDnsV6 @('2001:db8::53'))) -NetAfter @((Nic -StaticDns $dns))
     $r = Run
-    Assert ((Calls) -cmatch 'dns Ethernet 2001:db8::53' -and (Calls) -notmatch 'dns Ethernet 192') "IPv6 DNS alone re-applied: $(Calls)"
+    # One call with both families: a call with one family's servers may replace the other family's list.
+    Assert ((Calls) -cmatch 'dns Ethernet 192\.0\.2\.53 192\.0\.2\.54 2001:db8::53' -and @($f.Calls | Where-Object { $_ -like 'dns *' }).Count -eq 1) "both DNS families in one call: $(Calls)"
     # A failed driver MSI names the snapshot in its reason.
     $f = New-Fake -DriverExit 1603 -Net @((Nic))
     $r = Run
