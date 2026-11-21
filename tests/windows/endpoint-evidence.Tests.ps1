@@ -399,7 +399,7 @@ try {
 
     # Kfm: shell folder targets, OneDrive KFM state, and a bounded walk of the local folders with move blockers.
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive" @{ Version = '24.200.1.0001'; SilentBusinessConfigCompleted = 1; KfmBlockOptOut = 0 }
-    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" @{ Desktop = '%USERPROFILE%\OneDrive - Example\Desktop'; Personal = "$profileDir\Documents"; 'My Pictures' = '\\fs01\home\alex\Pictures'; Favorites = 'x' }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" @{ Desktop = '%USERPROFILE%\OneDrive - Example\Desktop'; Personal = "$profileDir\Documents"; 'My Pictures' = '\\fs01.example.com\share\Pictures'; Favorites = 'x' }
     $desk = New-Dir (Join-Path $profileDir 'Desktop')
     foreach ($n in @('mail.pst', 'notes.one', 'Open Notebook.onetoc2', '_vti_x.txt', '.lock', 'Contract.docx', 'desktop.ini', '~$draft.docx')) { New-File (Join-Path $desk $n) }
     $deep = New-Dir (Join-Path $desk 'Sub')
@@ -408,11 +408,19 @@ try {
     $kfm = Get-EeKfm
     $k0 = $kfm.users[0]
     Assert ($k0.user -eq 'alex' -and $k0.oneDrive['SilentBusinessConfigCompleted'] -eq 1 -and $k0.oneDrive['KfmBlockOptOut'] -eq 0 -and -not $k0.oneDrive.Contains('Version')) 'OneDrive KFM and silent config values'
-    Assert ($k0.shellFolders['Desktop'] -eq '%USERPROFILE%\OneDrive - Example\Desktop' -and $k0.shellFolders['Personal'] -eq '%USERPROFILE%\Documents' -and $k0.shellFolders['My Pictures'] -like '\\fs01*' -and -not $k0.shellFolders.Contains('Favorites')) 'shell folder targets, profile path shortened'
+    Assert ($k0.shellFolders['Desktop'] -eq '%USERPROFILE%\OneDrive - Example\Desktop' -and $k0.shellFolders['Personal'] -eq '%USERPROFILE%\Documents' -and $k0.shellFolders['My Pictures'] -like '\\fs01.example.com*' -and -not $k0.shellFolders.Contains('Favorites')) 'shell folder targets, profile path shortened'
     $fd = @{}; foreach ($f in $k0.folders) { $fd[$f.folder] = $f }
     $d = $fd['Desktop']
     Assert ($d.exists -and $d.files -eq 9 -and $d.pst -eq 1 -and $d.oneNote -eq 2 -and $d.badName -eq 3 -and $d.longPath -eq 1 -and $d.complete) 'desktop counts and blockers'
     Assert ($fd['Documents'].exists -eq $false -and $null -eq $fd['Documents']['files']) 'missing folder not walked'
+    if ([IO.Directory].GetMethod('CreateSymbolicLink')) {
+        # A junction or link as the folder itself is counted, not followed.
+        $elsewhere = New-Dir (Join-Path $tmp 'elsewhere')
+        New-File (Join-Path $elsewhere 'a.txt')
+        [void][IO.Directory]::CreateSymbolicLink((Join-Path $profileDir 'Pictures'), $elsewhere)
+        $pic = @((Get-EeKfm).users[0].folders | Where-Object { $_.folder -eq 'Pictures' })[0]
+        Assert ($pic.exists -and $pic.reparse -eq 1 -and $pic.files -eq 0) 'reparse-point root not followed'
+    }
     $script:EeKfmMaxEntries = 3
     $cut = (Get-EeKfm).users[0].folders[0]
     Assert ($cut.complete -eq $false -and $cut.files -le 3) 'walk stops at the entry cap'

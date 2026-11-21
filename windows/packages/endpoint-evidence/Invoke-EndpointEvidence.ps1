@@ -771,30 +771,30 @@ function Get-EeOfficeLicence {
     return $r
 }
 
-# Counts and Known Folder Move blockers in one folder. Reparse points are counted, not followed; $Budget caps entries and time for the section.
+# Counts and Known Folder Move blockers in one folder. Reparse points, the folder itself included, are counted, not followed; $Budget caps entries and time for the section.
 function Measure-EeFolder {
     param([string]$Dir, $Budget)
     $r = [ordered]@{ files = 0; mb = 0; pst = 0; oneNote = 0; longPath = 0; badName = 0; over250GB = 0; reparse = 0; unreadable = 0; complete = $true }
     $bytes = 0L
-    $stack = [Collections.Generic.Stack[string]]::new(); $stack.Push($Dir)
+    $stack = [Collections.Generic.Stack[IO.DirectoryInfo]]::new(); $stack.Push([IO.DirectoryInfo]::new($Dir))
     :walk while ($stack.Count) {
-        $items = @()
-        try { $items = ([IO.DirectoryInfo]::new($stack.Pop())).GetFileSystemInfos() } catch { $r.unreadable++ }
-        foreach ($i in $items) {
-            if ($Budget.Entries -le 0 -or $Budget.Clock.Elapsed.TotalSeconds -gt $script:EeKfmSeconds) { $r.complete = $false; break walk }
-            $Budget.Entries--
-            if ($i.Attributes -band [IO.FileAttributes]::Directory) {
-                if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { $r.reparse++ } else { $stack.Push($i.FullName) }
-                continue
+        $d = $stack.Pop()
+        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) { $r.reparse++; continue }
+        # Lazy enumeration, budget checked before each entry, so one huge folder cannot overrun the cap.
+        try {
+            foreach ($i in $d.EnumerateFileSystemInfos()) {
+                if ($Budget.Entries -le 0 -or $Budget.Clock.Elapsed.TotalSeconds -gt $script:EeKfmSeconds) { $r.complete = $false; break walk }
+                $Budget.Entries--
+                if ($i.Attributes -band [IO.FileAttributes]::Directory) { $stack.Push($i); continue }
+                $r.files++; $bytes += $i.Length
+                if ($i.Extension -eq '.pst') { $r.pst++ }
+                if ($i.Extension -match '^\.(one|onetoc2)$') { $r.oneNote++ }
+                if ($i.FullName.Length -gt 250) { $r.longPath++ }
+                if ($i.Length -gt 250GB) { $r.over250GB++ }
+                # Names SharePoint and OneDrive refuse.
+                if ($i.Name -match '(?i)^(\.lock|(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?)$|_vti_|^~\$|["*:<>?|]') { $r.badName++ }
             }
-            $r.files++; $bytes += $i.Length
-            if ($i.Extension -eq '.pst') { $r.pst++ }
-            if ($i.Extension -match '^\.(one|onetoc2)$') { $r.oneNote++ }
-            if ($i.FullName.Length -gt 250) { $r.longPath++ }
-            if ($i.Length -gt 250GB) { $r.over250GB++ }
-            # Names SharePoint and OneDrive refuse.
-            if ($i.Name -match '(?i)^(\.lock|(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?)$|_vti_|^~\$|["*:<>?|]') { $r.badName++ }
-        }
+        } catch { $r.unreadable++ }
     }
     $r.mb = [Math]::Round($bytes / 1MB, 1)
     return $r
