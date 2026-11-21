@@ -161,6 +161,11 @@ $s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-10-01'
 Assert ($s.status -eq 'refused' -and $script:Calls.Count -eq 0) 'worker checks the backup date again'
 
 Reset
+$script:Exits = @{ 'dism.exe /Online /Cleanup-Image /RestoreHealth*' = 3010 }
+$s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-11-20' -MsuPath 'C:\msu'
+Assert ($s.status -eq 'done' -and $s.restartNeeded -eq $true -and -not @($script:Calls | Where-Object { $_ -match '/Source:|expand' }) -and $script:Calls -contains 'sfc.exe /scannow') 'RestoreHealth 3010 is success with restartNeeded'
+
+Reset
 $script:Health = 'Repairable'
 $s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-11-20'
 Assert ($s.status -eq 'failed' -and $s.health -eq 'Repairable') 'repair is done only when CheckHealth says Healthy'

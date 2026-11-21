@@ -225,14 +225,16 @@ function Invoke-CsrWorker {
             $state.status = if ($state.health -like 'failed*') { 'failed' } else { 'done' }
         } elseif ($Mode -eq 'Repair') {
             $restore = @('/Online', '/Cleanup-Image', '/RestoreHealth', '/NoRestart')
+            # 3010: repaired, a restart finishes it. Nothing restarts here.
             $rc = & $step 'RestoreHealth' (& $script:CsrNative 'dism.exe' $restore)
-            if ($rc -ne 0) {
+            if ($rc -ne 0 -and $rc -ne 3010) {
                 foreach ($src in @(Get-CsrSources -MsuPath $MsuPath -WimPath $WimPath -Os $os -Notes $notes)) {
                     $rc = & $step 'RestoreHealth' (& $script:CsrNative 'dism.exe' ($restore + @("/Source:$src", '/LimitAccess'))) $src
-                    if ($rc -eq 0) { break }
+                    if ($rc -eq 0 -or $rc -eq 3010) { break }
                 }
             }
-            if ($rc -eq 0) {
+            if ($rc -eq 3010) { $state.restartNeeded = $true }
+            if ($rc -eq 0 -or $rc -eq 3010) {
                 $sfc = & $step 'sfc' (& $script:CsrNative 'sfc.exe' @('/scannow'))
                 if ($sfc -ne 0) { $notes.Add('sfc exit ' + $sfc + ': see the [SR] rows in CBS.log') }
                 # Done only when the store reads healthy afterwards.
