@@ -1,34 +1,35 @@
 <#
 .SYNOPSIS
-    British Columbia permanent UTC-7 time zone package for the Relian deploy runner (NinjaOne script 374).
-    Checks, and with Fix sets, British Columbia Standard Time (or Yukon Standard Time on unpatched builds).
+    Time zone package for the Relian deploy runner (NinjaOne script 374). Checks, and with Fix sets,
+    a target time zone. The default target is British Columbia Standard Time (BC permanent UTC-7).
 
 .DESCRIPTION
-    British Columbia is permanent UTC-7 from 2026-11-01, while Pacific Standard Time
-    falls back to UTC-8 in winter. The British Columbia Standard Time zone ships in
-    the 2026-09-22 preview / 2026-10-13 cumulative updates; unpatched builds use
-    Yukon Standard Time (also permanent UTC-7, no DST since 2020) until they patch.
+    British Columbia is permanent UTC-7 from 2026-11-01, while Pacific Standard Time falls back to
+    UTC-8 in winter. Windows adds the British Columbia Standard Time zone in its cumulative updates;
+    Pacific Standard Time itself is unchanged.
 
-    By default this package is read-only. It checks the current time zone and whether
-    British Columbia Standard Time is available in the local time zone database.
-    It flags only Pacific Standard Time, or Yukon Standard Time once British Columbia
-    Standard Time exists on the machine, so travellers on another time zone are left
-    alone. It writes no registry value and no file in check mode.
+    TargetZone (default British Columbia Standard Time) is the zone to move to. FromZone is a
+    comma-separated list of zones to move from (default Pacific Standard Time). A device on any other
+    zone, a traveller for example, is left alone.
 
-    With -Fix true it switches a flagged machine to British Columbia Standard Time
-    (when available) or Yukon Standard Time (when unpatched), then reads the active
-    time zone back to verify the change.
+    When the target zone is not in the local time zone database and the device is on a FromZone, the
+    run exits 3: the device needs the cumulative update that adds the zone. The package installs no
+    update. FallbackZone (empty by default) is the explicit switch for the old behaviour: when the
+    target is missing it sets the fallback (for example Yukon Standard Time) instead, and once the
+    target exists it moves a device on the fallback to the target.
 
-    The runner passes DeploymentType, Action and PinVersion, then each
-    PackageArguments pair as -Name value. Fix is the only one read, and it is a
-    string: base64 of {"Fix":"true"} is eyJGaXgiOiJ0cnVlIn0=.
-    Install, Update, Repair and Reinstall all run the check (and the fix when
+    By default this package is read-only. With Fix "true" it sets the zone, reads it back, and when
+    the zone changed restarts the Comet Backup services (backup.delegate, backup.elevator) that are
+    installed, so their schedules use the new offset. It never restarts the computer.
+
+    The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as
+    -Name value. Fix, TargetZone, FromZone and FallbackZone are strings: base64 of {"Fix":"true"} is
+    eyJGaXgiOiJ0cnVlIn0=. Install, Update, Repair and Reinstall all run the check (and the fix when
     Fix is "true"). Uninstall changes nothing and exits 0.
 
-    The result is one line of compact JSON, printed last on stdout, with a
-    short "verdict". The package writes no RMM field: the caller reads stdout and
-    the exit code. Exit 1 when a fix was attempted and the read-back does not match
-    the target time zone, or when reading the time zone failed.
+    The result is one line of compact JSON, printed last on stdout, with a short "verdict". The
+    package writes no RMM field. Exit codes: 0 compliant, untouched or fixed; 3 the target zone is
+    missing (needs the cumulative update); 1 a read, set, read-back or service restart failed.
 
 .NOTES
     Requirements: Windows PowerShell 5.1+, run as SYSTEM
@@ -42,14 +43,18 @@ param(
     [string]$DeploymentType,
     [string]$Action,
     [string]$PinVersion,
-    [string]$Fix = ''
+    [string]$Fix = '',
+    [string]$TargetZone = '',
+    [string]$FromZone = '',
+    [string]$FallbackZone = ''
 )
 
 $ProgressPreference = 'SilentlyContinue'
 
-$BctzBcId = 'British Columbia Standard Time'
-$BctzYukonId = 'Yukon Standard Time'
-$BctzPacificId = 'Pacific Standard Time'
+$BctzDefaultTarget = 'British Columbia Standard Time'
+$BctzDefaultFrom = 'Pacific Standard Time'
+$BctzCometServices = @('backup.delegate', 'backup.elevator')
+$BctzNeedsUpdateExit = 3
 
 function Write-BctzStatus {
     param([string]$Message, [string]$Level = 'INFO')
@@ -79,6 +84,16 @@ function Set-BctzZone {
     Set-TimeZone -Id $Id -ErrorAction Stop
 }
 
+# Running Comet service names, in restart order. A stopped service stays stopped.
+function Get-BctzCometServices {
+    return @($BctzCometServices | Where-Object { (Get-Service -Name $_ -ErrorAction SilentlyContinue).Status -eq 'Running' })
+}
+
+function Restart-BctzService {
+    param([string]$Name)
+    Restart-Service -Name $Name -ErrorAction Stop
+}
+
 function Get-BctzNow {
     return (Get-Date)
 }
@@ -97,55 +112,61 @@ function Get-BctzMode {
     throw 'Fix must be true or false.'
 }
 
-# Pure: picks target zone and whether the current zone needs changing.
-# Only Pacific Standard Time, or Yukon Standard Time when British Columbia Standard Time
-# exists on the machine, is flagged for change. Any other zone (e.g. a traveller on
-# Mountain or Eastern time) is left untouched.
+# Pure: picks the zone to set and whether the current zone needs changing.
+# A device on a FromZone, or on the FallbackZone once the target exists, is flagged. Any other zone is left alone.
 function Get-BctzPlan {
-    param([string]$CurrentId, [bool]$HasBritishColumbia, [bool]$HasYukon)
-    $target = if ($HasBritishColumbia) { $BctzBcId } else { $BctzYukonId }
-    $needsChange = ($CurrentId -eq $BctzPacificId) -or ($HasBritishColumbia -and ($CurrentId -eq $BctzYukonId))
-    $targetAvailable = if ($target -eq $BctzBcId) { $HasBritishColumbia } else { $HasYukon }
+    param([string]$CurrentId, [string]$TargetZone, [string[]]$FromZones, [string]$FallbackZone, [string[]]$AvailableIds)
+    $hasTarget = $AvailableIds -contains $TargetZone
+    $useFallback = (-not $hasTarget) -and $FallbackZone -ne '' -and ($AvailableIds -contains $FallbackZone)
+    $target = if ($useFallback) { $FallbackZone } else { $TargetZone }
+    $needsChange = ($CurrentId -ne $target) -and (($FromZones -contains $CurrentId) -or ($hasTarget -and $FallbackZone -ne '' -and $CurrentId -eq $FallbackZone))
     return [ordered]@{
         target          = $target
+        hasTarget       = $hasTarget
         needsChange     = $needsChange
-        targetAvailable = $targetAvailable
+        targetAvailable = ($hasTarget -or $useFallback)
     }
 }
 
 function Invoke-BctzRun {
-    param([switch]$Fix)
+    param(
+        [switch]$Fix,
+        [string]$TargetZone = $BctzDefaultTarget,
+        [string]$FromZone = $BctzDefaultFrom,
+        [string]$FallbackZone = ''
+    )
     $mode = if ($Fix) { 'fix' } else { 'check' }
+    $fromZones = @($FromZone -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
     $current = $null
     $available = @()
     try {
         $current = Get-BctzCurrentZone
-        $available = @(Get-BctzAvailableZones)
+        $available = @(Get-BctzAvailableZones | ForEach-Object { [string]$_.Id })
     } catch {
         $err = Limit-BctzText "$_" 160
         $nowErr = Get-BctzNow
         $record = [ordered]@{
-            mode               = $mode
-            before             = $null
-            after              = $null
-            target             = $null
-            hasBritishColumbia = $false
-            changed            = $false
-            localTime          = $nowErr.ToString('yyyy-MM-ddTHH:mm:sszzz')
-            verdict            = "time zone read failed, not changed: $err"
-            timestamp          = $nowErr.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            version            = '1.0'
+            mode      = $mode
+            before    = $null
+            after     = $null
+            target    = $TargetZone
+            hasTarget = $false
+            changed   = $false
+            restarted = @()
+            localTime = $nowErr.ToString('yyyy-MM-ddTHH:mm:sszzz')
+            verdict   = "time zone read failed, not changed: $err"
+            timestamp = $nowErr.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            version   = '1.1'
         }
         return [ordered]@{ record = $record; exitCode = 1 }
     }
 
     $beforeId = [string]$current.Id
-    $hasBc = @($available | Where-Object { $_.Id -eq $BctzBcId }).Count -gt 0
-    $hasYukon = @($available | Where-Object { $_.Id -eq $BctzYukonId }).Count -gt 0
-    $plan = Get-BctzPlan -CurrentId $beforeId -HasBritishColumbia $hasBc -HasYukon $hasYukon
+    $plan = Get-BctzPlan -CurrentId $beforeId -TargetZone $TargetZone -FromZones $fromZones -FallbackZone $FallbackZone -AvailableIds $available
 
     $afterId = $beforeId
     $changed = $false
+    $restarted = @()
     $code = 0
     $verdict = ''
 
@@ -153,11 +174,11 @@ function Invoke-BctzRun {
         if ($beforeId -eq $plan.target) {
             $verdict = "compliant: $beforeId"
         } else {
-            $verdict = "untouched non-Pacific zone: $beforeId"
+            $verdict = "untouched zone: $beforeId"
         }
     } elseif (-not $plan.targetAvailable) {
-        $code = 1
-        $verdict = "target zone $($plan.target) is not available on this device"
+        $code = $BctzNeedsUpdateExit
+        $verdict = "needs update: $($plan.target) is not available on this device"
     } elseif (-not $Fix) {
         $verdict = "wrong zone: $beforeId (want $($plan.target))"
     } else {
@@ -167,11 +188,9 @@ function Invoke-BctzRun {
         } catch {
             $setError = Limit-BctzText "$_" 160
         }
-        $afterZone = $null
         $readAfterError = $null
         try {
-            $afterZone = Get-BctzCurrentZone
-            $afterId = [string]$afterZone.Id
+            $afterId = [string](Get-BctzCurrentZone).Id
         } catch {
             $afterId = $null
             $changed = $null
@@ -187,6 +206,18 @@ function Invoke-BctzRun {
         } elseif ($afterId -eq $plan.target) {
             $changed = ($afterId -ne $beforeId)
             $verdict = "fixed: set $afterId (was $beforeId)"
+            # Comet schedules run on local time; restart so they pick up the new offset.
+            if ($changed) {
+                foreach ($svc in @(Get-BctzCometServices)) {
+                    try {
+                        Restart-BctzService -Name $svc
+                        $restarted += $svc
+                    } catch {
+                        $code = 1
+                        $verdict += "; restart failed $($svc): $(Limit-BctzText "$_" 120)"
+                    }
+                }
+            }
         } else {
             $code = 1
             $changed = ($afterId -ne $beforeId)
@@ -196,31 +227,34 @@ function Invoke-BctzRun {
 
     $now = Get-BctzNow
     $record = [ordered]@{
-        mode               = $mode
-        before             = $beforeId
-        after              = $afterId
-        target             = $plan.target
-        hasBritishColumbia = $hasBc
-        changed            = $changed
-        localTime          = $now.ToString('yyyy-MM-ddTHH:mm:sszzz')
-        verdict            = $verdict
-        timestamp          = $now.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        version            = '1.0'
+        mode      = $mode
+        before    = $beforeId
+        after     = $afterId
+        target    = $plan.target
+        hasTarget = $plan.hasTarget
+        changed   = $changed
+        restarted = $restarted
+        localTime = $now.ToString('yyyy-MM-ddTHH:mm:sszzz')
+        verdict   = $verdict
+        timestamp = $now.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        version   = '1.1'
     }
     return [ordered]@{ record = $record; exitCode = $code }
 }
 
 function Invoke-Main {
-    param([switch]$Fix)
+    param([switch]$Fix, [string]$TargetZone, [string]$FromZone, [string]$FallbackZone)
     try {
-        Write-BctzStatus "BC time zone $(if ($Fix) { 'fix' } else { 'check' }) starting"
-        $run = Invoke-BctzRun -Fix:$Fix
+        if ($TargetZone -eq '') { $TargetZone = $BctzDefaultTarget }
+        if ($FromZone -eq '') { $FromZone = $BctzDefaultFrom }
+        Write-BctzStatus "Time zone $(if ($Fix) { 'fix' } else { 'check' }) starting: target $(Limit-BctzText $TargetZone 64), from $(Limit-BctzText $FromZone 160), fallback '$(Limit-BctzText $FallbackZone 64)'"
+        $run = Invoke-BctzRun -Fix:$Fix -TargetZone $TargetZone -FromZone $FromZone -FallbackZone $FallbackZone
         $json = $run.record | ConvertTo-Json -Depth 4 -Compress
-        Write-BctzStatus "Verdict: $($run.record.verdict) ($($json.Length) bytes)"
+        Write-BctzStatus "Verdict: $($run.record.verdict) (exit $($run.exitCode))"
         Write-Output $json
         exit $run.exitCode
     } catch {
-        Write-BctzStatus "BC time zone error: $_" 'ERROR'
+        Write-BctzStatus "Time zone error: $_" 'ERROR'
         Write-BctzStatus $_.ScriptStackTrace 'ERROR'
         exit 1
     }
@@ -230,5 +264,5 @@ if ($env:RELIAN_DEPLOY_TEST -ne '1') {
     try { $bctzMode = Get-BctzMode -Action $Action -Fix $Fix -PinVersion $PinVersion }
     catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
     if ($bctzMode -eq 'none') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
-    Invoke-Main -Fix:($bctzMode -eq 'fix')
+    Invoke-Main -Fix:($bctzMode -eq 'fix') -TargetZone $TargetZone -FromZone $FromZone -FallbackZone $FallbackZone
 }
