@@ -18,6 +18,9 @@ foreach ($c in $commands) { Assert ($c -notmatch '^(Set|New|Remove|Restore|Backu
 foreach ($c in @('reg', 'reg.exe', 'msg', 'Ninja-Property-Set')) { Assert ($commands -notcontains $c) "read-only: no $c" }
 $source = [IO.File]::ReadAllText($path)
 Assert ($source -notmatch '(?i)PSAppDeployToolkit|Show-ADT|Open-ADT|Start-ADT') 'silent: no toolkit session or dialog'
+# The one exception: opt-in UserPrt registers a temporary task and writes a temporary script, both removed, in one helper.
+$writers = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] }, $true) | Where-Object { $_.Body.Extent.Text -match 'RegisterTaskDefinition|WriteAll|::Delete\(' } | ForEach-Object Name)
+Assert (($writers -join ',') -eq 'Invoke-EeAsUser') 'only the UserPrt task helper writes'
 
 # Review: an empty pin exits 0 for every action and collects nothing.
 foreach ($act in @('Install', 'Bogus')) {
@@ -42,6 +45,8 @@ if ($env:OS -eq 'Windows_NT') {
         Assert ($mo.PSObject.Properties[$k] -and -not $mo.$k.PSObject.Properties["status"]) "real run section $k collected"
     }
     Assert ($mo.edition.editionId -and $mo.edition.build) 'real run reads the edition'
+    $lk = Invoke-EndpointEvidence -Sections 'OfficeLicence,Kfm' | ConvertFrom-Json
+    Assert (-not $lk.officelicence.PSObject.Properties['status'] -and -not $lk.kfm.PSObject.Properties['status']) 'real run OfficeLicence and Kfm collected'
 }
 
 # In-memory registry: path -> values. Subkeys are the direct children of stored paths.
@@ -307,6 +312,14 @@ try {
     Assert ($libs['OneDrive - Example'].urlPath -eq '/personal/[user]/Documents') 'personal site path hides the user segment'
     Assert ($od.autoMount.device['Accounting'] -like 'tenantId=abc&listId={x}*' -and $u0.autoMount['Other'] -like '*listId={y}') 'TenantAutoMount values, device and user'
     Assert (-not (($od | ConvertTo-Json -Depth 8) -match '@|secret|alex_example')) 'no e-mail, query or user segment in the OneDrive section'
+    # Auto-mount view: the account's auto-mount values and whether each mounted library's folder is on disk.
+    $script:Reg[$acct]['AutoMountTeamSites'] = 1
+    [void](New-Dir (Join-Path $profileDir 'Example\Accounting - Documents'))
+    Add-Reg "$mp\lib3" @{ UrlNamespace = 'https://example.sharepoint.com/sites/Gone/Shared Documents'; MountPoint = (Join-Path $profileDir 'Example\Gone - Documents'); LibraryType = 'teamsite' }
+    $od = Get-EeOneDrive
+    $libs = @{}; foreach ($lib in $od.users[0].libraries) { $libs[$lib.mount] = $lib }
+    Assert ($od.users[0].business[0].AutoMountTeamSites -eq 1 -and -not $od.users[0].business[0].Contains('Timerautomount')) 'account auto-mount value'
+    Assert ($libs['Accounting - Documents'].exists -eq $true -and $libs['Gone - Documents'].exists -eq $false) 'mounted library folder present or missing'
 
     # Join: dsregcmd parsed, nltest DC, WorkplaceJoin per user hashed. Natives are stubbed.
     $fakeDevice = [guid]::NewGuid().ToString(); $fakeTenant = [guid]::NewGuid().ToString()
@@ -365,11 +378,115 @@ try {
         Assert ((Get-EeLnkIcon $real) -eq 'C:\Windows\System32\imageres.dll,137') 'shell-written lnk icon'
     }
 
+    # OfficeLicence: device Click-to-Run licensing, the user's LicensingNext state and licence file fields, addresses hashed.
+    Add-Reg "$L\SOFTWARE\Microsoft\Office\ClickToRun\Configuration" @{ ProductReleaseIds = 'O365BusinessRetail'; SharedComputerLicensing = '0'; Platform = 'x64' }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Office\16.0\Common\Licensing\LicensingNext" @{ o365businessretail = 2; LastKnownUser = 'alex@example.com' }
+    $inner = '{"ProductReleaseId":"O365BusinessRetail","LicenseType":"User","ExpiresOn":"2026-12-31T00:00:00Z","Email":"alex@example.com","Metadata":{"LicenseCategory":"Subscription","Notes":"skip me"},"Blob":"' + ('A' * 300) + '"}'
+    $licFile = '{"Version":1,"License":"' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($inner)) + '","Signature":"' + ('B' * 300) + '"}'
+    $licDir = New-Dir (Join-Path $profileDir 'AppData/Local/Microsoft/Office/Licenses/5')
+    [IO.File]::WriteAllText((Join-Path $licDir 'lic1'), $licFile, [Text.Encoding]::Unicode)
+    [IO.File]::WriteAllText((Join-Path $licDir 'broken'), 'not json')
+    $ol = Get-EeOfficeLicence
+    Assert ($ol.device.ProductReleaseIds -eq 'O365BusinessRetail' -and $ol.device.SharedComputerLicensing -eq '0') 'click-to-run licensing values'
+    Assert ($ol.users[0].user -eq 'alex' -and $ol.users[0].licensingNext['o365businessretail'] -eq 2 -and $ol.users[0].licensingNext['LastKnownUser'] -eq '[email omitted]') 'LicensingNext state, address scrubbed'
+    $files = @{}; foreach ($f in $ol.users[0].files) { $files[$f.name] = $f }
+    $lf = $files['lic1'].fields
+    Assert ($lf['License.ProductReleaseId'] -eq 'O365BusinessRetail' -and $lf['License.LicenseType'] -eq 'User' -and $lf['License.ExpiresOn'] -like '2026-12-31*' -and $lf['License.Metadata.LicenseCategory'] -eq 'Subscription') 'licence file fields from the decoded License blob'
+    Assert ($lf['License.Email'].id -eq $expectId -and $lf['License.Email'].domain -eq 'example.com') 'licence e-mail hashed'
+    Assert (-not $lf.Contains('License.Blob') -and -not $lf.Contains('Signature') -and -not $lf.Contains('License.Metadata.Notes')) 'blobs and other fields left out'
+    Assert ($files['broken'].status -eq 'unreadable') 'unreadable licence file reported, not thrown'
+    Assert (-not (($ol | ConvertTo-Json -Depth 8) -match '@')) 'no e-mail in the OfficeLicence section'
+
+    # Kfm: shell folder targets, OneDrive KFM state, and a bounded walk of the local folders with move blockers.
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive" @{ Version = '24.200.1.0001'; SilentBusinessConfigCompleted = 1; KfmBlockOptOut = 0 }
+    Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" @{ Desktop = '%USERPROFILE%\OneDrive - Example\Desktop'; Personal = "$profileDir\Documents"; 'My Pictures' = '\\fs01\home\alex\Pictures'; Favorites = 'x' }
+    $desk = New-Dir (Join-Path $profileDir 'Desktop')
+    foreach ($n in @('mail.pst', 'notes.one', 'Open Notebook.onetoc2', '_vti_x.txt', 'CON.txt', 'Contract.docx', 'desktop.ini', '~$draft.docx')) { New-File (Join-Path $desk $n) }
+    $deep = New-Dir (Join-Path $desk 'Sub')
+    $long = Join-Path $deep ('n' * [Math]::Max(1, 252 - $deep.Length))
+    New-File $long
+    $kfm = Get-EeKfm
+    $k0 = $kfm.users[0]
+    Assert ($k0.user -eq 'alex' -and $k0.oneDrive['SilentBusinessConfigCompleted'] -eq 1 -and $k0.oneDrive['KfmBlockOptOut'] -eq 0 -and -not $k0.oneDrive.Contains('Version')) 'OneDrive KFM and silent config values'
+    Assert ($k0.shellFolders['Desktop'] -eq '%USERPROFILE%\OneDrive - Example\Desktop' -and $k0.shellFolders['Personal'] -eq '%USERPROFILE%\Documents' -and $k0.shellFolders['My Pictures'] -like '\\fs01*' -and -not $k0.shellFolders.Contains('Favorites')) 'shell folder targets, profile path shortened'
+    $fd = @{}; foreach ($f in $k0.folders) { $fd[$f.folder] = $f }
+    $d = $fd['Desktop']
+    Assert ($d.exists -and $d.files -eq 9 -and $d.pst -eq 1 -and $d.oneNote -eq 2 -and $d.badName -eq 3 -and $d.longPath -eq 1 -and $d.complete) 'desktop counts and blockers'
+    Assert ($fd['Documents'].exists -eq $false -and $null -eq $fd['Documents']['files']) 'missing folder not walked'
+    $script:EeKfmMaxEntries = 3
+    $cut = (Get-EeKfm).users[0].folders[0]
+    Assert ($cut.complete -eq $false -and $cut.files -le 3) 'walk stops at the entry cap'
+    $script:EeKfmMaxEntries = 50000
+    Assert (-not (($kfm | ConvertTo-Json -Depth 8) -match ('@|' + [regex]::Escape($profileDir)))) 'no e-mail or profile path in the Kfm section'
+
+    # UserPrt: the user's own dsregcmd through a fake Task Scheduler; the task and both files are always removed.
+    $userState = @('| User State', '                    NgcSet : NO', '           WorkplaceJoined : NO', '             WamDefaultSet : YES', '| SSO State', '                AzureAdPrt : YES',
+        '      AzureAdPrtUpdateTime : 2026-11-20 14:01:02.000 UTC', '      AzureAdPrtExpiryTime : 2026-12-04 14:01:01.000 UTC', '       AzureAdPrtAuthority : https://login.microsoftonline.com/x',
+        '             EnterprisePrt : NO', '| Diagnostic Data', '    Executing Account Name : AzureAD\AlexExample, alex@example.com')
+    $script:Sched = @{ registered = @(); deleted = @(); defs = @(); mode = 'ok' }
+    function Get-EeTaskService {
+        $svc = [pscustomobject]@{}
+        $svc | Add-Member ScriptMethod NewTask {
+            param($f)
+            $d = [pscustomobject]@{ Settings = [pscustomobject]@{ Hidden = $false; ExecutionTimeLimit = $null; DisallowStartIfOnBatteries = $true; StopIfGoingOnBatteries = $true }
+                Principal = [pscustomobject]@{ UserId = $null; LogonType = $null; RunLevel = $null }; Actions = [pscustomobject]@{ Items = @() } }
+            $d.Actions | Add-Member ScriptMethod Create { param($t) $a = [pscustomobject]@{ Path = $null; Arguments = $null }; $this.Items += $a; $a }
+            $script:Sched.defs += $d
+            $d
+        }
+        $svc | Add-Member ScriptMethod GetFolder {
+            param($p)
+            $folder = [pscustomobject]@{}
+            $folder | Add-Member ScriptMethod RegisterTaskDefinition {
+                param($name, $def, $flags, $user, $pw, $logon)
+                $script:Sched.registered += $name
+                $t = [pscustomobject]@{ State = 3; Def = $def }
+                $t | Add-Member ScriptMethod Run {
+                    param($x)
+                    if ($script:Sched.mode -eq 'throw') { throw 'run failed' }
+                    if ($script:Sched.mode -ne 'ok') { return }
+                    $vbsPath = [regex]::Match($this.Def.Actions.Items[0].Arguments, '"(.+)"').Groups[1].Value
+                    $outPath = [regex]::Match([IO.File]::ReadAllText($vbsPath), '> ""(.+?)""').Groups[1].Value
+                    [IO.File]::WriteAllLines($outPath, [string[]]$userState)
+                }
+                $t | Add-Member ScriptMethod Stop { param($x) }
+                $t
+            }
+            $folder | Add-Member ScriptMethod DeleteTask { param($n, $x) $script:Sched.deleted += $n }
+            $folder
+        }
+        $svc
+    }
+    function Get-EeSessionSids { @($sid) }
+    $userTemp = New-Dir (Join-Path $profileDir 'AppData/Local/Temp')
+    $up = Get-EeUserPrt
+    $p0 = $up.users[0]
+    Assert ($p0.user -eq 'alex' -and $p0.AzureAdPrt -eq 'YES' -and $p0.AzureAdPrtUpdateTime -eq '2026-11-20 14:01:02.000 UTC' -and $p0.AzureAdPrtExpiryTime -like '2026-12-04*' -and $p0.WorkplaceJoined -eq 'NO' -and $p0.EnterprisePrt -eq 'NO') 'user PRT state parsed'
+    Assert ($p0.account.id -eq $expectId -and $p0.account.domain -eq 'example.com') 'executing account hashed'
+    Assert (-not (($up | ConvertTo-Json -Depth 8) -match '@|AlexExample|login\.microsoftonline')) 'no e-mail, account name or authority in the UserPrt section'
+    $def = $script:Sched.defs[0]
+    Assert ($def.Settings.Hidden -and $def.Settings.ExecutionTimeLimit -eq 'PT1M' -and $def.Principal.LogonType -eq 3 -and $def.Principal.RunLevel -eq 0 -and $def.Actions.Items[0].Path -like '*wscript.exe') 'hidden, time-limited, least-privilege interactive task'
+    Assert ($script:Sched.registered.Count -eq 1 -and $script:Sched.registered[0] -like 'Relian-EndpointEvidence-*' -and ($script:Sched.deleted -join ',') -eq ($script:Sched.registered -join ',')) 'task registered once and removed'
+    Assert (@(Get-ChildItem -LiteralPath $userTemp -Force).Count -eq 0) 'temporary script and output removed'
+    [void](Get-EeUserPrt)
+    Assert ($script:Sched.registered.Count -eq 2 -and $script:Sched.registered[0] -ne $script:Sched.registered[1]) 'unique task name per run'
+    $script:Sched.mode = 'throw'
+    $failed = Get-EeUserPrt
+    Assert ($failed.users[0].status -eq 'unavailable' -and $script:Sched.deleted.Count -eq 3 -and @(Get-ChildItem -LiteralPath $userTemp -Force).Count -eq 0) 'a failed run still removes the task and files'
+    $script:Sched.mode = 'silent'; $script:EeUserPrtSeconds = 1
+    $slow = Get-EeUserPrt
+    Assert ($slow.users[0].error -eq 'timeout' -and $script:Sched.deleted.Count -eq 4 -and @(Get-ChildItem -LiteralPath $userTemp -Force).Count -eq 0) 'a task that never writes times out and is removed'
+    $script:EeUserPrtSeconds = 30
+    function Get-EeSessionSids { @() }
+    $away = Get-EeUserPrt
+    Assert ($away.users[0].status -eq 'notSignedIn' -and $script:Sched.registered.Count -eq 4) 'no task for a user without a desktop session'
+
     # Whole report: one compact line, bounded, section selection, failures isolated.
     $json = Invoke-EndpointEvidence -Sections 'all' -AppRegex 'Vendor' -ShortcutRegex 'vendor' -ClickOnceRegex 'vend' -Paths $marker
     Assert (-not $json.Contains("`n")) 'single line'
     $o = $json | ConvertFrom-Json
-    foreach ($k in @($script:EeSectionNames | ForEach-Object { $_.ToLowerInvariant() })) { Assert ($o.PSObject.Properties[$k]) "section $k present" }
+    foreach ($k in @($script:EeSectionNames | Where-Object { $script:EeOptInSections -notcontains $_ } | ForEach-Object { $_.ToLowerInvariant() })) { Assert ($o.PSObject.Properties[$k]) "section $k present" }
+    Assert (-not $o.PSObject.Properties['userprt'] -and $script:EeOptInSections -contains 'UserPrt') 'UserPrt is opt-in, not in all'
     Assert ($o.status -eq 'collected' -and @($o.users) -contains 'alex') 'report header'
     $only = Invoke-EndpointEvidence -Sections 'Cis,Session' | ConvertFrom-Json
     Assert ($only.PSObject.Properties['cis'] -and $only.PSObject.Properties['session'] -and -not $only.PSObject.Properties['edge']) 'section selection'

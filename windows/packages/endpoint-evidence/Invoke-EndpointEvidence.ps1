@@ -11,7 +11,8 @@
     Package arguments (base64 JSON in -PackageArguments):
       Sections        "all" (default) or a comma list of Start, Outlook, Edge,
                       Session, Cis, Apps, Intune, Edition, Taskbar, DefaultApps,
-                      QuietWindows, Notifications, Acrobat, EdgeExtras, OneDrive, Drives, Join
+                      QuietWindows, Notifications, Acrobat, EdgeExtras, OneDrive, Drives, Join,
+                      OfficeLicence, Kfm; UserPrt runs only when named
       AppRegex        uninstall DisplayName and Intune log lines to report (Apps, Intune)
       ShortcutRegex   .lnk/.rdp/.appref-ms names on desktops and Start Menus (Apps)
       ClickOnceRegex  ClickOnce folders under each user's AppData\Local\Apps\2.0 (Apps)
@@ -23,7 +24,14 @@
     OneDrive and Join print no e-mail: an address is shown as its domain plus the first
     12 hex of the SHA256 of the lowercased address. Join runs dsregcmd /status and
     nltest /dsgetdc (20 second limit each), and reads WorkplaceJoin per user.
-    Nothing is changed: no registry, file, service, policy refresh or custom field.
+    OfficeLicence reads Click-to-Run licensing, each user's LicensingNext state and up to
+    3 licence files (selected fields, addresses hashed). Kfm shows shell folder targets,
+    OneDrive KFM values and a walk of the local Desktop, Documents and Pictures (counts,
+    PST, OneNote, long paths, bad names), capped at 50,000 entries and 20 seconds.
+    UserPrt (opt-in) runs dsregcmd /status as each user with a desktop session through
+    a hidden one-shot scheduled task (unique name, one-minute limit, 30 second wait);
+    the task, its script and output in the user's Temp are always removed.
+    Otherwise nothing is changed: no registry, file, service, policy refresh or custom field.
     Files are read by name only, except a local DefaultAssociations XML (hashed
     and counted) and Network Shortcuts target.lnk files (icon location only).
 #>
@@ -41,7 +49,12 @@ param(
 $ProgressPreference = 'SilentlyContinue'
 
 $script:EeSectionNames = @('Start', 'Outlook', 'Edge', 'Session', 'Cis', 'Apps', 'Intune', 'Edition', 'Taskbar', 'DefaultApps',
-    'QuietWindows', 'Notifications', 'Acrobat', 'EdgeExtras', 'OneDrive', 'Drives', 'Join')
+    'QuietWindows', 'Notifications', 'Acrobat', 'EdgeExtras', 'OneDrive', 'Drives', 'Join', 'OfficeLicence', 'Kfm', 'UserPrt')
+# Run only when named: UserPrt starts a task in each user's session and can wait 30 seconds per user.
+$script:EeOptInSections = @('UserPrt')
+$script:EeUserPrtSeconds = 30
+$script:EeKfmMaxEntries = 50000
+$script:EeKfmSeconds = 20
 $script:EeWatchedTypes = @('.pdf', 'http', 'https', 'mailto')
 $script:EeProgramData = $env:ProgramData
 $script:EePublic = $env:PUBLIC
@@ -635,7 +648,7 @@ function Get-EeOneDrive {
             $match = $null; if ($policyTenants.Count -and $tenant) { $match = [bool]($policyTenants -contains $tenant) }
             # The account e-mail and folder path are personal: only a hash, the domain and presence are shown.
             $row = [ordered]@{ account = $k; tenantId = $tenant; tenantMatchesPolicy = $match; user = Get-EeAddressId ([string]$v['UserEmail']); signedIn = [bool]$v['UserEmail']; hasFolder = [bool]$v['UserFolder'] }
-            foreach ($n in @($v.Keys | Where-Object { $_ -match '^(Kfm|FilesOnDemand|Timerautomount)|Error' })) { $row[$n] = Hide-EeAddress (ConvertTo-EeValue $v[$n]) }
+            foreach ($n in @($v.Keys | Where-Object { $_ -match '^(Kfm|FilesOnDemand|Timerautomount|AutoMount)|Error' })) { $row[$n] = Hide-EeAddress (ConvertTo-EeValue $v[$n]) }
             $business += $row
         }
         $folders = [ordered]@{}
@@ -656,7 +669,7 @@ function Get-EeOneDrive {
         foreach ($id in @(Get-EeSubKeys $prov)) {
             $v = Get-EeValues "$prov\$id"
             $mount = [string]$v['MountPoint']; $leaf = $null; if ($mount) { $leaf = Protect-EeText (Hide-EeAddress (Split-Path -Leaf $mount.TrimEnd('\', '/'))) -Max 80 }
-            $row = [ordered]@{ mount = $leaf; libraryType = (Protect-EeText ([string]$v['LibraryType']) -Max 40); shortcut = [bool](@($v.Keys) -match '(?i)shortcut') }
+            $row = [ordered]@{ mount = $leaf; exists = (Test-EeDir ([Environment]::ExpandEnvironmentVariables($mount))); libraryType = (Protect-EeText ([string]$v['LibraryType']) -Max 40); shortcut = [bool](@($v.Keys) -match '(?i)shortcut') }
             foreach ($p in (Get-EeUrlParts ([string]$v['UrlNamespace'])).GetEnumerator()) { $row[$p.Key] = $p.Value }
             $libs += $row
         }
@@ -713,6 +726,189 @@ function Get-EeJoin {
         $users += [ordered]@{ user = $u.Name; workplaceJoin = $wj }
     }
     return [ordered]@{ device = $device; dc = $dc; users = $users }
+}
+
+# Leaf fields of a licence JSON object as "a.b" = value. Addresses are hashed; blobs and other fields are left out.
+function Add-EeLicenceFields {
+    param($Node, [string]$Prefix, $Out)
+    if ($null -eq $Node -or $Out.Count -ge 20) { return }
+    if ($Node -is [Management.Automation.PSCustomObject]) { foreach ($p in $Node.PSObject.Properties) { Add-EeLicenceFields $p.Value ($Prefix + '.' + $p.Name) $Out }; return }
+    if ($Node -is [array]) { $i = 0; foreach ($e in $Node) { Add-EeLicenceFields $e ($Prefix + "[$i]") $Out; $i++ }; return }
+    $s = [string]$Node
+    # PowerShell 7 turns ISO dates into DateTime; 5.1 keeps the text.
+    if ($Node -is [datetime]) { $s = $Node.ToUniversalTime().ToString('o') }
+    if ($Prefix -notmatch '(?i)[^.\]]*(product|sku|expir|licensetype|licensecategory|tenant|userid|email|upn|acid|status|issued)[^.\[]*$' -or $s.Length -ge 200) { return }
+    $name = $Prefix.TrimStart('.')
+    if ($s -match '^[^\s@]+@[^\s@]+$') { $Out[$name] = Get-EeAddressId $s } else { $Out[$name] = Protect-EeText (Hide-EeAddress $s) -Max 80 }
+}
+
+# Office Click-to-Run licensing, each user's LicensingNext activation state and vNext licence files (at most 3 per user).
+function Get-EeOfficeLicence {
+    $c2r = Get-EeValues "$HKLM\SOFTWARE\Microsoft\Office\ClickToRun\Configuration"
+    $r = [ordered]@{ device = [ordered]@{}; users = @() }
+    foreach ($n in @('ProductReleaseIds', 'SharedComputerLicensing')) { $r.device[$n] = $null; if ($c2r.Contains($n)) { $r.device[$n] = ConvertTo-EeValue $c2r[$n] } }
+    foreach ($u in @(Get-EeUsers)) {
+        $next = Get-EeTree "$($u.Hive)\Software\Microsoft\Office\16.0\Common\Licensing\LicensingNext" -Max 15
+        foreach ($k in @($next.Keys)) { $next[$k] = Hide-EeAddress $next[$k] }
+        $files = @()
+        $dir = if ($u.Profile) { Join-Path $u.Profile 'AppData\Local\Microsoft\Office\Licenses' } else { $null }
+        if (Test-EeDir $dir) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 3)) {
+                $row = [ordered]@{ name = Protect-EeText $f.Name -Max 60; written = $f.LastWriteTimeUtc.ToString('s'); fields = [ordered]@{} }
+                try {
+                    if ($f.Length -gt 262144) { throw 'too large' }
+                    $b = [IO.File]::ReadAllBytes($f.FullName)
+                    $enc = [Text.Encoding]::UTF8; if ($b.Length -gt 1 -and ($b[1] -eq 0 -or ($b[0] -eq 0xFF -and $b[1] -eq 0xFE))) { $enc = [Text.Encoding]::Unicode }
+                    $j = $enc.GetString($b).Trim([char]0xFEFF, [char]0) | ConvertFrom-Json
+                    Add-EeLicenceFields $j '' $row.fields
+                    if ($j.PSObject.Properties['License']) { Add-EeLicenceFields ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$j.License)) | ConvertFrom-Json) 'License' $row.fields }
+                } catch { $row.status = 'unreadable' }
+                $files += $row
+            }
+        }
+        $r.users += [ordered]@{ user = $u.Name; licensingNext = $next; files = $files }
+    }
+    return $r
+}
+
+# Counts and Known Folder Move blockers in one folder. Reparse points are counted, not followed; $Budget caps entries and time for the section.
+function Measure-EeFolder {
+    param([string]$Dir, $Budget)
+    $r = [ordered]@{ files = 0; mb = 0; pst = 0; oneNote = 0; longPath = 0; badName = 0; over250GB = 0; reparse = 0; unreadable = 0; complete = $true }
+    $bytes = 0L
+    $stack = [Collections.Generic.Stack[string]]::new(); $stack.Push($Dir)
+    :walk while ($stack.Count) {
+        $items = @()
+        try { $items = ([IO.DirectoryInfo]::new($stack.Pop())).GetFileSystemInfos() } catch { $r.unreadable++ }
+        foreach ($i in $items) {
+            if ($Budget.Entries -le 0 -or $Budget.Clock.Elapsed.TotalSeconds -gt $script:EeKfmSeconds) { $r.complete = $false; break walk }
+            $Budget.Entries--
+            if ($i.Attributes -band [IO.FileAttributes]::Directory) {
+                if ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) { $r.reparse++ } else { $stack.Push($i.FullName) }
+                continue
+            }
+            $r.files++; $bytes += $i.Length
+            if ($i.Extension -eq '.pst') { $r.pst++ }
+            if ($i.Extension -match '^\.(one|onetoc2)$') { $r.oneNote++ }
+            if ($i.FullName.Length -gt 250) { $r.longPath++ }
+            if ($i.Length -gt 250GB) { $r.over250GB++ }
+            # Names SharePoint and OneDrive refuse.
+            if ($i.Name -match '(?i)^(\.lock|(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?)$|_vti_|^~\$|["*:<>?|]') { $r.badName++ }
+        }
+    }
+    $r.mb = [Math]::Round($bytes / 1MB, 1)
+    return $r
+}
+
+# Known Folder Move per user: shell folder targets, OneDrive KFM and silent config values, and the local Desktop, Documents
+# and Pictures that the move would empty. The account's Kfm* values and the OneDrive policy are in the OneDrive section.
+function Get-EeKfm {
+    $budget = @{ Entries = $script:EeKfmMaxEntries; Clock = [Diagnostics.Stopwatch]::StartNew() }
+    $users = @()
+    foreach ($u in @(Get-EeUsers)) {
+        $od = [ordered]@{}
+        $v = Get-EeValues "$($u.Hive)\Software\Microsoft\OneDrive"
+        foreach ($n in @($v.Keys | Where-Object { $_ -match '(?i)kfm|silent' })) { $od[$n] = Hide-EeAddress (ConvertTo-EeValue $v[$n]) }
+        $shell = [ordered]@{}
+        $v = Get-EeValues "$($u.Hive)\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
+        # Desktop, Documents, Pictures by name and by known folder id.
+        foreach ($n in @('Desktop', 'Personal', 'My Pictures', '{754AC886-DF64-4CBA-86B5-F7FBF4FBCEF5}', '{F42EE2D3-909F-4907-8871-4C22FC0BF756}', '{0DDD015D-B06C-45D5-8C4C-F59713854639}')) {
+            if (-not $v.Contains($n)) { continue }
+            $p = [string]$v[$n]
+            if ($u.Profile -and $p.StartsWith($u.Profile, [StringComparison]::OrdinalIgnoreCase)) { $p = '%USERPROFILE%' + $p.Substring($u.Profile.Length) }
+            $shell[$n] = Protect-EeText (Hide-EeAddress $p) -Max 120
+        }
+        $folders = @()
+        if ($u.Profile) {
+            foreach ($f in @('Desktop', 'Documents', 'Pictures')) {
+                $dir = Join-Path $u.Profile $f
+                $row = [ordered]@{ folder = $f; exists = (Test-EeDir $dir) }
+                if ($row.exists) { foreach ($e in (Measure-EeFolder $dir $budget).GetEnumerator()) { $row[$e.Key] = $e.Value } }
+                $folders += $row
+            }
+        }
+        $users += [ordered]@{ user = $u.Name; oneDrive = $od; shellFolders = $shell; folders = $folders }
+    }
+    return [ordered]@{ users = $users }
+}
+
+# SIDs that own an explorer.exe: users with a desktop session, where an interactive task can run. Tests replace this function.
+function Get-EeSessionSids {
+    return @(Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue |
+            ForEach-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue).Sid } | Where-Object { $_ } | Sort-Object -Unique)
+}
+
+# The Task Scheduler COM service. Tests replace this function.
+function Get-EeTaskService {
+    $s = [Activator]::CreateInstance([type]::GetTypeFromProgID('Schedule.Service'))
+    $s.Connect()
+    return $s
+}
+
+# dsregcmd /status as one signed-in user, the only place their PRT shows, returned as lines. A hidden one-shot task with a unique
+# name and a one-minute limit runs it through wscript (no window). The task, the script and the output are always removed.
+function Invoke-EeAsUser {
+    param([string]$Sid, [string]$Dir)
+    if (-not (Test-EeDir $Dir)) { throw 'noTempDir' }
+    $id = [guid]::NewGuid().ToString('N')
+    $name = "Relian-EndpointEvidence-$id"; $out = Join-Path $Dir "ee-$id.txt"; $vbs = Join-Path $Dir "ee-$id.vbs"
+    $account = $Sid
+    try { $account = [Security.Principal.SecurityIdentifier]::new($Sid).Translate([Security.Principal.NTAccount]).Value } catch { }
+    $folder = $null; $task = $null
+    try {
+        # UTF-16 with a BOM, so wscript reads a profile path with non-ASCII letters.
+        [IO.File]::WriteAllText($vbs, ('CreateObject("WScript.Shell").Run "cmd /c %SystemRoot%\System32\dsregcmd.exe /status > ""' + $out + '""", 0, True'), [Text.Encoding]::Unicode)
+        $svc = Get-EeTaskService
+        $folder = $svc.GetFolder('\')
+        $def = $svc.NewTask(0)
+        $def.Settings.Hidden = $true
+        $def.Settings.ExecutionTimeLimit = 'PT1M'
+        $def.Settings.DisallowStartIfOnBatteries = $false
+        $def.Settings.StopIfGoingOnBatteries = $false
+        $def.Principal.UserId = $account
+        $def.Principal.LogonType = 3  # interactive token: runs in the user's own session, no password stored
+        $def.Principal.RunLevel = 0   # least privilege
+        $action = $def.Actions.Create(0)
+        $action.Path = "$env:SystemRoot\System32\wscript.exe"
+        $action.Arguments = '//B //NoLogo "' + $vbs + '"'
+        $task = $folder.RegisterTaskDefinition($name, $def, 6, $account, $null, 3)
+        [void]$task.Run($null)
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        # cmd creates the file when it starts; once the task is no longer running (state 4) the output is complete.
+        while ($clock.Elapsed.TotalSeconds -lt $script:EeUserPrtSeconds) {
+            if ([IO.File]::Exists($out) -and $task.State -ne 4) { return @([IO.File]::ReadAllLines($out)) }
+            [Threading.Thread]::Sleep(500)
+        }
+        throw 'timeout'
+    } finally {
+        if ($task) { try { [void]$task.Stop(0) } catch { } }
+        if ($folder) { try { $folder.DeleteTask($name, 0) } catch { } }
+        foreach ($f in @($vbs, $out)) { try { [IO.File]::Delete($f) } catch { } }
+    }
+}
+
+$script:EeUserPrtNames = @('AzureAdPrt', 'AzureAdPrtUpdateTime', 'AzureAdPrtExpiryTime', 'EnterprisePrt', 'WorkplaceJoined', 'WamDefaultSet', 'OnPremTgt', 'CloudTgt')
+
+# The signed-in user's view of dsregcmd /status; the SYSTEM view in Join cannot see a user's PRT. Opt-in: see $script:EeOptInSections.
+function Get-EeUserPrt {
+    $sessions = @(Get-EeSessionSids)
+    $users = @()
+    foreach ($u in @(Get-EeUsers)) {
+        $row = [ordered]@{ user = $u.Name }
+        if ($sessions -notcontains $u.Sid -or -not $u.Profile) { $row.status = 'notSignedIn'; $users += $row; continue }
+        try {
+            $kv = @{}
+            foreach ($line in @(Invoke-EeAsUser -Sid $u.Sid -Dir (Join-Path $u.Profile 'AppData\Local\Temp'))) {
+                if ($line -match '^\s*(\w[\w ]*?)\s*:\s*(\S.*?)\s*$' -and -not $kv.ContainsKey($Matches[1])) { $kv[$Matches[1]] = $Matches[2] }
+            }
+            if (-not $kv.ContainsKey('AzureAdPrt')) { throw 'no SSO state in output' }
+            foreach ($n in $script:EeUserPrtNames) { $row[$n] = $null; if ($kv.ContainsKey($n)) { $row[$n] = Protect-EeText (Hide-EeAddress $kv[$n]) -Max 60 } }
+            $row.account = $null
+            if ([string]$kv['Executing Account Name'] -match '[^\s,@]+@[^\s,@]+') { $row.account = Get-EeAddressId $Matches[0] }
+        } catch { $row.status = 'unavailable'; $row.error = $_.Exception.Message.Substring(0, [Math]::Min(40, $_.Exception.Message.Length)) }
+        $users += $row
+    }
+    return [ordered]@{ users = $users }
 }
 
 # IconLocation from a .lnk (MS-SHLLINK StringData), read without COM. $null when the link has none.
@@ -818,7 +1014,7 @@ function ConvertTo-EeBoundedJson {
 function Invoke-EndpointEvidence {
     param([string]$Sections = 'all', [string]$AppRegex = '', [string]$ShortcutRegex = '', [string]$ClickOnceRegex = '', [string]$Paths = '')
     $wanted = @($Sections -split '[,|\s]+' | Where-Object { $_ })
-    if (-not $wanted.Count -or ($wanted.Count -eq 1 -and $wanted[0] -eq 'all')) { $wanted = $script:EeSectionNames }
+    if (-not $wanted.Count -or ($wanted.Count -eq 1 -and $wanted[0] -eq 'all')) { $wanted = @($script:EeSectionNames | Where-Object { $script:EeOptInSections -notcontains $_ }) }
     foreach ($s in $wanted) { if ($script:EeSectionNames -notcontains $s) { throw "Unknown section $s." } }
     foreach ($rx in @($AppRegex, $ShortcutRegex, $ClickOnceRegex)) { [void][regex]::new($rx) }
     $report = [ordered]@{ version = '2'; timestamp = [datetime]::UtcNow.ToString('o'); status = 'collected'; users = @(Get-EeUsers | ForEach-Object Name) }
