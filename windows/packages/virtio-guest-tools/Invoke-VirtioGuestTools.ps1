@@ -136,11 +136,11 @@ function Invoke-VgMain {
     $r = [ordered]@{ Package = 'virtio-guest-tools'; Action = $Action; PinVersion = $PinVersion; Status = 'error' }
     function Done([int]$Code, [string]$Reason = '') { if ($Reason) { $r.Reason = $Reason }; @{ ExitCode = $Code; Result = $r } }
 
-    if ([string]::IsNullOrWhiteSpace($InstallerSha256)) { $r.Status = 'disabled'; return Done 0 }
+    # An empty hash or an empty pin disables the package before anything else is checked.
+    if ([string]::IsNullOrWhiteSpace($InstallerSha256) -or [string]::IsNullOrWhiteSpace($PinVersion)) { $r.Status = 'disabled'; return Done 0 }
     if (-not (Test-VgPinHash $InstallerSha256)) { return Done 1 'invalid installer hash' }
     if (-not (Test-VgUrl $InstallerUrl)) { return Done 1 'installer URL must be https with no userinfo' }
     if ($Action -notin @('Install', 'Update', 'Repair')) { return Done 1 "action $Action is not supported" }
-    if ([string]::IsNullOrWhiteSpace($PinVersion)) { $r.Status = 'disabled'; return Done 0 }
     if ($PinVersion -notmatch '^\d+(\.\d+){1,3}$') { return Done 1 'invalid pin version' }
     if ($VssOption -notmatch '^[1-5]?$') { return Done 1 'VssOption must be empty or 1-5' }
 

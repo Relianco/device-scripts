@@ -147,6 +147,8 @@ try {
     Assert ((Run -Pin 'abc').ExitCode -eq 1 -and (Calls) -ceq '') 'bad pin refused'
     $r = Run -Pin ''
     Assert ($r.ExitCode -eq 0 -and (Calls) -ceq '') 'empty pin does nothing'
+    $r = Run -Pin '' -Url (-join @('https://', 'user', '@', 'example.invalid/x.exe')) -Action 'Uninstall'
+    Assert ($r.ExitCode -eq 0 -and (Calls) -ceq '') 'empty pin exits 0 before URL and action checks'
 
     # Hash mismatch: one download, no retry, no install.
     $f = New-Fake
