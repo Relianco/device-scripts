@@ -258,6 +258,7 @@ These report by default and change the device only when you ask. None reboots un
 
 All read-only, and each prints bounded JSON. The six under `windows/read/` also run through `Invoke-RelianReadJob`. The two test tools at the end are not read-only.
 
+- `ad-evidence` (read, runner 374 only, not in the read-job allowlist): Active Directory facts for a hybrid join or sync review; the domain comes from RootDSE. `Section` is `Inventory` (computers and users with OU, enabled, last logon, OS, `userCertificate` count, UPN suffix and immutableId; `SearchBase` scopes it, paged by `Offset`) or `Scp` (the Device Registration connection point's `azureADId` and `azureADName`); `Name` runs `Reach` for one computer (AD, DNS, DHCP lease, ping and TCP 135/445/3389/5985, ARP, 4768/4624 events, and an `sc.exe query` of `Services`).
 - `component-store` (read): component store health. DISM CheckHealth, a CBS.log summary (corruption rows, totals, top HRESULT codes, last errors), Windows Update events 20 and 31 by error code, build and UBR, pending restart state, and the last `component-store-repair` run.
 - `diagnose-feature-upgrade` (read): a failed or running feature upgrade. `Section` is `Summary`, `Rollback`, `Servicing`, `Setup`, `Boot` or `Maintenance`.
 - `diagnose-windows-update` (read): Windows Update state. `Section` is `Summary`, `History`, `Events`, `Policy`, `Service` or `ServicingHistory` (a CBS and DISM error digest).

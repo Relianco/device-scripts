@@ -39,8 +39,11 @@ $found = @()
 foreach ($file in $files) {
     $rel = [IO.Path]::GetRelativePath($repoRoot, $file.FullName).Replace('\', '/')
     # ninja-reset removes and reinstalls the NinjaOne agent itself: it may name the agent (NinjaRMMAgent) and the
-    # pinned installer on the public resources CDN. Every other pattern (CLI, fields, API, deploy token) still applies.
-    $allowed = if ($rel.StartsWith('windows/packages/ninja-reset/') -or $rel -eq 'windows/releases/ninja-reset.json') {
+    # pinned installer on the public resources CDN. ad-evidence only names the agent service as the default remote
+    # "sc.exe query" target. Every other pattern (CLI, fields, API, deploy token) still applies.
+    $allowed = if ($rel.StartsWith('windows/read/ad-evidence/') -or $rel -eq 'windows/releases/ad-evidence.json') {
+        [regex]::new('NinjaRMMAgent', 'IgnoreCase')
+    } elseif ($rel.StartsWith('windows/packages/ninja-reset/') -or $rel -eq 'windows/releases/ninja-reset.json') {
         [regex]::new('NinjaRMMAgent|https://resources\.ninjarmm\.com/Agent/[0-9a-z]+/NinjaOneAgent-x86\.msi', 'IgnoreCase')
     } else { $null }
     foreach ($line in @(Get-Content -LiteralPath $file.FullName)) {
