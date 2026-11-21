@@ -50,6 +50,9 @@ function New-Fake {
     }
     $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); Copy-Item -LiteralPath $script:Payload -Destination $Destination }
     $script:RetryDelay = { param($Seconds) }
+    $f | Add-Member -NotePropertyName VssOption -NotePropertyValue ''
+    $script:VgGetVssOption = { $script:Fake.VssOption }
+    $script:VgSetVssOption = { param([int]$Value) $script:Fake.Calls.Add("vss-option $Value"); $script:Fake.VssOption = [string]$Value }
     $script:VgRunInstaller = {
         param($Path, $LogPath)
         $script:Fake.Calls.Add('install')
@@ -68,8 +71,8 @@ New-Item -ItemType Directory -Path $dir | Out-Null
 $script:Payload = Join-Path $dir 'payload.exe'
 [System.IO.File]::WriteAllText($script:Payload, 'fake bundle')
 $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:Payload).Hash.ToLowerInvariant()
-function Run { param([string]$Action = 'Install', [string]$Pin = '0.1.302', [string]$Sha = $sha, [string]$Url = 'https://example.invalid/virtio-win-guest-tools.exe')
-    Invoke-VgMain -Action $Action -PinVersion $Pin -InstallerUrl $Url -InstallerSha256 $Sha -CancelPath '' -LogRoot $dir }
+function Run { param([string]$Action = 'Install', [string]$Pin = '0.1.302', [string]$Sha = $sha, [string]$Url = 'https://example.invalid/virtio-win-guest-tools.exe', [string]$Vss = '')
+    Invoke-VgMain -Action $Action -PinVersion $Pin -InstallerUrl $Url -InstallerSha256 $Sha -CancelPath '' -LogRoot $dir -VssOption $Vss }
 function Calls { $script:Fake.Calls -join ',' }
 
 try {
@@ -159,6 +162,25 @@ try {
     $f = New-Fake
     $r = Run -Pin '0.1.400'
     Assert ($r.ExitCode -eq 1) 'still below the pin after install'
+
+    # VssOption: empty leaves it alone; a value is written after install and only when it differs.
+    $f = New-Fake
+    $r = Run
+    Assert (-not ((Calls) -match 'vss-option')) 'empty VssOption writes nothing'
+    $f = New-Fake
+    $r = Run -Vss '5'
+    Assert ($r.ExitCode -eq 0 -and $r.Result.VssOption -eq '5' -and (Calls) -ceq 'download,install,start QEMU-GA,vss-option 5') "VssOption 5: $(Calls)"
+    $f.Calls.Clear()
+    $r = Run -Vss '5'
+    Assert ((Calls) -ceq '' -and $r.Result.Status -eq 'current') "VssOption already 5 is a no-op: $(Calls)"
+    $f = New-Fake
+    Assert ((Run -Vss '9').ExitCode -eq 1 -and (Calls) -ceq '') 'bad VssOption refused before download'
+
+    # A download error is reported.
+    $f = New-Fake
+    $script:DownloadFile = { param($Url, $Destination) throw 'boom' }
+    $r = Run
+    Assert ($r.Result.DownloadError -match 'boom') 'download error reported'
 
     # Version compare is numeric.
     Assert ((Compare-VgVersion '0.1.99' '0.1.302') -lt 0 -and (Compare-VgVersion '0.1.302' '0.1.302') -eq 0) 'numeric version compare'
