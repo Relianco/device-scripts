@@ -30,8 +30,9 @@ Assert ((Test-VgPinHash $DriverSha256) -and -not (Test-VgPinHash ('0' * 64)) -an
 function Pci([string]$Vendor, [string]$Device) { 'PCI\VEN_' + $Vendor + '&DEV_' + $Device }
 # A locally administered MAC and documentation addresses (RFC 5737): no real machine.
 $mac = '02-00-00-00-00-01'
-function Nic([string]$Alias = 'Ethernet', [bool]$Dhcp = $true, [object[]]$Addresses = @(), [object[]]$Gateways = @(), [string[]]$StaticDns = @()) {
-    [pscustomobject]@{ Mac = $mac; Alias = $Alias; Dhcp = $Dhcp; Addresses = $Addresses; Gateways = $Gateways; Dns = $StaticDns; StaticDns = $StaticDns }
+function Nic([string]$Alias = 'Ethernet', [bool]$Dhcp = $true, [object[]]$Addresses = @(), [object[]]$Gateways = @(), [string[]]$StaticDns = @(), [string[]]$StaticDnsV6 = @(), [string]$Status = 'Up', [string]$Mac = $mac) {
+    [pscustomobject]@{ Mac = $Mac; Alias = $Alias; Index = 7; Status = $Status; Category = 'DomainAuthenticated'; Dhcp = $Dhcp; Addresses = $Addresses; Gateways = $Gateways
+        DnsV4 = $StaticDns; DnsV6 = $StaticDnsV6; StaticDnsV4 = $StaticDns; StaticDnsV6 = $StaticDnsV6 }
 }
 $idle = @('"C:\Program Files\Comet\backup-tool.exe" delegate-server', '"C:\Program Files\Comet\backup-tool.exe" elevator-server', '"C:\Program Files\Comet\backup-tool.exe" stream 12')
 $stable = "Writer name: 'System Writer'`n   State: [1] Stable`n   Last error: No error`nWriter name: 'SqlServerWriter'`n   State: [8] Failed`n"
@@ -56,7 +57,7 @@ function New-Fake {
         Manufacturer = $Manufacturer; Pnp = $Pnp; DriverExit = $DriverExit; AgentExit = $AgentExit; AgentStarts = $AgentStarts; Held = $Held
         Versions = @{ 'Virtio-win-driver-installer' = $Driver; 'QEMU guest agent' = $Agent; 'Virtio-win-guest-tools' = $Bundle }
         Services = @{}; Calls = [System.Collections.Generic.List[string]]::new(); Delays = 0
-        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''
+        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Locked = [System.Collections.Generic.List[string]]::new()
     }
     if ($Services) {
         $f.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' }
@@ -65,7 +66,15 @@ function New-Fake {
     $script:Fake = $f
     $script:VgComputer = { [pscustomobject]@{ Manufacturer = $script:Fake.Manufacturer; Model = 'Standard PC' } }
     $script:VgPnpIds = { $script:Fake.Pnp }
-    $script:VgInstalledVersion = { param($Name) [string]$script:Fake.Versions[$Name] }
+    # Uninstall entries as a real 0.1.302 guest has them (publishers, hives, SystemComponent).
+    $script:VgUninstallEntries = {
+        $hive = @{ 'Virtio-win-driver-installer' = 'Uninstall'; 'QEMU guest agent' = 'Uninstall'; 'Virtio-win-guest-tools' = 'WOW6432Node' }
+        $pub = @{ 'Virtio-win-driver-installer' = 'Red Hat, Inc.'; 'QEMU guest agent' = 'RedHat'; 'Virtio-win-guest-tools' = 'Red Hat, Inc.' }
+        foreach ($n in @($script:Fake.Versions.Keys)) {
+            if ($script:Fake.Versions[$n]) { [pscustomobject]@{ DisplayName = $n; DisplayVersion = $script:Fake.Versions[$n]; Publisher = $pub[$n]; SystemComponent = [int]($n -eq 'Virtio-win-driver-installer'); Hive = $hive[$n] } }
+        }
+    }
+    $script:VgLockDir = { param($Path) $script:Fake.Locked.Add($Path) }
     $script:VgGetService = { param($Name) $script:Fake.Services[$Name] }
     $script:VgSetStartType = { param($Name, $Type) $script:Fake.Calls.Add("start-type $Name $Type"); $script:Fake.Services[$Name].StartType = $Type }
     $script:VgStartService = {
@@ -73,7 +82,7 @@ function New-Fake {
         $script:Fake.Calls.Add("start $Name")
         if ($script:Fake.AgentStarts) { $script:Fake.Services[$Name].Status = 'Running' } else { throw 'Cannot start service' }
     }
-    $script:VgStopService = { param($Name) $script:Fake.Calls.Add("stop $Name"); $script:Fake.Services[$Name].Status = 'Stopped' }
+    $script:VgStopService = { param($Name) $script:Fake.Calls.Add("stop $Name"); if ($script:Fake.StopFails) { throw 'access denied' }; $script:Fake.Services[$Name].Status = 'Stopped' }
     # Held: polls during which a service stays marked for delete; -1 is forever.
     $script:VgServiceHeld = { param($Name) $script:Fake.Held -ne 0 }
     $script:VgProcesses = { @($script:Fake.Processes | ForEach-Object { [pscustomobject]@{ Name = 'backup-tool.exe'; CommandLine = $_ } }) }
@@ -272,6 +281,33 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 0 -and $f.Delays -eq 2 -and (Calls) -match 'msi agent') "released service: $($r.ExitCode) $(Calls)"
 
+    # Detection on the exact uninstall entries of a real 0.1.302 guest: the driver MSI is SystemComponent=1 in the
+    # 64-bit hive, the agent's publisher is 'RedHat', the bundle sits under WOW6432Node. Other publishers do not count.
+    $f = New-Fake -Driver '0.1.302' -Agent '110.2.3' -Bundle '0.1.302'
+    Assert ((Get-VgInstalledVersion 'Virtio-win-driver-installer') -eq '0.1.302' -and (Get-VgInstalledVersion 'QEMU guest agent') -eq '110.2.3' -and (Get-VgInstalledVersion 'Virtio-win-guest-tools') -eq '0.1.302') 'real-guest uninstall entries'
+    $script:VgUninstallEntries = { [pscustomobject]@{ DisplayName = 'QEMU guest agent'; DisplayVersion = '999.0.0'; Publisher = 'Someone Else'; SystemComponent = 0; Hive = 'Uninstall' } }
+    Assert ((Get-VgInstalledVersion 'QEMU guest agent') -eq '') 'other publisher ignored'
+    $f = New-Fake -Driver '0.1.302' -Agent '110.2.3' -Bundle '0.1.302'
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'current' -and $r.Result.BundleVersion -eq '0.1.302') "real-guest entries are current: $($r.Result.Status)"
+
+    # Driver MSI exits 0 but stays below the pin: exit 1, and the agent the run stopped is started again.
+    $f = New-Fake -Agent '109.1.0'
+    $r = Run -Pin '0.1.400'
+    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'below the pin' -and (Calls) -clike "*$stopBoth,msi agent,start QEMU-GA") "driver below pin restarts the agent: $(Calls)"
+
+    # A failed service stop is recorded; the wait decides.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $f.StopFails = $true
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and $r.Result.StopError -match 'access denied') "stop error recorded: $($r.Result['StopError'])"
+
+    # Cache and log folders are locked down; log names are not predictable.
+    $f = New-Fake
+    $r = Run
+    Assert (@($f.Locked).Count -eq 2 -and $f.Locked[0] -ceq $dir -and $f.Locked[1] -like (Join-Path $dir 'relian-virtio-*')) "locked folders: $($f.Locked -join ', ')"
+    Assert (@(Get-ChildItem -LiteralPath $dir -Filter 'network-*.json' | Where-Object { $_.Name -notmatch '^network-\d{14}-[0-9a-f]{32}\.json$' }).Count -eq 0) 'snapshot name has a random part'
+
     # Network: hand-set DNS on a DHCP adapter is lost by the new NIC instance and set again, matched by MAC.
     $dns = @('192.0.2.53', '192.0.2.54')
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -StaticDns $dns)) -NetAfter @((Nic -Alias 'Ethernet 2'))
@@ -279,7 +315,7 @@ try {
     Assert ((Calls) -ceq 'download,msi driver,dns Ethernet 2 192.0.2.53 192.0.2.54,start-type QEMU-GA Automatic,start-type QEMU Guest Agent VSS Provider Manual,start QEMU-GA') "DNS re-applied: $(Calls)"
     Assert (@($r.Result.NetReapplied).Count -eq 1 -and $r.Result.NetReapplied[0] -match 'dns') 'DNS re-apply reported'
     $snap = @(Get-Content -LiteralPath $r.Result.NetSnapshot -Raw | ConvertFrom-Json)
-    Assert ($r.Result.NetSnapshot.StartsWith($dir) -and [string]$snap[0].Mac -eq $mac -and @($snap[0].StaticDns).Count -eq 2) 'snapshot written as JSON to the log dir'
+    Assert ($r.Result.NetSnapshot.StartsWith($dir) -and [string]$snap[0].Mac -eq $mac -and @($snap[0].StaticDnsV4).Count -eq 2 -and [string]$snap[0].Alias -eq 'Ethernet') 'snapshot written as JSON to the log dir'
     # Static address and gateway missing on the new instance: added back; DHCP-assigned ones are left alone.
     $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true }
     $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Manual = $true }
@@ -299,6 +335,21 @@ try {
     $f = New-Fake -Agent '109.1.0' -Net @((Nic -StaticDns $dns)) -NetAfter @()
     $r = Run
     Assert ($r.ExitCode -eq 1 -and (Calls) -clike '*msi agent,start QEMU-GA' -and $r.Result.Reason -match 'network-' -and $f.Delays -eq 24 -and @($r.Result.NetMissing) -contains $mac) "adapter missing: $($f.Delays)"
+    # Adapters that are not Up are recorded and matched too; nothing waits for them to come Up.
+    $down = Nic -Mac '02-00-00-00-00-02' -Alias 'Ethernet 3' -Status 'Disconnected' -StaticDns @('192.0.2.99')
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic), $down) -NetAfter @((Nic), (Nic -Mac '02-00-00-00-00-02' -Alias 'Ethernet 4' -Status 'Disconnected'))
+    $r = Run
+    $snap = @(Get-Content -LiteralPath $r.Result.NetSnapshot -Raw | ConvertFrom-Json)
+    Assert ($r.ExitCode -eq 0 -and $f.Delays -eq 0 -and (Calls) -cmatch 'dns Ethernet 4 192\.0\.2\.99' -and $snap.Count -eq 2 -and [string]$snap[1].Status -eq 'Disconnected' -and [string]$snap[1].Category -ne '') "non-Up adapter: $(Calls)"
+    # IPv4 and IPv6 hand-set DNS are separate lists and set separately.
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -StaticDns $dns -StaticDnsV6 @('2001:db8::53'))) -NetAfter @((Nic -StaticDns $dns))
+    $r = Run
+    Assert ((Calls) -cmatch 'dns Ethernet 2001:db8::53' -and (Calls) -notmatch 'dns Ethernet 192') "IPv6 DNS alone re-applied: $(Calls)"
+    # A failed driver MSI names the snapshot in its reason.
+    $f = New-Fake -DriverExit 1603 -Net @((Nic))
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network-.*\.json' -and $r.Result.Reason -match 'restore') "driver failure reason: $($r.Result.Reason)"
+
     # Agent-only run takes no snapshot.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -Net @((Nic -StaticDns $dns))
     $r = Run

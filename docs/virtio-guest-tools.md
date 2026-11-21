@@ -9,6 +9,14 @@ The package installs two MSIs from the fedorapeople virtio-win archive (`sourceU
 - `drivers`: `virtio-win-gt-x64.msi` 0.1.302, the VirtIO drivers. Its uninstall entry is "Virtio-win-driver-installer".
 - `agent`: `qemu-ga-x86_64.msi` 110.2.3, the QEMU guest agent and its VSS provider. Its uninstall entry is "QEMU guest agent".
 
+Detection was checked on a real 0.1.302 guest, and the tests use these entries as a fixture:
+
+- "Virtio-win-driver-installer", version 0.1.302, publisher "Red Hat, Inc.". It is in the 64-bit hive with SystemComponent=1, so Programs and Features hides it.
+- "QEMU guest agent", version 110.2.3, publisher "RedHat" (no space), in the 64-bit hive.
+- "Virtio-win-guest-tools" (the bundle), version 0.1.302, under WOW6432Node.
+
+The package reads both hives, including SystemComponent entries, and matches the exact DisplayName with a publisher that starts with "Red Hat" or "RedHat".
+
 These are the same files the 0.1.302 `virtio-win-guest-tools.exe` bundle carries (the SHA1 in the bundle manifest matches). The package downloads content-addressed copies from `relianpub` (`url` there), checked against the pinned SHA256.
 
 The fedorapeople bot check answers any User-Agent that contains `Mozilla` with an HTML page. Windows PowerShell 5.1 sends such a User-Agent by default. For that reason the package sends `relian-device-scripts` as its User-Agent.
@@ -41,9 +49,9 @@ The package never restarts the machine. `RebootRequired` is true when an MSI exi
 
 A NetKVM update can give the NIC a new device instance. Static addresses survive, but DNS servers typed by hand on a DHCP adapter are lost.
 
-Before the driver MSI the package writes every Up adapter to `network-<time>.json` in the log folder: MAC, alias, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`), default gateways (`Manual` for route protocol `NetMgmt`), the DNS servers in use, and `StaticDns`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` (and `Tcpip6`), which holds only hand-set servers.
+Before the driver MSI the package writes every adapter (any status) to `network-<time>.json` in the log folder: MAC, alias, status, network category, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`), default gateways (`Manual` for route protocol `NetMgmt`), the DNS servers in use (`DnsV4`, `DnsV6`), and `StaticDnsV4` and `StaticDnsV6`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` and `Tcpip6\...`, which holds only hand-set servers.
 
-After the driver MSI it waits up to 120 s for each saved MAC to be Up again. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing manual gateways, and the hand-set DNS servers when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
+After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up again if it was Up. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing manual gateways, and the hand-set DNS servers of each family when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
 
 ## Exit codes
 
@@ -56,7 +64,7 @@ After the driver MSI it waits up to 120 s for each saved MAC to be Up again. The
 | 22 | `agentInstallFailed` | The agent MSI failed (`AgentExit`) or left the agent below the pin. The drivers are installed. |
 | 130 | `cancelled` | Cancelled before an installer started. |
 
-Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>.log`, `agent-<time>.log` and `network-<time>.json`.
+Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>-<guid>.log`, `agent-<time>-<guid>.log` and `network-<time>-<guid>.json`. The log folder and the download folder get an ACL with only SYSTEM and Administrators (full control), inheritance off, owner Administrators. If the driver MSI fails, `Reason` names the snapshot file and says whether the restore finished. If a service stop throws, `StopError` holds the error, and the 120 s wait decides what happens next.
 
 ## Recovery
 

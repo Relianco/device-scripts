@@ -66,21 +66,35 @@ function Test-VgCancelled([string]$CancelPath) {
 # Seams. Tests replace these; the defaults touch the real device.
 $script:VgComputer = { Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object Manufacturer, Model }
 $script:VgPnpIds = { @(Get-CimInstance -ClassName Win32_PnPEntity | ForEach-Object { [string]$_.DeviceID }) }
-# Highest DisplayVersion of a Red Hat uninstall entry with this DisplayName ('' when none).
-$script:VgInstalledVersion = {
-    param([string]$Name)
-    $best = ''
+# Every uninstall entry in both hives, SystemComponent=1 entries included (the driver MSI is one).
+$script:VgUninstallEntries = {
     foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall')) {
-        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
-            $p = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue
-            # The driver MSI and the bundle say 'Red Hat, Inc.', the agent MSI 'RedHat'.
-            if ($null -eq $p -or [string]$p.DisplayName -cne $Name -or [string]$p.Publisher -notmatch '^Red ?Hat') { continue }
-            $v = [string]$p.DisplayVersion
-            if ($v -match '^\d+(\.\d+){1,3}$' -and ($best -eq '' -or (Compare-VgVersion $v $best) -gt 0)) { $best = $v }
-        }
+        foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) { Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction SilentlyContinue }
+    }
+}
+# Highest DisplayVersion of a Red Hat entry with this DisplayName ('' when none). Seen on a 0.1.302 guest:
+# 'Virtio-win-driver-installer' and the bundle say 'Red Hat, Inc.', 'QEMU guest agent' says 'RedHat'.
+function Get-VgInstalledVersion([string]$Name) {
+    $best = ''
+    foreach ($p in @(& $script:VgUninstallEntries)) {
+        if ($null -eq $p -or [string]$p.DisplayName -cne $Name -or [string]$p.Publisher -notmatch '^Red ?Hat') { continue }
+        $v = [string]$p.DisplayVersion
+        if ($v -match '^\d+(\.\d+){1,3}$' -and ($best -eq '' -or (Compare-VgVersion $v $best) -gt 0)) { $best = $v }
     }
     $best
 }
+# SYSTEM and Administrators only, inheritance off: no local user can read the logs or swap a staged MSI.
+$script:VgLockDir = {
+    param($Path)
+    $acl = [System.Security.AccessControl.DirectorySecurity]::new()
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]::new($sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+    }
+    $acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+function New-VgPrivateDir([string]$Path) { New-Item -ItemType Directory -Path $Path -Force | Out-Null; & $script:VgLockDir $Path }
 $script:VgGetService = {
     param($Name)
     $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
@@ -90,7 +104,7 @@ $script:VgGetService = {
 $script:VgSetStartType = { param($Name, $Type) Set-Service -Name $Name -StartupType $Type }
 $script:VgStartService = { param($Name) Start-Service -Name $Name }
 # Sends the stop and returns: Stop-Service waits on a StopPending service with no limit; Wait-Vg bounds the wait.
-$script:VgStopService = { param($Name) $s = Get-Service -Name $Name -ErrorAction SilentlyContinue; if ($null -ne $s -and [string]$s.Status -ne 'Stopped') { try { $s.Stop() } catch { } } }
+$script:VgStopService = { param($Name) $s = Get-Service -Name $Name -ErrorAction SilentlyContinue; if ($null -ne $s -and [string]$s.Status -ne 'Stopped') { $s.Stop() } }
 $script:VgTempRoot = [System.IO.Path]::GetTempPath()
 # Held: not stopped, or marked for delete (DeleteFlag), which makes the agent MSI's RegisterCom fail with 1603.
 $script:VgServiceHeld = {
@@ -102,25 +116,30 @@ $script:VgServiceHeld = {
 $script:VgProcesses = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'backup-tool.exe'" | Select-Object Name, CommandLine) }
 # '' when vssadmin fails.
 $script:VgVssWriters = { $out = & (Join-Path $env:SystemRoot 'System32\vssadmin.exe') list writers | Out-String; if ($LASTEXITCODE -ne 0) { return '' }; $out }
-# Up adapters. Manual marks what was set by hand: PrefixOrigin Manual, route Protocol NetMgmt. StaticDns is the
-# interface's NameServer value, which holds only hand-set servers; Dns is what the adapter uses now.
+# All adapters, any status. Manual marks what was set by hand: PrefixOrigin Manual, route Protocol NetMgmt.
+# StaticDnsV4/V6 are the interface's NameServer values (Tcpip, Tcpip6), which hold only hand-set servers;
+# DnsV4/V6 are what the adapter uses now. Category is the network profile, for the report.
 $script:VgGetNet = {
-    foreach ($a in @(Get-NetAdapter | Where-Object { [string]$_.Status -eq 'Up' })) {
+    foreach ($a in @(Get-NetAdapter)) {
         $i = $a.ifIndex
-        $ns = foreach ($stack in @('Tcpip', 'Tcpip6')) {
-            [string](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$stack\Parameters\Interfaces\$($a.InterfaceGuid)" -Name 'NameServer' -ErrorAction SilentlyContinue).NameServer
-        }
+        $ns = @(foreach ($stack in @('Tcpip', 'Tcpip6')) {
+            ,@(([string](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$stack\Parameters\Interfaces\$($a.InterfaceGuid)" -Name 'NameServer' -ErrorAction SilentlyContinue).NameServer -split '[,\s]+') | Where-Object { $_ })
+        })
         [pscustomobject]@{
             Mac = [string]$a.MacAddress
             Alias = [string]$a.Name
             Index = [int]$i
+            Status = [string]$a.Status
+            Category = [string](Get-NetConnectionProfile -InterfaceIndex $i -ErrorAction SilentlyContinue | Select-Object -First 1).NetworkCategory
             Dhcp = [string](Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp -eq 'Enabled'
             Addresses = @(Get-NetIPAddress -InterfaceIndex $i -ErrorAction SilentlyContinue | Where-Object { [string]$_.PrefixOrigin -ne 'WellKnown' } |
                 ForEach-Object { [pscustomobject]@{ Ip = [string]$_.IPAddress; Prefix = [int]$_.PrefixLength; Manual = [string]$_.PrefixOrigin -eq 'Manual' } })
             Gateways = @(Get-NetRoute -InterfaceIndex $i -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0', '::/0') } |
                 ForEach-Object { [pscustomobject]@{ Prefix = [string]$_.DestinationPrefix; NextHop = [string]$_.NextHop; Manual = [string]$_.Protocol -eq 'NetMgmt' } })
-            Dns = @((Get-DnsClientServerAddress -InterfaceIndex $i -ErrorAction SilentlyContinue).ServerAddresses)
-            StaticDns = @($ns -split '[,\s]+' | Where-Object { $_ })
+            DnsV4 = @((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
+            DnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses)
+            StaticDnsV4 = @($ns[0])
+            StaticDnsV6 = @($ns[1])
         }
     }
 }
@@ -216,8 +235,10 @@ function Invoke-VgMsi([string]$Mode, [string]$Path, [string]$Log) {
 function Restore-VgNetwork($Saved, $r) {
     for ($i = 0; ; $i++) {
         $now = @(& $script:VgGetNet | Where-Object { $_ })
+        $up = @($now | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $_.Mac })
         $macs = @($now | ForEach-Object { $_.Mac })
-        if (@($Saved | Where-Object { $_.Mac -notin $macs }).Count -eq 0 -or $i -ge 24) { break }
+        # Wait for every saved MAC, and for those that were Up to be Up again.
+        if (@($Saved | Where-Object { $_.Mac -notin $(if ($_.Status -eq 'Up') { $up } else { $macs }) }).Count -eq 0 -or $i -ge 24) { break }
         [void](& $script:RetryDelay -Seconds 5)
     }
     $applied = [System.Collections.Generic.List[string]]::new()
@@ -235,8 +256,9 @@ function Restore-VgNetwork($Saved, $r) {
         foreach ($g in @($s.Gateways | Where-Object { $_.Manual })) {
             if ($g.NextHop -notin @($c.Gateways | ForEach-Object { $_.NextHop })) { Apply "$($c.Alias) route $($g.Prefix) $($g.NextHop)" { & $script:VgAddRoute $c $g.Prefix $g.NextHop } }
         }
-        if (@($s.StaticDns).Count -gt 0 -and (@($s.StaticDns) -join ',') -ne (@($c.StaticDns) -join ',')) {
-            Apply "$($c.Alias) dns $(@($s.StaticDns) -join ' ')" { & $script:VgSetDns $c @($s.StaticDns) }
+        foreach ($fam in @('StaticDnsV4', 'StaticDnsV6')) {
+            $want = @($s.$fam)
+            if ($want.Count -gt 0 -and ($want -join ',') -ne (@($c.$fam) -join ',')) { Apply "$($c.Alias) dns $($want -join ' ')" { & $script:VgSetDns $c $want } }
         }
     }
     $r.NetReapplied = @($applied)
@@ -253,7 +275,9 @@ function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp
     if (Test-VgCancelled $CancelPath) { $r.AgentStep = 'cancelled'; $r.AgentReason = 'cancelled after the agent download'; return 130 }
     $busy = Get-VgBackupBusy
     if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = $busy; return 20 }
-    foreach ($name in @($script:VgAgent, $script:VgVss)) { if ($null -ne (& $script:VgGetService $name)) { & $script:VgStopService $name } }
+    foreach ($name in @($script:VgAgent, $script:VgVss)) {
+        if ($null -ne (& $script:VgGetService $name)) { try { & $script:VgStopService $name } catch { $r.StopError = "$name : $($_.Exception.Message)" } }
+    }
     Wait-Vg { @(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ }).Count -gt 0 }
     $held = @(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ })
     if ($held.Count -gt 0) { $r.AgentStep = 'agentServiceHeld'; $r.AgentReason = "still running or marked for delete after 120 s: $($held -join ', ')"; return 21 }
@@ -295,9 +319,9 @@ function Invoke-VgMain {
     $r.AgentChannel = @($pnp | Where-Object { $_ -match '(?i)^PCI\\VEN_1AF4&DEV_10(03|43)' }).Count -gt 0
 
     # Per component. The bundle record can outlive a rolled-back driver MSI, so it is only reported.
-    $r.BundleVersion = [string](& $script:VgInstalledVersion 'Virtio-win-guest-tools')
-    $r.DriverPrevious = [string](& $script:VgInstalledVersion 'Virtio-win-driver-installer')
-    $r.AgentPrevious = [string](& $script:VgInstalledVersion 'QEMU guest agent')
+    $r.BundleVersion = [string](Get-VgInstalledVersion 'Virtio-win-guest-tools')
+    $r.DriverPrevious = [string](Get-VgInstalledVersion 'Virtio-win-driver-installer')
+    $r.AgentPrevious = [string](Get-VgInstalledVersion 'QEMU guest agent')
     $needDriver = -not (Test-VgAtLeast $r.DriverPrevious $PinVersion)
     $agentCurrent = Test-VgAtLeast $r.AgentPrevious $AgentVersion
     $needAgent = -not $agentCurrent -or $null -eq (& $script:VgGetService $script:VgAgent)
@@ -307,10 +331,11 @@ function Invoke-VgMain {
         if (Test-VgCancelled $CancelPath) { $r.Status = 'cancelled'; return Done 130 }
         $busy = Get-VgBackupBusy
         if ($busy) { $r.Status = 'backupRunning'; return Done 20 $busy }
-        New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
-        $stamp = Get-Date -Format 'yyyyMMddHHmmss'
+        New-VgPrivateDir $LogRoot
+        # The random part keeps file names in the log folder unpredictable.
+        $stamp = (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('n')
         $cache = Join-Path $script:VgTempRoot ('relian-virtio-' + [guid]::NewGuid().ToString('n'))
-        New-Item -ItemType Directory -Path $cache -Force | Out-Null
+        New-VgPrivateDir $cache
         try {
             if ($needDriver) {
                 $msi = Join-Path $cache 'virtio-win-gt-x64.msi'
@@ -328,7 +353,10 @@ function Invoke-VgMain {
                 $r.DriverExit = $code
                 # Also after a failed MSI: a half-done driver swap can still have replaced the NIC instance.
                 try { Restore-VgNetwork $saved $r } catch { $r.NetError = $_.Exception.Message }
-                if ($code -notin $script:VgOk) { return Done 1 "driver installer failed with $code" }
+                if ($code -notin $script:VgOk) {
+                    $state = if ($r.Contains('NetMissing') -or $r.Contains('NetError')) { 'incomplete' } else { "done, $(@($r.NetReapplied).Count) re-applied" }
+                    return Done 1 "driver installer failed with $code; network snapshot $($r.NetSnapshot), restore $state"
+                }
                 $r.RebootRequired = $code -ne 0
             }
             if ($needAgent) {
@@ -341,9 +369,8 @@ function Invoke-VgMain {
             Remove-Item -LiteralPath $cache -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
-    $r.DriverVersion = [string](& $script:VgInstalledVersion 'Virtio-win-driver-installer')
-    $r.AgentVersion = [string](& $script:VgInstalledVersion 'QEMU guest agent')
-    if (-not (Test-VgAtLeast $r.DriverVersion $PinVersion)) { return Done 1 'drivers are still below the pin' }
+    $r.DriverVersion = [string](Get-VgInstalledVersion 'Virtio-win-driver-installer')
+    $r.AgentVersion = [string](Get-VgInstalledVersion 'QEMU guest agent')
     if ($agentCode -eq 0 -and -not (Test-VgAtLeast $r.AgentVersion $AgentVersion)) { $agentCode = 22; $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = 'agent is still below the pin' }
 
     # Runs after a skipped or failed agent step too: the old agent was stopped and must run again.
@@ -365,6 +392,8 @@ function Invoke-VgMain {
 
     # A guest that lost part of its network config is the worse failure; the snapshot JSON has what to set by hand.
     if ($r.Contains('NetMissing') -or $r.Contains('NetError')) { return Done 1 "network restore incomplete, see $($r.NetSnapshot)" }
+    # Checked after the agent restart above, so a stopped agent never stays stopped.
+    if (-not (Test-VgAtLeast $r.DriverVersion $PinVersion)) { return Done 1 'drivers are still below the pin' }
     if ($agentCode -ne 0) { $r.Status = if ($agentCode -eq 1) { 'error' } else { $r.AgentStep }; return Done $agentCode $r.AgentReason }
     if ($null -eq $ga) { return Done 1 "$($script:VgAgent) service is missing after install" }
     if ($VssOption -ne '' -and $null -eq $vss) { return Done 1 'VssOption given but the VSS provider service is missing' }
