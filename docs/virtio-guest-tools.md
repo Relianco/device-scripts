@@ -51,7 +51,7 @@ A NetKVM update can give the NIC a new device instance. Static addresses survive
 
 Before the driver MSI the package writes every adapter (any status) to `network-<time>.json` in the log folder: MAC, alias, status, network category, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`), default gateways (`Manual` for route protocol `NetMgmt`), the DNS servers in use (`DnsV4`, `DnsV6`), and `StaticDnsV4` and `StaticDnsV6`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` and `Tcpip6\...`, which holds only hand-set servers.
 
-After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up again if it was Up. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing manual gateways, and the hand-set DNS servers of each family when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
+After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up again if it was Up. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing manual gateways, and the hand-set DNS servers of each family when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back, and MACs that more than one adapter now shares (marked `shared`; those are left alone); `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
 
 ## Exit codes
 
@@ -64,7 +64,7 @@ After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up 
 | 22 | `agentInstallFailed` | The agent MSI failed (`AgentExit`) or left the agent below the pin. The drivers are installed. |
 | 130 | `cancelled` | Cancelled before an installer started. |
 
-Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>-<guid>.log`, `agent-<time>-<guid>.log` and `network-<time>-<guid>.json`. The log folder and the download folder get an ACL with only SYSTEM and Administrators (full control), inheritance off, owner Administrators. If the driver MSI fails, `Reason` names the snapshot file and says whether the restore finished. If a service stop throws, `StopError` holds the error, and the 120 s wait decides what happens next.
+Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>-<guid>.log`, `agent-<time>-<guid>.log` and `network-<time>-<guid>.json`. Downloads go to a `cache-<guid>` folder inside the log folder, which is removed after the run. The log folder and the cache folder get an ACL with only SYSTEM and Administrators (full control), inheritance off, owner Administrators. The run stops with exit 1, before it writes anything, if the log folder or its parent is a reparse point (a junction or symlink). If the driver MSI fails, `Reason` names the snapshot file and says whether the restore finished. If a service stop throws, `StopError` holds the error, and the 120 s wait decides what happens next.
 
 ## Recovery
 

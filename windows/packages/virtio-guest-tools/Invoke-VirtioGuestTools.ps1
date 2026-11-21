@@ -94,7 +94,14 @@ $script:VgLockDir = {
     $acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
-function New-VgPrivateDir([string]$Path) { New-Item -ItemType Directory -Path $Path -Force | Out-Null; & $script:VgLockDir $Path }
+function New-VgPrivateDir([string]$Path) {
+    # A junction planted by a local user would send the ACL change and SYSTEM's writes elsewhere.
+    foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
+        if ((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "$p is a reparse point" }
+    }
+    New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    & $script:VgLockDir $Path
+}
 $script:VgGetService = {
     param($Name)
     $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
@@ -105,7 +112,6 @@ $script:VgSetStartType = { param($Name, $Type) Set-Service -Name $Name -StartupT
 $script:VgStartService = { param($Name) Start-Service -Name $Name }
 # Sends the stop and returns: Stop-Service waits on a StopPending service with no limit; Wait-Vg bounds the wait.
 $script:VgStopService = { param($Name) $s = Get-Service -Name $Name -ErrorAction SilentlyContinue; if ($null -ne $s -and [string]$s.Status -ne 'Stopped') { $s.Stop() } }
-$script:VgTempRoot = [System.IO.Path]::GetTempPath()
 # Held: not stopped, or marked for delete (DeleteFlag), which makes the agent MSI's RegisterCom fail with 1603.
 $script:VgServiceHeld = {
     param($Name)
@@ -247,8 +253,10 @@ function Restore-VgNetwork($Saved, $r) {
     # One change per try: a failed address must not stop the gateway or DNS.
     function Apply([string]$What, [scriptblock]$Change) { try { & $Change; $applied.Add($What) } catch { $errors.Add("$What : $($_.Exception.Message)") } }
     foreach ($s in $Saved) {
-        $c = @($now | Where-Object { $_.Mac -eq $s.Mac }) | Select-Object -First 1
-        if ($null -eq $c) { $missing.Add($s.Mac); continue }
+        # A MAC shared by more than one adapter (a team, VLAN vNICs) is not guessed at: reported, left alone.
+        $match = @($now | Where-Object { $_.Mac -eq $s.Mac })
+        if ($match.Count -ne 1) { $missing.Add($(if ($match.Count -gt 1) { "$($s.Mac) (shared)" } else { $s.Mac })); continue }
+        $c = $match[0]
         # A manual IPv4 address on a DHCP adapter is not added back: New-NetIPAddress would turn DHCP off.
         foreach ($a in @($s.Addresses | Where-Object { $_.Manual -and ($_.Ip -match ':' -or -not $s.Dhcp) })) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { Apply "$($c.Alias) ip $($a.Ip)/$($a.Prefix)" { & $script:VgAddIp $c $a.Ip $a.Prefix $s.Dhcp } }
@@ -334,7 +342,8 @@ function Invoke-VgMain {
         New-VgPrivateDir $LogRoot
         # The random part keeps file names in the log folder unpredictable.
         $stamp = (Get-Date -Format 'yyyyMMddHHmmss') + '-' + [guid]::NewGuid().ToString('n')
-        $cache = Join-Path $script:VgTempRoot ('relian-virtio-' + [guid]::NewGuid().ToString('n'))
+        # Inside the locked log folder, so the download folder is never open to other users, not even briefly.
+        $cache = Join-Path $LogRoot ('cache-' + [guid]::NewGuid().ToString('n'))
         New-VgPrivateDir $cache
         try {
             if ($needDriver) {

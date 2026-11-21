@@ -126,8 +126,6 @@ New-Item -ItemType Directory -Path $dir | Out-Null
 $script:Payload = Join-Path $dir 'payload.msi'
 [System.IO.File]::WriteAllText($script:Payload, 'fake msi')
 $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:Payload).Hash.ToLowerInvariant()
-# Downloads are staged under this test's own folder.
-$script:VgTempRoot = $dir
 function Run { param([string]$Action = 'Install', [string]$Pin = '0.1.302', [string]$Sha = $sha, [string]$AgentSha = $sha, [string]$Url = 'https://example.invalid/virtio-win-gt-x64.msi', [string]$AgentUrl = 'https://example.invalid/qemu-ga-x86_64.msi', [string]$AgentPin = '110.2.3', [string]$Vss = '')
     Invoke-VgMain -Action $Action -PinVersion $Pin -DriverUrl $Url -DriverSha256 $Sha -AgentVersion $AgentPin -AgentUrl $AgentUrl -AgentSha256 $AgentSha -CancelPath '' -LogRoot $dir -VssOption $Vss }
 function Calls { $script:Fake.Calls -join ',' }
@@ -225,7 +223,7 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 20 -and (Calls) -ceq 'download') "backup during the driver download: $($r.ExitCode) $(Calls)"
     # An MSI swapped after its hash check is not run: exit 1, not 22.
-    function Swap([string]$Name) { Get-ChildItem -LiteralPath $script:VgTempRoot -Filter 'relian-virtio-*' -Directory | ForEach-Object { $p = Join-Path $_.FullName $Name; if (Test-Path -LiteralPath $p) { [System.IO.File]::WriteAllText($p, 'swapped') } } }
+    function Swap([string]$Name) { Get-ChildItem -LiteralPath $dir -Filter 'cache-*' -Directory | ForEach-Object { $p = Join-Path $_.FullName $Name; if (Test-Path -LiteralPath $p) { [System.IO.File]::WriteAllText($p, 'swapped') } } }
     $f = New-Fake
     $script:VgGetNet = { Swap 'virtio-win-gt-x64.msi'; @() }
     $r = Run
@@ -303,10 +301,21 @@ try {
     Assert ($r.ExitCode -eq 0 -and $r.Result.StopError -match 'access denied') "stop error recorded: $($r.Result['StopError'])"
 
     # Cache and log folders are locked down; log names are not predictable.
-    $f = New-Fake
+    $f = New-Fake -Net @((Nic))
     $r = Run
-    Assert (@($f.Locked).Count -eq 2 -and $f.Locked[0] -ceq $dir -and $f.Locked[1] -like (Join-Path $dir 'relian-virtio-*')) "locked folders: $($f.Locked -join ', ')"
-    Assert (@(Get-ChildItem -LiteralPath $dir -Filter 'network-*.json' | Where-Object { $_.Name -notmatch '^network-\d{14}-[0-9a-f]{32}\.json$' }).Count -eq 0) 'snapshot name has a random part'
+    Assert (@($f.Locked).Count -eq 2 -and $f.Locked[0] -ceq $dir -and $f.Locked[1] -like (Join-Path $dir 'cache-*')) "locked folders: $($f.Locked -join ', ')"
+    Assert ((Test-Path -LiteralPath $r.Result.NetSnapshot) -and (Split-Path -Leaf $r.Result.NetSnapshot) -match '^network-\d{14}-[0-9a-f]{32}\.json$') "snapshot name has a random part: $($r.Result['NetSnapshot'])"
+    Assert (@(Get-ChildItem -LiteralPath $dir -Directory -Filter 'cache-*').Count -eq 0) 'download folder removed after the run'
+    # A junction in place of the log folder or its parent is refused before anything is written.
+    $f = New-Fake
+    $script:VgLockDir = { param($Path) throw 'must not lock' }
+    $link = Join-Path $dir 'link'
+    New-Item -ItemType SymbolicLink -Path $link -Target $dir | Out-Null
+    $err = ''
+    try { [void](Invoke-VgMain -Action 'Install' -PinVersion '0.1.302' -DriverUrl 'https://example.invalid/a.msi' -DriverSha256 $sha -AgentVersion '110.2.3' -AgentUrl 'https://example.invalid/qemu-ga.msi' -AgentSha256 $sha -CancelPath '' -LogRoot (Join-Path $link 'logs')) } catch { $err = $_.Exception.Message }
+    # The throw reaches the script's catch, which prints it and exits 1.
+    Assert ($err -match 'reparse point' -and (Calls) -ceq '') "reparse point refused: $err"
+    Remove-Item -LiteralPath $link -Force
 
     # Network: hand-set DNS on a DHCP adapter is lost by the new NIC instance and set again, matched by MAC.
     $dns = @('192.0.2.53', '192.0.2.54')
@@ -341,6 +350,10 @@ try {
     $r = Run
     $snap = @(Get-Content -LiteralPath $r.Result.NetSnapshot -Raw | ConvertFrom-Json)
     Assert ($r.ExitCode -eq 0 -and $f.Delays -eq 0 -and (Calls) -cmatch 'dns Ethernet 4 192\.0\.2\.99' -and $snap.Count -eq 2 -and [string]$snap[1].Status -eq 'Disconnected' -and [string]$snap[1].Category -ne '') "non-Up adapter: $(Calls)"
+    # Two adapters with the saved MAC: nothing is guessed, the MAC is reported.
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -StaticDns $dns)) -NetAfter @((Nic -Alias 'Team'), (Nic -Alias 'Member'))
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and (Calls) -notmatch 'dns ' -and @($r.Result.NetMissing)[0] -match 'shared') "shared MAC: $(Calls)"
     # IPv4 and IPv6 hand-set DNS are separate lists and set separately.
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -StaticDns $dns -StaticDnsV6 @('2001:db8::53'))) -NetAfter @((Nic -StaticDns $dns))
     $r = Run
