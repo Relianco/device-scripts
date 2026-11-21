@@ -106,15 +106,14 @@ function Get-CsCbsSummary {
     $items = [Collections.Generic.List[string]]::new()
     $codes = @{}
     $errors = [Collections.Generic.List[string]]::new()
-    $detected = $null; $repaired = $null; $unrepaired = 0; $closed = $false
+    $detected = $null; $repaired = $null; $unrepaired = 0
+    $final = $null
     foreach ($line in @($Lines)) {
         if (-not $line) { continue }
         $time = $script:TimeRx.Match($line)
         $time = if ($time.Success) { $time.Groups[1].Value } else { $null }
         $row = $script:RowRx.Match($line)
         if ($row.Success) {
-            # A row after a Total line starts a new scan: only the latest scan counts.
-            if ($closed) { $kinds = [ordered]@{}; $items.Clear(); $unrepaired = 0; $closed = $false }
             $kind = $row.Groups[1].Value.Trim()
             $kinds[$kind] = 1 + [int]$kinds[$kind]
             if ($row.Groups[2].Value -ne 'f' -and -not $row.Groups[3].Success) {
@@ -123,7 +122,12 @@ function Get-CsCbsSummary {
             }
             continue
         }
-        if ($line -match 'Total Detected Corruption:\s*(\d+)') { $detected = [int]$Matches[1]; $closed = $true }
+        # A Total line ends a scan: keep its rows, start the next scan empty. Only the latest finished scan counts.
+        if ($line -match 'Total Detected Corruption:\s*(\d+)') {
+            $detected = [int]$Matches[1]; $repaired = $null
+            $final = @{ kinds = $kinds; items = @($items); unrepaired = $unrepaired }
+            $kinds = [ordered]@{}; $items = [Collections.Generic.List[string]]::new(); $unrepaired = 0
+        }
         if ($line -match 'Total Repaired Corruption:\s*(\d+)') { $repaired = [int]$Matches[1] }
         foreach ($m in $script:CodeRx.Matches($line)) {
             $code = $m.Groups[1].Value.ToLowerInvariant()
@@ -135,6 +139,7 @@ function Get-CsCbsSummary {
         if ($line -match ',\s+Error\s') { $errors.Add((Protect-CsText $line)); if ($errors.Count -gt 3) { $errors.RemoveAt(0) } }
     }
     $top = @($codes.Values | Sort-Object -Property @{ Expression = { $_.count }; Descending = $true }, @{ Expression = { $_.code } } | Select-Object -First 10)
+    if ($final) { $kinds = $final.kinds; $items = $final.items; $unrepaired = $final.unrepaired }
     return [ordered]@{ detected = $detected; repaired = $repaired; kinds = $kinds; unrepaired = $unrepaired; items = @($items); codes = $top; lastErrors = @($errors) }
 }
 

@@ -100,6 +100,10 @@ $script:CsrStartTask = { param($ArgumentLine)
         $owner = (Get-Acl -LiteralPath $d).GetOwner([Security.Principal.SecurityIdentifier]).Value
         if (@('S-1-5-18', 'S-1-5-32-544') -notcontains $owner) { throw 'state folder has an untrusted owner' }
     }
+    $rules = @((Get-Acl -LiteralPath $parent).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) |
+            ForEach-Object { [pscustomobject]@{ Sid = $_.IdentityReference.Value; Rights = $_.FileSystemRights; Type = [string]$_.AccessControlType } })
+    $why = Test-CsrParentRules -Rules $rules
+    if ($why) { throw $why }
     # Lock the folder first, so nobody else can add an entry, then clear what was there before.
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
@@ -132,6 +136,18 @@ function Clear-CsrStateFolder {
     foreach ($name in 'worker.ps1', 'state.json.tmp') {
         $f = Join-Path $Path $name
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+    }
+    return $null
+}
+
+# The parent's allow rules: anyone but SYSTEM, Administrators, TrustedInstaller and CREATOR OWNER (rights on what they
+# create only) holding delete-child, delete, write-DAC or take-ownership could rename or swap the state folder.
+function Test-CsrParentRules {
+    param($Rules)
+    $trusted = @('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $danger = [Security.AccessControl.FileSystemRights]'DeleteSubdirectoriesAndFiles, Delete, ChangePermissions, TakeOwnership'
+    foreach ($r in @($Rules)) {
+        if ([string]$r.Type -eq 'Allow' -and $trusted -notcontains [string]$r.Sid -and ([int]$r.Rights -band [int]$danger)) { return "parent folder lets $($r.Sid) delete or re-permission its children" }
     }
     return $null
 }

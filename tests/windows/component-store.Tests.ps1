@@ -55,6 +55,8 @@ $rerun = Get-CsCbsSummary -Lines ($lines + @(
     ('2026-11-21 09:00:01, Info CBS    Total Detected Corruption:' + $t + '1'),
     ('2026-11-21 09:00:01, Info CBS    Total Repaired Corruption:' + $t + '1')))
 Assert ($rerun.unrepaired -eq 0 -and $rerun.kinds['CSI Payload Corrupt'] -eq 1 -and $rerun.detected -eq 1) 'only the latest scan block counts'
+$clean = Get-CsCbsSummary -Lines ($lines + @(('2026-11-21 10:00:01, Info CBS    Total Detected Corruption:' + $t + '0'), ('2026-11-21 10:00:01, Info CBS    Total Repaired Corruption:' + $t + '0')))
+Assert ($clean.detected -eq 0 -and $clean.unrepaired -eq 0 -and $clean.kinds.Count -eq 0 -and @($clean.items).Count -eq 0) 'a clean scan after a corrupt one reports clean'
 $m = Get-CsCbsSummary -Lines $many
 Assert ($m.unrepaired -eq 500 -and @($m.items).Count -le 8) 'items capped, count kept'
 $e = Get-CsCbsSummary -Lines @()

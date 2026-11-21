@@ -209,6 +209,14 @@ $d = @($script:Calls | Where-Object { $_ -ne 'cleanup' })
 Assert ($d.Count -eq 2 -and $d[0] -like 'wusa.exe C:\msu\windows11.0-kb5043080*.msu /quiet /norestart' -and $d[1] -like 'wusa.exe *kb5136489*') "Server 2016/2019: wusa, online DISM cannot take an msu: $($d -join ' | ')"
 Assert ($s.status -eq 'done') 'wusa already-installed (0x240006) is success'
 
+# ---- Parent folder rights: a user who may delete children of the parent could swap the state folder -------------
+function Rule($Sid, $Rights, $Type = 'Allow') { [pscustomobject]@{ Sid = $Sid; Rights = [Security.AccessControl.FileSystemRights]$Rights; Type = $Type } }
+Assert ($null -eq (Test-CsrParentRules -Rules @((Rule 'S-1-5-18' 'FullControl'), (Rule 'S-1-5-32-544' 'FullControl'), (Rule 'S-1-5-32-545' 'ReadAndExecute, CreateFiles, AppendData'), (Rule 'S-1-3-0' 'FullControl')))) 'default ProgramData-style parent accepted'
+Assert ((Test-CsrParentRules -Rules @((Rule 'S-1-5-32-545' 'Modify'))) -match 'S-1-5-32-545') 'users with Modify refused'
+Assert ((Test-CsrParentRules -Rules @((Rule 'S-1-1-0' 'DeleteSubdirectoriesAndFiles'))) -match 'S-1-1-0') 'delete-child refused'
+Assert ((Test-CsrParentRules -Rules @((Rule 'S-1-5-11' 'ChangePermissions'))) -match 'S-1-5-11') 'change permissions refused'
+Assert ($null -eq (Test-CsrParentRules -Rules @((Rule 'S-1-5-32-545' 'FullControl' 'Deny')))) 'a deny rule is fine'
+
 # ---- State folder: leftovers a user could have planted are refused or removed ------------------------------------
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('csr-' + [guid]::NewGuid().ToString('n'))
 try {
