@@ -241,6 +241,9 @@ try {
     $f = New-Fake -Agent '109.1.0'
     $f.Writers = ''
     Assert ((Run).ExitCode -eq 20) 'empty vssadmin output refuses'
+    $f = New-Fake -Agent '109.1.0'
+    $f.Writers = 'Error: Access is denied.'
+    Assert ((Run).ExitCode -eq 20 -and (Calls) -ceq '') 'vssadmin error text with no writer state refuses'
     # A backup that starts during the service wait: no agent MSI, services started again.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -Held 1
     $script:VgVssWriters = { if ($script:Fake.Delays -gt 0) { 'State: [2] Waiting for freeze' } else { $stable } }

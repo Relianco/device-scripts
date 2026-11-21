@@ -100,7 +100,8 @@ $script:VgServiceHeld = {
     [string]$s.Status -ne 'Stopped' -or [int](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name 'DeleteFlag' -ErrorAction SilentlyContinue).DeleteFlag -eq 1
 }
 $script:VgProcesses = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'backup-tool.exe'" | Select-Object Name, CommandLine) }
-$script:VgVssWriters = { & (Join-Path $env:SystemRoot 'System32\vssadmin.exe') list writers | Out-String }
+# '' when vssadmin fails.
+$script:VgVssWriters = { $out = & (Join-Path $env:SystemRoot 'System32\vssadmin.exe') list writers | Out-String; if ($LASTEXITCODE -ne 0) { return '' }; $out }
 # Up adapters. Manual marks what was set by hand: PrefixOrigin Manual, route Protocol NetMgmt. StaticDns is the
 # interface's NameServer value, which holds only hand-set servers; Dns is what the adapter uses now.
 $script:VgGetNet = {
@@ -196,8 +197,8 @@ function Get-VgBackupBusy {
         if ($null -eq $rest -or $rest -notmatch '(?i)^(cmd\s+)?(-(?!Action=)\w+=\S*\s+)*(-Action=)?(delegate-server|elevator-server|stream)(\s|$)') { return 'a Comet backup job is running' }
     }
     $writers = [string](& $script:VgVssWriters)
-    # Fail closed: no output means the VSS state is unknown.
-    if ([string]::IsNullOrWhiteSpace($writers)) { return 'VSS writer state is unreadable' }
+    # Fail closed: output with no writer state ([n]) means the VSS state is unknown.
+    if ($writers -notmatch '\[\d+\]') { return 'VSS writer state is unreadable' }
     if ($writers -match '\[[2-5]\]') { return 'a VSS writer is in a snapshot' }
     ''
 }

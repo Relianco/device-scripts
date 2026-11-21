@@ -35,7 +35,7 @@ The package never restarts the machine. `RebootRequired` is true when an MSI exi
 ### Backup check
 
 - Comet: a `backup-tool.exe` process whose arguments are not one of the idle helpers (`delegate-server`, `elevator-server`, `stream`, with or without `cmd -Action=`) is a job. An unreadable command line counts as a job.
-- VSS: `vssadmin list writers` shows a writer in state 2 to 5 (waiting for freeze, thaw, post-snapshot or backup complete). Stable and failed writers do not block. Empty output counts as a backup.
+- VSS: `vssadmin list writers` shows a writer in state 2 to 5 (waiting for freeze, thaw, post-snapshot or backup complete). Stable and failed writers do not block. Output with no writer state, or a failed vssadmin, counts as a backup.
 
 ### Network
 
