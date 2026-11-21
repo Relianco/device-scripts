@@ -21,7 +21,8 @@ foreach ($c in $commands) {
 $text = Get-Content -Raw -LiteralPath $path
 Assert ($text -notmatch 'RequestStateChange|Get-NetNeighbor|192\\\.168|10\\\.\d') 'no state change call and no client-specific neighbour regex'
 
-# No Hyper-V module: a clear message, status hyperVAbsent, nothing else attempted.
+# No Hyper-V module, simulated so a test host with Hyper-V gives the same answer.
+function Get-Command { $null }
 function Get-CimInstance { param($ClassName, $Namespace, $Filter, $ErrorAction)
     switch ($ClassName) {
         'Win32_ComputerSystem' { [pscustomobject]@{ Manufacturer = 'Contoso'; Model = 'Model X1'; TotalPhysicalMemory = 64GB; NumberOfLogicalProcessors = 16 } }
@@ -32,6 +33,7 @@ function Get-CimInstance { param($ClassName, $Namespace, $Filter, $ErrorAction)
 $absent = Invoke-HyperVInventory | ConvertFrom-Json
 Assert ($absent.status -eq 'hyperVAbsent' -and $absent.message -match 'Hyper-V') 'absent module reported'
 Assert ($absent.host.model -eq 'Model X1' -and $absent.host.ramGB -eq 64 -and $absent.host.freeRamGB -eq 8 -and $absent.host.logicalProcessors -eq 16) 'host on absent'
+Remove-Item -LiteralPath Function:\Get-Command
 
 # Mocked Hyper-V host.
 function New-Kvp($Pairs) { @($Pairs.Keys | ForEach-Object { "<INSTANCE CLASSNAME=""Msvm_KvpExchangeDataItem""><PROPERTY NAME=""Data"" TYPE=""string""><VALUE>$($Pairs[$_])</VALUE></PROPERTY><PROPERTY NAME=""Name"" TYPE=""string""><VALUE>$_</VALUE></PROPERTY></INSTANCE>" }) }
@@ -105,8 +107,8 @@ $json = Invoke-HyperVInventory
 $big = $json | ConvertFrom-Json
 Assert ([Text.Encoding]::UTF8.GetByteCount($json) -le 8000 -and $big.truncated -and @($big.vms).Count -eq 1 -and $null -eq $big.nextOffset) 'single big VM trimmed, not paged away'
 
-# End to end without Hyper-V: the script exits 0 with one JSON line.
+# End to end without Hyper-V (simulated in the child too): the script exits 0 with one JSON line.
 Remove-Item Env:\RELIAN_DEPLOY_TEST
-$out = & pwsh -NoProfile -File $path -Action Install
+$out = & pwsh -NoProfile -Command ('function Get-Command { $null }; & ''' + ($path -replace "'", "''") + "' -Action Install; exit `$LASTEXITCODE")
 Assert ($LASTEXITCODE -eq 0 -and (@($out).Count -eq 1) -and (($out | ConvertFrom-Json).status -eq 'hyperVAbsent')) 'clean exit without Hyper-V'
 'hyperv-inventory tests passed'
