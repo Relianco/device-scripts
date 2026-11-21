@@ -97,8 +97,9 @@ function New-Fake {
         $Nic.Addresses = @($Nic.Addresses) + [pscustomobject]@{ Ip = $Ip; Prefix = $Prefix; Manual = $true; SkipAsSource = [bool]$Skip }
     }
     $script:VgAddRoute = {
-        param($Nic, $Prefix, $NextHop, $Metric, $Persistent)
-        $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop metric $Metric$(if (-not $Persistent) { ' active' })")
+        param($Nic, $Prefix, $NextHop, $Metric, $Store)
+        $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop metric $Metric$(@{ Both = ''; ActiveStore = ' active'; PersistentStore = ' persistent-only' }[$Store])")
+        $Persistent = $Store -ne 'ActiveStore'
         # DropRoute: the change reports success but the route is not there.
         if ($Prefix -ne $script:Fake.DropRoute) { $Nic.Routes = @($Nic.Routes) + [pscustomobject]@{ Prefix = $Prefix; NextHop = $NextHop; Metric = $Metric; Persistent = [bool]$Persistent } }
     }
@@ -504,6 +505,12 @@ try {
     $f.DropRoute = '172.16.0.0/12'
     $r = Run
     Assert ($r.ExitCode -eq 1 -and (@($r.Result.NetError) -join ' ') -match 'missing route 172\.16\.0\.0/12') "route not back: $(@($r.Result['NetError']) -join ' ')"
+
+    # A persistent route found only in the active store is not restored yet: it would vanish at the next boot.
+    $activeCopy = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Persistent = $false }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($sub))) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip) -Routes @($activeCopy)))
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*route Ethernet 2 10.0.0.0/8 198.51.100.254 metric 50 persistent-only,*') "persistent route re-persisted: $(Calls)"
 
     # An adapter that was Up and is still not Up after 120 s fails the run.
     $f = New-Fake -Agent '110.2.3' -Net @((Nic)) -NetAfter @((Nic -Status 'Disconnected'))

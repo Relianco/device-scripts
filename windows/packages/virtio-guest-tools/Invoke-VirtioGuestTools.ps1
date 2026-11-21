@@ -183,10 +183,10 @@ $script:VgAddIp = {
     if (-not $Dhcp -and $Ip -notmatch ':') { Set-NetIPInterface -InterfaceIndex $Nic.Index -AddressFamily IPv4 -Dhcp Disabled }
     New-NetIPAddress -InterfaceIndex $Nic.Index -IPAddress $Ip -PrefixLength $Prefix -SkipAsSource ([bool]$Skip) | Out-Null
 }
-# Without -PolicyStore New-NetRoute writes both stores (persistent); ActiveStore alone for a route that was active-only.
+# $Store: Both (New-NetRoute's default), ActiveStore for an active-only route, PersistentStore when the active copy exists.
 $script:VgAddRoute = {
-    param($Nic, $Prefix, $NextHop, $Metric, $Persistent)
-    $store = if ($Persistent) { @{} } else { @{ PolicyStore = 'ActiveStore' } }
+    param($Nic, $Prefix, $NextHop, $Metric, $Store)
+    $store = if ($Store -eq 'Both') { @{} } else { @{ PolicyStore = $Store } }
     New-NetRoute -InterfaceIndex $Nic.Index -DestinationPrefix $Prefix -NextHop $NextHop -RouteMetric $Metric @store | Out-Null
 }
 # The VssOption from before the agent MSI, kept outside the provider key (which a failed upgrade removes) until it is
@@ -300,6 +300,9 @@ function Wait-VgPing([string]$Ip) {
     for ($i = 0; ; $i++) { if (& $script:VgPing $Ip) { return $true }; if ($i -ge 6) { return $false }; [void](& $script:RetryDelay -Seconds 5) }
 }
 
+# The saved route is on the adapter, and in the persistent store if it was there.
+function Test-VgRoute($Nic, $Route) { @($Nic.Routes | Where-Object { $_.Prefix -eq $Route.Prefix -and $_.NextHop -eq $Route.NextHop -and ($_.Persistent -or -not $Route.Persistent) }).Count -gt 0 }
+
 # Waits for the saved adapters (by MAC), sets back what was set by hand and is missing, then checks the result.
 function Restore-VgNetwork($Saved, $r) {
     for ($i = 0; ; $i++) {
@@ -321,7 +324,10 @@ function Restore-VgNetwork($Saved, $r) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { Apply "$($c.Alias) ip $($a.Ip)/$($a.Prefix)" { & $script:VgAddIp $c $a.Ip $a.Prefix $s.Dhcp $a.SkipAsSource } }
         }
         foreach ($rt in @($s.Routes)) {
-            if (@($c.Routes | Where-Object { $_.Prefix -eq $rt.Prefix -and $_.NextHop -eq $rt.NextHop }).Count -eq 0) { Apply "$($c.Alias) route $($rt.Prefix) $($rt.NextHop) metric $($rt.Metric)$(if (-not $rt.Persistent) { ' active' })" { & $script:VgAddRoute $c $rt.Prefix $rt.NextHop $rt.Metric $rt.Persistent } }
+            if (-not (Test-VgRoute $c $rt)) {
+                $store = if (-not $rt.Persistent) { 'ActiveStore' } elseif (@($c.Routes | Where-Object { $_.Prefix -eq $rt.Prefix -and $_.NextHop -eq $rt.NextHop }).Count -gt 0) { 'PersistentStore' } else { 'Both' }
+                Apply "$($c.Alias) route $($rt.Prefix) $($rt.NextHop) metric $($rt.Metric) $store" { & $script:VgAddRoute $c $rt.Prefix $rt.NextHop $rt.Metric $store }
+            }
         }
         foreach ($v in @('4', '6')) {
             $m = $s."MetricV$v"
@@ -342,7 +348,7 @@ function Restore-VgNetwork($Saved, $r) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { $errors.Add("$($c.Alias) is missing $($a.Ip)") }
         }
         foreach ($rt in @($s.Routes)) {
-            if (@($c.Routes | Where-Object { $_.Prefix -eq $rt.Prefix -and $_.NextHop -eq $rt.NextHop }).Count -eq 0) { $errors.Add("$($c.Alias) is missing route $($rt.Prefix) via $($rt.NextHop)") }
+            if (-not (Test-VgRoute $c $rt)) { $errors.Add("$($c.Alias) is missing route $($rt.Prefix) via $($rt.NextHop)") }
         }
         # A new NIC instance can take a few seconds to resolve its gateway: up to 30 s.
         foreach ($g in @($s.Reachable)) { if (-not (Wait-VgPing $g)) { $errors.Add("$($c.Alias) gateway $g answered before the driver update and is unreachable now") } }
