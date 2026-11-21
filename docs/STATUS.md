@@ -1,5 +1,13 @@
 # Status
 
+## virtio-guest-tools and bc-timezone 1.1.0 — 2026-11-21
+
+Branch: `main`. HEAD: `1226399` (pull request [208](https://github.com/Relianco/device-scripts/pull/208) merged); bc-timezone 1.1.0 is [209](https://github.com/Relianco/device-scripts/pull/209), merged as `a34b5ce`.
+
+- virtio-guest-tools — 2026-11-21: package (PR 208) pins virtio-win 0.1.302 via relianpub; deployed to client Proxmox guests; one Server 2025 SQL guest failed: bundle rolled back drivers when qemu-ga failed; fix in progress (separate MSIs, stop VSS provider, DNS restore); do not run on that guest until fixed.
+- bc-timezone 1.1.0 (PR 209): `TargetZone` (default `British Columbia Standard Time`) and `FromZone` make the package generic; exit 3 when the target zone is missing (no silent fallback; `FallbackZone` opts in); restarts the running Comet services `backup.delegate` and `backup.elevator` after a verified change. Known gap: a failed Comet restart is not retried on rerun.
+- The two read-only probe scripts `sec/Get-TimeZone*` were deleted from the public relianpub bucket.
+
 ## Unity and AutoElevate references — 2026-11-10
 
 Branch: `lane/unity-reference`. Base main: `2284991`.
