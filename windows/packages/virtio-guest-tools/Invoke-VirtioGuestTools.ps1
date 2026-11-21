@@ -160,6 +160,8 @@ function Test-VgTransient($Exception) {
     return $false
 }
 
+function Test-VgSha([string]$Path, [string]$Sha256) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() -ceq $Sha256 }
+
 # 0 saved and verified, 1 failed. A hash mismatch is not retried.
 function Save-VgPayload([string]$Url, [string]$Destination, [string]$Sha256) {
     $delays = @(5, 20)
@@ -174,8 +176,7 @@ function Save-VgPayload([string]$Url, [string]$Destination, [string]$Sha256) {
             if ($attempt -lt 3) { [void](& $script:RetryDelay -Seconds $delays[$attempt - 1]) }
             continue
         }
-        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Destination).Hash.ToLowerInvariant()
-        if ($actual -ceq $Sha256) { return 0 }
+        if (Test-VgSha $Destination $Sha256) { return 0 }
         $script:VgDownloadError = 'hash mismatch'
         Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
         return 1
@@ -204,9 +205,7 @@ function Wait-Vg([scriptblock]$Test) {
     for ($i = 0; (& $Test) -and $i -lt 24; $i++) { [void](& $script:RetryDelay -Seconds 5) }
 }
 
-# The file is hashed again just before msiexec, so a swap after the download check cannot run.
-function Invoke-VgMsi([string]$Mode, [string]$Path, [string]$Sha256, [string]$Log) {
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant() -cne $Sha256) { throw "$Path changed after its hash check" }
+function Invoke-VgMsi([string]$Mode, [string]$Path, [string]$Log) {
     [int](& $script:VgRunMsi @($Mode, ('"{0}"' -f $Path), '/qn', '/norestart', '/l*v', ('"{0}"' -f $Log)))
 }
 
@@ -255,8 +254,10 @@ function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp
     # A backup may have started during the wait.
     $busy = Get-VgBackupBusy
     if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = $busy; return 20 }
+    # Hashed again just before msiexec, so a file swapped after the download check never runs.
+    if (-not (Test-VgSha $msi $AgentSha256)) { $r.AgentStep = 'error'; $r.AgentReason = 'agent MSI hash mismatch before install'; return 1 }
     # /famus reinstalls a registered agent whose service is gone; /i installs or upgrades.
-    $code = Invoke-VgMsi -Mode $(if ($Repair) { '/famus' } else { '/i' }) -Path $msi -Sha256 $AgentSha256 -Log (Join-Path $LogRoot "agent-$Stamp.log")
+    $code = Invoke-VgMsi -Mode $(if ($Repair) { '/famus' } else { '/i' }) -Path $msi -Log (Join-Path $LogRoot "agent-$Stamp.log")
     $r.AgentExit = $code
     if ($code -notin $script:VgOk) { $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = "agent installer failed with $code"; return 22 }
     $r.RebootRequired = $r.RebootRequired -or $code -ne 0
@@ -313,7 +314,11 @@ function Invoke-VgMain {
                 $saved = @(& $script:VgGetNet | Where-Object { $_ })
                 $r.NetSnapshot = Join-Path $LogRoot "network-$stamp.json"
                 Set-Content -LiteralPath $r.NetSnapshot -Value (ConvertTo-Json -InputObject $saved -Depth 5) -Encoding UTF8
-                $code = Invoke-VgMsi -Mode '/i' -Path $msi -Sha256 $DriverSha256 -Log (Join-Path $LogRoot "drivers-$stamp.log")
+                # A backup may have started during the download; the driver swap drops the network.
+                $busy = Get-VgBackupBusy
+                if ($busy) { $r.Status = 'backupRunning'; return Done 20 $busy }
+                if (-not (Test-VgSha $msi $DriverSha256)) { return Done 1 'driver MSI hash mismatch before install' }
+                $code = Invoke-VgMsi -Mode '/i' -Path $msi -Log (Join-Path $LogRoot "drivers-$stamp.log")
                 $r.DriverExit = $code
                 # Also after a failed MSI: a half-done driver swap can still have replaced the NIC instance.
                 try { Restore-VgNetwork $saved $r } catch { $r.NetError = $_.Exception.Message }

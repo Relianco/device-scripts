@@ -26,7 +26,7 @@ The bundle is a WiX Burn chain with one rollback boundary. When the agent MSI fa
    - agent: "QEMU guest agent" missing or below `AgentVersion`, or the `QEMU-GA` service missing (then a repair, `msiexec /famus`).
    - The bundle entry "Virtio-win-guest-tools" is reported as `BundleVersion` and never decides. It can say an older bundle is installed while the driver MSI was rolled back and is not registered at all.
 4. If a step is needed and a backup runs, exit 20 (`backupRunning`) before anything changes.
-5. Drivers: download, save the network (below), `msiexec /i virtio-win-gt-x64.msi /qn /norestart /l*v`, restore the network (also after a failed MSI). Failure exits 1; the agent step does not run.
+5. Drivers: download, save the network (below), check for a backup again (exit 20), `msiexec /i virtio-win-gt-x64.msi /qn /norestart /l*v`, restore the network (also after a failed MSI). Failure exits 1; the agent step does not run.
 6. Agent: check for a backup again (exit 20). Download. Stop `QEMU-GA` and `QEMU Guest Agent VSS Provider`, then wait up to 120 s until neither runs nor is marked for delete (`DeleteFlag` under the service key). If one still is, skip the MSI: exit 21 (`agentServiceHeld`). Check for a backup once more (exit 20). Then `msiexec /i qemu-ga-x86_64.msi /qn /norestart /l*v`; a failure exits 22 (`agentInstallFailed`).
 7. Always: set `QEMU-GA` to Automatic and start it (also the old one after a skipped or failed agent step), keep the VSS provider from Disabled, and write `VssOption` when given.
 

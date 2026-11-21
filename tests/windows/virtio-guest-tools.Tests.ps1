@@ -208,6 +208,22 @@ try {
     $f.Writers = "Writer name: 'SqlServerWriter'`n   State: [5] Waiting for completion`n"
     $r = Run
     Assert ($r.ExitCode -eq 20 -and (Calls) -ceq '') "VSS writer mid-snapshot: $($r.ExitCode) $(Calls)"
+    # A backup that starts during the driver download: refused before the driver MSI.
+    $f = New-Fake
+    $script:VgGetNet = { $script:Fake.Writers = 'State: [4] Waiting for post-snapshot'; @() }
+    $r = Run
+    Assert ($r.ExitCode -eq 20 -and (Calls) -ceq 'download') "backup during the driver download: $($r.ExitCode) $(Calls)"
+    # An MSI swapped after its hash check is not run: exit 1, not 22.
+    function Swap([string]$Name) { Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter 'relian-virtio-*' -Directory | ForEach-Object { $p = Join-Path $_.FullName $Name; if (Test-Path -LiteralPath $p) { [System.IO.File]::WriteAllText($p, 'swapped') } } }
+    $f = New-Fake
+    $script:VgGetNet = { Swap 'virtio-win-gt-x64.msi'; @() }
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'hash mismatch' -and (Calls) -ceq 'download') "swapped driver MSI: $($r.ExitCode) $(Calls)"
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $script:VgStopService = { param($Name) $script:Fake.Calls.Add("stop $Name"); Swap 'qemu-ga-x86_64.msi' }
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'hash mismatch' -and (Calls) -notmatch 'msi agent' -and (Calls) -clike '*start QEMU-GA') "swapped agent MSI: $($r.ExitCode) $(Calls)"
+
     # Unreadable writer state fails closed.
     $f = New-Fake -Agent '109.1.0'
     $f.Writers = ''
