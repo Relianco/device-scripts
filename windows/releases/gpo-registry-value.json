@@ -1,0 +1,6 @@
+{
+  "name": "Group Policy registry value",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Required: {\"Gpo\":\"<GUID or display name of an existing GPO>\",\"Key\":\"HKLM\\\\Software\\\\Policies\\\\<vendor>\\\\<product>\",\"ValueName\":\"<name>\"}. Plan-only unless \"Mode\":\"Apply\" (with \"Value\"; \"Type\" DWord, the default, or String) or \"Mode\":\"Rollback\" (removes the value). Key must be under HKLM or HKCU Software\\\\Policies or Software\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Policies. Apply and Rollback run Backup-GPO to %ProgramData%\\\\Relian\\\\gpo-backups\\\\{GPO GUID} first and read the value back; an unchanged value is left alone without a backup. Never creates, links or deletes a GPO, or changes its permissions. Run where the GroupPolicy module is installed; writes go to the PDC emulator. Uninstall only plans."
+}
