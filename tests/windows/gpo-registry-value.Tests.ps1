@@ -17,6 +17,9 @@ foreach ($kind in @('QuestionQuestion', 'QuestionQuestionEquals', 'QuestionDot',
     Assert (-not @($tokens | Where-Object { [string]$_.Kind -eq $kind })) "no PowerShell 7 token $kind"
 }
 
+# The real ACL helper, kept for the Windows-only check below before the fake replaces it.
+$script:realProtect = ${function:Protect-GrvBackupDir}
+
 # ---- Fake GroupPolicy module ----
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString('n'))
 [void](New-Item -ItemType Directory -Path $tmp)
@@ -28,9 +31,11 @@ function Reset-Fake {
     $script:backupFails = $false
     $script:backupNoId = $false
     $script:setIgnored = $false
+    $script:readError = $false
+    $script:readErrorAfterWrite = $false
 }
 function Import-Module { param([Parameter(ValueFromRemainingArguments)]$Rest) }
-function Protect-GrvBackupRoot { param($Path) $script:calls.Add('Protect-GrvBackupRoot') }
+function Protect-GrvBackupDir { param($Path) $script:calls.Add("Protect-GrvBackupDir $Path") }
 function Get-GPO {
     [CmdletBinding()]
     param($Guid, $Name)
@@ -42,6 +47,7 @@ function Get-GPRegistryValue {
     [CmdletBinding()]
     param($Guid, $Key, $ValueName)
     $k = "$Guid|$Key|$ValueName"
+    if ($script:readError -or ($script:readErrorAfterWrite -and (Get-Writes).Count)) { throw [System.InvalidOperationException]::new('RPC server unavailable') }
     if (-not $script:reg.ContainsKey($k)) { throw [System.ArgumentException]::new('setting was not found') }
     return $script:reg[$k]
 }
@@ -95,7 +101,9 @@ try {
     $w = Get-Writes
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'applied') "apply exits 0: $($r.report.status) $($r.report.error)"
     Assert ($w.Count -eq 2 -and $w[0] -like 'Backup-GPO *' -and $w[1] -eq "Set-GPRegistryValue $key|Flag|DWord|1") "apply backs up, then sets one DWord: $($w -join ', ')"
-    Assert ($w.Count -ge 1 -and $script:calls.IndexOf('Protect-GrvBackupRoot') -ge 0 -and $script:calls.IndexOf('Protect-GrvBackupRoot') -lt $script:calls.IndexOf($w[0])) 'backup root protected before the backup'
+    $gpoDir = Join-Path $script:GrvBackupRoot ('{' + $script:fakeGpo.Id.ToString().ToUpper() + '}')
+    $pr = $script:calls.IndexOf("Protect-GrvBackupDir $script:GrvBackupRoot"); $pd = $script:calls.IndexOf("Protect-GrvBackupDir $gpoDir")
+    Assert ($w.Count -ge 1 -and $pr -ge 0 -and $pd -ge 0 -and $pr -lt $script:calls.IndexOf($w[0]) -and $pd -lt $script:calls.IndexOf($w[0])) "backup root and GPO folder protected before the backup: $($script:calls -join ', ')"
     Assert ($w.Count -ge 1 -and $w[0] -like ("*|" + (Join-Path $script:GrvBackupRoot ('{' + $script:fakeGpo.Id.ToString().ToUpper() + '}')))) "backup goes to the per-GPO folder: $($w -join ', ')"
     Assert ($r.report.backupId -eq '11111111-2222-3333-4444-555555555555') 'apply reports the backup id'
     Assert ($null -eq $r.report.current -and $r.report.after -eq 'DWord=1') 'apply reports before and the value read back'
@@ -151,6 +159,22 @@ try {
     $r = Run @{ Mode = 'Rollback'; Gpo = $script:fakeGpo.Id.ToString(); Key = $key; ValueName = 'Flag' }
     Assert ($r.exitCode -eq 0 -and $r.report.status -eq 'noChange' -and (Get-Writes).Count -eq 0) 'rollback of an absent value changes nothing'
 
+    # A read error that is not "not found" stops the run: no write, exit 1.
+    Reset-Fake
+    $script:reg["$($script:fakeGpo.Id)|$key|Flag"] = [pscustomobject]@{ Type = 'DWord'; Value = 1; PolicyState = 'Set' }
+    $script:readError = $true
+    $r = Run @{ Mode = 'Rollback'; Gpo = $script:fakeGpo.Id.ToString(); Key = $key; ValueName = 'Flag' }
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'failed' -and (Get-Writes).Count -eq 0) "rollback after a failed read exits 1 and writes nothing: $($r.report.status)"
+    Reset-Fake
+    $script:readError = $true
+    $r = Run @{ Mode = 'Apply'; Gpo = $script:fakeGpo.Id.ToString(); Key = $key; ValueName = 'Flag'; Value = '1' }
+    Assert ($r.exitCode -eq 1 -and (Get-Writes).Count -eq 0) 'apply after a failed read exits 1 and writes nothing'
+    Reset-Fake
+    $script:reg["$($script:fakeGpo.Id)|$key|Flag"] = [pscustomobject]@{ Type = 'DWord'; Value = 1; PolicyState = 'Set' }
+    $script:readErrorAfterWrite = $true
+    $r = Run @{ Mode = 'Rollback'; Gpo = $script:fakeGpo.Id.ToString(); Key = $key; ValueName = 'Flag' }
+    Assert ($r.exitCode -eq 1 -and $r.report.status -eq 'failed' -and $r.report.backupId) "a failed read-back after removal exits 1: $($r.report.status)"
+
     # ---- Uninstall never writes ----
     Reset-Fake
     $r = Run @{ Action = 'Uninstall'; Mode = 'Apply'; Gpo = $script:fakeGpo.Id.ToString(); Key = $key; ValueName = 'Flag'; Value = '1' }
@@ -188,6 +212,20 @@ try {
     $r = Run @{ Gpo = 'Example Policy'; Key = $key; ValueName = 'Flag' }
     $json = ConvertTo-GrvJson $r.report
     Assert ($json -match '^\{"job":"gpo-registry-value",' -and $json -notmatch "\n") "one JSON line: $json"
+    # ---- Entry point: an empty PinVersion is the off switch ----
+    $out = & pwsh -NoProfile -File $path -Action Install -PinVersion '' -Mode Apply -Gpo 'Example Policy' -Key $key -ValueName Flag -Value 1 2>&1
+    Assert ($LASTEXITCODE -eq 0 -and -not $out) "empty PinVersion exits 0 and does nothing: $LASTEXITCODE $out"
+
+    # ---- Real ACL on Windows: only SYSTEM and Administrators, inheritance off ----
+    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+        $aclDir = Join-Path $tmp 'acl'
+        [void](New-Item -ItemType Directory -Path $aclDir)
+        & icacls.exe $aclDir /grant '*S-1-5-32-545:(OI)(CI)R' /C /Q | Out-Null
+        & $script:realProtect $aclDir
+        $acl = Get-Acl -LiteralPath $aclDir
+        $sids = @($acl.Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique)
+        Assert ($acl.AreAccessRulesProtected -and ($sids -join ',') -eq 'S-1-5-18,S-1-5-32-544') "backup folder ACL is SYSTEM and Administrators only: $($sids -join ',')"
+    }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

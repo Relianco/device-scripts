@@ -27,7 +27,15 @@
                 The policy then reverts to "Not configured" on clients.
     Backups go to %ProgramData%\Relian\gpo-backups\{GPO GUID} (SYSTEM and Administrators only),
     the folder gpo-baseline uses, so Restore-GPO -BackupId <backupId> -Path <backupPath> undoes
-    a run. Action Uninstall only plans.
+    a run. Each run replaces the DACL of that root and of the GPO's folder with SYSTEM and
+    Administrators only, inheritance off. Action Uninstall only plans.
+
+    The runner passes DeploymentType, Action and PinVersion, then each PackageArguments pair as
+    -Name value. An empty PinVersion is the off switch: exit 0, nothing read or changed. Any
+    non-empty pin runs.
+
+    A GPO or value that the module reports as not found (ArgumentException) counts as absent; any
+    other read error fails the run before a write, or fails it after one.
 
     The GroupPolicy cmdlets are called without -Server, so they read and write on the PDC
     emulator, as GPMC does. Run where the GroupPolicy module is installed (a domain controller).
@@ -60,21 +68,23 @@ $script:GrvGuidPattern = '\A[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}
 $script:GrvKeyPattern = '\AHK(?:LM|CU)\\Software\\(?:Policies|Microsoft\\Windows\\CurrentVersion\\Policies)(?:\\[A-Za-z0-9 ._-]+)+\z'
 $script:GrvValueNamePattern = '\A[A-Za-z0-9][A-Za-z0-9 ._-]{0,127}\z'
 
-function Protect-GrvBackupRoot {
+# Backups can hold Group Policy Preference data. Replaces the folder's DACL with a protected one that holds only
+# SYSTEM and Administrators, so no earlier explicit or inherited entry survives.
+function Protect-GrvBackupDir {
     param([string]$Path)
-    # Backups can hold Group Policy Preference data: SYSTEM and Administrators only (as gpo-baseline).
-    & icacls.exe $Path /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls grant exited $LASTEXITCODE" }
-    & icacls.exe $Path /inheritance:r /C /Q | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "icacls inheritance exited $LASTEXITCODE" }
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
 }
 
 # "Type=Value", "Delete" for a Registry.pol delete entry, or $null when the GPO does not set it.
 function Read-GrvValue {
     param([guid]$Id, [string]$Key, [string]$ValueName)
-    # shortcut: any read error counts as "not set" (the module reports a missing value as an error). Apply then
-    # fails its read-back; Rollback could report noChange after a transient error, so its output says what it read.
-    try { $v = Get-GPRegistryValue -Guid $Id -Key $Key -ValueName $ValueName -ErrorAction Stop } catch { return $null }
+    # The module reports a missing key or value as an ArgumentException; any other error (access, RPC) stops the run.
+    try { $v = Get-GPRegistryValue -Guid $Id -Key $Key -ValueName $ValueName -ErrorAction Stop } catch [System.ArgumentException] { return $null }
     if ($null -eq $v) { return $null }
     if ($v.PSObject.Properties['PolicyState'] -and [string]$v.PolicyState -eq 'Delete') { return 'Delete' }
     return "$($v.Type)=$($v.Value)"
@@ -83,9 +93,11 @@ function Read-GrvValue {
 function Save-GrvBackup {
     param([guid]$Id, [string]$Mode, [string]$ValueName)
     [void](New-Item -ItemType Directory -Path $script:GrvBackupRoot -Force)
-    Protect-GrvBackupRoot $script:GrvBackupRoot
+    Protect-GrvBackupDir $script:GrvBackupRoot
     $dir = Join-Path $script:GrvBackupRoot ('{' + $Id.ToString().ToUpper() + '}')
     [void](New-Item -ItemType Directory -Path $dir -Force)
+    # An existing per-GPO folder may carry its own explicit entries.
+    Protect-GrvBackupDir $dir
     $b = Backup-GPO -Guid $Id -Path $dir -Comment "relian-gpo-registry-value $Mode $ValueName" -ErrorAction Stop
     $backupId = ''
     if ($b -and $b.PSObject.Properties['Id']) { $backupId = [string]$b.Id }
@@ -136,7 +148,7 @@ function Invoke-GpoRegistryValue {
         try {
             if ($Gpo -match $script:GrvGuidPattern) { $g = Get-GPO -Guid ([guid]$Gpo) -ErrorAction Stop }
             else { $g = Get-GPO -Name $Gpo -ErrorAction Stop }
-        } catch { $g = $null }
+        } catch [System.ArgumentException] { $g = $null } # Get-GPO reports "not found" this way; other errors fail the run.
         if (-not $g) { return (& $refuse 'Gpo is not an existing GPO in this domain.') }
         $id = [guid]$g.Id
         $r.gpoId = $id.ToString(); $r.gpoName = [string]$g.DisplayName
@@ -172,6 +184,7 @@ function Invoke-GpoRegistryValue {
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
+if (-not $PinVersion) { exit 0 }
 if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
 $run = Invoke-GpoRegistryValue -Action $Action -Mode $Mode -Gpo $Gpo -Key $Key -ValueName $ValueName -Type $Type -Value $Value
 Write-Output (ConvertTo-GrvJson $run.report)

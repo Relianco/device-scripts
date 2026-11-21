@@ -109,6 +109,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-user-identity.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # gpo-registry-value: the real backup-folder DACL, under Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/gpo-registry-value.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # The wau package runs under Intune's Windows PowerShell 5.1.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wau-plan.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
