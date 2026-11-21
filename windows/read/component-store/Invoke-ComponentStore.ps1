@@ -5,7 +5,8 @@
 .DESCRIPTION
     Works on Windows Server 2016 to 2025 and Windows 10 and 11. Everything it reads is language-neutral: registry values,
     the image health enum from Repair-WindowsImage, CBS.log (Windows writes it in English on every locale) and the
-    named errorCode field of Windows Update client events 20 (install failed) and 31 (download failed) in the System log.
+    named errorCode field of Windows Update client events 20 (install failed) and 31 (download failed) in the System
+    and WindowsUpdateClient/Operational logs.
     - checkHealth: Repair-WindowsImage -Online -CheckHealth (DISM /CheckHealth). It reads the flag a previous scan left
       and changes nothing. Skipped while dism.exe runs (it would wait on the servicing lock); stopped after 45 seconds.
     - cbs: the last 16 MiB of CBS.log. Corruption rows a ScanHealth or RestoreHealth wrote ("(p)" rows; (n) is not
@@ -67,8 +68,14 @@ $script:CsCbsLines = {
     return $lines
 }
 $script:CsEvents = {
-    $raw = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient'; Id = 20, 31 } -MaxEvents 2000 -ErrorAction SilentlyContinue)
+    # Both channels: builds differ in where 20 and 31 land. A copy in both counts once.
+    $raw = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-WindowsUpdateClient'; Id = 20, 31 } -MaxEvents 2000 -ErrorAction SilentlyContinue) +
+        @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-WindowsUpdateClient/Operational'; Id = 20, 31 } -MaxEvents 2000 -ErrorAction SilentlyContinue)
+    $seen = @{}
     foreach ($e in $raw) {
+        $k = '' + $e.Id + '|' + $e.TimeCreated.Ticks
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
         $data = @{}
         foreach ($d in @(([xml]$e.ToXml()).Event.EventData.Data)) { if ($d.Name) { $data[[string]$d.Name] = [string]$d.'#text' } }
         [pscustomobject]@{ Id = [int]$e.Id; Time = $e.TimeCreated; ErrorCode = $data['errorCode']; Title = $data['updateTitle'] }

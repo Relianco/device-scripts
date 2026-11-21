@@ -188,8 +188,14 @@ $script:Os.build = 20348
 $script:Exits = @{ '*kb5043080*' = 14081 }
 $s = Invoke-CsrWorker -Mode InstallMsu -MsuPath 'C:\msu'
 $d = @($script:Calls | Where-Object { $_ -ne 'cleanup' })
-Assert ($d.Count -eq 1 -and $d[0] -like 'dism.exe /Online /Add-Package /PackagePath:C:\msu\windows11.0-kb5043080*.msu /NoRestart') 'Server 2022: one file at a time with DISM, stops at the first failure'
+Assert ($d.Count -eq 1 -and $d[0] -like 'wusa.exe C:\msu\windows11.0-kb5043080*.msu /quiet /norestart') "Server 2022: wusa, online DISM takes an msu only from Windows 11: $($d -join ' | ')"
 Assert ($s.status -eq 'failed' -and $s.steps[0].hex -eq '0x00003701') 'exit 14081 is 0x3701'
+
+Reset
+$script:Os.build = 22631
+$s = Invoke-CsrWorker -Mode InstallMsu -MsuPath 'C:\msu'
+$d = @($script:Calls | Where-Object { $_ -ne 'cleanup' })
+Assert ($d.Count -eq 2 -and $d[0] -like 'dism.exe /Online /Add-Package /PackagePath:C:\msu\windows11.0-kb5043080*.msu /NoRestart') 'Windows 11 before 24H2: DISM one file at a time'
 
 Reset
 $script:Os.build = 17763
@@ -198,5 +204,22 @@ $s = Invoke-CsrWorker -Mode InstallMsu -MsuPath 'C:\msu'
 $d = @($script:Calls | Where-Object { $_ -ne 'cleanup' })
 Assert ($d.Count -eq 2 -and $d[0] -like 'wusa.exe C:\msu\windows11.0-kb5043080*.msu /quiet /norestart' -and $d[1] -like 'wusa.exe *kb5136489*') "Server 2016/2019: wusa, online DISM cannot take an msu: $($d -join ' | ')"
 Assert ($s.status -eq 'done') 'wusa already-installed (0x240006) is success'
+
+# ---- State folder: leftovers a user could have planted are refused or removed ------------------------------------
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('csr-' + [guid]::NewGuid().ToString('n'))
+try {
+    $null = New-Item -ItemType Directory -Path $tmp
+    Set-Content -LiteralPath (Join-Path $tmp 'worker.ps1') -Value 'old'
+    Set-Content -LiteralPath (Join-Path $tmp 'state.json.tmp') -Value 'old'
+    Set-Content -LiteralPath (Join-Path $tmp 'state.json') -Value '{}'
+    Assert ($null -eq (Clear-CsrStateFolder -Path $tmp)) 'plain leftovers accepted'
+    Assert (-not (Test-Path -LiteralPath (Join-Path $tmp 'worker.ps1')) -and -not (Test-Path -LiteralPath (Join-Path $tmp 'state.json.tmp')) -and (Test-Path -LiteralPath (Join-Path $tmp 'state.json'))) 'worker and temp state removed, state kept'
+    $null = New-Item -ItemType Directory -Path (Join-Path $tmp 'src')
+    Assert ((Clear-CsrStateFolder -Path $tmp) -match 'src') 'a leftover work folder is refused'
+    Remove-Item -LiteralPath (Join-Path $tmp 'src')
+    $null = New-Item -ItemType SymbolicLink -Path (Join-Path $tmp 'state.json.tmp') -Target ([IO.Path]::GetTempPath())
+    Assert ((Clear-CsrStateFolder -Path $tmp) -match 'link') 'a link in the state folder is refused'
+    Assert (Test-Path -LiteralPath ([IO.Path]::GetTempPath())) 'link target untouched'
+} finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Output 'component-store-repair tests passed'

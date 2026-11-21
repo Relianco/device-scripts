@@ -19,8 +19,8 @@
       An msu is only expanded when the system drive keeps 4x its size plus 2 GB free.
     - InstallMsu: the .msu files in MsuPath. On build 26100 and later DISM /Add-Package /NoRestart on the whole folder
       in one call, so DISM installs the checkpoint update first; on older builds one file at a time, in name order,
-      stopping at the first failure: DISM on Server 2022, wusa /quiet /norestart before it (online DISM there takes
-      no .msu). Exit 0 and 3010 are success (wusa 0x240006, already installed, too); 3010 sets restartNeeded.
+      stopping at the first failure: DISM on Windows 11, wusa /quiet /norestart on Server 2016-2022 and Windows 10
+      (online DISM there takes no .msu). Exit 0 and 3010 are success (wusa 0x240006, already installed, too); 3010 sets restartNeeded.
     Exit codes are recorded as numbers and HRESULT hex (14081 = 0x3701 ERROR_SXS_ASSEMBLY_MISSING,
     0x800f081f source missing), so results do not depend on the system language.
     Refused (exit 1) while dism.exe or sfc.exe runs or the task is already running. An empty PinVersion and
@@ -100,13 +100,12 @@ $script:CsrStartTask = { param($ArgumentLine)
         $owner = (Get-Acl -LiteralPath $d).GetOwner([Security.Principal.SecurityIdentifier]).Value
         if (@('S-1-5-18', 'S-1-5-32-544') -notcontains $owner) { throw 'state folder has an untrusted owner' }
     }
+    $why = Clear-CsrStateFolder -Path $script:CsrRoot
+    if ($why) { throw $why }
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
     Set-Acl -LiteralPath $script:CsrRoot -AclObject $acl
-    # A fresh file inherits the protected ACL; an old one could keep an explicit ACE that lets a user rewrite it.
-    $workerFile = Join-Path $script:CsrRoot 'worker.ps1'
-    if (Test-Path -LiteralPath $workerFile) { Remove-Item -LiteralPath $workerFile -Force }
-    [IO.File]::WriteAllBytes($workerFile, [IO.File]::ReadAllBytes($PSCommandPath))
+    [IO.File]::WriteAllBytes((Join-Path $script:CsrRoot 'worker.ps1'), [IO.File]::ReadAllBytes($PSCommandPath))
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $a = New-ScheduledTaskAction -Execute $exe -Argument $ArgumentLine
     $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -118,6 +117,20 @@ $script:CsrStartTask = { param($ArgumentLine)
 # String path helpers: Join-Path and Split-Path need the drive to exist, and the tests run on Linux.
 function Get-CsrLeaf { param([string]$Path) ($Path -split '\\')[-1] }
 function Get-CsrStem { param([string]$Path) (Get-CsrLeaf $Path) -replace '\.[^.]*\z', '' }
+
+# Before the folder is locked down: a link in it (top level: only these names are used), or a leftover work folder, is refused (a user may have
+# planted it while the folder was writable); worker.ps1 and state.json.tmp are deleted so the fresh files inherit the
+# protected ACL instead of keeping an explicit ACE. Returns a refusal reason or $null.
+function Clear-CsrStateFolder {
+    param([string]$Path)
+    foreach ($item in @(Get-ChildItem -LiteralPath $Path -Force -Attributes ReparsePoint -ErrorAction Stop)) { return "state folder holds a link: $($item.Name)" }
+    if (Test-Path -LiteralPath (Join-Path $Path 'src')) { return 'state folder holds a leftover src work folder; check and delete it first' }
+    foreach ($name in 'worker.ps1', 'state.json.tmp') {
+        $f = Join-Path $Path $name
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force }
+    }
+    return $null
+}
 
 function Format-CsrHex { param($Value) '0x' + ([uint32]([long]$Value -band 0xFFFFFFFFL)).ToString('x8') }
 
@@ -244,11 +257,11 @@ function Invoke-CsrWorker {
         } else {
             $dir = ConvertTo-CsrPath $MsuPath
             # 24H2 and later: one call on the folder, so DISM applies the checkpoint update before the LCU.
-            # Before Server 2022 (20348) online DISM does not take an .msu, so wusa installs it.
+            # Online DISM takes an .msu only from Windows 11 (22000); Server 2016-2022 and Windows 10 use wusa.
             $targets = if ($os.build -ge 26100) { @($dir) } else { @(& $script:CsrListMsu $dir) }
             $state.status = 'done'
             foreach ($t in $targets) {
-                $run = if ($os.build -ge 20348) { & $script:CsrNative 'dism.exe' @('/Online', '/Add-Package', "/PackagePath:$t", '/NoRestart') }
+                $run = if ($os.build -ge 22000) { & $script:CsrNative 'dism.exe' @('/Online', '/Add-Package', "/PackagePath:$t", '/NoRestart') }
                        else { & $script:CsrNative 'wusa.exe' @($t, '/quiet', '/norestart') }
                 $rc = & $step 'Add-Package' $run $t
                 if ($rc -eq 3010) { $state.restartNeeded = $true }
