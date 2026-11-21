@@ -226,6 +226,17 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'hash mismatch' -and (Calls) -notmatch 'msi agent' -and (Calls) -clike '*start QEMU-GA') "swapped agent MSI: $($r.ExitCode) $(Calls)"
 
+    # A backup or a cancel that comes during the agent download: the services are not stopped.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); Copy-Item -LiteralPath $script:Payload -Destination $Destination; $script:Fake.Processes = @('"C:\Program Files\Comet\backup-tool.exe" backup') }
+    $r = Run
+    Assert ($r.ExitCode -eq 20 -and (Calls) -notmatch 'stop |msi agent') "backup during the agent download: $($r.ExitCode) $(Calls)"
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); Copy-Item -LiteralPath $script:Payload -Destination $Destination; $env:RELIAN_DEPLOY_CANCEL = '1' }
+    $r = Run
+    $env:RELIAN_DEPLOY_CANCEL = $null
+    Assert ($r.ExitCode -eq 130 -and $r.Result.Status -eq 'cancelled' -and (Calls) -notmatch 'stop |msi agent') "cancel during the agent download: $($r.ExitCode) $(Calls)"
+
     # Unreadable writer state fails closed.
     $f = New-Fake -Agent '109.1.0'
     $f.Writers = ''

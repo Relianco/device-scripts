@@ -243,12 +243,14 @@ function Restore-VgNetwork($Saved, $r) {
 }
 
 # Agent step. Returns 0, or the exit code for the run; the drivers are never touched here.
-function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp, [string]$AgentUrl, [string]$AgentSha256, [bool]$Repair) {
-    $busy = Get-VgBackupBusy
-    if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = $busy; return 20 }
+function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp, [string]$AgentUrl, [string]$AgentSha256, [bool]$Repair, [string]$CancelPath) {
     $msi = Join-Path $Cache 'qemu-ga-x86_64.msi'
     $script:VgDownloadError = ''
     if ((Save-VgPayload -Url $AgentUrl -Destination $msi -Sha256 $AgentSha256) -ne 0) { $r.AgentStep = 'error'; $r.AgentReason = 'agent download failed or hash mismatch'; $r.DownloadError = $script:VgDownloadError; return 1 }
+    # Checked after the download, right before the services are stopped.
+    if (Test-VgCancelled $CancelPath) { $r.AgentStep = 'cancelled'; $r.AgentReason = 'cancelled after the agent download'; return 130 }
+    $busy = Get-VgBackupBusy
+    if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = $busy; return 20 }
     foreach ($name in @($script:VgAgent, $script:VgVss)) { if ($null -ne (& $script:VgGetService $name)) { & $script:VgStopService $name } }
     Wait-Vg { @(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ }).Count -gt 0 }
     $held = @(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ })
@@ -330,7 +332,7 @@ function Invoke-VgMain {
             if ($needAgent) {
                 if (Test-VgCancelled $CancelPath) { $r.Status = 'cancelled'; return Done 130 }
                 # Any throw here still reaches the restart of the agent below.
-                try { $agentCode = Invoke-VgAgentStep $r $cache $LogRoot $stamp $AgentUrl $AgentSha256 ($agentCurrent) }
+                try { $agentCode = Invoke-VgAgentStep $r $cache $LogRoot $stamp $AgentUrl $AgentSha256 ($agentCurrent) $CancelPath }
                 catch { $agentCode = 22; $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = $_.Exception.Message }
             }
         } finally {
