@@ -57,7 +57,7 @@ function New-Fake {
         Manufacturer = $Manufacturer; Pnp = $Pnp; DriverExit = $DriverExit; AgentExit = $AgentExit; AgentStarts = $AgentStarts; Held = $Held
         Versions = @{ 'Virtio-win-driver-installer' = $Driver; 'QEMU guest agent' = $Agent; 'Virtio-win-guest-tools' = $Bundle }
         Services = @{}; Calls = [System.Collections.Generic.List[string]]::new(); Delays = 0
-        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Unreachable = @(); UnreachableAfter = $null; FailRemovesAgent = $false; HeldAfterFail = 0; Model = 'Standard PC (Q35 + ICH9, 2009)'; AgentCode = '{00000000-0000-4000-8000-000000000001}'; Args = @(); Locked = [System.Collections.Generic.List[string]]::new()
+        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Unreachable = @(); UnreachableAfter = $null; FailRemovesAgent = $false; HeldAfterFail = 0; Model = 'Standard PC (Q35 + ICH9, 2009)'; AgentCode = '{00000000-0000-4000-8000-000000000001}'; Args = @(); DropRoute = ''; Pending = ''; Locked = [System.Collections.Generic.List[string]]::new()
     }
     if ($Services) {
         $f.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' }
@@ -96,7 +96,15 @@ function New-Fake {
         $script:Fake.Calls.Add("ip $($Nic.Alias) $Ip/$Prefix dhcp=$Dhcp$(if ($Skip) { ' skipAsSource' })")
         $Nic.Addresses = @($Nic.Addresses) + [pscustomobject]@{ Ip = $Ip; Prefix = $Prefix; Manual = $true; SkipAsSource = [bool]$Skip }
     }
-    $script:VgAddRoute = { param($Nic, $Prefix, $NextHop, $Metric) $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop metric $Metric"); $Nic.Routes = @($Nic.Routes) + [pscustomobject]@{ Prefix = $Prefix; NextHop = $NextHop; Metric = $Metric } }
+    $script:VgAddRoute = {
+        param($Nic, $Prefix, $NextHop, $Metric, $Persistent)
+        $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop metric $Metric$(if (-not $Persistent) { ' active' })")
+        # DropRoute: the change reports success but the route is not there.
+        if ($Prefix -ne $script:Fake.DropRoute) { $Nic.Routes = @($Nic.Routes) + [pscustomobject]@{ Prefix = $Prefix; NextHop = $NextHop; Metric = $Metric; Persistent = [bool]$Persistent } }
+    }
+    $script:VgGetPendingVss = { $script:Fake.Pending }
+    $script:VgSetPendingVss = { param($Value) $script:Fake.Pending = [string]$Value }
+    $script:VgClearPendingVss = { $script:Fake.Pending = '' }
     $script:VgSetMetric = { param($Nic, $Family, $Metric) $script:Fake.Calls.Add("metric $($Nic.Alias) $Family $Metric"); $Nic.MetricV4 = $Metric }
     $script:VgPing = { param($Ip) $Ip -notin @($script:Fake.Unreachable) }
     $script:VgSetDns = { param($Nic, [string[]]$Servers) $script:Fake.Calls.Add("dns $($Nic.Alias) $($Servers -join ' ')") }
@@ -244,6 +252,25 @@ try {
     $r = Run
     Assert ($r.Result.VssOption -eq '5' -and (Calls) -clike '*msi agent,*vss-option 5') "VssOption kept without the parameter: $(Calls)"
 
+    # The VssOption from before is kept outside the provider key until it is written back: a run that fails with 22
+    # (no agent left) keeps it, and the next run puts it back and clears it.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603, 0)
+    $f.VssOption = '5'
+    $f.FailRemovesAgent = $true
+    $f.HeldAfterFail = -1
+    $r = Run
+    Assert ($r.ExitCode -eq 22 -and $f.Pending -eq '5') "run 1 keeps the pending VssOption: $($r.ExitCode) '$($f.Pending)'"
+    $f.VssOption = ''
+    $f.Held = 0
+    $f.Calls.Clear()
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*msi agent,*vss-option 5' -and $r.Result.VssOption -eq '5' -and $f.Pending -eq '') "run 2 restores 5 and clears it: $($r.ExitCode) $(Calls) '$($f.Pending)'"
+    # The parameter wins over a pending value, and the pending value is cleared once written.
+    $f = New-Fake -Driver '0.1.302' -Agent '110.2.3'
+    $f.Pending = '5'
+    $r = Run -Vss '3'
+    Assert ($r.Result.VssOption -eq '3' -and $f.Pending -eq '') "parameter wins: $($r.Result.VssOption) '$($f.Pending)'"
+
     # Driver failure: exit 1, no agent step.
     $f = New-Fake -Agent '109.1.0' -DriverExit 1603
     $r = Run
@@ -256,7 +283,7 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download,msi driver,dns Ethernet 2 192.0.2.53') "restore after a failed driver MSI: $(Calls)"
     $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true; SkipAsSource = $false }
-    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5 }
+    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5; Persistent = $true }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($gw) -StaticDns @('192.0.2.53'))) -NetAfter @((Nic -Alias 'Ethernet 2'))
     $f.FailIp = '198.51.100.10'
     $r = Run
@@ -425,7 +452,7 @@ try {
     Assert ($r.Result.NetSnapshot.StartsWith($dir) -and [string]$snap[0].Mac -eq $mac -and @($snap[0].StaticDnsV4).Count -eq 2 -and [string]$snap[0].Alias -eq 'Ethernet') 'snapshot written as JSON to the log dir'
     # Static address and gateway missing on the new instance: added back; DHCP-assigned ones are left alone.
     $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true; SkipAsSource = $false }
-    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5 }
+    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5; Persistent = $true }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($gw) -StaticDns $dns)) -NetAfter @((Nic -Alias 'Ethernet 2' -StaticDns $dns))
     $r = Run
     Assert ((Calls) -clike 'download,msi driver,ip Ethernet 2 198.51.100.10/24 dhcp=False,route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,start*') "static IP re-applied: $(Calls)"
@@ -463,11 +490,21 @@ try {
     Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network-.*\.json' -and $r.Result.Reason -match 'restore') "driver failure reason: $($r.Result.Reason)"
 
     # Every manual persistent route with its metric, a manual interface metric and SkipAsSource come back.
-    $sub = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50 }
+    $sub = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Persistent = $true }
     $second = [pscustomobject]@{ Ip = '198.51.100.11'; Prefix = 24; Manual = $true; SkipAsSource = $true }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip, $second) -Routes @($gw, $sub) -MetricV4 15)) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip)))
     $r = Run
     Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*ip Ethernet 2 198.51.100.11/24 dhcp=False skipAsSource,route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,route Ethernet 2 10.0.0.0/8 198.51.100.254 metric 50,metric Ethernet 2 IPv4 15,*') "routes, metric, SkipAsSource: $(Calls)"
+    # A route that lived only in the active store comes back there; a route that does not come back fails the run.
+    $active = [pscustomobject]@{ Prefix = '172.16.0.0/12'; NextHop = '198.51.100.253'; Metric = 20; Persistent = $false }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($active))) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip)))
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*route Ethernet 2 172.16.0.0/12 198.51.100.253 metric 20 active,*') "active-store route: $(Calls)"
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($active))) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip)))
+    $f.DropRoute = '172.16.0.0/12'
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and (@($r.Result.NetError) -join ' ') -match 'missing route 172\.16\.0\.0/12') "route not back: $(@($r.Result['NetError']) -join ' ')"
+
     # An adapter that was Up and is still not Up after 120 s fails the run.
     $f = New-Fake -Agent '110.2.3' -Net @((Nic)) -NetAfter @((Nic -Status 'Disconnected'))
     $r = Run
