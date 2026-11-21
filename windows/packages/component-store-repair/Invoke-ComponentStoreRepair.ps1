@@ -15,7 +15,7 @@
       asserts it. DISM /RestoreHealth (Windows Update as the source). If that fails, it tries each local source alone
       with /LimitAccess, in order: from each .msu in MsuPath (expanded under the state folder) the .wim inside it, then
       its expanded LCU .cab; then the image in WimPath (install.wim or install.esd) whose build and edition match this
-      machine. After a successful repair, sfc /scannow, then CheckHealth. Expanded files are deleted at the end.
+      machine. After a successful repair, sfc /scannow, then CheckHealth; done only when that says Healthy. Expanded files are deleted at the end.
       An msu is only expanded when the system drive keeps 4x its size plus 2 GB free.
     - InstallMsu: DISM /Add-Package /NoRestart for the .msu files in MsuPath. On build 26100 and later the whole folder
       in one call, so DISM installs the checkpoint update first; on older builds one file at a time, in name order,
@@ -86,6 +86,7 @@ $script:CsrSaveState = { param($State)
     [IO.File]::WriteAllText("$file.tmp", ($State | ConvertTo-Json -Depth 6 -Compress), [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath "$file.tmp" -Destination $file -Force
 }
+$script:CsrMakeDir = { param($d) [void][IO.Directory]::CreateDirectory($d) }
 $script:CsrRemoveWork = { if ([IO.Directory]::Exists($script:CsrWorkRoot)) { Remove-Item -LiteralPath $script:CsrWorkRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 # The folder holds the file a SYSTEM task runs: owner SYSTEM or Administrators, no reparse point, and an ACL that
 # lets only SYSTEM and Administrators in (ProgramData lets users create files in a new subfolder).
@@ -176,12 +177,14 @@ function Get-CsrSources {
             $need = 4 * [long](& $script:CsrFileBytes $msu) + 2GB
             if ([long](& $script:CsrFreeBytes $script:CsrWorkRoot) -lt $need) { $Notes.Add("not expanded, too little free space: $(Get-CsrLeaf $msu)"); continue }
             $dest = $script:CsrWorkRoot + '\' + (Get-CsrStem $msu)
+            & $script:CsrMakeDir $dest
             $x = & $script:CsrNative 'expand.exe' @('-F:*', $msu, $dest)
             if ($x.ExitCode -ne 0) { $Notes.Add("expand failed $($x.ExitCode): $(Get-CsrLeaf $msu)"); continue }
             $files = @(& $script:CsrListFiles $dest)
             foreach ($f in @($files | Where-Object { $_ -match '(?i)\.wim\z' })) { $sources.Add('WIM:' + $f + ':1') }
             foreach ($cab in @($files | Where-Object { $_ -match '(?i)\.cab\z' -and (Get-CsrLeaf $_) -notmatch $script:CsrSkipCab })) {
                 $sub = $dest + '\' + (Get-CsrStem $cab)
+                & $script:CsrMakeDir $sub
                 $x = & $script:CsrNative 'expand.exe' @('-F:*', $cab, $sub)
                 if ($x.ExitCode -eq 0) { $sources.Add($sub) } else { $Notes.Add("expand failed $($x.ExitCode): $(Get-CsrLeaf $cab)") }
             }
@@ -226,9 +229,11 @@ function Invoke-CsrWorker {
                 }
             }
             if ($rc -eq 0) {
-                [void](& $step 'sfc' (& $script:CsrNative 'sfc.exe' @('/scannow')))
+                $sfc = & $step 'sfc' (& $script:CsrNative 'sfc.exe' @('/scannow'))
+                if ($sfc -ne 0) { $notes.Add('sfc exit ' + $sfc + ': see the [SR] rows in CBS.log') }
+                # Done only when the store reads healthy afterwards.
                 $state.health = & $script:CsrHealth 'CheckHealth'
-                $state.status = 'done'
+                $state.status = if ($state.health -eq 'Healthy') { 'done' } else { 'failed' }
             } else { $state.status = 'failed' }
         } else {
             $dir = ConvertTo-CsrPath $MsuPath

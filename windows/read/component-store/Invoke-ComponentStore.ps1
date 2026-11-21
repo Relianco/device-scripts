@@ -159,6 +159,16 @@ function Get-CsReport {
     $worker = $null
     $stateText = & $script:CsState
     if ($stateText) { try { $worker = $stateText | ConvertFrom-Json } catch { $worker = 'unreadable' } }
+    # Only the summary of the repair run: its state file has no size limit.
+    if ($worker -is [pscustomobject]) {
+        $p = $worker.PSObject.Properties
+        $get = { param($o, $n) $q = $o.PSObject.Properties[$n]; if ($q) { $q.Value } else { $null } }
+        $worker = [ordered]@{ mode = & $get $worker 'mode'; status = & $get $worker 'status'; started = & $get $worker 'started'; updated = & $get $worker 'updated'
+            build = & $get $worker 'build'; backupDate = & $get $worker 'backupDate'; health = & $get $worker 'health'; restartNeeded = & $get $worker 'restartNeeded'
+            steps = @(@(& $get $worker 'steps') | Where-Object { $_ } | Select-Object -Last 3 | ForEach-Object {
+                    [ordered]@{ name = & $get $_ 'name'; source = (Protect-CsText ([string](& $get $_ 'source')) -Max 120); exit = & $get $_ 'exit'; hex = & $get $_ 'hex'; ended = & $get $_ 'ended' } })
+            notes = @(@(& $get $worker 'notes') | Where-Object { $_ } | Select-Object -Last 3 | ForEach-Object { Protect-CsText ([string]$_) -Max 160 }) }
+    }
     $free = $null; try { $free = & $script:CsFreeGB } catch { }
     return [ordered]@{ schemaVersion = 1; os = $os; systemFreeGB = $free; pending = $pending; checkHealth = $health
         cbs = (Get-CsCbsSummary -Lines @(& $script:CsCbsLines)); wu = @(Get-CsWuSummary -Events @(& $script:CsEvents)); worker = $worker; truncated = $false }
@@ -173,7 +183,9 @@ function ConvertTo-CsJson {
         { $Report.cbs.items = @($Report.cbs.items | Select-Object -First 3) },
         { $Report.wu = @($Report.wu | Select-Object -First 4) },
         { $Report.cbs.lastErrors = @(); $Report.cbs.items = @() },
-        { $Report.wu = @() }
+        { $Report.wu = @() },
+        { $Report.worker = 'omitted: too large' },
+        { $Report.cbs.codes = @($Report.cbs.codes | Select-Object -First 3) }
     )
     foreach ($step in $steps) {
         if ([Text.Encoding]::UTF8.GetByteCount($json) -le $script:OutputMaxBytes) { break }
@@ -181,6 +193,7 @@ function ConvertTo-CsJson {
         $Report.truncated = $true
         $json = $Report | ConvertTo-Json -Depth 6 -Compress
     }
+    if ([Text.Encoding]::UTF8.GetByteCount($json) -gt $script:OutputMaxBytes) { return '{"schemaVersion":1,"truncated":true,"error":"report too large"}' }
     return $json
 }
 

@@ -46,6 +46,7 @@ $script:CsrWimImages = { param($p) $script:Images }
 $script:CsrHealth = { param($Op) $script:Calls.Add("health $Op"); $script:Health }
 $script:CsrWorkRoot = 'C:\work'
 $script:CsrRemoveWork = { $script:Calls.Add('cleanup') }
+$script:CsrMakeDir = { param($d) $script:Calls.Add("mkdir $d") }
 # expand of an msu yields a wim, an SSU cab and the LCU cab; expand of the LCU cab yields files.
 $script:CsrListFiles = { param($d)
     if ($d -match 'kb5136489') { @("$d\SSU-26100.4000-x64.cab", "$d\Windows11.0-KB5136489-x64.cab", "$d\WSUSSCAN.cab", "$d\Windows11.0-KB5136489-x64.wim") } else { @() } }
@@ -121,6 +122,12 @@ $src = @($script:Calls | Where-Object { $_ -match '/Source:' })
 Assert ($src.Count -eq 1 -and $src[0] -match '/LimitAccess$') "first source succeeds, LimitAccess: $($src -join ' | ')"
 Assert ($src[0] -match '/Source:WIM:C:\\work\\[^ ]*kb5136489[^ ]*\.wim:1 /LimitAccess$') "inner wim tried first: $($src[0])"
 Assert (@($script:Calls | Where-Object { $_ -like 'expand.exe -F:* C:\msu\windows11.0-kb5136489*' }).Count -eq 1) 'msu expanded'
+$ex = @($script:Calls | Where-Object { $_ -like 'expand.exe*' })
+foreach ($e in $ex) {
+    $dest = ($e -split ' ')[-1]
+    $mk = $script:Calls.IndexOf("mkdir $dest")
+    Assert ($mk -ge 0 -and $mk -lt $script:Calls.IndexOf($e)) "destination made before expand: $dest"
+}
 Assert (-not @($script:Calls | Where-Object { $_ -match 'expand.exe .*(SSU-|WSUSSCAN)' })) 'SSU and WSUSSCAN cabs not expanded'
 Assert ($s.steps[0].hex -eq '0x800f081f' -and $s.status -eq 'done' -and $script:Calls -contains 'sfc.exe /scannow') 'source failure recorded, then repaired'
 Assert ($script:Calls[-1] -eq 'cleanup') 'expanded sources removed'
@@ -152,6 +159,16 @@ Assert (-not @($script:Calls | Where-Object { $_ -match 'expand' }) -and @($s.no
 Reset
 $s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-10-01'
 Assert ($s.status -eq 'refused' -and $script:Calls.Count -eq 0) 'worker checks the backup date again'
+
+Reset
+$script:Health = 'Repairable'
+$s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-11-20'
+Assert ($s.status -eq 'failed' -and $s.health -eq 'Repairable') 'repair is done only when CheckHealth says Healthy'
+Reset
+$script:Health = 'Healthy'
+$script:Exits = @{ 'sfc.exe*' = 1 }
+$s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-11-20'
+Assert ($s.status -eq 'done' -and @($s.notes) -match 'sfc') 'a nonzero sfc exit is noted'
 
 # ---- Worker: InstallMsu ----------------------------------------------------------------------------------------
 Reset
