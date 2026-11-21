@@ -36,7 +36,9 @@ param(
     [string]$AgentSha256 = '19dcf8abc30f70c2eb6e87282601fd0476e4e0b19936f63d9c80be30db0796ed',
     [string]$CancelPath = '',
     # Empty leaves the agent's VSS backup type alone. 5 (copy-only) keeps hypervisor backups out of SQL or Comet backup chains.
-    [string]$VssOption = ''
+    [string]$VssOption = '',
+    # 'true' installs on a guest whose SMBIOS does not say QEMU but that has VirtIO devices.
+    [string]$AllowNonQemu = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -74,15 +76,17 @@ $script:VgUninstallEntries = {
 }
 # Highest DisplayVersion of a Red Hat entry with this DisplayName ('' when none). Seen on a 0.1.302 guest:
 # 'Virtio-win-driver-installer' and the bundle say 'Red Hat, Inc.', 'QEMU guest agent' says 'RedHat'.
-function Get-VgInstalledVersion([string]$Name) {
-    $best = ''
+# The entry itself, or $null; its key name (PSChildName) is the MSI ProductCode.
+function Get-VgInstalled([string]$Name) {
+    $best = $null
     foreach ($p in @(& $script:VgUninstallEntries)) {
         if ($null -eq $p -or [string]$p.DisplayName -cne $Name -or [string]$p.Publisher -notmatch '^Red ?Hat') { continue }
         $v = [string]$p.DisplayVersion
-        if ($v -match '^\d+(\.\d+){1,3}$' -and ($best -eq '' -or (Compare-VgVersion $v $best) -gt 0)) { $best = $v }
+        if ($v -match '^\d+(\.\d+){1,3}$' -and ($null -eq $best -or (Compare-VgVersion $v ([string]$best.DisplayVersion)) -gt 0)) { $best = $p }
     }
     $best
 }
+function Get-VgInstalledVersion([string]$Name) { $e = Get-VgInstalled $Name; if ($null -eq $e) { '' } else { [string]$e.DisplayVersion } }
 # SYSTEM and Administrators only, inheritance off: no local user can read the logs or swap a staged MSI.
 $script:VgLockDir = {
     param($Path)
@@ -148,10 +152,17 @@ $script:VgGetNet = {
             Status = [string]$a.Status
             Category = [string](Get-NetConnectionProfile -InterfaceIndex $i -ErrorAction SilentlyContinue | Select-Object -First 1).NetworkCategory
             Dhcp = [string](Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue).Dhcp -eq 'Enabled'
+            # A manual interface metric (AutomaticMetric Disabled), else $null.
+            MetricV4 = @(Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { [string]$_.AutomaticMetric -eq 'Disabled' } | ForEach-Object { [int]$_.InterfaceMetric })[0]
+            MetricV6 = @(Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object { [string]$_.AutomaticMetric -eq 'Disabled' } | ForEach-Object { [int]$_.InterfaceMetric })[0]
             Addresses = @(Get-NetIPAddress -InterfaceIndex $i -ErrorAction SilentlyContinue | Where-Object { [string]$_.PrefixOrigin -ne 'WellKnown' } |
-                ForEach-Object { [pscustomobject]@{ Ip = [string]$_.IPAddress; Prefix = [int]$_.PrefixLength; Manual = [string]$_.PrefixOrigin -eq 'Manual' } })
-            Gateways = @(Get-NetRoute -InterfaceIndex $i -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0', '::/0') } |
-                ForEach-Object { [pscustomobject]@{ Prefix = [string]$_.DestinationPrefix; NextHop = [string]$_.NextHop; Manual = [string]$_.Protocol -eq 'NetMgmt' } })
+                ForEach-Object { [pscustomobject]@{ Ip = [string]$_.IPAddress; Prefix = [int]$_.PrefixLength; Manual = [string]$_.PrefixOrigin -eq 'Manual'; SkipAsSource = [bool]$_.SkipAsSource } })
+            # Persistent routes are the ones set by hand (route -p, New-NetRoute); DHCP and RA routes are not persistent.
+            Routes = @(Get-NetRoute -InterfaceIndex $i -PolicyStore PersistentStore -ErrorAction SilentlyContinue |
+                ForEach-Object { [pscustomobject]@{ Prefix = [string]$_.DestinationPrefix; NextHop = [string]$_.NextHop; Metric = [int]$_.RouteMetric } })
+            # Default gateways in use, for the reachability check.
+            Gateways = @(Get-NetRoute -InterfaceIndex $i -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+                Where-Object { $_.DestinationPrefix -in @('0.0.0.0/0', '::/0') -and $_.NextHop -notin @('0.0.0.0', '::') } | ForEach-Object { [string]$_.NextHop })
             DnsV4 = @((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses)
             DnsV6 = @((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv6 -ErrorAction SilentlyContinue).ServerAddresses)
             StaticDnsV4 = @($ns[0])
@@ -161,11 +172,18 @@ $script:VgGetNet = {
 }
 # $Nic is the adapter as it is now (its new instance); Index, not the alias, so wildcard characters cannot widen the match.
 $script:VgAddIp = {
-    param($Nic, $Ip, $Prefix, $Dhcp)
+    param($Nic, $Ip, $Prefix, $Dhcp, $Skip)
     if (-not $Dhcp -and $Ip -notmatch ':') { Set-NetIPInterface -InterfaceIndex $Nic.Index -AddressFamily IPv4 -Dhcp Disabled }
-    New-NetIPAddress -InterfaceIndex $Nic.Index -IPAddress $Ip -PrefixLength $Prefix | Out-Null
+    New-NetIPAddress -InterfaceIndex $Nic.Index -IPAddress $Ip -PrefixLength $Prefix -SkipAsSource ([bool]$Skip) | Out-Null
 }
-$script:VgAddRoute = { param($Nic, $Prefix, $NextHop) New-NetRoute -InterfaceIndex $Nic.Index -DestinationPrefix $Prefix -NextHop $NextHop | Out-Null }
+$script:VgAddRoute = { param($Nic, $Prefix, $NextHop, $Metric) New-NetRoute -InterfaceIndex $Nic.Index -DestinationPrefix $Prefix -NextHop $NextHop -RouteMetric $Metric | Out-Null }
+$script:VgSetMetric = { param($Nic, $Family, $Metric) Set-NetIPInterface -InterfaceIndex $Nic.Index -AddressFamily $Family -InterfaceMetric $Metric }
+# True when any of three 1 s pings answers.
+$script:VgPing = {
+    param($Ip)
+    $p = [System.Net.NetworkInformation.Ping]::new()
+    try { foreach ($n in 1..3) { if ([string]$p.Send($Ip, 1000).Status -eq 'Success') { return $true } }; $false } catch { $false } finally { $p.Dispose() }
+}
 $script:VgSetDns = { param($Nic, [string[]]$Servers) Set-DnsClientServerAddress -InterfaceIndex $Nic.Index -ServerAddresses $Servers }
 $script:VgVssKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\QEMU Guest Agent VSS Provider'
 $script:VgGetVssOption = { [string](Get-ItemProperty -LiteralPath $script:VgVssKey -Name 'VssOption' -ErrorAction SilentlyContinue).VssOption }
@@ -247,45 +265,65 @@ function Invoke-VgMsi([string]$Mode, [string]$Path, [string]$Log) {
     [int](& $script:VgRunMsi @($Mode, ('"{0}"' -f $Path), '/qn', '/norestart', '/l*v', ('"{0}"' -f $Log)))
 }
 
-# Waits for the saved adapters (by MAC), then sets back what was set by hand and is missing.
+# A saved adapter is back when its MAC is on one adapter and, if it was Up, that adapter is Up and, if it had a
+# DHCP address, has an address again. Manual addresses are the restore's job, so they are not waited for.
+function Test-VgNicBack($s, $c) {
+    $null -ne $c -and ($s.Status -ne 'Up' -or ($c.Status -eq 'Up' -and (@($s.Addresses | Where-Object { -not $_.Manual }).Count -eq 0 -or @($c.Addresses).Count -gt 0)))
+}
+function Find-VgNic($Now, [string]$Mac) { $m = @($Now | Where-Object { $_.Mac -eq $Mac }); if ($m.Count -eq 1) { $m[0] } }
+
+# Waits for the saved adapters (by MAC), sets back what was set by hand and is missing, then checks the result.
 function Restore-VgNetwork($Saved, $r) {
     for ($i = 0; ; $i++) {
         $now = @(& $script:VgGetNet | Where-Object { $_ })
-        $up = @($now | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { $_.Mac })
-        $macs = @($now | ForEach-Object { $_.Mac })
-        # Wait for every saved MAC, and for those that were Up to be Up again.
-        if (@($Saved | Where-Object { $_.Mac -notin $(if ($_.Status -eq 'Up') { $up } else { $macs }) }).Count -eq 0 -or $i -ge 24) { break }
+        if (@($Saved | Where-Object { -not (Test-VgNicBack $_ (Find-VgNic $now $_.Mac)) }).Count -eq 0 -or $i -ge 24) { break }
         [void](& $script:RetryDelay -Seconds 5)
     }
     $applied = [System.Collections.Generic.List[string]]::new()
     $missing = [System.Collections.Generic.List[string]]::new()
     $errors = [System.Collections.Generic.List[string]]::new()
-    # One change per try: a failed address must not stop the gateway or DNS.
+    # One change per try: a failed address must not stop the routes or DNS.
     function Apply([string]$What, [scriptblock]$Change) { try { & $Change; $applied.Add($What) } catch { $errors.Add("$What : $($_.Exception.Message)") } }
     foreach ($s in $Saved) {
         # A MAC shared by more than one adapter (a team, VLAN vNICs) is not guessed at: reported, left alone.
-        $match = @($now | Where-Object { $_.Mac -eq $s.Mac })
-        if ($match.Count -ne 1) { $missing.Add($(if ($match.Count -gt 1) { "$($s.Mac) (shared)" } else { $s.Mac })); continue }
-        $c = $match[0]
+        $c = Find-VgNic $now $s.Mac
+        if ($null -eq $c) { $missing.Add($(if (@($now | Where-Object { $_.Mac -eq $s.Mac }).Count -gt 1) { "$($s.Mac) (shared)" } else { $s.Mac })); continue }
         # A manual IPv4 address on a DHCP adapter is not added back: New-NetIPAddress would turn DHCP off.
         foreach ($a in @($s.Addresses | Where-Object { $_.Manual -and ($_.Ip -match ':' -or -not $s.Dhcp) })) {
-            if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { Apply "$($c.Alias) ip $($a.Ip)/$($a.Prefix)" { & $script:VgAddIp $c $a.Ip $a.Prefix $s.Dhcp } }
+            if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { Apply "$($c.Alias) ip $($a.Ip)/$($a.Prefix)" { & $script:VgAddIp $c $a.Ip $a.Prefix $s.Dhcp $a.SkipAsSource } }
         }
-        foreach ($g in @($s.Gateways | Where-Object { $_.Manual })) {
-            if ($g.NextHop -notin @($c.Gateways | ForEach-Object { $_.NextHop })) { Apply "$($c.Alias) route $($g.Prefix) $($g.NextHop)" { & $script:VgAddRoute $c $g.Prefix $g.NextHop } }
+        foreach ($rt in @($s.Routes)) {
+            if (@($c.Routes | Where-Object { $_.Prefix -eq $rt.Prefix -and $_.NextHop -eq $rt.NextHop }).Count -eq 0) { Apply "$($c.Alias) route $($rt.Prefix) $($rt.NextHop) metric $($rt.Metric)" { & $script:VgAddRoute $c $rt.Prefix $rt.NextHop $rt.Metric } }
         }
-        foreach ($fam in @('StaticDnsV4', 'StaticDnsV6')) {
-            $want = @($s.$fam)
-            if ($want.Count -gt 0 -and ($want -join ',') -ne (@($c.$fam) -join ',')) { Apply "$($c.Alias) dns $($want -join ' ')" { & $script:VgSetDns $c $want } }
+        foreach ($v in @('4', '6')) {
+            $m = $s."MetricV$v"
+            if ($null -ne $m -and $m -ne $c."MetricV$v") { Apply "$($c.Alias) metric IPv$v $m" { & $script:VgSetMetric $c "IPv$v" $m } }
+            $want = @($s."StaticDnsV$v")
+            if ($want.Count -gt 0 -and ($want -join ',') -ne (@($c."StaticDnsV$v") -join ',')) { Apply "$($c.Alias) dns $($want -join ' ')" { & $script:VgSetDns $c $want } }
         }
+    }
+    # Final state: each adapter that was Up is Up with its address, and each gateway that answered before still does.
+    $final = @(& $script:VgGetNet | Where-Object { $_ })
+    foreach ($s in @($Saved | Where-Object { $_.Status -eq 'Up' })) {
+        $c = Find-VgNic $final $s.Mac
+        if ($null -eq $c) { continue }
+        if (-not (Test-VgNicBack $s $c)) { $errors.Add("$($c.Alias) ($($s.Mac)) is $($c.Status) with $(@($c.Addresses).Count) addresses; it was Up"); continue }
+        foreach ($a in @($s.Addresses | Where-Object { $_.Manual -and ($_.Ip -match ':' -or -not $s.Dhcp) })) {
+            if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { $errors.Add("$($c.Alias) is missing $($a.Ip)") }
+        }
+        foreach ($g in @($s.Reachable)) { if (-not (& $script:VgPing $g)) { $errors.Add("$($c.Alias) gateway $g answered before the driver update and is unreachable now") } }
     }
     $r.NetReapplied = @($applied)
     if ($errors.Count -gt 0) { $r.NetError = @($errors) }
     if ($missing.Count -gt 0) { $r.NetMissing = @($missing) }
 }
 
+
 # Agent step. Returns 0, or the exit code for the run; the drivers are never touched here.
-function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp, [string]$AgentUrl, [string]$AgentSha256, [bool]$Repair, [string]$CancelPath) {
+# $RepairCode: the installed agent's ProductCode when it is current but its service is gone; '' installs or upgrades.
+function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp, [string]$AgentUrl, [string]$AgentSha256, [bool]$Repair, [string]$RepairCode, [string]$CancelPath) {
+    # The repair runs from the installed product's cached MSI, which may be newer than the pin.
+    if ($Repair -and $RepairCode -notmatch '^\{[0-9A-Fa-f-]{36}\}$') { $r.AgentStep = 'agentRepairUnavailable'; $r.AgentReason = 'the agent is registered but its service is gone, and its ProductCode is unknown: reinstall it by hand'; return 22 }
     $msi = Join-Path $Cache 'qemu-ga-x86_64.msi'
     $script:VgDownloadError = ''
     if ((Save-VgPayload -Url $AgentUrl -Destination $msi -Sha256 $AgentSha256) -ne 0) { $r.AgentStep = 'error'; $r.AgentReason = 'agent download failed or hash mismatch'; $r.DownloadError = $script:VgDownloadError; return 1 }
@@ -304,9 +342,20 @@ function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp
     if ($busy) { $r.AgentStep = 'backupRunning'; $r.AgentReason = $busy; return 20 }
     # Hashed again just before msiexec, so a file swapped after the download check never runs.
     if (-not (Test-VgSha $msi $AgentSha256)) { $r.AgentStep = 'error'; $r.AgentReason = 'agent MSI hash mismatch before install'; return 1 }
-    # /famus reinstalls a registered agent whose service is gone; /i installs or upgrades.
-    $code = Invoke-VgMsi -Mode $(if ($Repair) { '/famus' } else { '/i' }) -Path $msi -Log (Join-Path $LogRoot "agent-$Stamp.log")
+    # /famus reinstalls the registered agent whose service is gone; /i installs or upgrades.
+    $code = if ($Repair) { Invoke-VgMsi -Mode '/famus' -Path $RepairCode -Log (Join-Path $LogRoot "agent-$Stamp.log") } else { Invoke-VgMsi -Mode '/i' -Path $msi -Log (Join-Path $LogRoot "agent-$Stamp.log") }
     $r.AgentExit = $code
+    # RemoveExistingProducts runs before InstallInitialize in this MSI, so a failed upgrade can leave no agent at all.
+    # Then wait for the old service to clear and run the MSI once more.
+    if ($code -notin $script:VgOk -and -not $Repair -and $null -eq (& $script:VgGetService $script:VgAgent)) {
+        Wait-Vg { @(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ }).Count -gt 0 }
+        if (@(@($script:VgAgent, $script:VgVss) | Where-Object { & $script:VgServiceHeld $_ }).Count -gt 0) {
+            $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = "agent installer failed with $code and removed the old agent; its service is still marked for delete: reboot, then run again"; return 22
+        }
+        if (-not (Test-VgSha $msi $AgentSha256)) { $r.AgentStep = 'error'; $r.AgentReason = 'agent MSI hash mismatch before install'; return 1 }
+        $code = Invoke-VgMsi -Mode '/i' -Path $msi -Log (Join-Path $LogRoot "agent-retry-$Stamp.log")
+        $r.AgentRetryExit = $code
+    }
     if ($code -notin $script:VgOk) { $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = "agent installer failed with $code"; return 22 }
     $r.RebootRequired = $r.RebootRequired -or $code -ne 0
     $r.AgentStep = 'installed'
@@ -314,7 +363,7 @@ function Invoke-VgAgentStep($r, [string]$Cache, [string]$LogRoot, [string]$Stamp
 }
 
 function Invoke-VgMain {
-    param([string]$Action, [string]$PinVersion, [string]$DriverUrl, [string]$DriverSha256, [string]$AgentVersion, [string]$AgentUrl, [string]$AgentSha256, [string]$CancelPath, [string]$LogRoot, [string]$VssOption = '')
+    param([string]$Action, [string]$PinVersion, [string]$DriverUrl, [string]$DriverSha256, [string]$AgentVersion, [string]$AgentUrl, [string]$AgentSha256, [string]$CancelPath, [string]$LogRoot, [string]$VssOption = '', [string]$AllowNonQemu = '')
     $r = [ordered]@{ Package = 'virtio-guest-tools'; Action = $Action; PinVersion = $PinVersion; AgentPinVersion = $AgentVersion; Status = 'error' }
     function Done([int]$Code, [string]$Reason = '') { if ($Reason) { $r.Reason = $Reason }; @{ ExitCode = $Code; Result = $r } }
 
@@ -330,8 +379,10 @@ function Invoke-VgMain {
     $pnp = @(& $script:VgPnpIds)
     $r.Manufacturer = [string]$cs.Manufacturer
     $r.Model = [string]$cs.Model
-    # Red Hat VirtIO (1AF4) or QEMU (1B36) PCI devices mark a guest even when SMBIOS is overridden.
-    $r.QemuGuest = ("$($cs.Manufacturer) $($cs.Model)" -match '(?i)qemu') -or @($pnp | Where-Object { $_ -match '(?i)^PCI\\VEN_(1AF4|1B36)&' }).Count -gt 0
+    # SMBIOS must say QEMU. VirtIO (1AF4) or QEMU (1B36) PCI devices alone count only with AllowNonQemu=true:
+    # other hypervisors and passthrough setups expose them too.
+    $virtio = @($pnp | Where-Object { $_ -match '(?i)^PCI\\VEN_(1AF4|1B36)&' }).Count -gt 0
+    $r.QemuGuest = ("$($cs.Manufacturer) $($cs.Model)" -match '(?i)qemu') -or ($AllowNonQemu -eq 'true' -and $virtio)
     if (-not $r.QemuGuest) { $r.Status = 'notQemuGuest'; return Done 0 }
     # virtio-serial (legacy 1003, modern 1043) carries the guest-agent channel.
     $r.AgentChannel = @($pnp | Where-Object { $_ -match '(?i)^PCI\\VEN_1AF4&DEV_10(03|43)' }).Count -gt 0
@@ -343,6 +394,11 @@ function Invoke-VgMain {
     $needDriver = -not (Test-VgAtLeast $r.DriverPrevious $PinVersion)
     $agentCurrent = Test-VgAtLeast $r.AgentPrevious $AgentVersion
     $needAgent = -not $agentCurrent -or $null -eq (& $script:VgGetService $script:VgAgent)
+    $agentEntry = Get-VgInstalled 'QEMU guest agent'
+    $agentProduct = if ($null -ne $agentEntry -and $agentEntry.PSObject.Properties['PSChildName']) { [string]$agentEntry.PSChildName } else { '' }
+    # The agent MSI writes VssOption=1; the value from before is put back unless VssOption is given.
+    $vssBefore = [string](& $script:VgGetVssOption)
+    if ($vssBefore -notmatch '^[1-5]$') { $vssBefore = '' }
     $r.RebootRequired = $false
     $agentCode = 0
     if ($needDriver -or $needAgent) {
@@ -362,6 +418,8 @@ function Invoke-VgMain {
                 if ((Save-VgPayload -Url $DriverUrl -Destination $msi -Sha256 $DriverSha256) -ne 0) { $r.DownloadError = $script:VgDownloadError; return Done 1 'driver download failed or hash mismatch' }
                 if (Test-VgCancelled $CancelPath) { $r.Status = 'cancelled'; return Done 130 }
                 $saved = @(& $script:VgGetNet | Where-Object { $_ })
+                # Gateways that answer now must answer after the update; one that never answers ping is not checked.
+                foreach ($n in $saved) { $n | Add-Member -NotePropertyName Reachable -NotePropertyValue @(@($n.Gateways) | Where-Object { $n.Status -eq 'Up' -and (& $script:VgPing $_) }) -Force }
                 $r.NetSnapshot = Join-Path $LogRoot "network-$stamp.json"
                 Set-Content -LiteralPath $r.NetSnapshot -Value (ConvertTo-Json -InputObject $saved -Depth 5) -Encoding UTF8
                 # A backup may have started during the download; the driver swap drops the network.
@@ -381,7 +439,7 @@ function Invoke-VgMain {
             if ($needAgent) {
                 if (Test-VgCancelled $CancelPath) { $r.Status = 'cancelled'; return Done 130 }
                 # Any throw here still reaches the restart of the agent below.
-                try { $agentCode = Invoke-VgAgentStep $r $cache $LogRoot $stamp $AgentUrl $AgentSha256 ($agentCurrent) $CancelPath }
+                try { $agentCode = Invoke-VgAgentStep $r $cache $LogRoot $stamp $AgentUrl $AgentSha256 ($agentCurrent) $agentProduct $CancelPath }
                 catch { $agentCode = 22; $r.AgentStep = 'agentInstallFailed'; $r.AgentReason = $_.Exception.Message }
             }
         } finally {
@@ -410,7 +468,8 @@ function Invoke-VgMain {
     $vss = & $script:VgGetService $script:VgVss
     $r.VssProvider = if ($null -eq $vss) { $null } else { $vss.StartType }
     # Read after the agent MSI, which resets it.
-    if ($VssOption -ne '' -and $null -ne $vss -and (& $script:VgGetVssOption) -ne $VssOption) { & $script:VgSetVssOption ([int]$VssOption) }
+    $wantVss = if ($VssOption -ne '') { $VssOption } else { $vssBefore }
+    if ($wantVss -ne '' -and $null -ne $vss -and (& $script:VgGetVssOption) -ne $wantVss) { & $script:VgSetVssOption ([int]$wantVss) }
     $r.VssOption = [string](& $script:VgGetVssOption)
 
     # A guest that lost part of its network config is the worse failure; the snapshot JSON has what to set by hand.
@@ -446,7 +505,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 
 try {
     $logRoot = Join-Path $env:ProgramData 'Relian\virtio-guest-tools'
-    $run = Invoke-VgMain -Action $Action -PinVersion $PinVersion -DriverUrl $DriverUrl -DriverSha256 $DriverSha256 -AgentVersion $AgentVersion -AgentUrl $AgentUrl -AgentSha256 $AgentSha256 -CancelPath $CancelPath -LogRoot $logRoot -VssOption $VssOption
+    $run = Invoke-VgMain -Action $Action -PinVersion $PinVersion -DriverUrl $DriverUrl -DriverSha256 $DriverSha256 -AgentVersion $AgentVersion -AgentUrl $AgentUrl -AgentSha256 $AgentSha256 -CancelPath $CancelPath -LogRoot $logRoot -VssOption $VssOption -AllowNonQemu $AllowNonQemu
 } catch {
     $run = @{ ExitCode = 1; Result = [ordered]@{ Package = 'virtio-guest-tools'; Status = 'error'; Reason = $_.Exception.Message } }
 }

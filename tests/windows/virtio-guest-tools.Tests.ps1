@@ -30,8 +30,8 @@ Assert ((Test-VgPinHash $DriverSha256) -and -not (Test-VgPinHash ('0' * 64)) -an
 function Pci([string]$Vendor, [string]$Device) { 'PCI\VEN_' + $Vendor + '&DEV_' + $Device }
 # A locally administered MAC and documentation addresses (RFC 5737): no real machine.
 $mac = '02-00-00-00-00-01'
-function Nic([string]$Alias = 'Ethernet', [bool]$Dhcp = $true, [object[]]$Addresses = @(), [object[]]$Gateways = @(), [string[]]$StaticDns = @(), [string[]]$StaticDnsV6 = @(), [string]$Status = 'Up', [string]$Mac = $mac) {
-    [pscustomobject]@{ Mac = $Mac; Alias = $Alias; Index = 7; Status = $Status; Category = 'DomainAuthenticated'; Dhcp = $Dhcp; Addresses = $Addresses; Gateways = $Gateways
+function Nic([string]$Alias = 'Ethernet', [bool]$Dhcp = $true, [object[]]$Addresses = @(), [object[]]$Routes = @(), [string[]]$Gateways = @(), [string[]]$StaticDns = @(), [string[]]$StaticDnsV6 = @(), [string]$Status = 'Up', [string]$Mac = $mac, $MetricV4 = $null) {
+    [pscustomobject]@{ Mac = $Mac; Alias = $Alias; Index = 7; Status = $Status; Category = 'DomainAuthenticated'; Dhcp = $Dhcp; Addresses = $Addresses; Routes = $Routes; Gateways = $Gateways; MetricV4 = $MetricV4; MetricV6 = $null
         DnsV4 = $StaticDns; DnsV6 = $StaticDnsV6; StaticDnsV4 = $StaticDns; StaticDnsV6 = $StaticDnsV6 }
 }
 $idle = @('"C:\Program Files\Comet\backup-tool.exe" delegate-server', '"C:\Program Files\Comet\backup-tool.exe" elevator-server', '"C:\Program Files\Comet\backup-tool.exe" stream 12')
@@ -47,7 +47,7 @@ function New-Fake {
         [string]$Bundle = '',
         [bool]$Services = ($Agent -ne ''),
         [int]$DriverExit = 0,
-        [int]$AgentExit = 0,
+        [int[]]$AgentExit = @(0),
         [bool]$AgentStarts = $true,
         [int]$Held = 0,
         [object[]]$Net = @(),
@@ -57,21 +57,21 @@ function New-Fake {
         Manufacturer = $Manufacturer; Pnp = $Pnp; DriverExit = $DriverExit; AgentExit = $AgentExit; AgentStarts = $AgentStarts; Held = $Held
         Versions = @{ 'Virtio-win-driver-installer' = $Driver; 'QEMU guest agent' = $Agent; 'Virtio-win-guest-tools' = $Bundle }
         Services = @{}; Calls = [System.Collections.Generic.List[string]]::new(); Delays = 0
-        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Locked = [System.Collections.Generic.List[string]]::new()
+        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Unreachable = @(); UnreachableAfter = $null; FailRemovesAgent = $false; HeldAfterFail = 0; Model = 'Standard PC (Q35 + ICH9, 2009)'; AgentCode = '{00000000-0000-4000-8000-000000000001}'; Args = @(); Locked = [System.Collections.Generic.List[string]]::new()
     }
     if ($Services) {
         $f.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' }
         $f.Services['QEMU Guest Agent VSS Provider'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' }
     }
     $script:Fake = $f
-    $script:VgComputer = { [pscustomobject]@{ Manufacturer = $script:Fake.Manufacturer; Model = 'Standard PC' } }
+    $script:VgComputer = { [pscustomobject]@{ Manufacturer = $script:Fake.Manufacturer; Model = $script:Fake.Model } }
     $script:VgPnpIds = { $script:Fake.Pnp }
     # Uninstall entries as a real 0.1.302 guest has them (publishers, hives, SystemComponent).
     $script:VgUninstallEntries = {
         $hive = @{ 'Virtio-win-driver-installer' = 'Uninstall'; 'QEMU guest agent' = 'Uninstall'; 'Virtio-win-guest-tools' = 'WOW6432Node' }
         $pub = @{ 'Virtio-win-driver-installer' = 'Red Hat, Inc.'; 'QEMU guest agent' = 'RedHat'; 'Virtio-win-guest-tools' = 'Red Hat, Inc.' }
         foreach ($n in @($script:Fake.Versions.Keys)) {
-            if ($script:Fake.Versions[$n]) { [pscustomobject]@{ DisplayName = $n; DisplayVersion = $script:Fake.Versions[$n]; Publisher = $pub[$n]; SystemComponent = [int]($n -eq 'Virtio-win-driver-installer'); Hive = $hive[$n] } }
+            if ($script:Fake.Versions[$n]) { [pscustomobject]@{ DisplayName = $n; DisplayVersion = $script:Fake.Versions[$n]; Publisher = $pub[$n]; SystemComponent = [int]($n -eq 'Virtio-win-driver-installer'); Hive = $hive[$n]; PSChildName = $(if ($n -eq 'QEMU guest agent') { $script:Fake.AgentCode } else { '{00000000-0000-4000-8000-000000000002}' }) } }
         }
     }
     $script:VgLockDir = { param($Path) $script:Fake.Locked.Add($Path) }
@@ -89,8 +89,16 @@ function New-Fake {
     $script:VgProcesses = { @($script:Fake.Processes | ForEach-Object { [pscustomobject]@{ Name = 'backup-tool.exe'; CommandLine = $_ } }) }
     $script:VgVssWriters = { $script:Fake.Writers }
     $script:VgGetNet = { $script:Fake.Net }
-    $script:VgAddIp = { param($Nic, $Ip, $Prefix, $Dhcp) if ($Ip -eq $script:Fake.FailIp) { throw 'address in use' }; $script:Fake.Calls.Add("ip $($Nic.Alias) $Ip/$Prefix dhcp=$Dhcp") }
-    $script:VgAddRoute = { param($Nic, $Prefix, $NextHop) $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop") }
+    # Changes land on the adapter object, so the final check sees them.
+    $script:VgAddIp = {
+        param($Nic, $Ip, $Prefix, $Dhcp, $Skip)
+        if ($Ip -eq $script:Fake.FailIp) { throw 'address in use' }
+        $script:Fake.Calls.Add("ip $($Nic.Alias) $Ip/$Prefix dhcp=$Dhcp$(if ($Skip) { ' skipAsSource' })")
+        $Nic.Addresses = @($Nic.Addresses) + [pscustomobject]@{ Ip = $Ip; Prefix = $Prefix; Manual = $true; SkipAsSource = [bool]$Skip }
+    }
+    $script:VgAddRoute = { param($Nic, $Prefix, $NextHop, $Metric) $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop metric $Metric"); $Nic.Routes = @($Nic.Routes) + [pscustomobject]@{ Prefix = $Prefix; NextHop = $NextHop; Metric = $Metric } }
+    $script:VgSetMetric = { param($Nic, $Family, $Metric) $script:Fake.Calls.Add("metric $($Nic.Alias) $Family $Metric"); $Nic.MetricV4 = $Metric }
+    $script:VgPing = { param($Ip) $Ip -notin @($script:Fake.Unreachable) }
     $script:VgSetDns = { param($Nic, [string[]]$Servers) $script:Fake.Calls.Add("dns $($Nic.Alias) $($Servers -join ' ')") }
     $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); Copy-Item -LiteralPath $script:Payload -Destination $Destination }
     $script:RetryDelay = {
@@ -102,7 +110,8 @@ function New-Fake {
     $script:VgSetVssOption = { param([int]$Value) $script:Fake.Calls.Add("vss-option $Value"); $script:Fake.VssOption = [string]$Value }
     $script:VgRunMsi = {
         param([string[]]$Arguments)
-        $which = if ($Arguments[1] -match 'qemu-ga') { 'agent' } else { 'driver' }
+        $which = if ($Arguments[1] -match 'qemu-ga|^"\{') { 'agent' } else { 'driver' }
+        $script:Fake.Args = $Arguments
         $script:Fake.Calls.Add("msi $which")
         $script:Fake.Modes[$which] = $Arguments[0]
         Assert ($Arguments[2] -ceq '/qn' -and $Arguments[3] -ceq '/norestart' -and $Arguments[4] -ceq '/l*v') "msiexec arguments: $($Arguments -join ' ')"
@@ -110,14 +119,23 @@ function New-Fake {
             if ($script:Fake.DriverExit -notin @(0, 3010, 1641)) { return $script:Fake.DriverExit }
             $script:Fake.Versions['Virtio-win-driver-installer'] = '0.1.302'
             $script:Fake.Net = $script:Fake.NetAfter
+            if ($null -ne $script:Fake.UnreachableAfter) { $script:Fake.Unreachable = $script:Fake.UnreachableAfter }
             return $script:Fake.DriverExit
         }
-        if ($script:Fake.AgentExit -notin @(0, 3010, 1641)) { return $script:Fake.AgentExit }
+        $exits = @($script:Fake.AgentExit)
+        $code = $exits[0]
+        if ($exits.Count -gt 1) { $script:Fake.AgentExit = $exits[1..($exits.Count - 1)] }
+        if ($code -notin @(0, 3010, 1641)) {
+            # The pinned MSI removes the old product before its own transaction: a failure can leave no agent.
+            if ($script:Fake.FailRemovesAgent) { $script:Fake.Services.Clear(); $script:Fake.Versions['QEMU guest agent'] = ''; $script:Fake.Held = $script:Fake.HeldAfterFail }
+            return $code
+        }
         $script:Fake.Versions['QEMU guest agent'] = '110.2.3'
         $script:Fake.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Automatic' }
         $script:Fake.Services['QEMU Guest Agent VSS Provider'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' }
-        $script:Fake.VssOption = ''
-        return $script:Fake.AgentExit
+        # The MSI's Registry table writes VssOption=1.
+        $script:Fake.VssOption = '1'
+        return $code
     }
     return $f
 }
@@ -127,8 +145,8 @@ New-Item -ItemType Directory -Path $dir | Out-Null
 $script:Payload = Join-Path $dir 'payload.msi'
 [System.IO.File]::WriteAllText($script:Payload, 'fake msi')
 $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:Payload).Hash.ToLowerInvariant()
-function Run { param([string]$Action = 'Install', [string]$Pin = '0.1.302', [string]$Sha = $sha, [string]$AgentSha = $sha, [string]$Url = 'https://example.invalid/virtio-win-gt-x64.msi', [string]$AgentUrl = 'https://example.invalid/qemu-ga-x86_64.msi', [string]$AgentPin = '110.2.3', [string]$Vss = '')
-    Invoke-VgMain -Action $Action -PinVersion $Pin -DriverUrl $Url -DriverSha256 $Sha -AgentVersion $AgentPin -AgentUrl $AgentUrl -AgentSha256 $AgentSha -CancelPath '' -LogRoot $dir -VssOption $Vss }
+function Run { param([string]$AllowNonQemu = '', [string]$Action = 'Install', [string]$Pin = '0.1.302', [string]$Sha = $sha, [string]$AgentSha = $sha, [string]$Url = 'https://example.invalid/virtio-win-gt-x64.msi', [string]$AgentUrl = 'https://example.invalid/qemu-ga-x86_64.msi', [string]$AgentPin = '110.2.3', [string]$Vss = '')
+    Invoke-VgMain -Action $Action -PinVersion $Pin -DriverUrl $Url -DriverSha256 $Sha -AgentVersion $AgentPin -AgentUrl $AgentUrl -AgentSha256 $AgentSha -CancelPath '' -LogRoot $dir -VssOption $Vss -AllowNonQemu $AllowNonQemu }
 function Calls { $script:Fake.Calls -join ',' }
 $stopBoth = 'stop QEMU-GA,stop QEMU Guest Agent VSS Provider'
 
@@ -182,6 +200,38 @@ try {
     Assert ($r.Result.DriverVersion -eq '0.1.302' -and $r.Result.DriverExit -eq 0 -and @($f.Calls | Where-Object { $_ -eq 'msi driver' }).Count -eq 1) 'driver MSI untouched by the agent failure'
     Assert ((Calls) -clike '*msi agent,*start QEMU-GA') "old agent restarted after the failure: $(Calls)"
 
+    # The agent MSI removes the old agent before its own transaction. If the upgrade then fails and leaves no agent,
+    # wait for the old service to clear and run the MSI once more.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603, 0)
+    $f.FailRemovesAgent = $true
+    $f.HeldAfterFail = 2
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and $r.Result.AgentRetryExit -eq 0 -and $f.Delays -eq 2 -and (Calls) -clike "*$stopBoth,msi agent,msi agent,start QEMU-GA") "agent retried: $($r.ExitCode) $(Calls)"
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603, 0)
+    $f.FailRemovesAgent = $true
+    $f.HeldAfterFail = -1
+    $r = Run
+    Assert ($r.ExitCode -eq 22 -and $r.Result.Reason -match 'reboot' -and @($f.Calls | Where-Object { $_ -eq 'msi agent' }).Count -eq 1) "removed agent still held: $($r.ExitCode) $($r.Result['Reason'])"
+    # A failure that leaves the old agent in place is not retried.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603, 0)
+    $r = Run
+    Assert ($r.ExitCode -eq 22 -and @($f.Calls | Where-Object { $_ -eq 'msi agent' }).Count -eq 1) 'agent still present: no retry'
+
+    # A newer agent than the pin with its service gone: repair the installed product by its ProductCode.
+    $f = New-Fake -Driver '0.1.302' -Agent '111.0.0' -Services $false
+    $r = Run
+    Assert ($f.Modes['agent'] -ceq '/famus' -and $f.Args[1] -ceq ('"' + $f.AgentCode + '"')) "repair by product code: $($f.Args -join ' ')"
+    $f = New-Fake -Driver '0.1.302' -Agent '111.0.0' -Services $false
+    $f.AgentCode = 'QEMU guest agent'
+    $r = Run
+    Assert ($r.ExitCode -eq 22 -and $r.Result.Status -eq 'agentRepairUnavailable' -and (Calls) -notmatch 'msi agent') "no product code: $($r.Result.Status) $(Calls)"
+
+    # VssOption without the parameter: the value from before the agent MSI (which writes 1) is put back.
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
+    $f.VssOption = '5'
+    $r = Run
+    Assert ($r.Result.VssOption -eq '5' -and (Calls) -clike '*msi agent,*vss-option 5') "VssOption kept without the parameter: $(Calls)"
+
     # Driver failure: exit 1, no agent step.
     $f = New-Fake -Agent '109.1.0' -DriverExit 1603
     $r = Run
@@ -193,12 +243,12 @@ try {
     $script:VgRunMsi = { param([string[]]$Arguments) $script:Fake.Calls.Add('msi driver'); $script:Fake.Net = $script:Fake.NetAfter; 1603 }
     $r = Run
     Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download,msi driver,dns Ethernet 2 192.0.2.53') "restore after a failed driver MSI: $(Calls)"
-    $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true }
-    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Manual = $true }
-    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Gateways @($gw) -StaticDns @('192.0.2.53'))) -NetAfter @((Nic -Alias 'Ethernet 2'))
+    $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true; SkipAsSource = $false }
+    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5 }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($gw) -StaticDns @('192.0.2.53'))) -NetAfter @((Nic -Alias 'Ethernet 2'))
     $f.FailIp = '198.51.100.10'
     $r = Run
-    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network restore incomplete' -and (Calls) -clike '*route Ethernet 2 0.0.0.0/0 198.51.100.1,dns Ethernet 2 192.0.2.53*' -and @($r.Result.NetError).Count -eq 1 -and $r.Result.NetError[0] -match 'address in use') "failed address does not stop the rest: $(Calls)"
+    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network restore incomplete' -and (Calls) -clike '*route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,dns Ethernet 2 192.0.2.53*' -and $r.Result.NetError[0] -match 'address in use' -and (@($r.Result.NetError) -join ' ') -match 'missing 198\.51\.100\.10') "failed address does not stop the rest: $(Calls)"
 
     # An agent step that throws is reported as 22 and the old agent still runs again.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
@@ -342,7 +392,7 @@ try {
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
     $entries = $script:VgUninstallEntries
     $script:EntryReads = 0
-    $script:VgUninstallEntries = { $script:EntryReads++; if ($script:EntryReads -gt 3) { throw 'registry read failed' }; & $entries }
+    $script:VgUninstallEntries = { $script:EntryReads++; if ($script:EntryReads -gt 4) { throw 'registry read failed' }; & $entries }
     $err = ''
     try { [void](Run) } catch { $err = $_.Exception.Message }
     Assert ($err -match 'registry read failed' -and (Calls) -clike "*$stopBoth,msi agent,*start QEMU-GA") "restart after a throw: $err $(Calls)"
@@ -362,17 +412,17 @@ try {
     $snap = @(Get-Content -LiteralPath $r.Result.NetSnapshot -Raw | ConvertFrom-Json)
     Assert ($r.Result.NetSnapshot.StartsWith($dir) -and [string]$snap[0].Mac -eq $mac -and @($snap[0].StaticDnsV4).Count -eq 2 -and [string]$snap[0].Alias -eq 'Ethernet') 'snapshot written as JSON to the log dir'
     # Static address and gateway missing on the new instance: added back; DHCP-assigned ones are left alone.
-    $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true }
-    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Manual = $true }
-    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Gateways @($gw) -StaticDns $dns)) -NetAfter @((Nic -Alias 'Ethernet 2' -StaticDns $dns))
+    $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true; SkipAsSource = $false }
+    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5 }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($gw) -StaticDns $dns)) -NetAfter @((Nic -Alias 'Ethernet 2' -StaticDns $dns))
     $r = Run
-    Assert ((Calls) -clike 'download,msi driver,ip Ethernet 2 198.51.100.10/24 dhcp=False,route Ethernet 2 0.0.0.0/0 198.51.100.1,start*') "static IP re-applied: $(Calls)"
-    $dhcpIp = [pscustomobject]@{ Ip = '203.0.113.20'; Prefix = 24; Manual = $false }
+    Assert ((Calls) -clike 'download,msi driver,ip Ethernet 2 198.51.100.10/24 dhcp=False,route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,start*') "static IP re-applied: $(Calls)"
+    $dhcpIp = [pscustomobject]@{ Ip = '203.0.113.20'; Prefix = 24; Manual = $false; SkipAsSource = $false }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($dhcpIp))) -NetAfter @((Nic))
     $r = Run
     Assert ((Calls) -notmatch 'ip |route |dns ' -and @($r.Result.NetReapplied).Count -eq 0) "DHCP config left alone: $(Calls)"
     # A manual IPv4 address on a DHCP adapter is left alone (adding it would turn DHCP off); IPv6 is added back.
-    $v6 = [pscustomobject]@{ Ip = '2001:db8::10'; Prefix = 64; Manual = $true }
+    $v6 = [pscustomobject]@{ Ip = '2001:db8::10'; Prefix = 64; Manual = $true; SkipAsSource = $false }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($ip, $v6))) -NetAfter @((Nic))
     $r = Run
     Assert ((Calls) -cmatch 'ip Ethernet 2001:db8::10/64 dhcp=True' -and (Calls) -notmatch '198\.51\.100\.10') "DHCP adapter keeps DHCP: $(Calls)"
@@ -399,6 +449,25 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network-.*\.json' -and $r.Result.Reason -match 'restore') "driver failure reason: $($r.Result.Reason)"
 
+    # Every manual persistent route with its metric, a manual interface metric and SkipAsSource come back.
+    $sub = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50 }
+    $second = [pscustomobject]@{ Ip = '198.51.100.11'; Prefix = 24; Manual = $true; SkipAsSource = $true }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip, $second) -Routes @($gw, $sub) -MetricV4 15)) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip)))
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*ip Ethernet 2 198.51.100.11/24 dhcp=False skipAsSource,route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,route Ethernet 2 10.0.0.0/8 198.51.100.254 metric 50,metric Ethernet 2 IPv4 15,*') "routes, metric, SkipAsSource: $(Calls)"
+    # An adapter that was Up and is still not Up after 120 s fails the run.
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic)) -NetAfter @((Nic -Status 'Disconnected'))
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and $f.Delays -eq 24 -and (@($r.Result.NetError) -join ' ') -match 'Disconnected') "adapter stays down: $($r.ExitCode) $(@($r.Result['NetError']) -join ' ')"
+    # A gateway that answered before the driver update and not after fails the run; one that never answered is not checked.
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Gateways @('198.51.100.1')))
+    $f.UnreachableAfter = @('198.51.100.1')
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and (@($r.Result.NetError) -join ' ') -match '198\.51\.100\.1 .*unreachable') "gateway lost: $($r.ExitCode) $(@($r.Result['NetError']) -join ' ')"
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Gateways @('198.51.100.1')))
+    $f.Unreachable = @('198.51.100.1')
+    Assert ((Run).ExitCode -eq 0) 'a gateway that never answered ping is not a failure'
+
     # Agent-only run takes no snapshot.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -Net @((Nic -StaticDns $dns))
     $r = Run
@@ -416,9 +485,14 @@ try {
     $f = New-Fake -Manufacturer 'Dell Inc.' -Pnp @((Pci '8086' '15BB'))
     $r = Run
     Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'notQemuGuest' -and (Calls) -ceq '') "non-QEMU: $($r.Result.Status) $(Calls)"
-    # SMBIOS overridden but VirtIO devices present: still a guest.
+    # SMBIOS overridden: VirtIO devices alone do not make a guest; AllowNonQemu=true opts in when they are present.
     $f = New-Fake -Manufacturer 'Custom' -Pnp @((Pci '1AF4' '1041'))
-    Assert ((Run).Result.Status -eq 'installed') 'VirtIO PCI device marks a guest'
+    $f.Model = 'Custom'
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'notQemuGuest' -and (Calls) -ceq '') "VirtIO without QEMU SMBIOS: $($r.Result.Status) $(Calls)"
+    Assert ((Run -AllowNonQemu 'true').Result.Status -eq 'installed') 'AllowNonQemu opts in a VirtIO guest'
+    $f = New-Fake -Manufacturer 'Dell Inc.' -Pnp @((Pci '8086' '15BB'))
+    Assert ((Run -AllowNonQemu 'true').Result.Status -eq 'notQemuGuest' -and (Calls) -ceq '') 'AllowNonQemu still needs VirtIO devices'
 
     # No virtio-serial channel: the agent cannot start. Installed, exit 0, told why.
     $f = New-Fake -Pnp @((Pci '1AF4' '1004')) -AgentStarts $false

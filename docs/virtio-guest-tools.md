@@ -28,15 +28,17 @@ The bundle is a WiX Burn chain with one rollback boundary. When the agent MSI fa
 ## Sequence
 
 1. Refuse bad input (exit 1). An empty `PinVersion`, `DriverSha256` or `AgentSha256` exits 0 and does nothing.
-2. Not a QEMU guest: `notQemuGuest`, exit 0.
+2. Not a QEMU guest: `notQemuGuest`, exit 0. SMBIOS (`Win32_ComputerSystem` Manufacturer or Model) must say QEMU. VirtIO or QEMU PCI devices alone do not count, because other hypervisors and passthrough setups have them too. With `AllowNonQemu` set to `true`, a guest with such devices counts even when its SMBIOS is overridden.
 3. Decide per component, from the MSI uninstall entries:
    - drivers: "Virtio-win-driver-installer" missing or below `PinVersion`;
-   - agent: "QEMU guest agent" missing or below `AgentVersion`, or the `QEMU-GA` service missing (then a repair, `msiexec /famus`).
+   - agent: "QEMU guest agent" missing or below `AgentVersion`, or the `QEMU-GA` service missing. In that last case the package repairs the installed product by its ProductCode (`msiexec /famus {code}`, from its cached MSI), even when that product is newer than the pin. If the ProductCode is unknown, the run exits 22 with `agentRepairUnavailable`.
    - The bundle entry "Virtio-win-guest-tools" is reported as `BundleVersion` and never decides. It can say an older bundle is installed while the driver MSI was rolled back and is not registered at all.
 4. If a step is needed and a backup runs, exit 20 (`backupRunning`) before anything changes.
 5. Drivers: download, save the network (below), check for a backup again (exit 20), `msiexec /i virtio-win-gt-x64.msi /qn /norestart /l*v`, restore the network (also after a failed MSI). Failure exits 1; the agent step does not run.
 6. Agent: download, then check for a cancel (exit 130) and a backup (exit 20) again. Send a stop to `QEMU-GA` and `QEMU Guest Agent VSS Provider` (without waiting on it), then wait up to 120 s until neither runs nor is marked for delete (`DeleteFlag` under the service key). If one still is, skip the MSI: exit 21 (`agentServiceHeld`). Check for a backup once more (exit 20). Then `msiexec /i qemu-ga-x86_64.msi /qn /norestart /l*v`; a failure exits 22 (`agentInstallFailed`).
-7. Always, also after an error past the agent stop: set `QEMU-GA` to Automatic and start it (a failed start-type change goes to `StartTypeError` and does not skip the start) (also the old one after a skipped or failed agent step), keep the VSS provider from Disabled, and write `VssOption` when given.
+   - This MSI runs `RemoveExistingProducts` (sequence 1401) before `InstallInitialize` (1500). The old agent is removed in its own transaction, so a failed upgrade (for example `RegisterCom` with `0x80070430`) can leave no agent at all.
+   - When the MSI fails and `QEMU-GA` is gone afterwards, the package waits up to 120 s for the old services to clear and runs the MSI once more (`AgentRetryExit`, `agent-retry-<time>.log`). If a service is still marked for delete, the run exits 22 and says to reboot.
+7. Always, also after an error past the agent stop: set `QEMU-GA` to Automatic and start it (a failed start-type change goes to `StartTypeError` and does not skip the start) (also the old one after a skipped or failed agent step), keep the VSS provider from Disabled, and write `VssOption`. The agent MSI's Registry table writes `VssOption=1`. Without the parameter, the package puts back the value from before the agent MSI.
 
 The package never restarts the machine. `RebootRequired` is true when an MSI exits 3010 or 1641.
 
@@ -49,9 +51,9 @@ The package never restarts the machine. `RebootRequired` is true when an MSI exi
 
 A NetKVM update can give the NIC a new device instance. Static addresses survive, but DNS servers typed by hand on a DHCP adapter are lost.
 
-Before the driver MSI the package writes every adapter (any status) to `network-<time>.json` in the log folder: MAC, alias, status, network category, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`), default gateways (`Manual` for route protocol `NetMgmt`), the DNS servers in use (`DnsV4`, `DnsV6`), and `StaticDnsV4` and `StaticDnsV6`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` and `Tcpip6\...`, which holds only hand-set servers.
+Before the driver MSI the package writes every adapter (any status) to `network-<time>.json` in the log folder: MAC, alias, status, network category, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`, with `SkipAsSource`), the manual interface metric per family (`MetricV4`, `MetricV6`; null when automatic), every persistent route with its metric (`Routes`; persistent routes are the hand-set ones), the default gateways in use (`Gateways`) and which of them answer ping (`Reachable`), the DNS servers in use (`DnsV4`, `DnsV6`), and `StaticDnsV4` and `StaticDnsV6`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` and `Tcpip6\...`, which holds only hand-set servers.
 
-After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up again if it was Up. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing manual gateways, and the hand-set DNS servers of each family when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back, and MACs that more than one adapter now shares (marked `shared`; those are left alone); `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
+After the driver MSI it waits up to 120 s for each saved MAC to be back. An adapter that was Up must be Up again, and must have an address again if it had a DHCP address. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing persistent routes with their metric, a manual interface metric that differs, and the hand-set DNS servers of each family when they differ. Then it checks the final state. Each adapter that was Up must be Up, with its manual addresses, and each gateway that answered ping before must still answer (3 pings, 1 s each). Any miss is a `NetError`. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back, and MACs that more than one adapter now shares (marked `shared`; those are left alone); `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
 
 ## Exit codes
 
@@ -61,7 +63,7 @@ After the driver MSI it waits up to 120 s for each saved MAC to be back, and Up 
 | 1 | `error` | Bad input, download or hash failure, driver MSI failure, network restore incomplete (`NetMissing` or `NetError`; this wins over 20-22), or the agent did not start with a channel present. |
 | 20 | `backupRunning` | A Comet job or VSS snapshot is running. Run again later. Drivers may already be done (`DriverVersion`). |
 | 21 | `agentServiceHeld` | An agent service was still running or marked for delete after 120 s. The agent MSI did not run; the drivers are installed. |
-| 22 | `agentInstallFailed` | The agent MSI failed (`AgentExit`) or left the agent below the pin. The drivers are installed. |
+| 22 | `agentInstallFailed`, `agentRepairUnavailable` | The agent MSI failed (`AgentExit`, and `AgentRetryExit` after a retry) or left the agent below the pin. The drivers are installed. This can mean the guest has no agent at all: check `QEMU-GA` and see Recovery. |
 | 130 | `cancelled` | Cancelled before an installer started. |
 
 Logs: `%ProgramData%\Relian\virtio-guest-tools\drivers-<time>-<guid>.log`, `agent-<time>-<guid>.log` and `network-<time>-<guid>.json`. Downloads go to a `cache-<guid>` folder inside the log folder, which is removed after the run. The log folder and the cache folder get an ACL with only SYSTEM and Administrators (full control), inheritance off, owner Administrators. The run stops with exit 1, before it writes anything, if the log folder or its parent is a reparse point (a junction or symlink), or if the folder or its parent already exists and is not owned by SYSTEM or Administrators (a folder a local user created first is refused, never re-ACLed). If the driver MSI fails, `Reason` names the snapshot file and says whether the restore finished. If a service stop throws, `StopError` holds the error, and the 120 s wait decides what happens next.
@@ -72,13 +74,16 @@ A guest that lost NetKVM (no network) after a failed bundle run:
 
 1. From the Proxmox console, attach the virtio-win ISO of the pinned version and run `msiexec /i D:\virtio-win-gt-x64.msi /qn /norestart /l*v C:\Windows\Temp\virtio-drivers.log`, or `pnputil /add-driver D:\NetKVM\<os>\amd64\netkvm.inf /install` for the network driver alone.
 2. Check each adapter's IP, gateway and DNS against the last `network-<time>.json` (if the package ran) or your records, and set hand-set DNS again with `Set-DnsClientServerAddress`.
-3. For a held agent service (exit 21, or a 1603 with `0x80070430` in the agent log): stop the backup software's services, or reboot, so the old `QEMU Guest Agent VSS Provider` is deleted. Then run the package again; it installs only what is still below its pin.
+3. For exit 22, first check whether `QEMU-GA` exists. A failed upgrade can remove the old agent. Reboot so the marked-for-delete services clear, then run the package again.
+4. For a held agent service (exit 21, or a 1603 with `0x80070430` in the agent log): stop the backup software's services, or reboot, so the old `QEMU Guest Agent VSS Provider` is deleted. Then run the package again; it installs only what is still below its pin.
 
 ## Package arguments
 
-`VssOption` sets the backup type the agent's VSS provider asks for. It takes a value from 1 to 5; 5 means copy-only. The agent MSI resets this setting, so the package writes it after the agent step on every run.
+`VssOption` sets the backup type the agent's VSS provider asks for. It takes a value from 1 to 5; 5 means copy-only. The agent MSI sets it to 1, so the package writes it after the agent step on every run.
 
-Leave it empty to keep the current value.
+Leave it empty to keep the value the guest had before the run.
+
+`AllowNonQemu` `true` installs on a guest with VirtIO devices whose SMBIOS does not say QEMU.
 
 Use `{"VssOption":"5"}` on a guest where SQL Server or Comet uses VSS. Then a Proxmox backup does not break the application's backup chain.
 
