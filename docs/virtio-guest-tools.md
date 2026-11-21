@@ -43,7 +43,7 @@ A NetKVM update can give the NIC a new device instance. Static addresses survive
 
 Before the driver MSI the package writes every Up adapter to `network-<time>.json` in the log folder: MAC, alias, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`), default gateways (`Manual` for route protocol `NetMgmt`), the DNS servers in use, and `StaticDns`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` (and `Tcpip6`), which holds only hand-set servers.
 
-After the driver MSI it waits up to 120 s for each saved MAC to be Up again. Then, on the adapter with that MAC, it adds back missing manual addresses (turning IPv4 DHCP off when the adapter was static), missing manual gateways, and the hand-set DNS servers when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
+After the driver MSI it waits up to 120 s for each saved MAC to be Up again. Then, on the adapter with that MAC, it adds back missing manual addresses (IPv4 only on an adapter that was static, since adding one turns DHCP off), missing manual gateways, and the hand-set DNS servers when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
 
 ## Exit codes
 

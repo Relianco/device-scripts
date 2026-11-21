@@ -290,6 +290,11 @@ try {
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($dhcpIp))) -NetAfter @((Nic))
     $r = Run
     Assert ((Calls) -notmatch 'ip |route |dns ' -and @($r.Result.NetReapplied).Count -eq 0) "DHCP config left alone: $(Calls)"
+    # A manual IPv4 address on a DHCP adapter is left alone (adding it would turn DHCP off); IPv6 is added back.
+    $v6 = [pscustomobject]@{ Ip = '2001:db8::10'; Prefix = 64; Manual = $true }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($ip, $v6))) -NetAfter @((Nic))
+    $r = Run
+    Assert ((Calls) -cmatch 'ip Ethernet 2001:db8::10/64 dhcp=True' -and (Calls) -notmatch '198\.51\.100\.10') "DHCP adapter keeps DHCP: $(Calls)"
     # The adapter does not come back: bounded wait, the agent step still runs, the run fails with the snapshot path.
     $f = New-Fake -Agent '109.1.0' -Net @((Nic -StaticDns $dns)) -NetAfter @()
     $r = Run

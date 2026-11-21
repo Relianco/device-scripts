@@ -228,7 +228,8 @@ function Restore-VgNetwork($Saved, $r) {
     foreach ($s in $Saved) {
         $c = @($now | Where-Object { $_.Mac -eq $s.Mac }) | Select-Object -First 1
         if ($null -eq $c) { $missing.Add($s.Mac); continue }
-        foreach ($a in @($s.Addresses | Where-Object { $_.Manual })) {
+        # A manual IPv4 address on a DHCP adapter is not added back: New-NetIPAddress would turn DHCP off.
+        foreach ($a in @($s.Addresses | Where-Object { $_.Manual -and ($_.Ip -match ':' -or -not $s.Dhcp) })) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { Apply "$($c.Alias) ip $($a.Ip)/$($a.Prefix)" { & $script:VgAddIp $c $a.Ip $a.Prefix $s.Dhcp } }
         }
         foreach ($g in @($s.Gateways | Where-Object { $_.Manual })) {
