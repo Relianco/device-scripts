@@ -262,7 +262,7 @@ function Wait-Vg([scriptblock]$Test) {
 }
 
 function Invoke-VgMsi([string]$Mode, [string]$Path, [string]$Log) {
-    [int](& $script:VgRunMsi @($Mode, ('"{0}"' -f $Path), '/qn', '/norestart', '/l*v', ('"{0}"' -f $Log)))
+    [int](& $script:VgRunMsi -Arguments @($Mode, ('"{0}"' -f $Path), '/qn', '/norestart', '/l*v', ('"{0}"' -f $Log)))
 }
 
 # A saved adapter is back when its MAC is on one adapter and, if it was Up, that adapter is Up and, if it had a
