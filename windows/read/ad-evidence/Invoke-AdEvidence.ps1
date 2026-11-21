@@ -7,6 +7,9 @@
     Prints one line of JSON, at most 8,000 UTF-8 bytes, with "truncated" set when a list
     was cut. The domain, configuration NC and DNS zone come from RootDSE.
 
+    PinVersion is ignored, as in the other read modules: the runner's empty package hash is the
+    off switch (it exits 0 and downloads nothing), so a package that runs was asked to run.
+
     Package arguments (base64 JSON in -PackageArguments):
       Section    Inventory (default), Scp or Reach
       SearchBase DN inside this domain that scopes Inventory (default: the domain root)
