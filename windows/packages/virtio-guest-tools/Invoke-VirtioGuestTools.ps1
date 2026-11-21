@@ -94,11 +94,15 @@ $script:VgLockDir = {
     $acl.SetOwner([System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
+$script:VgOwnerSid = { param($Path) (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value }
 function New-VgPrivateDir([string]$Path) {
     # A junction planted by a local user would send the ACL change and SYSTEM's writes elsewhere.
     foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
         if ((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "$p is a reparse point" }
     }
+    # A parent a local user created (and so owns) lets that user swap our folder after the hash check.
+    $parent = Split-Path -Path $Path -Parent
+    if ((Test-Path -LiteralPath $parent) -and (& $script:VgOwnerSid $parent) -notin @('S-1-5-18', 'S-1-5-32-544')) { throw "$parent is not owned by SYSTEM or Administrators" }
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
     & $script:VgLockDir $Path
 }
