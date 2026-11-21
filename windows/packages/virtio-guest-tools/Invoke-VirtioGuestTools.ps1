@@ -129,9 +129,10 @@ $script:VgStopService = { param($Name) $s = Get-Service -Name $Name -ErrorAction
 # Held: not stopped, or marked for delete (DeleteFlag), which makes the agent MSI's RegisterCom fail with 1603.
 $script:VgServiceHeld = {
     param($Name)
+    # DeleteFlag first: a service marked for delete can already be missing from Get-Service while its key remains.
+    if ([int](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name 'DeleteFlag' -ErrorAction SilentlyContinue).DeleteFlag -eq 1) { return $true }
     $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
-    if ($null -eq $s) { return $false }
-    [string]$s.Status -ne 'Stopped' -or [int](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name 'DeleteFlag' -ErrorAction SilentlyContinue).DeleteFlag -eq 1
+    $null -ne $s -and [string]$s.Status -ne 'Stopped'
 }
 $script:VgProcesses = { @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'backup-tool.exe'" | Select-Object Name, CommandLine) }
 # '' when vssadmin fails.
