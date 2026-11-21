@@ -86,10 +86,26 @@ $script:DownloadFile = {
 }
 $script:RetryDelay = { param($Seconds) Start-Sleep -Seconds ([int]$Seconds) }
 # The bundle is waited on and never killed.
+# Mode is /install, or /repair when the current bundle is registered but its agent service is gone.
 $script:VgRunInstaller = {
-    param($Path, $LogPath)
-    $proc = Start-Process -FilePath $Path -ArgumentList @('/install', '/quiet', '/norestart', '/log', ('"{0}"' -f $LogPath)) -Wait -PassThru -WindowStyle Hidden
+    param($Path, $LogPath, $Mode)
+    $proc = Start-Process -FilePath $Path -ArgumentList @($Mode, '/quiet', '/norestart', '/log', ('"{0}"' -f $LogPath)) -Wait -PassThru -WindowStyle Hidden
     [int]$proc.ExitCode
+}
+
+# Retry only timeouts, connection and DNS failures, and HTTP 408, 429 and 5xx gateway codes.
+function Test-VgTransient($Exception) {
+    for ($e = $Exception; $null -ne $e; $e = $e.InnerException) {
+        if ($e -is [System.TimeoutException] -or $e -is [System.Net.Sockets.SocketException]) { return $true }
+        if ($e -is [System.Net.WebException] -and [string]$e.Status -in @('Timeout', 'ConnectFailure', 'NameResolutionFailure', 'ReceiveFailure', 'SendFailure', 'ConnectionClosed', 'KeepAliveFailure')) { return $true }
+        if ($e.PSObject.Properties.Name -contains 'Response' -and $null -ne $e.Response -and $e.Response.PSObject.Properties.Name -contains 'StatusCode') {
+            return [int]$e.Response.StatusCode -in @(408, 429, 500, 502, 503, 504)
+        }
+        if ($e.PSObject.Properties.Name -contains 'StatusCode' -and $null -ne $e.StatusCode) {
+            return [int]$e.StatusCode -in @(408, 429, 500, 502, 503, 504)
+        }
+    }
+    return $false
 }
 
 # 0 saved and verified, 1 failed. A hash mismatch is not retried.
@@ -102,6 +118,7 @@ function Save-VgPayload([string]$Url, [string]$Destination, [string]$Sha256) {
             $script:VgDownloadError = $_.Exception.Message
             if ($null -ne $_.Exception.InnerException) { $script:VgDownloadError += ' | ' + $_.Exception.InnerException.Message }
             Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+            if (-not (Test-VgTransient $_.Exception)) { return 1 }
             if ($attempt -lt 3) { [void](& $script:RetryDelay -Seconds $delays[$attempt - 1]) }
             continue
         }
@@ -139,7 +156,8 @@ function Invoke-VgMain {
 
     $previous = [string](& $script:VgInstalledVersion)
     $r.PreviousVersion = $previous
-    $needInstall = $previous -eq '' -or (Compare-VgVersion $previous $PinVersion) -lt 0 -or $null -eq (& $script:VgGetService $script:VgAgent)
+    $current = $previous -ne '' -and (Compare-VgVersion $previous $PinVersion) -ge 0
+    $needInstall = -not $current -or $null -eq (& $script:VgGetService $script:VgAgent)
     $r.RebootRequired = $false
     if ($needInstall) {
         if (Test-VgCancelled $CancelPath) { $r.Status = 'cancelled'; return Done 130 }
@@ -152,7 +170,9 @@ function Invoke-VgMain {
             if (Test-VgCancelled $CancelPath) { $r.Status = 'cancelled'; return Done 130 }
             New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
             $r.LogPath = Join-Path $LogRoot ('install-{0}.log' -f (Get-Date -Format 'yyyyMMddHHmmss'))
-            $code = [int](& $script:VgRunInstaller -Path $exe -LogPath $r.LogPath)
+            $mode = if ($current) { '/repair' } else { '/install' }
+            $r.InstallerMode = $mode
+            $code = [int](& $script:VgRunInstaller -Path $exe -LogPath $r.LogPath -Mode $mode)
             $r.InstallerExit = $code
             if ($code -notin @(0, 3010, 1641)) { return Done 1 "installer failed with $code" }
             $r.RebootRequired = $code -ne 0

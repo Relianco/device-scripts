@@ -20,11 +20,14 @@ $source = [string]$release.sourceUrl
 Assert ($source.StartsWith('https://') -and $source.EndsWith('/' + [string]$release.file) -and $source -match ('/virtio-win-' + [regex]::Escape([string]$release.version) + '-\d+/')) 'sourceUrl is not the vendor archive file of the pinned version'
 Assert ((Test-VgPinHash $InstallerSha256) -and -not (Test-VgPinHash ('0' * 64)) -and -not (Test-VgPinHash 'ABC')) 'pin hash check'
 
+# PCI hardware IDs are built here: public vendor and device numbers, not a real machine's identifiers.
+function Pci([string]$Vendor, [string]$Device) { 'PCI\VEN_' + $Vendor + '&DEV_' + $Device }
+
 # A fake VM. Every machine hook is replaced; nothing is installed.
 function New-Fake {
     param(
         [string]$Manufacturer = 'QEMU',
-        [string[]]$Pnp = @('PCI\VEN_1AF4&DEV_1004&SUBSYS_00081AF4', 'PCI\VEN_1AF4&DEV_1003&SUBSYS_00031AF4'),
+        [string[]]$Pnp = @((Pci '1AF4' '1004'), (Pci '1AF4' '1003')),
         [string]$Installed = '',
         [bool]$Agent = $false,
         [int]$InstallerExit = 0,
@@ -55,8 +58,9 @@ function New-Fake {
     $script:VgGetVssOption = { $script:Fake.VssOption }
     $script:VgSetVssOption = { param([int]$Value) $script:Fake.Calls.Add("vss-option $Value"); $script:Fake.VssOption = [string]$Value }
     $script:VgRunInstaller = {
-        param($Path, $LogPath)
+        param($Path, $LogPath, $Mode)
         $script:Fake.Calls.Add('install')
+        $script:Fake | Add-Member -NotePropertyName Mode -NotePropertyValue $Mode -Force
         if ($script:Fake.InstallerExit -in @(0, 3010, 1641)) {
             $script:Fake.Installed = '0.1.302'
             $script:Fake.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Automatic' }
@@ -102,7 +106,10 @@ try {
     # Current bundle but the agent service is gone: reinstall.
     $f = New-Fake -Installed '0.1.302'
     $r = Run
-    Assert ((Calls) -clike 'download,install,*') "missing agent service reinstalls: $(Calls)"
+    Assert ((Calls) -clike 'download,install,*' -and $f.Mode -eq '/repair') "missing agent service repairs: $(Calls) $($f.Mode)"
+    $f = New-Fake -Installed '0.1.285'
+    $r = Run
+    Assert ($f.Mode -eq '/install') 'older bundle uses /install'
 
     # Reboot requested by the installer is reported, never acted on.
     $f = New-Fake -InstallerExit 3010
@@ -115,15 +122,15 @@ try {
     Assert ($r.ExitCode -eq 1 -and $r.Result.InstallerExit -eq 1603) 'installer failure exits 1'
 
     # Not a QEMU guest: nothing happens.
-    $f = New-Fake -Manufacturer 'Dell Inc.' -Pnp @('PCI\VEN_8086&DEV_15BB')
+    $f = New-Fake -Manufacturer 'Dell Inc.' -Pnp @((Pci '8086' '15BB'))
     $r = Run
     Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'notQemuGuest' -and (Calls) -ceq '') "non-QEMU: $($r.Result.Status) $(Calls)"
     # SMBIOS overridden but VirtIO devices present: still a guest.
-    $f = New-Fake -Manufacturer 'Custom' -Pnp @('PCI\VEN_1AF4&DEV_1041')
+    $f = New-Fake -Manufacturer 'Custom' -Pnp @((Pci '1AF4' '1041'))
     Assert ((Run).Result.Status -eq 'installed') 'VirtIO PCI device marks a guest'
 
     # No virtio-serial channel: the agent cannot start. Installed, exit 0, told why.
-    $f = New-Fake -Pnp @('PCI\VEN_1AF4&DEV_1004') -AgentStarts $false
+    $f = New-Fake -Pnp @((Pci '1AF4' '1004')) -AgentStarts $false
     $r = Run
     Assert ($r.ExitCode -eq 0 -and $r.Result.Status -eq 'agentChannelMissing' -and -not $r.Result.AgentRunning) "no channel: $($r.ExitCode) $($r.Result.Status)"
     # Channel present but the agent will not start: failure.
@@ -146,11 +153,23 @@ try {
     $r = Run -Sha ('a' * 63 + 'b')
     Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download') "hash mismatch: $(Calls)"
 
-    # Download errors are tried three times.
+    # Transient download errors are tried three times; anything else once.
+    $f = New-Fake
+    $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); throw [System.Net.WebException]::new('timed out', [System.Net.WebExceptionStatus]::Timeout) }
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download,download,download') "transient download retries: $(Calls)"
+    $f = New-Fake
+    $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); throw [System.Net.Http.HttpRequestException]::new('not found', $null, [System.Net.HttpStatusCode]::NotFound) }
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download') "404 is not retried: $(Calls)"
+    $f = New-Fake
+    $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); throw [System.Net.Http.HttpRequestException]::new('busy', $null, [System.Net.HttpStatusCode]::ServiceUnavailable) }
+    $r = Run
+    Assert ((Calls) -ceq 'download,download,download') "503 is retried: $(Calls)"
     $f = New-Fake
     $script:DownloadFile = { param($Url, $Destination) $script:Fake.Calls.Add('download'); throw 'network down' }
     $r = Run
-    Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download,download,download') "download retries: $(Calls)"
+    Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download') "unclassified error is not retried: $(Calls)"
 
     # Cancel before download.
     $f = New-Fake
@@ -191,7 +210,7 @@ try {
 
 # The installer is silent, never restarts, and logs.
 $text = Get-Content -LiteralPath $scriptPath -Raw
-Assert ($text -match "'/install', '/quiet', '/norestart', '/log'") 'installer arguments'
+Assert ($text.Contains('@($Mode, ''/quiet'', ''/norestart'', ''/log''')) 'installer arguments'
 Assert ($text -notmatch '(?i)Restart-Computer|shutdown(\.exe)?\s+/r') 'the package must not reboot'
 Assert ($text -match "-UserAgent 'relian-device-scripts'") 'download must not send a Mozilla User-Agent (fedorapeople bot check)'
 
