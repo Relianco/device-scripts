@@ -265,7 +265,7 @@ All read-only, and each prints bounded JSON. The six under `windows/read/` also 
 - `maintenance-evidence` (read): reads back stored storage and update maintenance reports, in pages.
 - `wake-device` (read): sends a Wake-on-LAN packet from an online peer to `Mac` on the same subnet. A sent packet does not prove the target woke.
 - `s1-install-logs` (read, runner 374 only, plain text, not in the read-job allowlist): SentinelOne installer and upgrade logs (file list, newest tails) and SentinelOne/MsiInstaller events from the last `Days` days, to explain an installer exit code. Token-shaped text is redacted.
-- `endpoint-evidence`: device and user state that Intune or a script should have set. `Sections` picks the checks. Silent.
+- `endpoint-evidence`: device and user state that Intune or a script should have set. `Sections` picks the checks; `all` adds `OfficeLicence` (Office licence files and activation state) and `Kfm` (Known Folder Move targets, file counts and blockers) to the others. `UserPrt` (the signed-in user's PRT from `dsregcmd /status`) is opt-in only: it runs a hidden one-shot scheduled task in each user's session and removes it. E-mail addresses are hashed. Silent.
 - `outlook-suggestion-sources`: where on a PC one address (`Match`) could surface in Classic Outlook suggestions. Never prints the address or matched text.
 
 Test tools. These write to the device.
