@@ -2,6 +2,7 @@
   "name": "virtio-win guest tools",
   "arch": "x64",
   "sourceUrl": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-guest-tools.exe",
+  "url": "https://relianpub.blob.core.windows.net/pub/sec/virtio-win-guest-tools-0.1.302-d8ae9ea1e943384ac195e012cd36f82c3161620e5fc9529be4e42e6f420e222d.exe",
   "file": "virtio-win-guest-tools.exe",
   "sha256": "d8ae9ea1e943384ac195e012cd36f82c3161620e5fc9529be4e42e6f420e222d",
   "size": 31642483,

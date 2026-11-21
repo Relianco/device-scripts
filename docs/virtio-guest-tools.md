@@ -2,6 +2,12 @@
 
 `windows/packages/virtio-guest-tools/Invoke-VirtioGuestTools.ps1` installs or updates the virtio-win guest tools bundle on a Windows guest on QEMU or Proxmox. The bundle holds the VirtIO drivers, the QEMU guest agent and the SPICE agent.
 
+## Source
+
+The vendor file is from the fedorapeople virtio-win archive (`sourceUrl` in `windows/releases/virtio-guest-tools.json`). The package downloads a content-addressed copy from `relianpub` (`url` there), checked against the same SHA256.
+
+The fedorapeople bot check answers any User-Agent that contains `Mozilla` with an HTML page. Windows PowerShell 5.1 sends such a User-Agent by default. For that reason the package sends `relian-device-scripts` as its User-Agent.
+
 ## What it does
 
 - It runs the pinned `virtio-win-guest-tools.exe` with `/install /quiet /norestart` in two cases:

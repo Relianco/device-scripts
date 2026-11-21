@@ -16,14 +16,14 @@
     Prints one JSON line. Exit 0 ok, 1 failure, 130 cancelled.
 #>
 # Parameters are not Mandatory: a mandatory parameter prompts when this file is dot-sourced under RELIAN_DEPLOY_TEST.
-# InstallerUrl and InstallerSha256 are the pin in windows/releases/virtio-guest-tools.json. The runner copies
-# this script alone, so the values are inlined.
+# InstallerUrl and InstallerSha256 are the pin in windows/releases/virtio-guest-tools.json: a content-addressed copy
+# of the vendor file (sourceUrl there). The runner copies this script alone, so the values are inlined.
 [CmdletBinding()]
 param(
     [string]$DeploymentType,
     [string]$Action,
     [string]$PinVersion,
-    [string]$InstallerUrl = 'https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-guest-tools.exe',
+    [string]$InstallerUrl = 'https://relianpub.blob.core.windows.net/pub/sec/virtio-win-guest-tools-0.1.302-d8ae9ea1e943384ac195e012cd36f82c3161620e5fc9529be4e42e6f420e222d.exe',
     [string]$InstallerSha256 = 'd8ae9ea1e943384ac195e012cd36f82c3161620e5fc9529be4e42e6f420e222d',
     [string]$CancelPath = '',
     # Empty leaves the agent's VSS backup type alone. 5 (copy-only) keeps hypervisor backups out of SQL or Comet backup chains.

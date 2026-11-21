@@ -14,9 +14,10 @@ $env:RELIAN_DEPLOY_TEST = '1'
 
 # Pin record and inlined defaults agree.
 $release = Get-Content -LiteralPath $releasePath -Raw -Encoding utf8 | ConvertFrom-Json
-Assert ($InstallerUrl -ceq [string]$release.sourceUrl -and $InstallerSha256 -ceq [string]$release.sha256) 'script defaults do not match the release file'
-Assert ($InstallerUrl.StartsWith('https://') -and $InstallerUrl.EndsWith('/' + [string]$release.file)) 'source URL is not https or does not end in the file name'
-Assert ($InstallerUrl -match ('/virtio-win-' + [regex]::Escape([string]$release.version) + '-\d+/')) 'source URL is not the archive folder of the pinned version'
+Assert ($InstallerUrl -ceq [string]$release.url -and $InstallerSha256 -ceq [string]$release.sha256) 'script defaults do not match the release file'
+Assert ($InstallerUrl -ceq ('https://relianpub.blob.core.windows.net/pub/sec/virtio-win-guest-tools-' + [string]$release.version + '-' + [string]$release.sha256 + '.exe')) 'installer URL is not the content-addressed blob of the pin'
+$source = [string]$release.sourceUrl
+Assert ($source.StartsWith('https://') -and $source.EndsWith('/' + [string]$release.file) -and $source -match ('/virtio-win-' + [regex]::Escape([string]$release.version) + '-\d+/')) 'sourceUrl is not the vendor archive file of the pinned version'
 Assert ((Test-VgPinHash $InstallerSha256) -and -not (Test-VgPinHash ('0' * 64)) -and -not (Test-VgPinHash 'ABC')) 'pin hash check'
 
 # A fake VM. Every machine hook is replaced; nothing is installed.
