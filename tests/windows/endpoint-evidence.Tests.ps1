@@ -403,6 +403,7 @@ try {
     $desk = New-Dir (Join-Path $profileDir 'Desktop')
     foreach ($n in @('mail.pst', 'notes.one', 'Open Notebook.onetoc2', '_vti_x.txt', '.lock', 'Contract.docx', 'desktop.ini', '~$draft.docx')) { New-File (Join-Path $desk $n) }
     $deep = New-Dir (Join-Path $desk 'Sub')
+    [void](New-Dir (Join-Path $desk '_vti_dir'))
     $long = Join-Path $deep ('n' * [Math]::Max(1, 252 - $deep.Length))
     New-File $long
     $kfm = Get-EeKfm
@@ -411,7 +412,7 @@ try {
     Assert ($k0.shellFolders['Desktop'] -eq '%USERPROFILE%\OneDrive - Example\Desktop' -and $k0.shellFolders['Personal'] -eq '%USERPROFILE%\Documents' -and $k0.shellFolders['My Pictures'] -like '\\fs01.example.com*' -and -not $k0.shellFolders.Contains('Favorites')) 'shell folder targets, profile path shortened'
     $fd = @{}; foreach ($f in $k0.folders) { $fd[$f.folder] = $f }
     $d = $fd['Desktop']
-    Assert ($d.exists -and $d.files -eq 9 -and $d.pst -eq 1 -and $d.oneNote -eq 2 -and $d.badName -eq 3 -and $d.longPath -eq 1 -and $d.complete) 'desktop counts and blockers'
+    Assert ($d.exists -and $d.files -eq 9 -and $d.pst -eq 1 -and $d.oneNote -eq 2 -and $d.badName -eq 4 -and $d.longPath -eq 1 -and $d.complete) 'desktop counts and blockers'
     Assert ($fd['Documents'].exists -eq $false -and $null -eq $fd['Documents']['files']) 'missing folder not walked'
     if ([IO.Directory].GetMethod('CreateSymbolicLink')) {
         # A junction or link as the folder itself is counted, not followed.

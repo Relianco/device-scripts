@@ -785,14 +785,14 @@ function Measure-EeFolder {
             foreach ($i in $d.EnumerateFileSystemInfos()) {
                 if ($Budget.Entries -le 0 -or $Budget.Clock.Elapsed.TotalSeconds -gt $script:EeKfmSeconds) { $r.complete = $false; break walk }
                 $Budget.Entries--
+                # Path length and names SharePoint and OneDrive refuse apply to folders and files.
+                if ($i.FullName.Length -gt 250) { $r.longPath++ }
+                if ($i.Name -match '(?i)^(\.lock|(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?)$|_vti_|^~\$|["*:<>?|]') { $r.badName++ }
                 if ($i.Attributes -band [IO.FileAttributes]::Directory) { $stack.Push($i); continue }
                 $r.files++; $bytes += $i.Length
                 if ($i.Extension -eq '.pst') { $r.pst++ }
                 if ($i.Extension -match '^\.(one|onetoc2)$') { $r.oneNote++ }
-                if ($i.FullName.Length -gt 250) { $r.longPath++ }
                 if ($i.Length -gt 250GB) { $r.over250GB++ }
-                # Names SharePoint and OneDrive refuse.
-                if ($i.Name -match '(?i)^(\.lock|(CON|PRN|AUX|NUL|COM\d|LPT\d)(\..*)?)$|_vti_|^~\$|["*:<>?|]') { $r.badName++ }
             }
         } catch { $r.unreadable++ }
     }
