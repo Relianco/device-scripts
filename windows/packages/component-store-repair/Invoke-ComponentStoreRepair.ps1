@@ -100,12 +100,16 @@ $script:CsrStartTask = { param($ArgumentLine)
         $owner = (Get-Acl -LiteralPath $d).GetOwner([Security.Principal.SecurityIdentifier]).Value
         if (@('S-1-5-18', 'S-1-5-32-544') -notcontains $owner) { throw 'state folder has an untrusted owner' }
     }
-    $why = Clear-CsrStateFolder -Path $script:CsrRoot
-    if ($why) { throw $why }
+    # Lock the folder first, so nobody else can add an entry, then clear what was there before.
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
     Set-Acl -LiteralPath $script:CsrRoot -AclObject $acl
-    [IO.File]::WriteAllBytes((Join-Path $script:CsrRoot 'worker.ps1'), [IO.File]::ReadAllBytes($PSCommandPath))
+    $why = Clear-CsrStateFolder -Path $script:CsrRoot
+    if ($why) { throw $why }
+    # CreateNew: a file that appeared after the clear fails here instead of being reused.
+    $bytes = [IO.File]::ReadAllBytes($PSCommandPath)
+    $fs = [IO.File]::Open((Join-Path $script:CsrRoot 'worker.ps1'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $a = New-ScheduledTaskAction -Execute $exe -Argument $ArgumentLine
     $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -118,7 +122,7 @@ $script:CsrStartTask = { param($ArgumentLine)
 function Get-CsrLeaf { param([string]$Path) ($Path -split '\\')[-1] }
 function Get-CsrStem { param([string]$Path) (Get-CsrLeaf $Path) -replace '\.[^.]*\z', '' }
 
-# Before the folder is locked down: a link in it (top level: only these names are used), or a leftover work folder, is refused (a user may have
+# After the folder is locked down: a link in it (top level: only these names are used), or a leftover work folder, is refused (a user may have
 # planted it while the folder was writable); worker.ps1 and state.json.tmp are deleted so the fresh files inherit the
 # protected ACL instead of keeping an explicit ACE. Returns a refusal reason or $null.
 function Clear-CsrStateFolder {
