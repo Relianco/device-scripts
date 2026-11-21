@@ -1,0 +1,6 @@
+{
+  "name": "Microsoft Entra hybrid join",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Optional. Without it (Mode Report) the run is read-only: dsregcmd /status facts, the client-side SCP values in HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\CDJ\\AAD, the Automatic-Device-Join task and AD domain reachability. {\"Mode\":\"Join\",\"TenantId\":\"00000000-0000-0000-0000-000000000000\",\"TenantName\":\"contoso.onmicrosoft.com\"} (base64 eyJNb2RlIjoiSm9pbiIsIlRlbmFudElkIjoiMDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAwIiwiVGVuYW50TmFtZSI6ImNvbnRvc28ub25taWNyb3NvZnQuY29tIn0=) writes TenantId and TenantName there after a backup to C:\\ProgramData\\Relian\\hybrid-join\\, reads them back, then starts the join task and reports again. Mode Scp writes the values only. TenantId must be a GUID and TenantName a domain name; there are no defaults. Refuses a device that is not domain-joined; an AzureAdJoined device is reported and left alone. Rollback: restore the backed-up values, or delete the CDJ\\AAD key when the backup says keyExists false. Never runs dsregcmd /leave."
+}
