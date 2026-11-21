@@ -401,7 +401,7 @@ try {
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\OneDrive" @{ Version = '24.200.1.0001'; SilentBusinessConfigCompleted = 1; KfmBlockOptOut = 0 }
     Add-Reg "HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" @{ Desktop = '%USERPROFILE%\OneDrive - Example\Desktop'; Personal = "$profileDir\Documents"; 'My Pictures' = '\\fs01\home\alex\Pictures'; Favorites = 'x' }
     $desk = New-Dir (Join-Path $profileDir 'Desktop')
-    foreach ($n in @('mail.pst', 'notes.one', 'Open Notebook.onetoc2', '_vti_x.txt', 'CON.txt', 'Contract.docx', 'desktop.ini', '~$draft.docx')) { New-File (Join-Path $desk $n) }
+    foreach ($n in @('mail.pst', 'notes.one', 'Open Notebook.onetoc2', '_vti_x.txt', '.lock', 'Contract.docx', 'desktop.ini', '~$draft.docx')) { New-File (Join-Path $desk $n) }
     $deep = New-Dir (Join-Path $desk 'Sub')
     $long = Join-Path $deep ('n' * [Math]::Max(1, 252 - $deep.Length))
     New-File $long
