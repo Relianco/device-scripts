@@ -127,10 +127,11 @@ $script:VgStartService = { param($Name) Start-Service -Name $Name }
 # Sends the stop and returns: Stop-Service waits on a StopPending service with no limit; Wait-Vg bounds the wait.
 $script:VgStopService = { param($Name) $s = Get-Service -Name $Name -ErrorAction SilentlyContinue; if ($null -ne $s -and [string]$s.Status -ne 'Stopped') { $s.Stop() } }
 # Held: not stopped, or marked for delete (DeleteFlag), which makes the agent MSI's RegisterCom fail with 1603.
+$script:VgDeletePending = { param($Name) [int](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name 'DeleteFlag' -ErrorAction SilentlyContinue).DeleteFlag -eq 1 }
 $script:VgServiceHeld = {
     param($Name)
     # DeleteFlag first: a service marked for delete can already be missing from Get-Service while its key remains.
-    if ([int](Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$Name" -Name 'DeleteFlag' -ErrorAction SilentlyContinue).DeleteFlag -eq 1) { return $true }
+    if (& $script:VgDeletePending $Name) { return $true }
     $s = Get-Service -Name $Name -ErrorAction SilentlyContinue
     $null -ne $s -and [string]$s.Status -ne 'Stopped'
 }
@@ -160,11 +161,14 @@ $script:VgGetNet = {
                 ForEach-Object { [pscustomobject]@{ Ip = [string]$_.IPAddress; Prefix = [int]$_.PrefixLength; Manual = [string]$_.PrefixOrigin -eq 'Manual'; SkipAsSource = [bool]$_.SkipAsSource } })
             # Routes set by hand: every persistent route, plus active-only routes with protocol NetMgmt (DHCP, RA and
             # system routes have other protocols). Persistent says which store to put the route back in.
+            # Active and Persistent say which store holds the route; each copy is restored and checked on its own.
             Routes = @(& {
+                $key = { "$($_.DestinationPrefix)|$($_.NextHop)" }
                 $persist = @(Get-NetRoute -InterfaceIndex $i -PolicyStore PersistentStore -ErrorAction SilentlyContinue)
-                $keys = @($persist | ForEach-Object { "$($_.DestinationPrefix)|$($_.NextHop)" })
-                @($persist) + @(Get-NetRoute -InterfaceIndex $i -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { [string]$_.Protocol -eq 'NetMgmt' }) |
-                    ForEach-Object { [pscustomobject]@{ Prefix = [string]$_.DestinationPrefix; NextHop = [string]$_.NextHop; Metric = [int]$_.RouteMetric; Persistent = "$($_.DestinationPrefix)|$($_.NextHop)" -in $keys } } |
+                $active = @(Get-NetRoute -InterfaceIndex $i -PolicyStore ActiveStore -ErrorAction SilentlyContinue | Where-Object { [string]$_.Protocol -eq 'NetMgmt' })
+                $pk = @($persist | ForEach-Object $key); $ak = @($active | ForEach-Object $key)
+                @($persist) + @($active) |
+                    ForEach-Object { $k = & $key; [pscustomobject]@{ Prefix = [string]$_.DestinationPrefix; NextHop = [string]$_.NextHop; Metric = [int]$_.RouteMetric; Active = $k -in $ak; Persistent = $k -in $pk } } |
                     Sort-Object -Property Prefix, NextHop -Unique
             })
             # Default gateways in use, for the reachability check.
@@ -301,7 +305,13 @@ function Wait-VgPing([string]$Ip) {
 }
 
 # The saved route is on the adapter, and in the persistent store if it was there.
-function Test-VgRoute($Nic, $Route) { @($Nic.Routes | Where-Object { $_.Prefix -eq $Route.Prefix -and $_.NextHop -eq $Route.NextHop -and ($_.Persistent -or -not $Route.Persistent) }).Count -gt 0 }
+# The store the saved route still misses on the adapter: Both, ActiveStore, PersistentStore, or '' when it is all there.
+function Get-VgRouteGap($Nic, $Route) {
+    $cur = @($Nic.Routes | Where-Object { $_.Prefix -eq $Route.Prefix -and $_.NextHop -eq $Route.NextHop })
+    $needActive = $Route.Active -and @($cur | Where-Object { $_.Active }).Count -eq 0
+    $needPersist = $Route.Persistent -and @($cur | Where-Object { $_.Persistent }).Count -eq 0
+    if ($needActive -and $needPersist) { 'Both' } elseif ($needActive) { 'ActiveStore' } elseif ($needPersist) { 'PersistentStore' } else { '' }
+}
 
 # Waits for the saved adapters (by MAC), sets back what was set by hand and is missing, then checks the result.
 function Restore-VgNetwork($Saved, $r) {
@@ -324,8 +334,8 @@ function Restore-VgNetwork($Saved, $r) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { Apply "$($c.Alias) ip $($a.Ip)/$($a.Prefix)" { & $script:VgAddIp $c $a.Ip $a.Prefix $s.Dhcp $a.SkipAsSource } }
         }
         foreach ($rt in @($s.Routes)) {
-            if (-not (Test-VgRoute $c $rt)) {
-                $store = if (-not $rt.Persistent) { 'ActiveStore' } elseif (@($c.Routes | Where-Object { $_.Prefix -eq $rt.Prefix -and $_.NextHop -eq $rt.NextHop }).Count -gt 0) { 'PersistentStore' } else { 'Both' }
+            $store = Get-VgRouteGap $c $rt
+            if ($store) {
                 Apply "$($c.Alias) route $($rt.Prefix) $($rt.NextHop) metric $($rt.Metric) $store" { & $script:VgAddRoute $c $rt.Prefix $rt.NextHop $rt.Metric $store }
             }
         }
@@ -348,7 +358,7 @@ function Restore-VgNetwork($Saved, $r) {
             if ($a.Ip -notin @($c.Addresses | ForEach-Object { $_.Ip })) { $errors.Add("$($c.Alias) is missing $($a.Ip)") }
         }
         foreach ($rt in @($s.Routes)) {
-            if (-not (Test-VgRoute $c $rt)) { $errors.Add("$($c.Alias) is missing route $($rt.Prefix) via $($rt.NextHop)") }
+            $gap = Get-VgRouteGap $c $rt; if ($gap) { $errors.Add("$($c.Alias) is missing route $($rt.Prefix) via $($rt.NextHop) ($gap)") }
         }
         # A new NIC instance can take a few seconds to resolve its gateway: up to 30 s.
         foreach ($g in @($s.Reachable)) { if (-not (Wait-VgPing $g)) { $errors.Add("$($c.Alias) gateway $g answered before the driver update and is unreachable now") } }
@@ -516,8 +526,9 @@ function Invoke-VgMain {
     # Read after the agent MSI, which resets it.
     $wantVss = if ($VssOption -ne '') { $VssOption } else { $vssBefore }
     if ($wantVss -ne '' -and $null -ne $vss -and (& $script:VgGetVssOption) -ne $wantVss) { & $script:VgSetVssOption ([int]$wantVss) }
-    # Cleared only once the provider key holds the value; until then later runs keep putting it back.
-    if ($null -ne $vss -and $wantVss -ne '' -and (& $script:VgGetVssOption) -eq $wantVss) { & $script:VgClearPendingVss }
+    # Cleared only after the agent step succeeded (or was not needed), the provider is not being deleted, and its key
+    # holds the value; until then later runs keep putting it back.
+    if ($agentCode -eq 0 -and $null -ne $vss -and -not (& $script:VgDeletePending $script:VgVss) -and $wantVss -ne '' -and (& $script:VgGetVssOption) -eq $wantVss) { & $script:VgClearPendingVss }
     $r.VssOption = [string](& $script:VgGetVssOption)
 
     # A guest that lost part of its network config is the worse failure; the snapshot JSON has what to set by hand.

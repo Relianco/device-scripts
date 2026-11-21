@@ -57,7 +57,7 @@ function New-Fake {
         Manufacturer = $Manufacturer; Pnp = $Pnp; DriverExit = $DriverExit; AgentExit = $AgentExit; AgentStarts = $AgentStarts; Held = $Held
         Versions = @{ 'Virtio-win-driver-installer' = $Driver; 'QEMU guest agent' = $Agent; 'Virtio-win-guest-tools' = $Bundle }
         Services = @{}; Calls = [System.Collections.Generic.List[string]]::new(); Delays = 0
-        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Unreachable = @(); UnreachableAfter = $null; FailRemovesAgent = $false; HeldAfterFail = 0; Model = 'Standard PC (Q35 + ICH9, 2009)'; AgentCode = '{00000000-0000-4000-8000-000000000001}'; Args = @(); DropRoute = ''; Pending = ''; Locked = [System.Collections.Generic.List[string]]::new()
+        Net = $Net; NetAfter = $(if ($null -eq $NetAfter) { $Net } else { $NetAfter }); Processes = $idle; Writers = $stable; VssOption = ''; Modes = @{}; FailIp = ''; StopFails = $false; Owner = 'S-1-5-18'; OwnerOf = @{}; Unreachable = @(); UnreachableAfter = $null; FailRemovesAgent = $false; HeldAfterFail = 0; Model = 'Standard PC (Q35 + ICH9, 2009)'; AgentCode = '{00000000-0000-4000-8000-000000000001}'; Args = @(); DropRoute = ''; Pending = ''; DeleteMarked = $false; Locked = [System.Collections.Generic.List[string]]::new()
     }
     if ($Services) {
         $f.Services['QEMU-GA'] = [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' }
@@ -99,10 +99,14 @@ function New-Fake {
     $script:VgAddRoute = {
         param($Nic, $Prefix, $NextHop, $Metric, $Store)
         $script:Fake.Calls.Add("route $($Nic.Alias) $Prefix $NextHop metric $Metric$(@{ Both = ''; ActiveStore = ' active'; PersistentStore = ' persistent-only' }[$Store])")
-        $Persistent = $Store -ne 'ActiveStore'
         # DropRoute: the change reports success but the route is not there.
-        if ($Prefix -ne $script:Fake.DropRoute) { $Nic.Routes = @($Nic.Routes) + [pscustomobject]@{ Prefix = $Prefix; NextHop = $NextHop; Metric = $Metric; Persistent = [bool]$Persistent } }
+        if ($Prefix -eq $script:Fake.DropRoute) { return }
+        $e = $Nic.Routes | Where-Object { $_.Prefix -eq $Prefix -and $_.NextHop -eq $NextHop } | Select-Object -First 1
+        if ($null -eq $e) { $e = [pscustomobject]@{ Prefix = $Prefix; NextHop = $NextHop; Metric = $Metric; Active = $false; Persistent = $false }; $Nic.Routes = @($Nic.Routes) + $e }
+        if ($Store -ne 'PersistentStore') { $e.Active = $true }
+        if ($Store -ne 'ActiveStore') { $e.Persistent = $true }
     }
+    $script:VgDeletePending = { param($Name) $script:Fake.DeleteMarked }
     $script:VgGetPendingVss = { $script:Fake.Pending }
     $script:VgSetPendingVss = { param($Value) $script:Fake.Pending = [string]$Value }
     $script:VgClearPendingVss = { $script:Fake.Pending = '' }
@@ -266,6 +270,20 @@ try {
     $f.Calls.Clear()
     $r = Run
     Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*msi agent,*vss-option 5' -and $r.Result.VssOption -eq '5' -and $f.Pending -eq '') "run 2 restores 5 and clears it: $($r.ExitCode) $(Calls) '$($f.Pending)'"
+    # A failed agent step keeps the pending value even when the provider key still shows it (service being deleted).
+    $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -AgentExit @(1603)
+    $f.VssOption = '5'
+    $r = Run
+    Assert ($r.ExitCode -eq 22 -and $f.Pending -eq '5') "failed agent keeps pending: $($r.ExitCode) '$($f.Pending)'"
+    # Agent current but its provider service is marked for delete: kept; once the delete is gone, written and cleared.
+    $f.AgentExit = @(0)
+    $f.Versions['QEMU guest agent'] = '110.2.3'
+    $f.DeleteMarked = $true
+    $r = Run
+    Assert ($f.Pending -eq '5') "marked for delete keeps pending: '$($f.Pending)'"
+    $f.DeleteMarked = $false
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and $f.Pending -eq '') "cleared once the provider is healthy: '$($f.Pending)'"
     # The parameter wins over a pending value, and the pending value is cleared once written.
     $f = New-Fake -Driver '0.1.302' -Agent '110.2.3'
     $f.Pending = '5'
@@ -284,7 +302,7 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 1 -and (Calls) -ceq 'download,msi driver,dns Ethernet 2 192.0.2.53') "restore after a failed driver MSI: $(Calls)"
     $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true; SkipAsSource = $false }
-    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5; Persistent = $true }
+    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5; Active = $true; Persistent = $true }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($gw) -StaticDns @('192.0.2.53'))) -NetAfter @((Nic -Alias 'Ethernet 2'))
     $f.FailIp = '198.51.100.10'
     $r = Run
@@ -453,7 +471,7 @@ try {
     Assert ($r.Result.NetSnapshot.StartsWith($dir) -and [string]$snap[0].Mac -eq $mac -and @($snap[0].StaticDnsV4).Count -eq 2 -and [string]$snap[0].Alias -eq 'Ethernet') 'snapshot written as JSON to the log dir'
     # Static address and gateway missing on the new instance: added back; DHCP-assigned ones are left alone.
     $ip = [pscustomobject]@{ Ip = '198.51.100.10'; Prefix = 24; Manual = $true; SkipAsSource = $false }
-    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5; Persistent = $true }
+    $gw = [pscustomobject]@{ Prefix = '0.0.0.0/0'; NextHop = '198.51.100.1'; Metric = 5; Active = $true; Persistent = $true }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($gw) -StaticDns $dns)) -NetAfter @((Nic -Alias 'Ethernet 2' -StaticDns $dns))
     $r = Run
     Assert ((Calls) -clike 'download,msi driver,ip Ethernet 2 198.51.100.10/24 dhcp=False,route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,start*') "static IP re-applied: $(Calls)"
@@ -491,13 +509,13 @@ try {
     Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network-.*\.json' -and $r.Result.Reason -match 'restore') "driver failure reason: $($r.Result.Reason)"
 
     # Every manual persistent route with its metric, a manual interface metric and SkipAsSource come back.
-    $sub = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Persistent = $true }
+    $sub = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Active = $true; Persistent = $true }
     $second = [pscustomobject]@{ Ip = '198.51.100.11'; Prefix = 24; Manual = $true; SkipAsSource = $true }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip, $second) -Routes @($gw, $sub) -MetricV4 15)) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip)))
     $r = Run
     Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*ip Ethernet 2 198.51.100.11/24 dhcp=False skipAsSource,route Ethernet 2 0.0.0.0/0 198.51.100.1 metric 5,route Ethernet 2 10.0.0.0/8 198.51.100.254 metric 50,metric Ethernet 2 IPv4 15,*') "routes, metric, SkipAsSource: $(Calls)"
     # A route that lived only in the active store comes back there; a route that does not come back fails the run.
-    $active = [pscustomobject]@{ Prefix = '172.16.0.0/12'; NextHop = '198.51.100.253'; Metric = 20; Persistent = $false }
+    $active = [pscustomobject]@{ Prefix = '172.16.0.0/12'; NextHop = '198.51.100.253'; Metric = 20; Active = $true; Persistent = $false }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($active))) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip)))
     $r = Run
     Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*route Ethernet 2 172.16.0.0/12 198.51.100.253 metric 20 active,*') "active-store route: $(Calls)"
@@ -507,10 +525,16 @@ try {
     Assert ($r.ExitCode -eq 1 -and (@($r.Result.NetError) -join ' ') -match 'missing route 172\.16\.0\.0/12') "route not back: $(@($r.Result['NetError']) -join ' ')"
 
     # A persistent route found only in the active store is not restored yet: it would vanish at the next boot.
-    $activeCopy = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Persistent = $false }
+    $activeCopy = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Active = $true; Persistent = $false }
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($sub))) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip) -Routes @($activeCopy)))
     $r = Run
     Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*route Ethernet 2 10.0.0.0/8 198.51.100.254 metric 50 persistent-only,*') "persistent route re-persisted: $(Calls)"
+
+    # A route in both stores whose active copy is gone while the persistent copy survived: the active copy comes back.
+    $persistOnly = [pscustomobject]@{ Prefix = '10.0.0.0/8'; NextHop = '198.51.100.254'; Metric = 50; Active = $false; Persistent = $true }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Routes @($sub))) -NetAfter @((Nic -Alias 'Ethernet 2' -Dhcp $false -Addresses @($ip) -Routes @($persistOnly)))
+    $r = Run
+    Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*route Ethernet 2 10.0.0.0/8 198.51.100.254 metric 50 active,*') "active copy restored: $(Calls)"
 
     # An adapter that was Up and is still not Up after 120 s fails the run.
     $f = New-Fake -Agent '110.2.3' -Net @((Nic)) -NetAfter @((Nic -Status 'Disconnected'))
