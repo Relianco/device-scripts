@@ -117,6 +117,8 @@ New-Item -ItemType Directory -Path $dir | Out-Null
 $script:Payload = Join-Path $dir 'payload.msi'
 [System.IO.File]::WriteAllText($script:Payload, 'fake msi')
 $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $script:Payload).Hash.ToLowerInvariant()
+# Downloads are staged under this test's own folder.
+$script:VgTempRoot = $dir
 function Run { param([string]$Action = 'Install', [string]$Pin = '0.1.302', [string]$Sha = $sha, [string]$AgentSha = $sha, [string]$Url = 'https://example.invalid/virtio-win-gt-x64.msi', [string]$AgentUrl = 'https://example.invalid/qemu-ga-x86_64.msi', [string]$AgentPin = '110.2.3', [string]$Vss = '')
     Invoke-VgMain -Action $Action -PinVersion $Pin -DriverUrl $Url -DriverSha256 $Sha -AgentVersion $AgentPin -AgentUrl $AgentUrl -AgentSha256 $AgentSha -CancelPath '' -LogRoot $dir -VssOption $Vss }
 function Calls { $script:Fake.Calls -join ',' }
@@ -188,7 +190,7 @@ try {
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Dhcp $false -Addresses @($ip) -Gateways @($gw) -StaticDns @('192.0.2.53'))) -NetAfter @((Nic -Alias 'Ethernet 2'))
     $f.FailIp = '198.51.100.10'
     $r = Run
-    Assert ($r.ExitCode -eq 0 -and (Calls) -clike '*route Ethernet 2 0.0.0.0/0 198.51.100.1,dns Ethernet 2 192.0.2.53*' -and @($r.Result.NetError).Count -eq 1 -and $r.Result.NetError[0] -match 'address in use') "failed address does not stop the rest: $(Calls)"
+    Assert ($r.ExitCode -eq 1 -and $r.Result.Reason -match 'network restore incomplete' -and (Calls) -clike '*route Ethernet 2 0.0.0.0/0 198.51.100.1,dns Ethernet 2 192.0.2.53*' -and @($r.Result.NetError).Count -eq 1 -and $r.Result.NetError[0] -match 'address in use') "failed address does not stop the rest: $(Calls)"
 
     # An agent step that throws is reported as 22 and the old agent still runs again.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
@@ -214,7 +216,7 @@ try {
     $r = Run
     Assert ($r.ExitCode -eq 20 -and (Calls) -ceq 'download') "backup during the driver download: $($r.ExitCode) $(Calls)"
     # An MSI swapped after its hash check is not run: exit 1, not 22.
-    function Swap([string]$Name) { Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter 'relian-virtio-*' -Directory | ForEach-Object { $p = Join-Path $_.FullName $Name; if (Test-Path -LiteralPath $p) { [System.IO.File]::WriteAllText($p, 'swapped') } } }
+    function Swap([string]$Name) { Get-ChildItem -LiteralPath $script:VgTempRoot -Filter 'relian-virtio-*' -Directory | ForEach-Object { $p = Join-Path $_.FullName $Name; if (Test-Path -LiteralPath $p) { [System.IO.File]::WriteAllText($p, 'swapped') } } }
     $f = New-Fake
     $script:VgGetNet = { Swap 'virtio-win-gt-x64.msi'; @() }
     $r = Run
@@ -274,10 +276,10 @@ try {
     $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($dhcpIp))) -NetAfter @((Nic))
     $r = Run
     Assert ((Calls) -notmatch 'ip |route |dns ' -and @($r.Result.NetReapplied).Count -eq 0) "DHCP config left alone: $(Calls)"
-    # The adapter does not come back: bounded wait, reported, the run goes on.
-    $f = New-Fake -Agent '110.2.3' -Net @((Nic -StaticDns $dns)) -NetAfter @()
+    # The adapter does not come back: bounded wait, the agent step still runs, the run fails with the snapshot path.
+    $f = New-Fake -Agent '109.1.0' -Net @((Nic -StaticDns $dns)) -NetAfter @()
     $r = Run
-    Assert ($r.ExitCode -eq 0 -and $f.Delays -eq 24 -and @($r.Result.NetMissing) -contains $mac) "adapter missing: $($f.Delays)"
+    Assert ($r.ExitCode -eq 1 -and (Calls) -clike '*msi agent,start QEMU-GA' -and $r.Result.Reason -match 'network-' -and $f.Delays -eq 24 -and @($r.Result.NetMissing) -contains $mac) "adapter missing: $($f.Delays)"
     # Agent-only run takes no snapshot.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -Net @((Nic -StaticDns $dns))
     $r = Run

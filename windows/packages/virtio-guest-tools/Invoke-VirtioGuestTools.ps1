@@ -89,7 +89,9 @@ $script:VgGetService = {
 }
 $script:VgSetStartType = { param($Name, $Type) Set-Service -Name $Name -StartupType $Type }
 $script:VgStartService = { param($Name) Start-Service -Name $Name }
-$script:VgStopService = { param($Name) Stop-Service -Name $Name -Force -ErrorAction SilentlyContinue }
+# Sends the stop and returns: Stop-Service waits on a StopPending service with no limit; Wait-Vg bounds the wait.
+$script:VgStopService = { param($Name) $s = Get-Service -Name $Name -ErrorAction SilentlyContinue; if ($null -ne $s -and [string]$s.Status -ne 'Stopped') { try { $s.Stop() } catch { } } }
+$script:VgTempRoot = [System.IO.Path]::GetTempPath()
 # Held: not stopped, or marked for delete (DeleteFlag), which makes the agent MSI's RegisterCom fail with 1603.
 $script:VgServiceHeld = {
     param($Name)
@@ -303,7 +305,7 @@ function Invoke-VgMain {
         if ($busy) { $r.Status = 'backupRunning'; return Done 20 $busy }
         New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
         $stamp = Get-Date -Format 'yyyyMMddHHmmss'
-        $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-virtio-' + [guid]::NewGuid().ToString('n'))
+        $cache = Join-Path $script:VgTempRoot ('relian-virtio-' + [guid]::NewGuid().ToString('n'))
         New-Item -ItemType Directory -Path $cache -Force | Out-Null
         try {
             if ($needDriver) {
@@ -357,6 +359,8 @@ function Invoke-VgMain {
     if ($VssOption -ne '' -and $null -ne $vss -and (& $script:VgGetVssOption) -ne $VssOption) { & $script:VgSetVssOption ([int]$VssOption) }
     $r.VssOption = [string](& $script:VgGetVssOption)
 
+    # A guest that lost part of its network config is the worse failure; the snapshot JSON has what to set by hand.
+    if ($r.Contains('NetMissing') -or $r.Contains('NetError')) { return Done 1 "network restore incomplete, see $($r.NetSnapshot)" }
     if ($agentCode -ne 0) { $r.Status = if ($agentCode -eq 1) { 'error' } else { $r.AgentStep }; return Done $agentCode $r.AgentReason }
     if ($null -eq $ga) { return Done 1 "$($script:VgAgent) service is missing after install" }
     if ($VssOption -ne '' -and $null -eq $vss) { return Done 1 'VssOption given but the VSS provider service is missing' }

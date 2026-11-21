@@ -27,7 +27,7 @@ The bundle is a WiX Burn chain with one rollback boundary. When the agent MSI fa
    - The bundle entry "Virtio-win-guest-tools" is reported as `BundleVersion` and never decides. It can say an older bundle is installed while the driver MSI was rolled back and is not registered at all.
 4. If a step is needed and a backup runs, exit 20 (`backupRunning`) before anything changes.
 5. Drivers: download, save the network (below), check for a backup again (exit 20), `msiexec /i virtio-win-gt-x64.msi /qn /norestart /l*v`, restore the network (also after a failed MSI). Failure exits 1; the agent step does not run.
-6. Agent: check for a backup again (exit 20). Download. Stop `QEMU-GA` and `QEMU Guest Agent VSS Provider`, then wait up to 120 s until neither runs nor is marked for delete (`DeleteFlag` under the service key). If one still is, skip the MSI: exit 21 (`agentServiceHeld`). Check for a backup once more (exit 20). Then `msiexec /i qemu-ga-x86_64.msi /qn /norestart /l*v`; a failure exits 22 (`agentInstallFailed`).
+6. Agent: check for a backup again (exit 20). Download. Send a stop to `QEMU-GA` and `QEMU Guest Agent VSS Provider` (without waiting on it), then wait up to 120 s until neither runs nor is marked for delete (`DeleteFlag` under the service key). If one still is, skip the MSI: exit 21 (`agentServiceHeld`). Check for a backup once more (exit 20). Then `msiexec /i qemu-ga-x86_64.msi /qn /norestart /l*v`; a failure exits 22 (`agentInstallFailed`).
 7. Always: set `QEMU-GA` to Automatic and start it (also the old one after a skipped or failed agent step), keep the VSS provider from Disabled, and write `VssOption` when given.
 
 The package never restarts the machine. `RebootRequired` is true when an MSI exits 3010 or 1641.
@@ -43,14 +43,14 @@ A NetKVM update can give the NIC a new device instance. Static addresses survive
 
 Before the driver MSI the package writes every Up adapter to `network-<time>.json` in the log folder: MAC, alias, IPv4 DHCP state, addresses (`Manual` for `PrefixOrigin Manual`), default gateways (`Manual` for route protocol `NetMgmt`), the DNS servers in use, and `StaticDns`: the interface's `NameServer` value under `Tcpip\Parameters\Interfaces\{guid}` (and `Tcpip6`), which holds only hand-set servers.
 
-After the driver MSI it waits up to 120 s for each saved MAC to be Up again. Then, on the adapter with that MAC, it adds back missing manual addresses (turning IPv4 DHCP off when the adapter was static), missing manual gateways, and the hand-set DNS servers when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own.
+After the driver MSI it waits up to 120 s for each saved MAC to be Up again. Then, on the adapter with that MAC, it adds back missing manual addresses (turning IPv4 DHCP off when the adapter was static), missing manual gateways, and the hand-set DNS servers when they differ. `NetReapplied` lists what it set; `NetMissing` lists MACs that did not come back; `NetError` lists changes that failed. Each change is tried on its own. Either one makes the run exit 1 after the agent step, with the snapshot path in `Reason`.
 
 ## Exit codes
 
 | Exit | Status | Meaning |
 |---|---|---|
 | 0 | `installed`, `updated`, `current`, `agentChannelMissing`, `notQemuGuest`, `disabled` | Done or nothing to do. |
-| 1 | `error` | Bad input, download or hash failure, driver MSI failure, or the agent did not start with a channel present. |
+| 1 | `error` | Bad input, download or hash failure, driver MSI failure, network restore incomplete (`NetMissing` or `NetError`; this wins over 20-22), or the agent did not start with a channel present. |
 | 20 | `backupRunning` | A Comet job or VSS snapshot is running. Run again later. Drivers may already be done (`DriverVersion`). |
 | 21 | `agentServiceHeld` | An agent service was still running or marked for delete after 120 s. The agent MSI did not run; the drivers are installed. |
 | 22 | `agentInstallFailed` | The agent MSI failed (`AgentExit`) or left the agent below the pin. The drivers are installed. |
