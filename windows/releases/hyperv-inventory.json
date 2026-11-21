@@ -1,0 +1,6 @@
+{
+  "name": "Hyper-V host inventory",
+  "kind": "diagnostic",
+  "installsSoftware": false,
+  "packageArguments": "Optional: {\"Offset\":\"<nextOffset from the previous run>\"} to page VMs (sorted by name, up to 10 per page; host sections on the first page only). Base64 in PackageArguments. Read-only stdout JSON, at most 8000 UTF-8 bytes; status hyperVAbsent when the Hyper-V module is missing; no VM, host or custom field changes."
+}
