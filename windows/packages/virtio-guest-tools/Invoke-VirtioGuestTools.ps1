@@ -96,16 +96,20 @@ $script:VgLockDir = {
 }
 $script:VgOwnerSid = { param($Path) (Get-Acl -LiteralPath $Path).GetOwner([System.Security.Principal.SecurityIdentifier]).Value }
 function New-VgPrivateDir([string]$Path) {
-    # A junction planted by a local user would send the ACL change and SYSTEM's writes elsewhere.
-    foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
-        if ((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { throw "$p is a reparse point" }
+    # A junction planted by a local user would send the ACL change and SYSTEM's writes elsewhere. A folder a local
+    # user created first (and so owns) is refused, never re-ACLed: the user could swap our folder through the parent,
+    # or keep a WRITE_DAC handle open on the folder itself.
+    $check = {
+        foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
+            if (-not (Test-Path -LiteralPath $p)) { continue }
+            if ((Get-Item -LiteralPath $p -Force).Attributes -band [System.IO.FileAttributes]::ReparsePoint) { throw "$p is a reparse point" }
+            if ((& $script:VgOwnerSid $p) -notin @('S-1-5-18', 'S-1-5-32-544')) { throw "$p is not owned by SYSTEM or Administrators" }
+        }
     }
-    # A folder a local user created first (and so owns) is refused, never re-ACLed: the user could swap our folder
-    # through the parent, or keep a WRITE_DAC handle open on the folder itself.
-    foreach ($p in @((Split-Path -Path $Path -Parent), $Path)) {
-        if ((Test-Path -LiteralPath $p) -and (& $script:VgOwnerSid $p) -notin @('S-1-5-18', 'S-1-5-32-544')) { throw "$p is not owned by SYSTEM or Administrators" }
-    }
+    & $check
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    # Again after the create: a folder slipped in between the check and New-Item is caught here.
+    & $check
     & $script:VgLockDir $Path
 }
 $script:VgGetService = {

@@ -330,6 +330,14 @@ try {
     try { [void](Run) } catch { $err = $_.Exception.Message }
     Assert ($err -match [regex]::Escape($dir) -and $err -match 'not owned' -and (Calls) -ceq '' -and @($f.Locked).Count -eq 0) "user-owned log folder: $err $(Calls)"
 
+    # A folder slipped in between the check and the create (first run) is caught before the ACL change.
+    $f = New-Fake
+    $fresh = Join-Path $dir 'fresh-logs'
+    $f.OwnerOf[$fresh] = 'S-1-5-21-1-2-3-1001'
+    $err = ''
+    try { [void](Invoke-VgMain -Action 'Install' -PinVersion '0.1.302' -DriverUrl 'https://example.invalid/a.msi' -DriverSha256 $sha -AgentVersion '110.2.3' -AgentUrl 'https://example.invalid/qemu-ga.msi' -AgentSha256 $sha -CancelPath '' -LogRoot $fresh) } catch { $err = $_.Exception.Message }
+    Assert ($err -match 'not owned' -and @($f.Locked).Count -eq 0 -and (Calls) -ceq '') "folder created in the race: $err"
+
     # After the agent services were stopped, a throw while reading versions still starts the agent again.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0'
     $entries = $script:VgUninstallEntries
