@@ -48,6 +48,8 @@ Assert ($top.code -eq '0x80073701' -and $top.name -eq 'ERROR_SXS_ASSEMBLY_MISSIN
 Assert (@($c.codes | Where-Object { $_.code -eq '0x800f081f' }).Count -eq 1) 'bare code counted'
 Assert (@($c.lastErrors).Count -eq 3 -and $c.lastErrors[-1] -notmatch $user) 'last errors, profile name redacted'
 $many = @(1..500 | ForEach-Object { '2026-11-20 19:10:00, Info CBS    (p)' + $t + 'CSI Payload Corrupt' + $t + '(n)' + $t + "amd64_x_$_\f.dll" })
+$fx = Get-CsCbsSummary -Lines @(('2026-11-20 19:10:00, Info CBS    (p)' + $t + 'CSI Payload Corrupt' + $t + $t + $t + '(w)' + $t + '(Fixed)' + $t + 'wow64_microsoft-windows-c_31bf_10.0.26100.1_none_3\c.dll'))
+Assert ($fx.unrepaired -eq 0 -and $fx.kinds['CSI Payload Corrupt'] -eq 1) 'a (w) (Fixed) row counts as repaired'
 $m = Get-CsCbsSummary -Lines $many
 Assert ($m.unrepaired -eq 500 -and @($m.items).Count -le 8) 'items capped, count kept'
 $e = Get-CsCbsSummary -Lines @()

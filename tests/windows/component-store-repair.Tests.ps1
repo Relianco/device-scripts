@@ -111,15 +111,15 @@ Assert (-not @($script:Calls | Where-Object { $_ -match 'RestoreHealth|sfc' })) 
 Reset
 $script:Health = 'Healthy'
 $s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-11-20' -MsuPath 'C:\msu'
-Assert ($s.status -eq 'done' -and $script:Calls[0] -eq 'dism.exe /Online /Cleanup-Image /RestoreHealth') "plain RestoreHealth first: $($script:Calls[0])"
+Assert ($s.status -eq 'done' -and $script:Calls[0] -eq 'dism.exe /Online /Cleanup-Image /RestoreHealth /NoRestart') "plain RestoreHealth first: $($script:Calls[0])"
 Assert (-not @($script:Calls | Where-Object { $_ -match 'expand|/Source' })) 'no source needed when Windows Update repairs it'
 Assert (@($script:Calls | Where-Object { $_ -eq 'sfc.exe /scannow' }).Count -eq 1 -and $s.health -eq 'Healthy') 'sfc then CheckHealth'
 
 Reset
-$script:Exits = @{ 'dism.exe /Online /Cleanup-Image /RestoreHealth' = -2146498529 }
+$script:Exits = @{ 'dism.exe /Online /Cleanup-Image /RestoreHealth /NoRestart' = -2146498529 }
 $s = Invoke-CsrWorker -Mode Repair -BackupDate '2026-11-20' -MsuPath 'C:\msu'
 $src = @($script:Calls | Where-Object { $_ -match '/Source:' })
-Assert ($src.Count -eq 1 -and $src[0] -match '/LimitAccess$') "first source succeeds, LimitAccess: $($src -join ' | ')"
+Assert ($src.Count -eq 1 -and $src[0] -match '/NoRestart /Source:\S+ /LimitAccess$') "first source succeeds, LimitAccess: $($src -join ' | ')"
 Assert ($src[0] -match '/Source:WIM:C:\\work\\[^ ]*kb5136489[^ ]*\.wim:1 /LimitAccess$') "inner wim tried first: $($src[0])"
 Assert (@($script:Calls | Where-Object { $_ -like 'expand.exe -F:* C:\msu\windows11.0-kb5136489*' }).Count -eq 1) 'msu expanded'
 $ex = @($script:Calls | Where-Object { $_ -like 'expand.exe*' })
@@ -183,7 +183,15 @@ $script:Os.build = 20348
 $script:Exits = @{ '*kb5043080*' = 14081 }
 $s = Invoke-CsrWorker -Mode InstallMsu -MsuPath 'C:\msu'
 $d = @($script:Calls | Where-Object { $_ -ne 'cleanup' })
-Assert ($d.Count -eq 1 -and $d[0] -like 'dism.exe /Online /Add-Package /PackagePath:C:\msu\windows11.0-kb5043080*.msu /NoRestart') 'older build: one file at a time, stops at the first failure'
+Assert ($d.Count -eq 1 -and $d[0] -like 'dism.exe /Online /Add-Package /PackagePath:C:\msu\windows11.0-kb5043080*.msu /NoRestart') 'Server 2022: one file at a time with DISM, stops at the first failure'
 Assert ($s.status -eq 'failed' -and $s.steps[0].hex -eq '0x00003701') 'exit 14081 is 0x3701'
+
+Reset
+$script:Os.build = 17763
+$script:Exits = @{ '*kb5043080*' = 2359302 }
+$s = Invoke-CsrWorker -Mode InstallMsu -MsuPath 'C:\msu'
+$d = @($script:Calls | Where-Object { $_ -ne 'cleanup' })
+Assert ($d.Count -eq 2 -and $d[0] -like 'wusa.exe C:\msu\windows11.0-kb5043080*.msu /quiet /norestart' -and $d[1] -like 'wusa.exe *kb5136489*') "Server 2016/2019: wusa, online DISM cannot take an msu: $($d -join ' | ')"
+Assert ($s.status -eq 'done') 'wusa already-installed (0x240006) is success'
 
 Write-Output 'component-store-repair tests passed'

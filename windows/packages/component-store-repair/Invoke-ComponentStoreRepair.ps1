@@ -17,9 +17,10 @@
       its expanded LCU .cab; then the image in WimPath (install.wim or install.esd) whose build and edition match this
       machine. After a successful repair, sfc /scannow, then CheckHealth; done only when that says Healthy. Expanded files are deleted at the end.
       An msu is only expanded when the system drive keeps 4x its size plus 2 GB free.
-    - InstallMsu: DISM /Add-Package /NoRestart for the .msu files in MsuPath. On build 26100 and later the whole folder
+    - InstallMsu: the .msu files in MsuPath. On build 26100 and later DISM /Add-Package /NoRestart on the whole folder
       in one call, so DISM installs the checkpoint update first; on older builds one file at a time, in name order,
-      stopping at the first failure. Exit 0 and 3010 are success; 3010 sets restartNeeded, nothing restarts.
+      stopping at the first failure: DISM on Server 2022, wusa /quiet /norestart before it (online DISM there takes
+      no .msu). Exit 0 and 3010 are success (wusa 0x240006, already installed, too); 3010 sets restartNeeded.
     Exit codes are recorded as numbers and HRESULT hex (14081 = 0x3701 ERROR_SXS_ASSEMBLY_MISSING,
     0x800f081f source missing), so results do not depend on the system language.
     Refused (exit 1) while dism.exe or sfc.exe runs or the task is already running. An empty PinVersion and
@@ -102,7 +103,10 @@ $script:CsrStartTask = { param($ArgumentLine)
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
     Set-Acl -LiteralPath $script:CsrRoot -AclObject $acl
-    [IO.File]::WriteAllBytes((Join-Path $script:CsrRoot 'worker.ps1'), [IO.File]::ReadAllBytes($PSCommandPath))
+    # A fresh file inherits the protected ACL; an old one could keep an explicit ACE that lets a user rewrite it.
+    $workerFile = Join-Path $script:CsrRoot 'worker.ps1'
+    if (Test-Path -LiteralPath $workerFile) { Remove-Item -LiteralPath $workerFile -Force }
+    [IO.File]::WriteAllBytes($workerFile, [IO.File]::ReadAllBytes($PSCommandPath))
     $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $a = New-ScheduledTaskAction -Execute $exe -Argument $ArgumentLine
     $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -220,7 +224,7 @@ function Invoke-CsrWorker {
             $state.health = & $script:CsrHealth 'ScanHealth'
             $state.status = if ($state.health -like 'failed*') { 'failed' } else { 'done' }
         } elseif ($Mode -eq 'Repair') {
-            $restore = @('/Online', '/Cleanup-Image', '/RestoreHealth')
+            $restore = @('/Online', '/Cleanup-Image', '/RestoreHealth', '/NoRestart')
             $rc = & $step 'RestoreHealth' (& $script:CsrNative 'dism.exe' $restore)
             if ($rc -ne 0) {
                 foreach ($src in @(Get-CsrSources -MsuPath $MsuPath -WimPath $WimPath -Os $os -Notes $notes)) {
@@ -238,12 +242,16 @@ function Invoke-CsrWorker {
         } else {
             $dir = ConvertTo-CsrPath $MsuPath
             # 24H2 and later: one call on the folder, so DISM applies the checkpoint update before the LCU.
+            # Before Server 2022 (20348) online DISM does not take an .msu, so wusa installs it.
             $targets = if ($os.build -ge 26100) { @($dir) } else { @(& $script:CsrListMsu $dir) }
             $state.status = 'done'
             foreach ($t in $targets) {
-                $rc = & $step 'Add-Package' (& $script:CsrNative 'dism.exe' @('/Online', '/Add-Package', "/PackagePath:$t", '/NoRestart')) $t
+                $run = if ($os.build -ge 20348) { & $script:CsrNative 'dism.exe' @('/Online', '/Add-Package', "/PackagePath:$t", '/NoRestart') }
+                       else { & $script:CsrNative 'wusa.exe' @($t, '/quiet', '/norestart') }
+                $rc = & $step 'Add-Package' $run $t
                 if ($rc -eq 3010) { $state.restartNeeded = $true }
-                if ($rc -ne 0 -and $rc -ne 3010) { $state.status = 'failed'; break }
+                # 2359302 (0x240006): wusa says the update is already installed.
+                if ($rc -ne 0 -and $rc -ne 3010 -and $rc -ne 2359302) { $state.status = 'failed'; break }
             }
         }
     } catch {

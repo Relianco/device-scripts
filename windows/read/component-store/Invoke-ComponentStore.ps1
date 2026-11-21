@@ -9,7 +9,7 @@
     - checkHealth: Repair-WindowsImage -Online -CheckHealth (DISM /CheckHealth). It reads the flag a previous scan left
       and changes nothing. Skipped while dism.exe runs (it would wait on the servicing lock); stopped after 45 seconds.
     - cbs: the last 16 MiB of CBS.log. Corruption rows a ScanHealth or RestoreHealth wrote ("(p)" rows; (n) is not
-      repaired), the last "Total Detected/Repaired Corruption" totals, the 10 most frequent HRESULT codes with their
+      repaired; (f) or (Fixed) is), the last "Total Detected/Repaired Corruption" totals, the 10 most frequent HRESULT codes with their
       symbolic name when the log gives one and the last time seen, and the last three Error lines.
     - wu: events 20 and 31 grouped by event id and error code with counts, first and last time and the newest KB numbers.
     - worker: state.json of the component-store-repair package (Scan, Repair or InstallMsu), when it has run.
@@ -25,7 +25,7 @@ $script:OutputMaxBytes = 7600
 $script:CbsTailBytes = 16MB
 $script:HealthSeconds = 45
 $script:CodeRx = [regex]::new('\b(0x[8cC][0-9a-fA-F]{7})\b(?:\s*-\s*([A-Z][A-Z0-9_]{2,}))?')
-$script:RowRx = [regex]::new('\(p\)\s+((?:CSI|CBS)[A-Za-z ]*?(?:Corrupt|Missing|Mismatch|Bad)[A-Za-z ]*?)\s+\(([a-z])\)\s+([^\t\r\n]+)')
+$script:RowRx = [regex]::new('\(p\)\s+((?:CSI|CBS)[A-Za-z ]*?(?:Corrupt|Missing|Mismatch|Bad)[A-Za-z ]*?)\s+\(([a-z])\)\s+(\(Fixed\)\s+)?([^\t\r\n]+)')
 $script:TimeRx = [regex]::new('\A(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)')
 $script:CvKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 $script:StatePath = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\ComponentStore\state.json'
@@ -108,9 +108,9 @@ function Get-CsCbsSummary {
         if ($row.Success) {
             $kind = $row.Groups[1].Value.Trim()
             $kinds[$kind] = 1 + [int]$kinds[$kind]
-            if ($row.Groups[2].Value -ne 'f') {
+            if ($row.Groups[2].Value -ne 'f' -and -not $row.Groups[3].Success) {
                 $unrepaired++
-                if ($items.Count -lt 8) { $items.Add((Protect-CsText ($kind + ' ' + $row.Groups[3].Value.Trim()) -Max 140)) }
+                if ($items.Count -lt 8) { $items.Add((Protect-CsText ($kind + ' ' + $row.Groups[4].Value.Trim()) -Max 140)) }
             }
             continue
         }
