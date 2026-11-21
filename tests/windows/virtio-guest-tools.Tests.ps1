@@ -469,6 +469,16 @@ try {
     $f.Unreachable = @('198.51.100.1')
     Assert ((Run).ExitCode -eq 0) 'a gateway that never answered ping is not a failure'
 
+    # A DHCP adapter is back only with a usable dynamic address in each family it had one in.
+    $lease = [pscustomobject]@{ Ip = '203.0.113.20'; Prefix = 24; Manual = $false; SkipAsSource = $false }
+    $ll = [pscustomobject]@{ Ip = 'fe80::1'; Prefix = 64; Manual = $false; SkipAsSource = $false }
+    $slaac = [pscustomobject]@{ Ip = '2001:db8::20'; Prefix = 64; Manual = $false; SkipAsSource = $false }
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($lease))) -NetAfter @((Nic -Addresses @($ll, $slaac)))
+    $r = Run
+    Assert ($r.ExitCode -eq 1 -and $f.Delays -eq 24 -and (@($r.Result.NetError) -join ' ') -match 'it was Up') "IPv6 only after an IPv4 lease: $($r.ExitCode) $($f.Delays)"
+    $f = New-Fake -Agent '110.2.3' -Net @((Nic -Addresses @($lease))) -NetAfter @((Nic -Addresses @($ll, $lease)))
+    Assert ((Run).ExitCode -eq 0 -and $f.Delays -eq 0) 'IPv4 lease back'
+
     # Agent-only run takes no snapshot.
     $f = New-Fake -Driver '0.1.302' -Agent '109.1.0' -Net @((Nic -StaticDns $dns))
     $r = Run

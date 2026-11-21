@@ -265,10 +265,16 @@ function Invoke-VgMsi([string]$Mode, [string]$Path, [string]$Log) {
     [int](& $script:VgRunMsi -Arguments @($Mode, ('"{0}"' -f $Path), '/qn', '/norestart', '/l*v', ('"{0}"' -f $Log)))
 }
 
-# A saved adapter is back when its MAC is on one adapter and, if it was Up, that adapter is Up and, if it had a
-# DHCP address, has an address again. Manual addresses are the restore's job, so they are not waited for.
+# A saved adapter is back when its MAC is on one adapter and, if it was Up, that adapter is Up with a usable dynamic
+# address (not 169.254 or fe80) in each family it had one in. Manual addresses are the restore's job, not waited for.
+function Get-VgDynamicFamilies($Nic) {
+    @($Nic.Addresses | Where-Object { -not $_.Manual -and $_.Ip -notmatch '^(169\.254\.|fe80:)' } | ForEach-Object { if ($_.Ip -match ':') { 6 } else { 4 } } | Sort-Object -Unique)
+}
 function Test-VgNicBack($s, $c) {
-    $null -ne $c -and ($s.Status -ne 'Up' -or ($c.Status -eq 'Up' -and (@($s.Addresses | Where-Object { -not $_.Manual }).Count -eq 0 -or @($c.Addresses).Count -gt 0)))
+    if ($null -eq $c) { return $false }
+    if ($s.Status -ne 'Up') { return $true }
+    $have = Get-VgDynamicFamilies $c
+    $c.Status -eq 'Up' -and @(Get-VgDynamicFamilies $s | Where-Object { $_ -notin $have }).Count -eq 0
 }
 function Find-VgNic($Now, [string]$Mac) { $m = @($Now | Where-Object { $_.Mac -eq $Mac }); if ($m.Count -eq 1) { $m[0] } }
 
