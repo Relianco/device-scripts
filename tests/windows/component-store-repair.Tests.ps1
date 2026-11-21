@@ -99,6 +99,10 @@ $script:Busy = 'dism.exe is running'
 $r = M -Mode Scan
 Assert ($r.ExitCode -eq 1 -and $r.Result.status -eq 'busy' -and -not $script:Started) 'busy refused'
 
+Reset
+$r = M -Mode Scan -BackupDate 'x -WimPath y'
+Assert ($r.ExitCode -eq 0 -and $script:Started -notmatch 'BackupDate|WimPath') "BackupDate only reaches the task for Repair: $script:Started"
+
 # ---- Worker: Scan --------------------------------------------------------------------------------------------
 Reset
 $script:Health = 'Repairable'

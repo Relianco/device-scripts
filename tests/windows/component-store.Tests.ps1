@@ -50,6 +50,11 @@ Assert (@($c.lastErrors).Count -eq 3 -and $c.lastErrors[-1] -notmatch $user) 'la
 $many = @(1..500 | ForEach-Object { '2026-11-20 19:10:00, Info CBS    (p)' + $t + 'CSI Payload Corrupt' + $t + '(n)' + $t + "amd64_x_$_\f.dll" })
 $fx = Get-CsCbsSummary -Lines @(('2026-11-20 19:10:00, Info CBS    (p)' + $t + 'CSI Payload Corrupt' + $t + $t + $t + '(w)' + $t + '(Fixed)' + $t + 'wow64_microsoft-windows-c_31bf_10.0.26100.1_none_3\c.dll'))
 Assert ($fx.unrepaired -eq 0 -and $fx.kinds['CSI Payload Corrupt'] -eq 1) 'a (w) (Fixed) row counts as repaired'
+$rerun = Get-CsCbsSummary -Lines ($lines + @(
+    ('2026-11-21 09:00:00, Info CBS    (p)' + $t + 'CSI Payload Corrupt' + $t + '(f)' + $t + 'amd64_microsoft-windows-a_31bf_10.0.26100.1_none_1\a.dll'),
+    ('2026-11-21 09:00:01, Info CBS    Total Detected Corruption:' + $t + '1'),
+    ('2026-11-21 09:00:01, Info CBS    Total Repaired Corruption:' + $t + '1')))
+Assert ($rerun.unrepaired -eq 0 -and $rerun.kinds['CSI Payload Corrupt'] -eq 1 -and $rerun.detected -eq 1) 'only the latest scan block counts'
 $m = Get-CsCbsSummary -Lines $many
 Assert ($m.unrepaired -eq 500 -and @($m.items).Count -le 8) 'items capped, count kept'
 $e = Get-CsCbsSummary -Lines @()

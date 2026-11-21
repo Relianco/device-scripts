@@ -10,7 +10,7 @@
     - checkHealth: Repair-WindowsImage -Online -CheckHealth (DISM /CheckHealth). It reads the flag a previous scan left
       and changes nothing. Skipped while dism.exe runs (it would wait on the servicing lock); stopped after 45 seconds.
     - cbs: the last 16 MiB of CBS.log. Corruption rows a ScanHealth or RestoreHealth wrote ("(p)" rows; (n) is not
-      repaired; (f) or (Fixed) is), the last "Total Detected/Repaired Corruption" totals, the 10 most frequent HRESULT codes with their
+      repaired; (f) or (Fixed) is; only the latest scan's rows count), the last "Total Detected/Repaired Corruption" totals, the 10 most frequent HRESULT codes with their
       symbolic name when the log gives one and the last time seen, and the last three Error lines.
     - wu: events 20 and 31 grouped by event id and error code with counts, first and last time and the newest KB numbers.
     - worker: state.json of the component-store-repair package (Scan, Repair or InstallMsu), when it has run.
@@ -106,13 +106,15 @@ function Get-CsCbsSummary {
     $items = [Collections.Generic.List[string]]::new()
     $codes = @{}
     $errors = [Collections.Generic.List[string]]::new()
-    $detected = $null; $repaired = $null; $unrepaired = 0
+    $detected = $null; $repaired = $null; $unrepaired = 0; $closed = $false
     foreach ($line in @($Lines)) {
         if (-not $line) { continue }
         $time = $script:TimeRx.Match($line)
         $time = if ($time.Success) { $time.Groups[1].Value } else { $null }
         $row = $script:RowRx.Match($line)
         if ($row.Success) {
+            # A row after a Total line starts a new scan: only the latest scan counts.
+            if ($closed) { $kinds = [ordered]@{}; $items.Clear(); $unrepaired = 0; $closed = $false }
             $kind = $row.Groups[1].Value.Trim()
             $kinds[$kind] = 1 + [int]$kinds[$kind]
             if ($row.Groups[2].Value -ne 'f' -and -not $row.Groups[3].Success) {
@@ -121,7 +123,7 @@ function Get-CsCbsSummary {
             }
             continue
         }
-        if ($line -match 'Total Detected Corruption:\s*(\d+)') { $detected = [int]$Matches[1] }
+        if ($line -match 'Total Detected Corruption:\s*(\d+)') { $detected = [int]$Matches[1]; $closed = $true }
         if ($line -match 'Total Repaired Corruption:\s*(\d+)') { $repaired = [int]$Matches[1] }
         foreach ($m in $script:CodeRx.Matches($line)) {
             $code = $m.Groups[1].Value.ToLowerInvariant()

@@ -171,7 +171,8 @@ function Test-CsrRequest {
 function Get-CsrTaskArguments {
     param([string]$Mode, [string]$BackupDate, [string]$MsuPath, [string]$WimPath)
     $line = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $script:CsrRoot 'worker.ps1') + '" -Worker -Mode ' + $Mode
-    if ($BackupDate) { $line += ' -BackupDate ' + $BackupDate }
+    # Validated only for Repair, so only Repair passes it on.
+    if ($Mode -eq 'Repair') { $line += ' -BackupDate ' + $BackupDate }
     if ($MsuPath) { $line += ' -MsuPath "' + (ConvertTo-CsrPath $MsuPath) + '"' }
     if ($WimPath) { $line += ' -WimPath "' + (ConvertTo-CsrPath $WimPath) + '"' }
     return $line
