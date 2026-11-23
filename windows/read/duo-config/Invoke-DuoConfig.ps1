@@ -63,19 +63,27 @@ $script:ReadProducts = {
         } finally { $key.Close() }
     }
 }
-# $true when a standard-user group has an Allow rule that includes reading values.
 $script:UsersCanRead = {
     param($SubKey)
     $key = Open-DuoKey $SubKey
     if ($null -eq $key) { return $null }
     try {
-        $rules = $key.GetAccessControl().GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
-        foreach ($rule in $rules) {
-            $read = ([int]$rule.RegistryRights -band [int][Security.AccessControl.RegistryRights]::QueryValues) -ne 0
-            if ($rule.AccessControlType -eq 'Allow' -and $read -and $script:UserSids -contains $rule.IdentityReference.Value) { return $true }
-        }
-        return $false
+        return (Test-DuoUsersCanRead @($key.GetAccessControl().GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])))
     } finally { $key.Close() }
+}
+
+# $true when a standard-user group may read values and none of those groups is denied it: a standard interactive user is
+# in all four groups, so any such Deny wins.
+function Test-DuoUsersCanRead {
+    param($Rules)
+    $allow = $false
+    foreach ($rule in @($Rules)) {
+        $read = ([int]$rule.RegistryRights -band [int][Security.AccessControl.RegistryRights]::QueryValues) -ne 0
+        if (-not $read -or $script:UserSids -notcontains $rule.IdentityReference.Value) { continue }
+        if ([string]$rule.AccessControlType -eq 'Deny') { return $false }
+        $allow = $true
+    }
+    return $allow
 }
 
 function Get-DuoFingerprint {

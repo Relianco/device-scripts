@@ -45,4 +45,9 @@ Assert ($d.usersCanRead -eq $false) 'default key acl'
 Assert ($r.policy.exists -eq $false -and $r.policy.usersCanRead -eq $null) 'missing policy key'
 Assert ($r.products[0].version -eq '4.3.1.4861' -and $r.products[0].name -eq 'Duo Authentication for Windows Logon x64') 'product'
 Assert ($r.status -eq 'ok' -and $r.version -eq '1') 'status'
+# A Deny for any standard-user group wins over an Allow (a standard user is in all four groups).
+function Rule($Sid, $Type) { [pscustomobject]@{ IdentityReference = [pscustomobject]@{ Value = $Sid }; AccessControlType = $Type; RegistryRights = [Security.AccessControl.RegistryRights]::ReadKey } }
+Assert ((Test-DuoUsersCanRead @((Rule 'S-1-1-0' 'Allow'))) -eq $true) 'allow everyone'
+Assert ((Test-DuoUsersCanRead @((Rule 'S-1-1-0' 'Allow'), (Rule 'S-1-5-32-545' 'Deny'))) -eq $false) 'deny users wins'
+Assert ((Test-DuoUsersCanRead @((Rule 'S-1-5-18' 'Allow'), (Rule 'S-1-5-32-544' 'Allow'))) -eq $false) 'system and admins only'
 Write-Output 'duo-config ok'
