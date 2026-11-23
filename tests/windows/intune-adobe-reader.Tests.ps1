@@ -117,8 +117,8 @@ if (-not (Test-Path -LiteralPath $namedDetectPath)) {
 
 $installCommand = [string]$meta.installCommand
 $uninstallCommand = [string]$meta.uninstallCommand
-$expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-AdobeReader.ps1 -DeploymentType Install -Action Install -PinVersion ' + $pin
-$expectedUninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-AdobeReader.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion ' + $pin
+$expectedInstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-AdobeReader.ps1 -DeploymentType Install -Action Install -PinVersion ' + $pin
+$expectedUninstall = 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-AdobeReader.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion ' + $pin
 if ($installCommand -cne $expectedInstall) {
     Fail 'install command'
 }
@@ -126,7 +126,7 @@ if ($uninstallCommand -cne $expectedUninstall) {
     Fail 'uninstall command'
 }
 foreach ($command in @($installCommand, $uninstallCommand)) {
-    if (-not $command.StartsWith('powershell.exe')) {
+    if (-not ($command -match '^(%SystemRoot%\\sysnative|C:\\Windows\\Sysnative)\\WindowsPowerShell\\v1\.0\\powershell\.exe')) {
         Fail 'command does not use powershell.exe'
     }
     if ($command.Contains('pwsh')) {

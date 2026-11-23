@@ -2,8 +2,8 @@
   "displayName": "Relian Managed - WireGuard",
   "publisher": "Relian",
   "setupFile": "Install-WireGuardIntune.ps1",
-  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Install-WireGuardIntune.ps1",
-  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-WireGuardClient.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.1.1",
+  "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Install-WireGuardIntune.ps1",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-WireGuardClient.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.1.1",
   "detectionScript": "Detect-WireGuardClient.ps1",
   "detectReplace": []
 }

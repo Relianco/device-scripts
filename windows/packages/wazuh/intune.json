@@ -2,8 +2,8 @@
   "displayName": "Relian Wazuh Agent",
   "publisher": "Relian",
   "setupFile": "Invoke-Wazuh.ps1",
-  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Wazuh.ps1 -DeploymentType Install -Action Install -PinVersion 4.14.9 -FloorVersion 4.14.3 -Enroll",
-  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Wazuh.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 4.14.9",
+  "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Wazuh.ps1 -DeploymentType Install -Action Install -PinVersion 4.14.9 -FloorVersion 4.14.3 -Enroll",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Wazuh.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 4.14.9",
   "detectionScript": "Detect-Wazuh.ps1",
   "detectReplace": []
 }

@@ -97,9 +97,9 @@ for ($i = 0; $i -lt $tokens.Count; $i++) {
 
 # Review finding rejected: these tokens are intentional. They are the same packager-filled convention as packages/browser-extension/intune.json (on main), so the committed file never holds a queue name or address. A raw upload is not a supported path.
 # {env:RELIAN_PRINTER_NAME}, {env:RELIAN_PRINTER_ADDRESS}, and {env:RELIAN_PRINTER_MODEL} tokens stay in the command because the packager fills them before upload, and this file must not contain a queue name, address, or model.
-# IME runs install commands in a 32-bit host; Sysnative gives 64-bit PowerShell, where pnputil.exe exists (2026-11-23 Sitka Konica failures, 0x80070001).
+# IME runs install commands in a 32-bit host; Sysnative gives 64-bit PowerShell, where pnputil.exe exists (installs exited 1, 0x80070001).
 $expectedInstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Install -Action Install -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
-$expectedUninstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
+$expectedUninstall = 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-PrinterTcp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion pinned -PrinterName "{env:RELIAN_PRINTER_NAME}" -PrinterAddress "{env:RELIAN_PRINTER_ADDRESS}" -PrinterModel "{env:RELIAN_PRINTER_MODEL}"'
 $install = [string]$meta.installCommand
 $uninstall = [string]$meta.uninstallCommand
 if ($install -cne $expectedInstall) {

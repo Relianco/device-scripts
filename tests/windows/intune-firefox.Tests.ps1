@@ -140,8 +140,8 @@ if (-not (Test-Path -LiteralPath $detectionPath)) {
     Fail 'detectionScript is not next to intune.json'
 }
 
-$expectedInstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Firefox.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
-$expectedUninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Firefox.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
+$expectedInstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Firefox.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
+$expectedUninstall = "C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Firefox.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 if ([string]$json.installCommand -cne $expectedInstall) {
     Fail "installCommand '$($json.installCommand)'"
 }
@@ -149,7 +149,7 @@ if ([string]$json.uninstallCommand -cne $expectedUninstall) {
     Fail "uninstallCommand '$($json.uninstallCommand)'"
 }
 foreach ($command in @([string]$json.installCommand, [string]$json.uninstallCommand)) {
-    if ($command -notlike 'powershell.exe *') {
+    if ($command -notmatch '^(%SystemRoot%\\sysnative|C:\\Windows\\Sysnative)\\WindowsPowerShell\\v1\.0\\powershell\.exe') {
         Fail "command does not use powershell.exe: $command"
     }
     if ($command -match 'pwsh') {

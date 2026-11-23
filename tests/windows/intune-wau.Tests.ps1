@@ -43,8 +43,8 @@ if ($null -eq $meta.detectReplace -or @($meta.detectReplace).Count -ne 0) { Fail
 if (-not (Test-Path -LiteralPath (Join-Path $packageDir ([string]$meta.setupFile)))) { Fail 'setupFile is not next to intune.json' }
 
 $pin = [string]$release.version
-$expectedInstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Install -Action Install -PinVersion $pin -ListUrl https://relianpub.blob.core.windows.net/pub/wau/broad/ -UpdatesAtTime 12:00:00 -AvdUpdatesAtTime 02:00:00"
-$expectedUninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
+$expectedInstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Install -Action Install -PinVersion $pin -ListUrl https://relianpub.blob.core.windows.net/pub/wau/broad/ -UpdatesAtTime 12:00:00 -AvdUpdatesAtTime 02:00:00"
+$expectedUninstall = "C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 if ([string]$meta.installCommand -cne $expectedInstall) { Fail 'install command' }
 if ([string]$meta.uninstallCommand -cne $expectedUninstall) { Fail 'uninstall command' }
 

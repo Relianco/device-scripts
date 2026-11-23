@@ -121,8 +121,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $packageDir ([string]$meta.detection
     Fail 'detectionScript is not next to intune.json'
 }
 
-$expectedInstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Microsoft365.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
-$expectedUninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Microsoft365.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
+$expectedInstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Microsoft365.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
+$expectedUninstall = "C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Microsoft365.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 $install = [string]$meta.installCommand
 $uninstall = [string]$meta.uninstallCommand
 if ($install -cne $expectedInstall) {
@@ -132,7 +132,7 @@ if ($uninstall -cne $expectedUninstall) {
     Fail "uninstallCommand '$uninstall'"
 }
 foreach ($command in @($install, $uninstall)) {
-    if (-not $command.StartsWith('powershell.exe')) {
+    if (-not ($command -match '^(%SystemRoot%\\sysnative|C:\\Windows\\Sysnative)\\WindowsPowerShell\\v1\.0\\powershell\.exe')) {
         Fail 'command does not use powershell.exe'
     }
     if ($command -match 'pwsh') {

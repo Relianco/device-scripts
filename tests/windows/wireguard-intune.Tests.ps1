@@ -354,7 +354,7 @@ $meta = Get-Content -LiteralPath (Join-Path $packageDir 'intune.json') -Raw | Co
 if ((@($meta.PSObject.Properties.Name) -join ',') -cne 'displayName,publisher,setupFile,installCommand,uninstallCommand,detectionScript,detectReplace') { Fail 'intune.json fields' }
 if ($meta.displayName -cne 'Relian Managed - WireGuard' -or $meta.detectionScript -cne 'Detect-WireGuardClient.ps1') { Fail 'intune.json values' }
 foreach ($f in @($meta.setupFile, $meta.detectionScript)) { if (-not (Test-Path -LiteralPath (Join-Path $packageDir $f))) { Fail "$f is not in the package" } }
-if (-not ([string]$meta.installCommand).StartsWith('powershell.exe ') -or ([string]$meta.installCommand).Length -gt 1024) { Fail 'install command' }
+if (-not ([string]$meta.installCommand).StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe ') -or ([string]$meta.installCommand).Length -gt 1024) { Fail 'install command' }
 if (-not ([string]$meta.uninstallCommand).Contains('-Action Uninstall -PinVersion 1.1.1')) { Fail 'uninstall command' }
 $wrapper = Get-Content -LiteralPath (Join-Path $packageDir $meta.setupFile) -Raw
 $tokens = @('wgtunnel', 'wgendpoint', 'wgserverkey', 'wgallowedips', 'wgnrptns', 'wgnrptdns', 'wggateways', 'wggatewaymacs', 'wgmapurl', 'wgmapkey', 'wglegacy', 'wgdisablepa')

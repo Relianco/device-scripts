@@ -2,8 +2,8 @@
   "displayName": "Relian PDF-XChange PRO",
   "publisher": "Relian",
   "setupFile": "Invoke-PdfXchange.ps1",
-  "installCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-PdfXchange.ps1 -DeploymentType Install -Action Install -PinVersion 11.1.2.0",
-  "uninstallCommand": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-PdfXchange.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 11.1.2.0",
+  "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-PdfXchange.ps1 -DeploymentType Install -Action Install -PinVersion 11.1.2.0",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-PdfXchange.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 11.1.2.0",
   "detectionScript": "Detect-PdfXchange.ps1",
   "detectReplace": []
 }
