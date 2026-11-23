@@ -192,7 +192,7 @@ for ($i = 0; $i -lt $expectedApps.Count; $i++) {
         Fail "$id pin disagrees with the action file"
     }
     $install = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ApplyAction.ps1 -DeploymentType Install -Action Install -PinVersion ' + $pin
-    $uninstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion ' + $pin
+    $uninstall = 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ApplyAction.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion ' + $pin
     if ([string]$app.installCommand -cne $install) {
         Fail "$id install command"
     }
@@ -200,7 +200,7 @@ for ($i = 0; $i -lt $expectedApps.Count; $i++) {
         Fail "$id uninstall command"
     }
     foreach ($command in @([string]$app.installCommand, [string]$app.uninstallCommand)) {
-        if (-not $command.StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe')) {
+        if (-not ($command -match '^(%SystemRoot%\\sysnative|C:\\Windows\\Sysnative)\\WindowsPowerShell\\v1\.0\\powershell\.exe')) {
             Fail "$id command does not use powershell.exe"
         }
         foreach ($banned in @('-ActionBaseUrl', '-MarkerRoot', '-CancelPath', 'pwsh', 'cmd.exe', 'cmd /c', 'exit 0')) {

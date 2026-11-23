@@ -139,7 +139,7 @@ if (-not (Test-Path -LiteralPath $detectionPath)) {
 }
 
 $expectedInstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Chrome.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
-$expectedUninstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Chrome.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
+$expectedUninstall = "C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Chrome.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 if ([string]$json.installCommand -cne $expectedInstall) {
     Fail "installCommand '$($json.installCommand)'"
 }
@@ -147,7 +147,7 @@ if ([string]$json.uninstallCommand -cne $expectedUninstall) {
     Fail "uninstallCommand '$($json.uninstallCommand)'"
 }
 foreach ($command in @([string]$json.installCommand, [string]$json.uninstallCommand)) {
-    if ($command -notlike '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe *') {
+    if ($command -notmatch '^(%SystemRoot%\\sysnative|C:\\Windows\\Sysnative)\\WindowsPowerShell\\v1\.0\\powershell\.exe') {
         Fail "command does not use powershell.exe: $command"
     }
     if ($command -match 'pwsh') {

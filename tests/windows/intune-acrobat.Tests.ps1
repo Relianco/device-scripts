@@ -137,11 +137,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $packageDir ([string]$meta.detection
 }
 
 $expectedInstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Acrobat.ps1 -DeploymentType Install -Action Install -Edition ' + $quotedEdition + ' -PinVersion ' + $pin
-$expectedUninstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Acrobat.ps1 -DeploymentType Uninstall -Action Uninstall -Edition ' + $quotedEdition + ' -PinVersion ' + $pin
+$expectedUninstall = 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Acrobat.ps1 -DeploymentType Uninstall -Action Uninstall -Edition ' + $quotedEdition + ' -PinVersion ' + $pin
 $install = [string]$meta.installCommand
 $uninstall = [string]$meta.uninstallCommand
 foreach ($command in @($install, $uninstall)) {
-    if (-not $command.StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe')) {
+    if (-not ($command -match '^(%SystemRoot%\\sysnative|C:\\Windows\\Sysnative)\\WindowsPowerShell\\v1\.0\\powershell\.exe')) {
         Fail 'command does not use powershell.exe'
     }
     if ($command.Contains('pwsh')) {

@@ -72,7 +72,7 @@ if (-not (Test-Path -LiteralPath $detectBeside)) {
     Fail 'detectionScript is not next to intune.json'
 }
 $install = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Notepadpp.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
-$uninstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Notepadpp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
+$uninstall = "C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Notepadpp.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 if ([string]$meta.installCommand -cne $install) {
     Fail 'installCommand'
 }
@@ -83,7 +83,7 @@ $otherHost = 'p' + 'wsh'
 if ($install.Contains($otherHost) -or $uninstall.Contains($otherHost)) {
     Fail 'command uses the wrong PowerShell host'
 }
-if (-not $install.StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe ') -or -not $uninstall.StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe ')) {
+if (-not $install.StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe ') -or -not $uninstall.StartsWith('C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe ')) {
     Fail 'command does not use powershell.exe'
 }
 if ($install -notlike '*-Action Install*' -or $uninstall -notlike '*-Action Uninstall*') {

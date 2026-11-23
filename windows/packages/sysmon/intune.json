@@ -3,7 +3,7 @@
   "publisher": "Relian",
   "setupFile": "Invoke-Sysmon.ps1",
   "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Sysmon.ps1 -DeploymentType Install -Action Install -PinVersion 15.22",
-  "uninstallCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Sysmon.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 15.22",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Sysmon.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 15.22",
   "detectionScript": "Detect-Sysmon.ps1",
   "detectReplace": []
 }

@@ -61,7 +61,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $packageDir ([string]$meta.detection
 }
 
 $expectedInstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Putty.ps1 -DeploymentType Install -Action Install -PinVersion 0.85.0.0'
-$expectedUninstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Putty.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 0.85.0.0'
+$expectedUninstall = 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Putty.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 0.85.0.0'
 $install = [string]$meta.installCommand
 $uninstall = [string]$meta.uninstallCommand
 if ($install -cne $expectedInstall) {

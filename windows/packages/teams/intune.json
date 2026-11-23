@@ -3,7 +3,7 @@
   "publisher": "Relian",
   "setupFile": "Invoke-Teams.ps1",
   "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Teams.ps1 -DeploymentType Install -Action Install -PinVersion 0.0.0.1",
-  "uninstallCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Teams.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 0.0.0.1",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Teams.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 0.0.0.1",
   "detectionScript": "Detect-Teams.ps1",
   "detectReplace": []
 }

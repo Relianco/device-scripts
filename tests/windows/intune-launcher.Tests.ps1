@@ -6,6 +6,9 @@ Set-StrictMode -Version Latest
 # (Sitka Convey Konica, 2026-11-23, 0x80070001). Every package command must start 64-bit PowerShell.
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $launcher = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe '
+# Intune does not expand environment variables in the uninstall command (Microsoft Learn, Add Win32 apps), so it uses the literal path.
+# shortcut: assumes Windows lives in C:\Windows, true on every managed PC; upgrade to a packaged wrapper if that ever changes.
+$uninstallLauncher = 'C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe '
 
 function Get-CommandStrings {
     param($Node, [string]$Path)
@@ -37,7 +40,9 @@ foreach ($file in $files) {
     $meta = Get-Content -LiteralPath $file.FullName -Raw -Encoding utf8 | ConvertFrom-Json
     foreach ($cmd in @(Get-CommandStrings -Node $meta -Path $file.Directory.Name)) {
         $seen++
-        if (-not $cmd.Value.StartsWith($launcher, [System.StringComparison]::Ordinal)) {
+        $want = $launcher
+        if ($cmd.Path.EndsWith('.uninstallCommand')) { $want = $uninstallLauncher }
+        if (-not $cmd.Value.StartsWith($want, [System.StringComparison]::Ordinal)) {
             $bad += "$($cmd.Path): $($cmd.Value.Split(' ')[0])"
         }
     }

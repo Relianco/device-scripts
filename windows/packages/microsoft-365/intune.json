@@ -3,7 +3,7 @@
   "publisher": "Relian",
   "setupFile": "Invoke-Microsoft365.ps1",
   "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Microsoft365.ps1 -DeploymentType Install -Action Install -PinVersion 16.0.0.0",
-  "uninstallCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Microsoft365.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 16.0.0.0",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Microsoft365.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 16.0.0.0",
   "detectionScript": "Detect-Microsoft365.ps1",
   "detectReplace": []
 }

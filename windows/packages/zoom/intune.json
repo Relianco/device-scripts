@@ -3,7 +3,7 @@
   "publisher": "Relian",
   "setupFile": "Invoke-Zoom.ps1",
   "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Zoom.ps1 -DeploymentType Install -Action Install -PinVersion 7.2.48556",
-  "uninstallCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Zoom.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 7.2.48556",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Zoom.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 7.2.48556",
   "detectionScript": "Detect-Zoom.ps1",
   "detectReplace": []
 }
