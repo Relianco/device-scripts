@@ -3,7 +3,8 @@
 # Microsoft Corporation. Leaves .NET 6, .NET 8, .NET 9, .NET 10, .NET Framework, and third-party runtimes untouched.
 # remove-eol-dotnet-6.ps1 is this file with DnIncludeDotnet6 set to $true: it also removes .NET 6 (end of life
 # 2024-11-12), its Windows Desktop Runtime and its ASP.NET Core Hosting Bundle (Windows Server Hosting and Hosting Bundle
-# Options), which removes the IIS ASP.NET Core Module 6 with it. Never .NET 8 or later.
+# Options). It refuses the Hosting Bundle (exit 2, nothing run) unless a .NET 8 or later Hosting Bundle is installed,
+# because the bundles share one IIS ASP.NET Core Module. Never .NET 8 or later.
 # Before running any uninstaller, writes a JSON backup under C:\ProgramData\Relian\EolDotnetBackup (SYSTEM-only,
 # never overwritten) and reads it back. Verified WiX Burn bundles under C:\ProgramData\Package Cache\{GUID}\*.exe
 # run first (/uninstall /quiet /norestart), then any remaining matched Windows Installer {GUID} products run via
@@ -227,6 +228,18 @@ function Get-DnTargets {
     return @($found | Sort-Object @{ Expression = { $_.name } }, @{ Expression = { $_.id } })
 }
 
+# Every ASP.NET Core Hosting Bundle shares one IIS ASP.NET Core Module: removing the last bundle removes it for every site.
+function Get-DnHostingBlock {
+    param($Entries, $Targets)
+    if (-not @($Targets | Where-Object { $_.name -match '(?i)\AMicrosoft \.NET 6\.\d+\.\d+ - Windows Server Hosting\z' })) { return '' }
+    foreach ($e in @($Entries)) {
+        if ($null -eq $e) { continue }
+        if (([string](Get-DnProp $e 'publisher' '')).Trim() -ine 'Microsoft Corporation') { continue }
+        if (([string](Get-DnProp $e 'name' '')).Trim() -match '(?i)\AMicrosoft \.NET (\d{1,3})\.\d+\.\d+ - Windows Server Hosting\z' -and [int]$Matches[1] -ge 8) { return '' }
+    }
+    return 'refusing .NET 6 Hosting Bundle: no .NET 8 or later Hosting Bundle is installed to keep the ASP.NET Core Module'
+}
+
 function Get-DnVerifiedBundlePath {
     param($Entry)
     $cand = ([string](Get-DnProp $Entry 'bundleCachePath' '')).Trim()
@@ -304,8 +317,10 @@ function Invoke-DnJob {
         Error          = ''
     }
     try {
-        $targets = @(Get-DnTargets (& $script:DnReadUninstallEntries))
+        $entries = @(& $script:DnReadUninstallEntries)
+        $targets = @(Get-DnTargets $entries)
         $r.Before = @(Get-DnSummary $targets)
+        $hostingBlock = Get-DnHostingBlock $entries $targets
         if ($targets.Count -eq 0) {
             $r.After = @()
             $r.Status = 'unchanged'
@@ -314,6 +329,10 @@ function Invoke-DnJob {
             $r.After = $r.Before
             $r.Status = 'drift'
             $r.ExitCode = 1
+            $r.Error = $hostingBlock
+        } elseif ($hostingBlock) {
+            $r.After = $r.Before
+            $r.Error = $hostingBlock
         } else {
             $r.Backup = Write-DnBackup $targets
             $bundlesRun = [Collections.Generic.List[string]]::new()

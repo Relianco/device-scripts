@@ -292,6 +292,20 @@ try {
     Assert-Same (@($script:Log | Where-Object { $_ -like 'msi:*' }).Count) 11 'opt-in leftover MSIs run'
     Assert-Same ((@($script:FakeEntries | ForEach-Object { $_.name }) | Sort-Object) -join '|') ((@($keepers | ForEach-Object { $_.name }) | Sort-Object) -join '|') 'opt-in leaves .NET 8/9/10, Framework and third party'
 
+    # 7d. Opt-in refuses the .NET 6 Hosting Bundle when no .NET 8+ Hosting Bundle keeps the shared IIS ASP.NET Core Module.
+    $noNewHosting = @($keepers | Where-Object { $_.name -ne 'Microsoft .NET 8.0.11 - Windows Server Hosting' })
+    Reset-Test -Entries ($azdc6 + $noNewHosting) -ExistingFiles $azdcFiles -IncludeDotnet6 $true
+    $r = Invoke-DnJob
+    Assert-Same $r.ExitCode 2 'no newer hosting bundle exit'
+    Assert-Same $r.Status 'failed' 'no newer hosting bundle status'
+    Assert-Same $r.Error 'refusing .NET 6 Hosting Bundle: no .NET 8 or later Hosting Bundle is installed to keep the ASP.NET Core Module' 'no newer hosting bundle error'
+    Assert-Same $script:Log.Count 0 'no newer hosting bundle runs nothing'
+    Assert-Same (@(Backups).Count) 0 'no newer hosting bundle writes no backup'
+    Reset-Test -Entries ($azdc6 + $noNewHosting) -ExistingFiles $azdcFiles -IncludeDotnet6 $true
+    $r = Invoke-DnJob -ReportOnly
+    Assert-Same $r.Status 'drift' 'no newer hosting bundle report status'
+    Assert-Same $r.Error 'refusing .NET 6 Hosting Bundle: no .NET 8 or later Hosting Bundle is installed to keep the ASP.NET Core Module' 'no newer hosting bundle report error'
+
     # 8. remove-eol-dotnet-6.ps1 is the base module with the opt-in line flipped, and nothing else.
     $baseLines = [IO.File]::ReadAllLines($modulePath)
     $sixLines = [IO.File]::ReadAllLines($module6Path)
