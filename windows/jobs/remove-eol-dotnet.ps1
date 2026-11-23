@@ -1,6 +1,10 @@
 # Remediation module, run by windows/runner/Invoke-RelianJob.ps1 as SYSTEM. Removes end-of-life .NET 5 and .NET 7
 # runtimes (Runtime, Windows Desktop Runtime, ASP.NET Core Shared Framework, Host, Host FX Resolver) published by
 # Microsoft Corporation. Leaves .NET 6, .NET 8, .NET 9, .NET 10, .NET Framework, and third-party runtimes untouched.
+# remove-eol-dotnet-6.ps1 is this file with DnIncludeDotnet6 set to $true: it also removes .NET 6 (end of life
+# 2024-11-12), its Windows Desktop Runtime and its ASP.NET Core Hosting Bundle (Windows Server Hosting and Hosting Bundle
+# Options). The bundles share one IIS ASP.NET Core Module, so it refuses the Hosting Bundle (exit 2, nothing run) while
+# an installed aspnetcorev2.dll is older than 18 (.NET 8). Never .NET 8 or later.
 # Before running any uninstaller, writes a JSON backup under C:\ProgramData\Relian\EolDotnetBackup (SYSTEM-only,
 # never overwritten) and reads it back. Verified WiX Burn bundles under C:\ProgramData\Package Cache\{GUID}\*.exe
 # run first (/uninstall /quiet /norestart), then any remaining matched Windows Installer {GUID} products run via
@@ -18,6 +22,9 @@ $script:DnUninstallRoots = @(
     'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
 )
 $script:DnNamePattern = '(?i)\A(?:Microsoft \.NET (?:Runtime|Host|Host FX Resolver) - [57]\.\d+\.\d+|Microsoft Windows Desktop Runtime - [57]\.\d+\.\d+|Microsoft ASP\.NET Core [57]\.\d+\.\d+(?:\s+-)?\s+Shared Framework)\s+\((?:x64|x86|arm64)\)\z'
+# The loader forwards only -ReportOnly, so the .NET 6 opt-in is a sibling file that differs from this one in this line only.
+$script:DnIncludeDotnet6 = $false
+$script:Dn6NamePattern = '(?i)\A(?:(?:Microsoft \.NET (?:Runtime|Host|Host FX Resolver) - 6\.\d+\.\d+|Microsoft Windows Desktop Runtime - 6\.\d+\.\d+|Microsoft ASP\.NET Core 6\.\d+\.\d+(?:\s+-)?\s+Shared Framework)\s+\((?:x64|x86|arm64)\)|Microsoft \.NET 6\.\d+\.\d+ - Windows Server Hosting|Microsoft ASP\.NET Core 6\.\d+\.\d+ Hosting Bundle Options)\z'
 $script:DnGuidPattern = '\A\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}\z'
 $script:DnPackageCacheRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Package Cache'
 $script:DnBackupDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\EolDotnetBackup'
@@ -29,6 +36,15 @@ function Open-DnHklm {
 $script:DnReadSddl = { param($Path) (Get-Acl -LiteralPath $Path).Sddl }
 
 $script:DnFileExists = { param([string]$Path) [IO.File]::Exists($Path) }
+
+# File major version of each installed IIS ASP.NET Core Module (aspnetcorev2.dll): 16 ships with .NET 6, 18 with .NET 8.
+$script:DnReadAncmMajors = {
+    $dirs = @($env:ProgramW6432, ${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ } | Sort-Object -Unique
+    foreach ($d in $dirs) {
+        $dll = Join-Path $d 'IIS\Asp.Net Core Module\V2\aspnetcorev2.dll'
+        if ([IO.File]::Exists($dll)) { [Diagnostics.FileVersionInfo]::GetVersionInfo($dll).FileMajorPart }
+    }
+}
 
 $script:DnAssertNotReparse = {
     param([string[]]$Paths)
@@ -197,7 +213,7 @@ function Ensure-DnBackupDirectory {
     }
 }
 
-# Pure: filters uninstall entries down to Microsoft EOL .NET 5 and .NET 7 runtime/desktop/ASP.NET Core packages.
+# Pure: filters uninstall entries down to Microsoft EOL .NET 5 and .NET 7 (and opt-in .NET 6) runtime/desktop/ASP.NET Core packages.
 function Get-DnTargets {
     param($Entries)
     $found = [Collections.Generic.List[object]]::new()
@@ -206,7 +222,7 @@ function Get-DnTargets {
         $pub = ([string](Get-DnProp $e 'publisher' '')).Trim()
         if ($pub -ine 'Microsoft Corporation') { continue }
         $name = ([string](Get-DnProp $e 'name' '')).Trim()
-        if ($name -notmatch $script:DnNamePattern) { continue }
+        if ($name -notmatch $script:DnNamePattern -and -not ($script:DnIncludeDotnet6 -and $name -match $script:Dn6NamePattern)) { continue }
         $found.Add([ordered]@{
             key             = [string](Get-DnProp $e 'key' '')
             id              = [string](Get-DnProp $e 'id' '')
@@ -219,6 +235,17 @@ function Get-DnTargets {
         })
     }
     return @($found | Sort-Object @{ Expression = { $_.name } }, @{ Expression = { $_.id } })
+}
+
+# Every ASP.NET Core Hosting Bundle shares one IIS ASP.NET Core Module. Removing the .NET 6 bundle is safe only when no
+# module is installed or every copy is 18 or later (from .NET 8 or later), which a .NET 6 bundle does not own.
+function Get-DnHostingBlock {
+    param($Targets)
+    if (-not @($Targets | Where-Object { $_.name -match '(?i)\AMicrosoft \.NET 6\.\d+\.\d+ - Windows Server Hosting\z' })) { return '' }
+    foreach ($major in @(& $script:DnReadAncmMajors)) {
+        if ([int]$major -lt 18) { return 'refusing .NET 6 Hosting Bundle: the IIS ASP.NET Core Module is not from a .NET 8 or later Hosting Bundle' }
+    }
+    return ''
 }
 
 function Get-DnVerifiedBundlePath {
@@ -298,8 +325,10 @@ function Invoke-DnJob {
         Error          = ''
     }
     try {
-        $targets = @(Get-DnTargets (& $script:DnReadUninstallEntries))
+        $entries = @(& $script:DnReadUninstallEntries)
+        $targets = @(Get-DnTargets $entries)
         $r.Before = @(Get-DnSummary $targets)
+        $hostingBlock = Get-DnHostingBlock $targets
         if ($targets.Count -eq 0) {
             $r.After = @()
             $r.Status = 'unchanged'
@@ -308,6 +337,10 @@ function Invoke-DnJob {
             $r.After = $r.Before
             $r.Status = 'drift'
             $r.ExitCode = 1
+            $r.Error = $hostingBlock
+        } elseif ($hostingBlock) {
+            $r.After = $r.Before
+            $r.Error = $hostingBlock
         } else {
             $r.Backup = Write-DnBackup $targets
             $bundlesRun = [Collections.Generic.List[string]]::new()
