@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 # IME starts Win32 app commands from a 32-bit host. A bare powershell.exe there is the SysWOW64 host:
 # System32, HKLM\SOFTWARE and $env:ProgramFiles redirect, and System32\pnputil.exe is missing
-# (Sitka Convey Konica, 2026-11-23, 0x80070001). Every package command must start 64-bit PowerShell.
+# (a TCP printer install exited 1, 0x80070001). Every package command must start 64-bit PowerShell.
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $launcher = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe '
 # Intune does not expand environment variables in the uninstall command (Microsoft Learn, Add Win32 apps), so it uses the literal path.
