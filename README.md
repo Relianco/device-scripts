@@ -343,6 +343,12 @@ Packages in `macos/packages/`, pinned in `macos/releases/<name>.json`:
 
 - `noop`: installs nothing and exits 0. It tests the runner.
 
+## Operator tools
+
+Scripts in `scripts/` run on an admin machine or a server, never on a device.
+
+- `scripts/remote-sessions.ps1` drafts Invoice Ninja remote-support tasks from NinjaOne session records and Wazuh activity. The default is a dry run: `pwsh -NoProfile -File scripts/remote-sessions.ps1 -Days 3`. `-Apply -ClientMap <file>` also creates Backlog tasks; it never sends, invoices or emails. Credentials come from environment variables only (see the script's help).
+
 ## CI and review gates
 
 A pull request into `main` needs four green checks: `PowerShell tests`, `Windows maintenance regressions`, `Secret scan (betterleaks)` and `review`.
