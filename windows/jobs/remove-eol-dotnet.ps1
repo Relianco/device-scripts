@@ -229,6 +229,7 @@ function Get-DnTargets {
 }
 
 # Every ASP.NET Core Hosting Bundle shares one IIS ASP.NET Core Module: removing the last bundle removes it for every site.
+# shortcut: trusts the newer bundle's uninstall entry; one installed with OPT_NO_ANCM=1 also passes. Check that by hand on IIS hosts.
 function Get-DnHostingBlock {
     param($Entries, $Targets)
     if (-not @($Targets | Where-Object { $_.name -match '(?i)\AMicrosoft \.NET 6\.\d+\.\d+ - Windows Server Hosting\z' })) { return '' }
