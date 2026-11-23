@@ -563,7 +563,8 @@ function Get-RsNinja {
         if ($minTime -lt $Since -or ($null -ne $older -and $minId -ge $older)) { break }
         $older = [long]$minId
     }
-    return @{ activities = @($acts); devices = @(Invoke-RsHttp -Method GET -Uri "$b/v2/devices" -Headers $h) }
+    $devices = Invoke-RsHttp -Method GET -Uri "$b/v2/devices" -Headers $h   # a list as one value: @() around the call would nest it
+    return @{ activities = @($acts); devices = $devices }
 }
 
 # The device's alerts in the window, from the one agent with this host name: hits, whether the indexer cut them, and why none.

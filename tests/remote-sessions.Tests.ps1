@@ -283,6 +283,19 @@ Assert-Same $msg 'Invoice Ninja has no task status named Backlog; nothing create
 Assert-Same $script:calls.Count 1 'no Backlog: only the status read'
 Ok 'apply: without a Backlog status nothing is created'
 
+# ---------------------------------------------------------------- NinjaOne read (HTTP mocked): a JSON list of devices stays a list of devices
+$env:NINJAONE_BASE_URL = 'https://ninja.test'
+function Invoke-RsHttp {
+    param([string]$Method, [string]$Uri, [hashtable]$Headers, [string]$Body, [string]$ContentType, [string]$PinSha256)
+    if ($Uri -like '*/ws/oauth/token') { return @{ access_token = 't' } }
+    if ($Uri -like '*/v2/activities*') { return @{ activities = @() } }
+    return ConvertFrom-Json -InputObject '[{"id":1001,"systemName":"PC-01"},{"id":1002,"systemName":"SRV-01"}]' -AsHashtable -NoEnumerate
+}
+$read = Get-RsNinja -Since 0
+Assert-Same @($read['devices']).Count 2 'device count'
+Assert-Json @($read['devices'] | ForEach-Object { $_['systemName'] }) '["PC-01","SRV-01"]' 'devices read'
+Ok 'ninja: the device list is read as devices, so every session finds its device'
+
 # ---------------------------------------------------------------- the Wazuh indexer certificate is pinned (a certificate made here; no network)
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
 $certRequest = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new('CN=indexer.test', $rsa, 'SHA256', [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
