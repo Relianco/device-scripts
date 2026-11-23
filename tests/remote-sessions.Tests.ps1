@@ -68,6 +68,13 @@ Assert-Same $lost['staff'] $null 'request not seen: staff unknown'
 Assert-Same (Get-RsVerdict (With $lost @{ ids = @($lost['id']) })) 'technician unknown (request not seen): a person checks' 'request not seen verdict'
 Ok 'sessions: a connection whose request is outside the pull is not taken for client staff; a person checks it'
 
+# NinjaOne also logs a request and a termination (duration "0", one participant) with no established record: not a session.
+$requestOnly = @(@{ id = 1; activityTime = 1795111380; deviceId = 1001; activityType = 'NINJA_REMOTE'; data = @{ sessionName = 'X1'; message = @{ code = 'nc_session_requested'; params = @{ appUserEmail = 'tech@relian.ca' } } } },
+    @{ id = 2; activityTime = 1795111390; deviceId = 1001; activityType = 'NINJA_REMOTE'; data = @{ sessionName = 'X1'; message = @{ code = 'nc_session_terminated_with_handle'; params = @{ duration = '0'; participants = '[PLAYER]' } } } })
+Assert-Same @(Get-RsSessions -Activities $requestOnly -Devices $NINJA['devices']).Count 0 'request and termination only'
+Assert-Same @(Get-RsSittings -Sessions @()).Count 0 'no sessions, no sittings'
+Ok 'sessions: a request that ended without a connection is not a session, and none at all is an empty report'
+
 # ---------------------------------------------------------------- sittings and verdicts
 $sittingList = @(Get-RsSittings -Sessions @($S.Values))
 $by = @{}
@@ -298,6 +305,12 @@ $read = Get-RsNinja -Since 0
 Assert-Same @($read['devices']).Count 2 'device count'
 Assert-Json @($read['devices'] | ForEach-Object { $_['systemName'] }) '["PC-01","SRV-01"]' 'devices read'
 Ok 'ninja: the device list is read as devices, so every session finds its device'
+
+$threw = $false
+try { Get-RsWazuh -Url 'http://indexer.test:9200' -Device 'PC-01' -Start 0 -End 1 | Out-Null } catch { $threw = $true; $msg = $_.Exception.Message }
+Assert-Same $threw $true 'plain http indexer refused'
+Assert-Same $msg 'the Wazuh indexer URL must be https (its certificate is pinned); nothing sent' 'plain http message'
+Ok 'wazuh: a plain http indexer address is refused before the credentials are sent'
 
 # ---------------------------------------------------------------- the Wazuh indexer certificate is pinned (a certificate made here; no network)
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)

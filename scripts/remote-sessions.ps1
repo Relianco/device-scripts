@@ -66,6 +66,7 @@ function Compare-RsKey {
 
 function Sort-RsStable {
     param($Items, [scriptblock]$Key)
+    if ($null -eq $Items) { return }   # no items: @($null) would be one
     $decorated = [System.Collections.Generic.List[object]]::new()
     $i = 0
     foreach ($item in @($Items)) { $decorated.Add([pscustomobject]@{ k = @(& $Key $item); i = $i++; v = $item }) }
@@ -570,6 +571,7 @@ function Get-RsNinja {
 # The device's alerts in the window, from the one agent with this host name: hits, whether the indexer cut them, and why none.
 function Get-RsWazuh {
     param([string]$Url, [string]$Device, [long]$Start, [long]$End)
+    if (([uri]$Url).Scheme -cne 'https') { throw 'the Wazuh indexer URL must be https (its certificate is pinned); nothing sent' }
     $auth = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes("$($env:WAZUH_INDEXER_USER):$($env:WAZUH_INDEXER_PASSWORD)"))
     $search = {
         param($Query)
