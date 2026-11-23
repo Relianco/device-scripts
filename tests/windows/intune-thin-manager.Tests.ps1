@@ -98,8 +98,8 @@ if (-not (Test-Path -LiteralPath $namedDetectPath)) {
 
 $installCommand = [string]$meta.installCommand
 $uninstallCommand = [string]$meta.uninstallCommand
-$expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ThinManager.ps1 -DeploymentType Install -Action Install -PinVersion 1.0.0.0'
-$expectedUninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ThinManager.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.0.0.0'
+$expectedInstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ThinManager.ps1 -DeploymentType Install -Action Install -PinVersion 1.0.0.0'
+$expectedUninstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-ThinManager.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 1.0.0.0'
 if ($installCommand -cne $expectedInstall) {
     Fail 'install command'
 }
@@ -107,7 +107,7 @@ if ($uninstallCommand -cne $expectedUninstall) {
     Fail 'uninstall command'
 }
 foreach ($command in @($installCommand, $uninstallCommand)) {
-    if (-not $command.StartsWith('powershell.exe')) {
+    if (-not $command.StartsWith('%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe')) {
         Fail 'command does not use powershell.exe'
     }
     if ($command.Contains('pwsh')) {

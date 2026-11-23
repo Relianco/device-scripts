@@ -79,8 +79,8 @@ for ($i = 0; $i -lt $tokens.Count; $i++) {
 }
 
 # {env:BROWSER} and {env:EXTENSION_ID} stay in the command because the packager fills them before upload.
-$expectedInstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-BrowserExtension.ps1 -DeploymentType Install -Action Install -Browser "{env:BROWSER}" -ExtensionId "{env:EXTENSION_ID}"'
-$expectedUninstall = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-BrowserExtension.ps1 -DeploymentType Uninstall -Action Uninstall -Browser "{env:BROWSER}" -ExtensionId "{env:EXTENSION_ID}"'
+$expectedInstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-BrowserExtension.ps1 -DeploymentType Install -Action Install -Browser "{env:BROWSER}" -ExtensionId "{env:EXTENSION_ID}"'
+$expectedUninstall = '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-BrowserExtension.ps1 -DeploymentType Uninstall -Action Uninstall -Browser "{env:BROWSER}" -ExtensionId "{env:EXTENSION_ID}"'
 $install = [string]$meta.installCommand
 $uninstall = [string]$meta.uninstallCommand
 if ($install -cne $expectedInstall) {

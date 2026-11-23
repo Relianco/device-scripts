@@ -64,8 +64,8 @@ if ($null -eq $replaceValue -or @($replaceValue).Count -ne 0) {
     Fail 'detectReplace did not parse as an empty array'
 }
 
-$install = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Vlc.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
-$uninstall = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Vlc.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
+$install = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Vlc.ps1 -DeploymentType Install -Action Install -PinVersion $pin"
+$uninstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Vlc.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 if ([string]$meta.installCommand -cne $install) {
     Fail "installCommand '$($meta.installCommand)'"
 }
@@ -73,7 +73,7 @@ if ([string]$meta.uninstallCommand -cne $uninstall) {
     Fail "uninstallCommand '$($meta.uninstallCommand)'"
 }
 foreach ($command in @([string]$meta.installCommand, [string]$meta.uninstallCommand)) {
-    if ($command -notlike 'powershell.exe *') {
+    if ($command -notlike '%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe *') {
         Fail "command does not use powershell.exe: $command"
     }
     if ($command -match 'pwsh') {
