@@ -473,7 +473,7 @@ function Invoke-RsApply {
         $client = $ClientMap["$($r['org'])"]
         if (-not $client) { "skipped NinjaOne $($handles): organization $($r['org']) is not in the client map"; continue }
         $body = ConvertTo-Json -InputObject (New-RsTaskBody -Row $r -ClientId $client -StatusId $backlog[0]['id']) -Compress
-        $created = Invoke-RsHttp -Method POST -Uri ($base + 'tasks') -Headers $headers -Body $body
+        $created = Invoke-RsHttp -Method POST -Uri ($base + 'tasks') -Headers $headers -Body $body -NoRetry
         "created task $($created['data']['number']) for NinjaOne $handles"
     }
 }
@@ -509,8 +509,12 @@ function New-RsPin {
     return ('RelianCertPin' -as [type])::new($hex)
 }
 
-function Invoke-RsHttp {
-    param([string]$Method, [string]$Uri, [hashtable]$Headers = @{}, [string]$Body, [string]$ContentType = 'application/json', [string]$PinSha256)
+$script:RsRetryStatuses = @(408, 429, 500, 502, 503, 504)
+$script:RsRetryDelaySeconds = 2
+
+# One request: the status and the body text. A transport failure throws; a pin mismatch throws RsPinMismatch (never retried).
+function Send-RsRequest {
+    param([string]$Method, [string]$Uri, [hashtable]$Headers, $Body, [string]$ContentType, [string]$PinSha256)
     $handler = [System.Net.Http.HttpClientHandler]::new()
     $pin = $null
     if ($PinSha256) {
@@ -523,19 +527,43 @@ function Invoke-RsHttp {
         $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::new($Method), $Uri)
         [void]$request.Headers.TryAddWithoutValidation('User-Agent', 'curl/8')
         foreach ($k in $Headers.Keys) { [void]$request.Headers.TryAddWithoutValidation($k, [string]$Headers[$k]) }
-        if ($PSBoundParameters.ContainsKey('Body')) { $request.Content = [System.Net.Http.StringContent]::new($Body, [System.Text.Encoding]::UTF8, $ContentType) }
+        if ($null -ne $Body) { $request.Content = [System.Net.Http.StringContent]::new([string]$Body, [System.Text.Encoding]::UTF8, $ContentType) }
         try {
             $response = $client.SendAsync($request).GetAwaiter().GetResult()
         } catch {
-            if ($pin -and $pin.Mismatch) { throw 'Wazuh indexer certificate does not match the pinned SHA-256; nothing sent' }
-            throw "$Method $(([uri]$Uri).Host) failed: $($_.Exception.InnerException.Message)"
+            if ($pin -and $pin.Mismatch) { throw [System.Security.Authentication.AuthenticationException]::new('RsPinMismatch') }
+            throw
         }
-        $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        if (-not $response.IsSuccessStatusCode) { throw "$Method $(([uri]$Uri).AbsolutePath): HTTP $([int]$response.StatusCode)" }
-        if (-not $text) { return $null }
-        return ConvertFrom-Json -InputObject $text -AsHashtable -NoEnumerate -DateKind String
+        return @{ status = [int]$response.StatusCode; text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() }
     } finally {
         $client.Dispose()
+    }
+}
+
+# Timeouts, connection and DNS failures and HTTP 408/429/5xx get three attempts; any other status one. -NoRetry: one attempt,
+# for a request that creates something (a retry after a lost reply could create it twice).
+function Invoke-RsHttp {
+    param([string]$Method, [string]$Uri, [hashtable]$Headers = @{}, [string]$Body, [string]$ContentType = 'application/json', [string]$PinSha256, [switch]$NoRetry)
+    $sendBody = if ($PSBoundParameters.ContainsKey('Body')) { $Body } else { $null }
+    $attempts = if ($NoRetry) { 1 } else { 3 }
+    for ($attempt = 1; ; $attempt++) {
+        $reply = $null
+        $failure = $null
+        try {
+            $reply = Send-RsRequest -Method $Method -Uri $Uri -Headers $Headers -Body $sendBody -ContentType $ContentType -PinSha256 $PinSha256
+        } catch {
+            $inner = $_.Exception
+            while ($inner.InnerException) { $inner = $inner.InnerException }
+            if ($inner.Message -ceq 'RsPinMismatch' -or $_.Exception.Message -like '*RsPinMismatch*') { throw 'Wazuh indexer certificate does not match the pinned SHA-256; nothing sent' }
+            $failure = "$Method $(([uri]$Uri).Host) failed: $($inner.Message)"
+        }
+        if ($reply -and $reply['status'] -ge 200 -and $reply['status'] -lt 300) {
+            if (-not $reply['text']) { return $null }
+            return ConvertFrom-Json -InputObject $reply['text'] -AsHashtable -NoEnumerate -DateKind String
+        }
+        if ($reply) { $failure = "$Method $(([uri]$Uri).AbsolutePath): HTTP $($reply['status'])" }
+        if ($attempt -ge $attempts -or ($reply -and $script:RsRetryStatuses -notcontains $reply['status'])) { throw $failure }
+        Start-Sleep -Seconds $script:RsRetryDelaySeconds
     }
 }
 

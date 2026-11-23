@@ -265,8 +265,8 @@ $env:INVOICENINJA_API_KEY = 'test-key'
 $script:calls = [System.Collections.Generic.List[object]]::new()
 $script:statuses = @(@{ id = 'st1'; name = 'Ready to do'; is_deleted = $false }, @{ id = 'st9'; name = 'Backlog'; is_deleted = $false })
 function Invoke-RsHttp {
-    param([string]$Method, [string]$Uri, [hashtable]$Headers, [string]$Body, [string]$ContentType, [string]$PinSha256)
-    $script:calls.Add([ordered]@{ method = $Method; uri = $Uri; body = $Body; token = $Headers['X-API-TOKEN'] })
+    param([string]$Method, [string]$Uri, [hashtable]$Headers, [string]$Body, [string]$ContentType, [string]$PinSha256, [switch]$NoRetry)
+    $script:calls.Add([ordered]@{ method = $Method; uri = $Uri; body = $Body; token = $Headers['X-API-TOKEN']; noRetry = [bool]$NoRetry })
     if ($Method -eq 'GET') { return @{ data = $script:statuses } }
     return @{ data = @{ id = 'new'; number = '0100' } }
 }
@@ -280,6 +280,7 @@ $report = @(Invoke-RsApply -Rows $rows -ClientMap @{ '12' = 'cl12' })
 Assert-Json @($script:calls | ForEach-Object { "$($_.method) $($_.uri)" }) '["GET https://invoicing.test/api/v1/task_statuses?per_page=500","POST https://invoicing.test/api/v1/tasks"]' 'apply calls'
 Assert-Same $script:calls[1].body '{"client_id":"cl12","description":"Server maintenance: text","status_id":"st9","time_log":"[[1794882750,1794885270,\"\",true]]","date":"2026-11-16"}' 'apply post body'
 Assert-Same $script:calls[1].token 'test-key' 'apply token header'
+Assert-Same $script:calls[1].noRetry $true 'task creation is never retried'
 Assert-Json $report '["created task 0100 for NinjaOne 4714976556","skipped NinjaOne 3333333333: organization 13 is not in the client map"]' 'apply report'
 Ok 'apply: only drafted sittings not already drafted become tasks; an organization missing from the map is skipped and reported'
 
@@ -311,6 +312,35 @@ try { Get-RsWazuh -Url 'http://indexer.test:9200' -Device 'PC-01' -Start 0 -End 
 Assert-Same $threw $true 'plain http indexer refused'
 Assert-Same $msg 'the Wazuh indexer URL must be https (its certificate is pinned); nothing sent' 'plain http message'
 Ok 'wazuh: a plain http indexer address is refused before the credentials are sent'
+
+Assert-Json (Get-RsActivity -Alerts @() -Spans @(, @(1795111385, 1795113834))) '{"installed":[],"observed":[],"apps":[],"commands":[],"elevations":0}' 'no alerts'
+Ok 'activity: no Wazuh alerts is an empty activity, not an error'
+
+# ---------------------------------------------------------------- retries (the single send is mocked): transient failures three times, nothing else
+. $scriptPath   # the real Invoke-RsHttp again, over the mocked send below
+$script:RsRetryDelaySeconds = 0
+$script:sends = 0
+function Send-RsRequest {
+    param([string]$Method, [string]$Uri, [hashtable]$Headers, $Body, [string]$ContentType, [string]$PinSha256)
+    $script:sends++
+    $s = $script:replies[[math]::Min($script:sends, $script:replies.Count) - 1]
+    if ($s -eq 'drop') { throw [System.Net.Http.HttpRequestException]::new('connection refused') }
+    return @{ status = $s; text = '{"ok":true}' }
+}
+$script:replies = @(503, 'drop', 200)
+Assert-Same (Invoke-RsHttp -Method GET -Uri 'https://x.test/a')['ok'] $true 'third attempt succeeds'
+Assert-Same $script:sends 3 'three attempts'
+$script:sends = 0; $script:replies = @(503)
+try { Invoke-RsHttp -Method GET -Uri 'https://x.test/a' | Out-Null } catch { $msg = $_.Exception.Message }
+Assert-Same $script:sends 3 'gives up after three'
+Assert-Same $msg 'GET /a: HTTP 503' 'last status reported'
+$script:sends = 0; $script:replies = @(404)
+try { Invoke-RsHttp -Method GET -Uri 'https://x.test/a' | Out-Null } catch { }
+Assert-Same $script:sends 1 '404 is one attempt'
+$script:sends = 0; $script:replies = @(503)
+try { Invoke-RsHttp -Method POST -Uri 'https://x.test/tasks' -Body '{}' -NoRetry | Out-Null } catch { }
+Assert-Same $script:sends 1 'a task creation is one attempt (a retry after a lost reply could create it twice)'
+Ok 'http: timeouts, connection failures and 408/429/5xx are tried three times; other statuses and task creation once'
 
 # ---------------------------------------------------------------- the Wazuh indexer certificate is pinned (a certificate made here; no network)
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
