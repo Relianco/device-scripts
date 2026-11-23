@@ -27,7 +27,7 @@
 
     Credentials come only from the environment: NINJAONE_BASE_URL, NINJAONE_CLIENT_ID, NINJAONE_CLIENT_SECRET,
     WAZUH_INDEXER_USER, WAZUH_INDEXER_PASSWORD, WAZUH_INDEXER_SHA256 (the indexer certificate's pinned SHA-256),
-    INVOICENINJA_API_URL, INVOICENINJA_API_KEY. WAZUH_INDEXER_URL overrides the default indexer address.
+    INVOICENINJA_API_URL, INVOICENINJA_API_KEY. -IndexerUrl overrides the indexer's tailnet address.
 
 .EXAMPLE
     pwsh -NoProfile -File scripts/remote-sessions.ps1 -Days 3
@@ -39,7 +39,7 @@
 [CmdletBinding()]
 param(
     [double]$Days = 3,
-    [string]$IndexerUrl = $(if ($env:WAZUH_INDEXER_URL) { $env:WAZUH_INDEXER_URL } else { 'https://100.94.199.113:9200' }),   # the indexer's tailnet address
+    [string]$IndexerUrl = 'https://100.94.199.113:9200',   # the indexer's tailnet address
     [string]$Json,
     [switch]$Apply,
     [string]$ClientMap
