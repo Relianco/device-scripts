@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $modulePath = Join-Path $repoRoot 'windows/jobs/remove-eol-dotnet.ps1'
+$module6Path = Join-Path $repoRoot 'windows/jobs/remove-eol-dotnet-6.ps1'
 
 function Fail { param([string]$Message) [Console]::Error.WriteLine("FAIL $Message"); exit 1 }
 function Assert-True { param([bool]$Condition, [string]$Label) if (-not $Condition) { Fail $Label } }
@@ -45,7 +46,8 @@ function New-Entry {
 }
 
 function Reset-Test {
-    param($Entries = @(), $ExistingFiles = @())
+    param($Entries = @(), $ExistingFiles = @(), [bool]$IncludeDotnet6 = $false)
+    $script:DnIncludeDotnet6 = $IncludeDotnet6
     $script:FakeEntries = [Collections.Generic.List[object]]::new()
     foreach ($e in $Entries) { $script:FakeEntries.Add($e.Clone()) }
     $script:ExistingFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -222,6 +224,82 @@ try {
     Assert-True (Test-DnParentAcl 'O:SYG:SYD:AI(A;ID;0x1200a9;;;BU)(A;OICIIOID;0x100116;;;BU)(A;;FA;;;SY)') 'accepts ProgramData IO ACE on parent'
     Assert-True (-not (Test-DnBackupAcl 'O:SYG:SYD:P(A;;FA;;;SY)')) 'rejects backup ACL without OICI inheritance'
     Assert-True (Test-DnBackupAcl 'O:SYG:SYD:P(A;OICI;FA;;;SY)') 'accepts backup ACL with OICI inheritance'
+
+    # 7. .NET 6 opt-in, with the .NET 6 entries found on a Server 2022 domain controller on 2026-11-23.
+    $hostingId = '{58f3f479-fe1b-4cb4-b547-d6cb9196eac4}'
+    $hostingExe = "C:\ProgramData\Package Cache\$hostingId\dotnet-hosting-6.0.16-win.exe"
+    $rt64Exe = 'C:\ProgramData\Package Cache\{44444444-4444-4444-4444-444444444444}\dotnet-runtime-6.0.16-win-x64.exe'
+    $rt86Exe = 'C:\ProgramData\Package Cache\{55555555-5555-5555-5555-555555555555}\dotnet-runtime-6.0.16-win-x86.exe'
+    $azdc6 = @(
+        (New-Entry -Root 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' -Id $hostingId -Name 'Microsoft .NET 6.0.16 - Windows Server Hosting' -Version '6.0.16.23174' -BundleCachePath $hostingExe -QuietUninstall "`"$hostingExe`" /uninstall /quiet"),
+        (New-Entry -Name 'Microsoft .NET Host - 6.0.16 (x64)' -Version '48.64.23121' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Host - 6.0.16 (x86)' -Version '48.64.23121' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Host FX Resolver - 6.0.16 (x64)' -Version '48.64.23121' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Host FX Resolver - 6.0.16 (x86)' -Version '48.64.23121' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Runtime - 6.0.16 (x64)' -Version '48.64.23121' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Runtime - 6.0.16 (x86)' -Version '48.64.23121' -Msi $true),
+        (New-Entry -Id '{44444444-4444-4444-4444-444444444444}' -Name 'Microsoft .NET Runtime - 6.0.16 (x64)' -Version '6.0.16.32323' -BundleCachePath $rt64Exe),
+        (New-Entry -Id '{55555555-5555-5555-5555-555555555555}' -Name 'Microsoft .NET Runtime - 6.0.16 (x86)' -Version '6.0.16.32323' -BundleCachePath $rt86Exe),
+        (New-Entry -Name 'Microsoft ASP.NET Core 6.0.16 - Shared Framework (x64)' -Version '6.0.16.23174' -Msi $true),
+        (New-Entry -Name 'Microsoft ASP.NET Core 6.0.16 - Shared Framework (x86)' -Version '6.0.16.23174' -Msi $true),
+        (New-Entry -Name 'Microsoft ASP.NET Core 6.0.16 Shared Framework (x64)' -Version '6.0.16.23174' -Msi $true),
+        (New-Entry -Name 'Microsoft ASP.NET Core 6.0.16 Shared Framework (x86)' -Version '6.0.16.23174' -Msi $true),
+        (New-Entry -Id '{1DB68DD7-07DF-3B9C-A907-3E94A08E4651}' -Name 'Microsoft ASP.NET Core 6.0.16 Hosting Bundle Options' -Version '6.0.16.23174' -Msi $true)
+    )
+    $keepers = @(
+        (New-Entry -Name 'Microsoft .NET 8.0.11 - Windows Server Hosting' -Version '8.0.11.24521'),
+        (New-Entry -Name 'Microsoft ASP.NET Core 8.0.11 Hosting Bundle Options' -Version '8.0.11.24521' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Runtime - 8.0.11 (x64)' -Version '64.44.23553' -Msi $true),
+        (New-Entry -Name 'Microsoft Windows Desktop Runtime - 9.0.10 (x64)' -Version '72.40.11023' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Runtime - 10.0.14 (x64)' -Version '80.56.61678' -Msi $true),
+        (New-Entry -Name 'Microsoft .NET Framework 4.8' -Version '4.8.03761'),
+        (New-Entry -Name 'Microsoft .NET Runtime - 6.0.16 (x64)' -Publisher 'ThirdParty' -Version '48.64.23121' -Msi $true)
+    )
+    $expected6 = @(
+        'Microsoft .NET 6.0.16 - Windows Server Hosting',
+        'Microsoft .NET Host - 6.0.16 (x64)', 'Microsoft .NET Host - 6.0.16 (x86)',
+        'Microsoft .NET Host FX Resolver - 6.0.16 (x64)', 'Microsoft .NET Host FX Resolver - 6.0.16 (x86)',
+        'Microsoft .NET Runtime - 6.0.16 (x64)', 'Microsoft .NET Runtime - 6.0.16 (x64)',
+        'Microsoft .NET Runtime - 6.0.16 (x86)', 'Microsoft .NET Runtime - 6.0.16 (x86)',
+        'Microsoft ASP.NET Core 6.0.16 - Shared Framework (x64)', 'Microsoft ASP.NET Core 6.0.16 - Shared Framework (x86)',
+        'Microsoft ASP.NET Core 6.0.16 Shared Framework (x64)', 'Microsoft ASP.NET Core 6.0.16 Shared Framework (x86)',
+        'Microsoft ASP.NET Core 6.0.16 Hosting Bundle Options'
+    )
+    $azdcFiles = @($hostingExe, $rt64Exe, $rt86Exe)
+
+    # 7a. Default: .NET 6 and its Hosting Bundle are left alone.
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles
+    $r = Invoke-DnJob -ReportOnly
+    Assert-Same $r.Status 'unchanged' 'default leaves .NET 6 alone'
+    Assert-Same $r.Before.Count 0 'default finds no .NET 6 target'
+
+    # 7b. Opt-in ReportOnly lists exactly the .NET 6 entries and changes nothing.
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles -IncludeDotnet6 $true
+    $r = Invoke-DnJob -ReportOnly
+    Assert-Same $r.ExitCode 1 'opt-in report exit'
+    Assert-Same $r.Status 'drift' 'opt-in report status'
+    Assert-Same ((@($r.Before | ForEach-Object { $_.name }) | Sort-Object) -join '|') (($expected6 | Sort-Object) -join '|') 'opt-in report lists the .NET 6 entries'
+    Assert-Same $script:Log.Count 0 'opt-in report changes nothing'
+    Assert-Same (@(Backups).Count) 0 'opt-in report writes no backup'
+
+    # 7c. Opt-in removal: backup first, three verified bundles, then the leftover MSIs; .NET 8/9/10, Framework and third party stay.
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles -IncludeDotnet6 $true
+    $r = Invoke-DnJob
+    Assert-Same $r.Status 'removed' 'opt-in remove status'
+    Assert-Same $r.ExitCode 0 'opt-in remove exit'
+    Assert-Same (@(Backups).Count) 1 'opt-in backup written'
+    Assert-Same (@($script:Log | Where-Object { $_ -like 'bundle:*' }) -join '|') "bundle:$hostingExe|/uninstall /quiet /norestart|bundle:$rt64Exe|/uninstall /quiet /norestart|bundle:$rt86Exe|/uninstall /quiet /norestart" 'opt-in bundles run'
+    Assert-Same (@($script:Log | Where-Object { $_ -like 'msi:*' }).Count) 11 'opt-in leftover MSIs run'
+    Assert-Same ((@($script:FakeEntries | ForEach-Object { $_.name }) | Sort-Object) -join '|') ((@($keepers | ForEach-Object { $_.name }) | Sort-Object) -join '|') 'opt-in leaves .NET 8/9/10, Framework and third party'
+
+    # 8. remove-eol-dotnet-6.ps1 is the base module with the opt-in line flipped, and nothing else.
+    $baseLines = [IO.File]::ReadAllLines($modulePath)
+    $sixLines = [IO.File]::ReadAllLines($module6Path)
+    Assert-Same $sixLines.Count $baseLines.Count 'opt-in module line count'
+    $diff = @(for ($i = 0; $i -lt $baseLines.Count; $i++) { if ($baseLines[$i] -cne $sixLines[$i]) { "$($baseLines[$i]) => $($sixLines[$i])" } })
+    Assert-Same ($diff -join '|') '$script:DnIncludeDotnet6 = $false => $script:DnIncludeDotnet6 = $true' 'opt-in module differs only in the opt-in line'
+    . $module6Path
+    Assert-Same ((@(Get-DnTargets ($azdc6 + $keepers)) | ForEach-Object { $_.name } | Sort-Object) -join '|') (($expected6 | Sort-Object) -join '|') 'opt-in module targets the .NET 6 entries'
 } finally {
     if (Test-Path -LiteralPath $tmpRoot) { Remove-Item -LiteralPath $tmpRoot -Recurse -Force }
 }
