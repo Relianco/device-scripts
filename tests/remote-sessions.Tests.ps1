@@ -96,7 +96,7 @@ $apart = @(Get-RsSittings -Sessions @((With $w @{ id = 'a'; start = 0; end = 600
 Assert-Json @($apart | ForEach-Object { , @($_['ids']) }) '[["a"],["b"]]' 'apart'
 Ok 'sittings: a gap over 15 minutes starts a new sitting'
 
-$twins = @(Get-RsSittings -Sessions @((With $w @{ id = 'a'; start = 0; end = 600; seconds = 600 }), (With $w @{ id = 'b'; deviceId = 9999; org = 99; start = 700; end = 1300; seconds = 600 })))
+$twins = @(Get-RsSittings -Sessions @((With $w @{ id = 'a'; start = 0; end = 600; seconds = 600 }), (With $w @{ id = 'b'; deviceId = 'dev-z'; org = 'org-z'; start = 700; end = 1300; seconds = 600 })))
 Assert-Json @($twins | ForEach-Object { , @($_['ids']) }) '[["a"],["b"]]' 'twins'
 Ok 'sittings: two devices with the same name (two clients) never merge; the NinjaOne device id decides'
 
@@ -203,7 +203,7 @@ Ok 'activity: an install is ours only when a person ran that package (msiexec /i
 
 $tgit = @{ data = @{ win = @{ system = @{ eventID = '1'; systemTime = '2026-11-19T18:20:00.0000000Z' }; eventdata = @{
                 image = 'C:\Windows\System32\msiexec.exe'; parentImage = 'C:\Windows\explorer.exe'; user = 'CORP\user1'
-                commandLine = '"C:\Windows\System32\msiexec.exe" /i "C:\Users\user1\Downloads\TortoiseGit-2.17.0.msi"' } } } }
+                commandLine = '"C:\Windows\System32\msiexec.exe" /i "C:\Fixtures\Downloads\TortoiseGit-2.17.0.msi"' } } } }
 $bothGit = Get-RsActivity -Alerts @($tgit, (Msi '1033' 'Git, 2.47.0, 1033, 0, Vendor'), (Msi '1033' 'TortoiseGit, 2.17.0, 1033, 0, Vendor')) -Spans @(, @(1795111385, 1795113834))
 Assert-Json @($bothGit['installed'], $bothGit['observed']) '[["TortoiseGit 2.17.0"],["Git 2.47.0 installed"]]' 'tortoisegit'
 Ok 'activity: the package file name must start with the product name word for word (TortoiseGit does not claim Git)'
@@ -324,7 +324,8 @@ function Send-RsRequest {
     param([string]$Method, [string]$Uri, [hashtable]$Headers, $Body, [string]$ContentType, [string]$PinSha256)
     $script:sends++
     $s = $script:replies[[math]::Min($script:sends, $script:replies.Count) - 1]
-    if ($s -eq 'drop') { throw [System.Net.Http.HttpRequestException]::new('connection refused') }
+    if ($s -eq 'drop') { throw [System.Net.Http.HttpRequestException]::new('connection refused', [System.Net.Sockets.SocketException]::new(111)) }
+    if ($s -eq 'badcert') { throw [System.Net.Http.HttpRequestException]::new('SSL failed', [System.Security.Authentication.AuthenticationException]::new('remote certificate is invalid')) }
     return @{ status = $s; text = '{"ok":true}' }
 }
 $script:replies = @(503, 'drop', 200)
@@ -340,7 +341,10 @@ Assert-Same $script:sends 1 '404 is one attempt'
 $script:sends = 0; $script:replies = @(503)
 try { Invoke-RsHttp -Method POST -Uri 'https://x.test/tasks' -Body '{}' -NoRetry | Out-Null } catch { }
 Assert-Same $script:sends 1 'a task creation is one attempt (a retry after a lost reply could create it twice)'
-Ok 'http: timeouts, connection failures and 408/429/5xx are tried three times; other statuses and task creation once'
+$script:sends = 0; $script:replies = @('badcert')
+try { Invoke-RsHttp -Method GET -Uri 'https://x.test/a' | Out-Null } catch { }
+Assert-Same $script:sends 1 'a TLS failure is one attempt'
+Ok 'http: timeouts, connection failures and 408/429/5xx are tried three times; other failures, other statuses and task creation once'
 
 # ---------------------------------------------------------------- the Wazuh indexer certificate is pinned (a certificate made here; no network)
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)

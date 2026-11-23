@@ -1,35 +1,35 @@
 {
  "devices": [
   {
-   "id": 1001,
+   "id": "dev-a",
    "systemName": "PC-01",
    "nodeClass": "WINDOWS_WORKSTATION",
-   "organizationId": 11
+   "organizationId": "org-a"
   },
   {
-   "id": 1002,
+   "id": "dev-b",
    "systemName": "SRV-01",
    "nodeClass": "WINDOWS_SERVER",
-   "organizationId": 12
+   "organizationId": "org-b"
   },
   {
-   "id": 1003,
+   "id": "dev-c",
    "systemName": "SRV-02",
    "nodeClass": "WINDOWS_SERVER",
-   "organizationId": 13
+   "organizationId": "org-c"
   },
   {
-   "id": 1004,
+   "id": "dev-d",
    "systemName": "PC-02",
    "nodeClass": "WINDOWS_WORKSTATION",
-   "organizationId": 12
+   "organizationId": "org-b"
   }
  ],
  "activities": [
   {
    "id": 23716874,
    "activityTime": 1795182090,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "8230077061211F90SPBXYUBL6AGF0HNI",
@@ -46,7 +46,7 @@
   {
    "id": 23716872,
    "activityTime": 1795182082,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "8230077061211F90SPBXYUBL6AGF0HNI",
@@ -61,7 +61,7 @@
   {
    "id": 23716870,
    "activityTime": 1795182079.900519,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "8230077061211F90SPBXYUBL6AGF0HNI",
@@ -72,7 +72,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1003"
+      "nodeId": "dev-c"
      }
     }
    }
@@ -80,7 +80,7 @@
   {
    "id": 23716703,
    "activityTime": 1795181732.034069,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "9440189190211F90UNQV13E9ZS79EQFM",
@@ -95,7 +95,7 @@
   {
    "id": 23716696,
    "activityTime": 1795181718.094228,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "9440189190211F90UNQV13E9ZS79EQFM",
@@ -106,7 +106,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1003"
+      "nodeId": "dev-c"
      }
     }
    }
@@ -114,7 +114,7 @@
   {
    "id": 23716487,
    "activityTime": 1795181307,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "4314106653211F90KWGWV6ZLP8MKVO2N",
@@ -131,7 +131,7 @@
   {
    "id": 23716484,
    "activityTime": 1795181294,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "4314106653211F90KWGWV6ZLP8MKVO2N",
@@ -146,7 +146,7 @@
   {
    "id": 23716483,
    "activityTime": 1795181291.317184,
-   "deviceId": 1003,
+   "deviceId": "dev-c",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "4314106653211F90KWGWV6ZLP8MKVO2N",
@@ -157,7 +157,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1003"
+      "nodeId": "dev-c"
      }
     }
    }
@@ -165,7 +165,7 @@
   {
    "id": 23705674,
    "activityTime": 1795113834,
-   "deviceId": 1001,
+   "deviceId": "dev-a",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "5592750678211F90GUEAWF29GATLVYSJ",
@@ -182,7 +182,7 @@
   {
    "id": 23705306,
    "activityTime": 1795111385,
-   "deviceId": 1001,
+   "deviceId": "dev-a",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "5592750678211F90GUEAWF29GATLVYSJ",
@@ -197,7 +197,7 @@
   {
    "id": 23705305,
    "activityTime": 1795111380.907031,
-   "deviceId": 1001,
+   "deviceId": "dev-a",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "5592750678211F90GUEAWF29GATLVYSJ",
@@ -208,7 +208,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1001"
+      "nodeId": "dev-a"
      }
     }
    }
@@ -216,7 +216,7 @@
   {
    "id": 23518063,
    "activityTime": 1794885107,
-   "deviceId": 1002,
+   "deviceId": "dev-b",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "4714976556211F90SYUAUQ68SHGNRGV3",
@@ -233,7 +233,7 @@
   {
    "id": 23462941,
    "activityTime": 1794882750,
-   "deviceId": 1002,
+   "deviceId": "dev-b",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "4714976556211F90SYUAUQ68SHGNRGV3",
@@ -248,7 +248,7 @@
   {
    "id": 23462940,
    "activityTime": 1794882747.666349,
-   "deviceId": 1002,
+   "deviceId": "dev-b",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "4714976556211F90SYUAUQ68SHGNRGV3",
@@ -259,7 +259,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1002"
+      "nodeId": "dev-b"
      }
     }
    }
@@ -267,7 +267,7 @@
   {
    "id": 23458705,
    "activityTime": 1794882570.306227,
-   "deviceId": 1002,
+   "deviceId": "dev-b",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "2315920241211F90RVOVYZZJ0ZDGSSOO",
@@ -278,7 +278,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1002"
+      "nodeId": "dev-b"
      }
     }
    }
@@ -286,7 +286,7 @@
   {
    "id": 23458303,
    "activityTime": 1794882553.399932,
-   "deviceId": 1002,
+   "deviceId": "dev-b",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "5966168942211F90IDQAUUUMGWOFP4PD",
@@ -297,7 +297,7 @@
       "appUserName": "Relian Tech",
       "appUserId": "1",
       "appUserEmail": "tech@relian.ca",
-      "nodeId": "1002"
+      "nodeId": "dev-b"
      }
     }
    }
@@ -305,7 +305,7 @@
   {
    "id": 22699356,
    "activityTime": 1794859016,
-   "deviceId": 1004,
+   "deviceId": "dev-d",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "9872937265211F90OFIRX2GXWY4HJSKI",
@@ -322,7 +322,7 @@
   {
    "id": 22694004,
    "activityTime": 1794858872,
-   "deviceId": 1004,
+   "deviceId": "dev-d",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "9872937265211F90OFIRX2GXWY4HJSKI",
@@ -337,7 +337,7 @@
   {
    "id": 22693628,
    "activityTime": 1794858867.813446,
-   "deviceId": 1004,
+   "deviceId": "dev-d",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "9872937265211F90OFIRX2GXWY4HJSKI",
@@ -348,7 +348,7 @@
       "appUserName": "Client Staff",
       "appUserId": "31",
       "appUserEmail": "staff@client.example",
-      "nodeId": "1004"
+      "nodeId": "dev-d"
      }
     }
    }
@@ -356,7 +356,7 @@
   {
    "id": 22655390,
    "activityTime": 1794857691.571084,
-   "deviceId": 1004,
+   "deviceId": "dev-d",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "3454014536211F90VFT4LIKIIDXBLOD4",
@@ -371,7 +371,7 @@
   {
    "id": 22655380,
    "activityTime": 1794857691.504224,
-   "deviceId": 1004,
+   "deviceId": "dev-d",
    "activityType": "NINJA_REMOTE",
    "data": {
     "sessionName": "3454014536211F90VFT4LIKIIDXBLOD4",
@@ -382,7 +382,7 @@
       "appUserName": "Client Staff",
       "appUserId": "31",
       "appUserEmail": "staff@client.example",
-      "nodeId": "1004"
+      "nodeId": "dev-d"
      }
     }
    }

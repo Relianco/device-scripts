@@ -556,6 +556,8 @@ function Invoke-RsHttp {
             while ($inner.InnerException) { $inner = $inner.InnerException }
             if ($inner.Message -ceq 'RsPinMismatch' -or $_.Exception.Message -like '*RsPinMismatch*') { throw 'Wazuh indexer certificate does not match the pinned SHA-256; nothing sent' }
             $failure = "$Method $(([uri]$Uri).Host) failed: $($inner.Message)"
+            # only a timeout (TaskCanceled/Timeout) or a socket failure (connection, DNS) is transient
+            if ($inner -isnot [System.Net.Sockets.SocketException] -and $inner -isnot [System.TimeoutException] -and $inner -isnot [System.Threading.Tasks.TaskCanceledException]) { throw $failure }
         }
         if ($reply -and $reply['status'] -ge 200 -and $reply['status'] -lt 300) {
             if (-not $reply['text']) { return $null }
