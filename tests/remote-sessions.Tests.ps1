@@ -235,6 +235,9 @@ Assert-Same (Find-RsOldTask -Sitting $ws1 -Tasks @($old))['number'] '0099' 'old 
 Assert-Same (Find-RsOldTask -Sitting $ws1 -Tasks @($old) -Shared) $null 'old task shared'
 Ok 'comparison: the old task is matched by computer and start, and not at all when two NinjaOne devices share the name'
 
+Assert-Same (Get-RsLoggedHours '[[1795111385, 1795111985, "", true], [1795112000, 1795112720, "", true], [1795113000, 0, "", true]]') 0.37 'old task hours'
+Ok 'comparison: the old task shows its logged hours (finished entries only), to two decimals'
+
 $realZone = $script:RsZone
 $script:RsZone = [TimeZoneInfo]::CreateCustomTimeZone('pre-2026', [timespan]::FromHours(-8), 'pre-2026', 'pre-2026')   # what a host with time zone data older than 2026 has for America/Vancouver
 Assert-Same (Get-RsClock 1794882750).ToString('HH:mm') '19:32' 'clock from 2026 is UTC-7'

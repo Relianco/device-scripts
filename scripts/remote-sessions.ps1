@@ -607,6 +607,15 @@ function Get-RsTasks {
 
 # ---------------------------------------------------------------- the report
 
+# Hours logged on a task (entries with an end), to two decimals.
+function Get-RsLoggedHours {
+    param([string]$TimeLog)
+    $sum = 0
+    $log = ConvertFrom-Json -InputObject $TimeLog -NoEnumerate   # one value: @() around the call would nest the list
+    foreach ($x in $log) { if ($x[1]) { $sum += $x[1] - $x[0] } }
+    return [math]::Round($sum / 3600, 2)
+}
+
 # Python's str() of a value, so the dry run prints what the Python tool printed.
 function Format-RsPy {
     param($Value)
@@ -646,12 +655,7 @@ function Invoke-RsMain {
         if ($shared) { $hits = @(); $note = "two NinjaOne devices are named $($t['device']): activity not read" }
         $act = if (-not $why) { Get-RsActivity -Alerts $hits -Spans @($t['spans']) } else { $null }
         $old = Find-RsOldTask -Sitting $t -Tasks $tasks -Shared:$shared
-        $oldHours = $null
-        if ($old) {
-            $sum = 0
-            foreach ($x in @(ConvertFrom-Json -InputObject $old['time_log'] -NoEnumerate)) { if ($x[1]) { $sum += $x[1] - $x[0] } }
-            $oldHours = [math]::Round($sum / 3600, 2)
-        }
+        $oldHours = if ($old) { Get-RsLoggedHours $old['time_log'] } else { $null }
         $rows.Add([ordered]@{
                 device = $t['device']; org = $t['org']; start = $t['start']; seconds = $t['seconds']; ids = @($t['ids']); skip = $why
                 wazuhEvents = $hits.Count; wazuhCut = $w['cut']; wazuhNote = $note; observed = $(if ($act) { $act['observed'] })
