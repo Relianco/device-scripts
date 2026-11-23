@@ -503,8 +503,9 @@ public sealed class RelianCertPin {
 # The indexer's self-signed certificate is trusted by its SHA-256 alone, checked in the TLS handshake before anything is sent.
 function New-RsPin {
     param([string]$Sha256)
-    $hex = ([string]$Sha256).ToUpperInvariant() -replace '[^0-9A-F]', ''
-    if ($hex.Length -ne 64) { throw 'WAZUH_INDEXER_SHA256 is not a SHA-256 fingerprint' }
+    # 64 hex digits, or 32 colon-separated pairs as openssl prints them; any other text is refused
+    if ([string]$Sha256 -notmatch '^([0-9A-Fa-f]{64}|([0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2})$') { throw 'WAZUH_INDEXER_SHA256 is not a SHA-256 fingerprint' }
+    $hex = ([string]$Sha256).ToUpperInvariant() -replace ':', ''
     if (-not ('RelianCertPin' -as [type])) { Add-Type -TypeDefinition $script:RsPinSource }
     return ('RelianCertPin' -as [type])::new($hex)
 }

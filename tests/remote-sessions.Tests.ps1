@@ -360,6 +360,9 @@ Assert-Same $other.Mismatch $true 'other certificate mismatch recorded'
 $threw = $false
 try { New-RsPin 'not-a-hash' | Out-Null } catch { $threw = $true }
 Assert-Same $threw $true 'a pin that is not a SHA-256 is refused'
+$threw = $false
+try { New-RsPin ('x-' + ('ab' * 32)) | Out-Null } catch { $threw = $true }
+Assert-Same $threw $true 'a pin with other text around the hex is refused'
 Ok 'pin: only the certificate with the pinned SHA-256 is accepted; an empty or malformed pin is refused'
 
 Write-Output "remote-sessions: $($script:n) checks ok"
