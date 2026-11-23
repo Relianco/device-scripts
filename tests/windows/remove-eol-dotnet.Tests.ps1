@@ -46,8 +46,10 @@ function New-Entry {
 }
 
 function Reset-Test {
-    param($Entries = @(), $ExistingFiles = @(), [bool]$IncludeDotnet6 = $false)
+    param($Entries = @(), $ExistingFiles = @(), [bool]$IncludeDotnet6 = $false, [int[]]$AncmMajors = @(18))
     $script:DnIncludeDotnet6 = $IncludeDotnet6
+    $script:AncmMajors = $AncmMajors
+    $script:AncmThrows = $false
     $script:FakeEntries = [Collections.Generic.List[object]]::new()
     foreach ($e in $Entries) { $script:FakeEntries.Add($e.Clone()) }
     $script:ExistingFiles = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -71,6 +73,10 @@ $script:DnAssertNotReparse = {
     }
 }
 $script:DnFileExists = { param([string]$Path) $script:ExistingFiles.Contains($Path) }
+$script:DnReadAncmMajors = {
+    if ($script:AncmThrows) { throw 'version read failure' }
+    return @($script:AncmMajors)
+}
 $script:DnProtectDir = { param($Path) $script:Log.Add("protect:$(Split-Path -Leaf $Path)") }
 $script:DnReadSddl = {
     param($Path)
@@ -292,19 +298,30 @@ try {
     Assert-Same (@($script:Log | Where-Object { $_ -like 'msi:*' }).Count) 11 'opt-in leftover MSIs run'
     Assert-Same ((@($script:FakeEntries | ForEach-Object { $_.name }) | Sort-Object) -join '|') ((@($keepers | ForEach-Object { $_.name }) | Sort-Object) -join '|') 'opt-in leaves .NET 8/9/10, Framework and third party'
 
-    # 7d. Opt-in refuses the .NET 6 Hosting Bundle when no .NET 8+ Hosting Bundle keeps the shared IIS ASP.NET Core Module.
-    $noNewHosting = @($keepers | Where-Object { $_.name -ne 'Microsoft .NET 8.0.11 - Windows Server Hosting' })
-    Reset-Test -Entries ($azdc6 + $noNewHosting) -ExistingFiles $azdcFiles -IncludeDotnet6 $true
+    # 7d. Opt-in refuses the .NET 6 Hosting Bundle while the shared IIS ASP.NET Core Module is the .NET 6 one (16.x),
+    # even with a .NET 8 Hosting Bundle listed (installed with OPT_NO_ANCM=1). ANCM file majors: 6.0 = 16, 8.0 = 18 (dotnet.microsoft.com download pages).
+    $refuseText = 'refusing .NET 6 Hosting Bundle: the IIS ASP.NET Core Module is not from a .NET 8 or later Hosting Bundle'
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles -IncludeDotnet6 $true -AncmMajors @(16)
     $r = Invoke-DnJob
-    Assert-Same $r.ExitCode 2 'no newer hosting bundle exit'
-    Assert-Same $r.Status 'failed' 'no newer hosting bundle status'
-    Assert-Same $r.Error 'refusing .NET 6 Hosting Bundle: no .NET 8 or later Hosting Bundle is installed to keep the ASP.NET Core Module' 'no newer hosting bundle error'
-    Assert-Same $script:Log.Count 0 'no newer hosting bundle runs nothing'
-    Assert-Same (@(Backups).Count) 0 'no newer hosting bundle writes no backup'
-    Reset-Test -Entries ($azdc6 + $noNewHosting) -ExistingFiles $azdcFiles -IncludeDotnet6 $true
+    Assert-Same $r.ExitCode 2 'ANCM 16 exit'
+    Assert-Same $r.Status 'failed' 'ANCM 16 status'
+    Assert-Same $r.Error $refuseText 'ANCM 16 error'
+    Assert-Same $script:Log.Count 0 'ANCM 16 runs nothing'
+    Assert-Same (@(Backups).Count) 0 'ANCM 16 writes no backup'
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles -IncludeDotnet6 $true -AncmMajors @(18, 16)
     $r = Invoke-DnJob -ReportOnly
-    Assert-Same $r.Status 'drift' 'no newer hosting bundle report status'
-    Assert-Same $r.Error 'refusing .NET 6 Hosting Bundle: no .NET 8 or later Hosting Bundle is installed to keep the ASP.NET Core Module' 'no newer hosting bundle report error'
+    Assert-Same $r.Status 'drift' 'ANCM 18 and 16 report status'
+    Assert-Same $r.Error $refuseText 'ANCM 18 and 16 report error (any 16 copy refuses)'
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles -IncludeDotnet6 $true -AncmMajors @(18)
+    $script:AncmThrows = $true
+    $r = Invoke-DnJob
+    Assert-Same $r.Status 'failed' 'ANCM read failure status'
+    Assert-Same $script:Log.Count 0 'ANCM read failure runs nothing'
+
+    # 7e. No ASP.NET Core Module at all: nothing in IIS to break, so the Hosting Bundle goes.
+    Reset-Test -Entries ($azdc6 + $keepers) -ExistingFiles $azdcFiles -IncludeDotnet6 $true -AncmMajors @()
+    $r = Invoke-DnJob
+    Assert-Same $r.Status 'removed' 'no ANCM removed'
 
     # 8. remove-eol-dotnet-6.ps1 is the base module with the opt-in line flipped, and nothing else.
     $baseLines = [IO.File]::ReadAllLines($modulePath)

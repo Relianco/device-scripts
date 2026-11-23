@@ -3,8 +3,8 @@
 # Microsoft Corporation. Leaves .NET 6, .NET 8, .NET 9, .NET 10, .NET Framework, and third-party runtimes untouched.
 # remove-eol-dotnet-6.ps1 is this file with DnIncludeDotnet6 set to $true: it also removes .NET 6 (end of life
 # 2024-11-12), its Windows Desktop Runtime and its ASP.NET Core Hosting Bundle (Windows Server Hosting and Hosting Bundle
-# Options). It refuses the Hosting Bundle (exit 2, nothing run) unless a .NET 8 or later Hosting Bundle is installed,
-# because the bundles share one IIS ASP.NET Core Module. Never .NET 8 or later.
+# Options). The bundles share one IIS ASP.NET Core Module, so it refuses the Hosting Bundle (exit 2, nothing run) while
+# an installed aspnetcorev2.dll is older than 18 (.NET 8). Never .NET 8 or later.
 # Before running any uninstaller, writes a JSON backup under C:\ProgramData\Relian\EolDotnetBackup (SYSTEM-only,
 # never overwritten) and reads it back. Verified WiX Burn bundles under C:\ProgramData\Package Cache\{GUID}\*.exe
 # run first (/uninstall /quiet /norestart), then any remaining matched Windows Installer {GUID} products run via
@@ -36,6 +36,15 @@ function Open-DnHklm {
 $script:DnReadSddl = { param($Path) (Get-Acl -LiteralPath $Path).Sddl }
 
 $script:DnFileExists = { param([string]$Path) [IO.File]::Exists($Path) }
+
+# File major version of each installed IIS ASP.NET Core Module (aspnetcorev2.dll): 16 ships with .NET 6, 18 with .NET 8.
+$script:DnReadAncmMajors = {
+    $dirs = @($env:ProgramW6432, ${env:ProgramFiles(x86)}, $env:ProgramFiles) | Where-Object { $_ } | Sort-Object -Unique
+    foreach ($d in $dirs) {
+        $dll = Join-Path $d 'IIS\Asp.Net Core Module\V2\aspnetcorev2.dll'
+        if ([IO.File]::Exists($dll)) { [Diagnostics.FileVersionInfo]::GetVersionInfo($dll).FileMajorPart }
+    }
+}
 
 $script:DnAssertNotReparse = {
     param([string[]]$Paths)
@@ -228,17 +237,15 @@ function Get-DnTargets {
     return @($found | Sort-Object @{ Expression = { $_.name } }, @{ Expression = { $_.id } })
 }
 
-# Every ASP.NET Core Hosting Bundle shares one IIS ASP.NET Core Module: removing the last bundle removes it for every site.
-# shortcut: trusts the newer bundle's uninstall entry; one installed with OPT_NO_ANCM=1 also passes. Check that by hand on IIS hosts.
+# Every ASP.NET Core Hosting Bundle shares one IIS ASP.NET Core Module. Removing the .NET 6 bundle is safe only when no
+# module is installed or every copy is 18 or later (from .NET 8 or later), which a .NET 6 bundle does not own.
 function Get-DnHostingBlock {
-    param($Entries, $Targets)
+    param($Targets)
     if (-not @($Targets | Where-Object { $_.name -match '(?i)\AMicrosoft \.NET 6\.\d+\.\d+ - Windows Server Hosting\z' })) { return '' }
-    foreach ($e in @($Entries)) {
-        if ($null -eq $e) { continue }
-        if (([string](Get-DnProp $e 'publisher' '')).Trim() -ine 'Microsoft Corporation') { continue }
-        if (([string](Get-DnProp $e 'name' '')).Trim() -match '(?i)\AMicrosoft \.NET (\d{1,3})\.\d+\.\d+ - Windows Server Hosting\z' -and [int]$Matches[1] -ge 8) { return '' }
+    foreach ($major in @(& $script:DnReadAncmMajors)) {
+        if ([int]$major -lt 18) { return 'refusing .NET 6 Hosting Bundle: the IIS ASP.NET Core Module is not from a .NET 8 or later Hosting Bundle' }
     }
-    return 'refusing .NET 6 Hosting Bundle: no .NET 8 or later Hosting Bundle is installed to keep the ASP.NET Core Module'
+    return ''
 }
 
 function Get-DnVerifiedBundlePath {
@@ -321,7 +328,7 @@ function Invoke-DnJob {
         $entries = @(& $script:DnReadUninstallEntries)
         $targets = @(Get-DnTargets $entries)
         $r.Before = @(Get-DnSummary $targets)
-        $hostingBlock = Get-DnHostingBlock $entries $targets
+        $hostingBlock = Get-DnHostingBlock $targets
         if ($targets.Count -eq 0) {
             $r.After = @()
             $r.Status = 'unchanged'
