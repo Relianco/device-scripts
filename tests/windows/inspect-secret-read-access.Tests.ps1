@@ -39,6 +39,13 @@ Assert-Same (Get-SrAccess 'D:(A;;0x1200a9;;;WD)').standardUserRead $true 'hex re
 Assert-Same (Get-SrAccess 'D:(D;;0x1;;;IU)(A;;0x1;;;IU)').standardUserRead $false 'deny read wins'
 Assert-Same (Get-SrAccess 'D:(A;;0x1;;;S-1-5-21-1-2-3-1001)').standardUserRead $false 'a named account is not a group of all staff'
 Assert-Same @((Get-SrAccess 'D:(A;;0x1;;;S-1-5-21-1-2-3-1001)').aces)[0].who 'name-of-S-1-5-21-1-2-3-1001' 'unknown SID translated through the seam'
+# Every staff token holds Everyone, Users, Authenticated Users and INTERACTIVE, so a deny on any of them blocks all.
+Assert-Same (Get-SrAccess 'D:(D;;0x1;;;WD)(A;;0x1;;;BU)').standardUserRead $false 'deny for Everyone blocks a Users grant'
+# A null DACL is unrestricted; an empty one grants nothing; no descriptor is unknown.
+Assert-Same (Get-SrAccess 'O:BAG:SYD:NO_ACCESS_CONTROL').standardUserRead $true 'null DACL is world-readable'
+Assert-Same (Get-SrAccess 'O:BAG:SYD:P').standardUserRead $false 'empty DACL grants nothing'
+Assert-True ($null -eq (Get-SrAccess '').standardUserRead) 'no descriptor is unknown'
+Assert-True ($null -eq (Get-SrAccess 'O:BAG:SY').standardUserRead) 'descriptor without a DACL section is unknown'
 # The SACL is not parsed as access.
 Assert-Same @((Get-SrAccess 'O:SYG:SYD:(A;;KA;;;SY)S:(AU;SA;KA;;;WD)').aces).Count 1 'SACL ignored'
 

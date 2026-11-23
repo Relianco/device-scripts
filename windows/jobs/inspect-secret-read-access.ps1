@@ -143,18 +143,22 @@ function Get-SrAccess {
             read = (-not $inheritOnly) -and (((Get-SrMask $rights) -band $script:SrReadBits) -ne 0)
         }
     })
-    $readable = {
-        param($Sid)
-        $hits = @($aces | Where-Object { $_.sid -eq $Sid -and $_.read })
-        (@($hits | Where-Object { $_.type -eq 'allow' }).Count -gt 0) -and (@($hits | Where-Object { $_.type -eq 'deny' }).Count -eq 0)
-    }
-    $standard = @($script:SrStandardSids | Where-Object { & $readable $_ } | ForEach-Object { Get-SrName $_ })
+    $denied = { param($Sids) @($aces | Where-Object { $_.type -eq 'deny' -and $_.read -and $Sids -contains $_.sid }).Count -gt 0 }
+    $granted = { param($Sid) @($aces | Where-Object { $_.type -eq 'allow' -and $_.read -and $_.sid -eq $Sid }).Count -gt 0 }
+    # Every staff token holds all the standard SIDs, so a read deny on any one of them applies to every grant.
+    $standardDenied = & $denied $script:SrStandardSids
+    $standard = @($script:SrStandardSids | Where-Object { (-not $standardDenied) -and (& $granted $_) } | ForEach-Object { Get-SrName $_ })
+    $staffRead = $standard.Count -gt 0
+    $readersRead = (& $granted $script:SrEventLogReaders) -and -not (& $denied (@($script:SrStandardSids) + $script:SrEventLogReaders))
+    # D:NO_ACCESS_CONTROL is a null DACL: everyone has every right. No DACL section at all is unknown, not denied.
+    if ($Sddl -match 'D:NO_ACCESS_CONTROL') { $standard = @('Everyone (null DACL)'); $staffRead = $true; $readersRead = $true }
+    elseif ($Sddl -notmatch 'D:') { $staffRead = $null; $readersRead = $null }
     [ordered]@{
         sddl = $Sddl
         aces = $aces
         standardReaders = $standard
-        standardUserRead = ($standard.Count -gt 0)
-        eventLogReadersRead = [bool](& $readable $script:SrEventLogReaders)
+        standardUserRead = $staffRead
+        eventLogReadersRead = $readersRead
     }
 }
 
