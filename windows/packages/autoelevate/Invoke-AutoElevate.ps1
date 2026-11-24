@@ -185,6 +185,18 @@ function Get-AutoElevatePlan {
 $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
 $script:AutoElevateReport = [ordered]@{ Package = 'autoelevate' }
 $script:AutoElevateSecret = ''
+# Written by the vendor's NinjaOne install script (msiexec /lv); it holds the licence key.
+$script:AutoElevateInstallLogPath = 'C:\AEInstallLog.log'
+
+# Section RemoveInstallLog: deletes that one file and nothing else. Run it only after the vendor
+# script is gone from NinjaOne, or its next run writes the file again.
+function Remove-AutoElevateInstallLog {
+    $path = $script:AutoElevateInstallLogPath
+    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{ InstallLog = 'absent' } }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ InstallLog = 'not a file' } }
+    Remove-Item -LiteralPath $path -Force
+    return [pscustomobject]@{ InstallLog = 'removed' }
+}
 
 function Select-AutoElevateKey {
     param([string]$Argument, [string]$Field = '')
@@ -1073,6 +1085,15 @@ function Invoke-AutoElevateAction {
         return 130
     }
     $present = -not [string]::IsNullOrWhiteSpace($installed)
+    # Registration values on an uninstall mean a Reinstall (runner: uninstall step, then install step,
+    # same arguments). Refuse it while the key is missing, or the device is left without the agent.
+    if ($plan.RunInstaller -eq 'uninstall' -and (@($CompanyName, $CompanyInitials, $LocationName, $ElevationMode) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $check = Get-AutoElevateRegistrationProperties -LicenseKey $LicenseKey -CompanyName $CompanyName -CompanyInitials $CompanyInitials -LocationName $LocationName -ElevationMode $ElevationMode -Registered $false
+        if ($null -ne $check.ExitCode) {
+            Add-AutoElevateError -Message ('not uninstalling, the install step would fail: ' + $check.Reason)
+            return 1
+        }
+    }
 
     $cache = ''
     try {
@@ -1225,6 +1246,9 @@ try {
     if ($Section -eq 'Evidence') {
         $script:AutoElevateReport = Get-AutoElevateEvidence
         $autoelevateExit = 0
+    } elseif ($Section -eq 'RemoveInstallLog') {
+        $script:AutoElevateReport['InstallLog'] = (Remove-AutoElevateInstallLog).InstallLog
+        $autoelevateExit = if ($script:AutoElevateReport['InstallLog'] -eq 'not a file') { 1 } else { 0 }
     } elseif (-not [string]::IsNullOrEmpty($Section)) {
         Add-AutoElevateError -Message 'unsupported Section'
     } else {

@@ -201,6 +201,20 @@ try {
     $want = @('open Registry64', 'create SOFTWARE\AutoElevate', ('set LicenseKey=' + $script:ArgKey + ' (String)'), 'open Registry64', 'create SOFTWARE\AutoElevate', ('set LicenseKey=' + $oldKey + ' (String)'))
     if (($script:Reg -join '|') -cne ($want -join '|')) { Fail "installed 1603 did not restore the old key: $(($script:Reg -join '|').Replace($script:ArgKey, '[new]'))" }
 
+    # 3c. Runner 374 Reinstall = Uninstall step, then Install step, each with the same arguments.
+    #     An Uninstall that carries registration values is the first half of a re-registration: it
+    #     must not remove the agent when the key is not there yet (an org field takes minutes to
+    #     reach the agent), or the device is left without AutoElevate.
+    Reset-Case -Installed $true
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey '' -CompanyName 'Example Company' -LocationName 'Main Office')
+    if ($code -ne 1 -or $script:Calls -contains 'msiexec uninstall') { Fail "uninstall with names and no key: exit $code calls $($script:Calls -join ', ')" }
+    Reset-Case -Installed $true
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey $script:FieldKey -CompanyName 'Example Company' -LocationName 'Main Office')
+    if ($code -ne 0 -or $script:Calls -notcontains 'msiexec uninstall') { Fail "uninstall with names and the key: exit $code calls $($script:Calls -join ', ')" }
+    Reset-Case -Installed $true
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot)
+    if ($code -ne 0 -or $script:Calls -notcontains 'msiexec uninstall') { Fail "plain uninstall: exit $code calls $($script:Calls -join ', ')" }
+
     # 4. End to end, as runner 374 starts it: a child process with only LicenseKeyField on its command
     #    line finds Ninja-Property-Get by module autoload (NJCliPSh, as on a NinjaOne device), gets the
     #    key, and moves on to the next check. No names, so it stops before the registry and the download.

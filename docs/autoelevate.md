@@ -88,6 +88,18 @@ It is separate from normal installation and requires review before reuse.
   (MsiInstaller events) and the MSI exit code in the report. A machine policy
   that turns on Windows Installer logging still writes one, so keep that
   policy off.
+- **`Section` `RemoveInstallLog`** deletes `C:\AEInstallLog.log` and nothing
+  else, and reports `InstallLog`: `removed`, `absent` or `not a file` (exit 1,
+  left alone). The vendor's NinjaOne install script writes that file with
+  `msiexec /lv`, and it holds the key. Run it only after that script is gone
+  from NinjaOne, or its next run writes the file again.
+- **`Reinstall` keeps the agent when the key is missing.** The runner runs
+  `Reinstall` as an uninstall step and then an install step, with the same
+  arguments. An uninstall step that carries registration values (`CompanyName`
+  and the rest) first checks them as the install step will. If the key is not
+  there (for example, a NinjaOne field set less than five minutes ago, which has
+  not reached the agent yet), it exits 1 and does not uninstall. A plain
+  `Uninstall` with no registration values is unchanged.
 - **`Section` `Evidence`** is read-only. It reports the installed version, the
   product code, the install path, the stored registration (the key and
   `Settings` only as `present` or `absent`), both services with their state
@@ -110,6 +122,7 @@ README.
 | Run | `-Action` | `-PackageArguments` | JSON |
 |---|---|---|---|
 | Evidence | `Install` | `eyJTZWN0aW9uIjoiRXZpZGVuY2UifQ==` | `{"Section":"Evidence"}` |
+| Remove the vendor install log | `Install` | `eyJTZWN0aW9uIjoiUmVtb3ZlSW5zdGFsbExvZyJ9` | `{"Section":"RemoveInstallLog"}` |
 | Upgrade a registered agent | `Install` | none | |
 | Fresh install | `Install` | `eyJDb21wYW55TmFtZSI6IkV4YW1wbGUgQ29tcGFueSIsIkNvbXBhbnlJbml0aWFscyI6IkVDIiwiTG9jYXRpb25OYW1lIjoiTWFpbiBPZmZpY2UiLCJFbGV2YXRpb25Nb2RlIjoibGl2ZSJ9` | `{"CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}` |
 
@@ -132,7 +145,8 @@ There is no msiexec log.
 - The field: `autoelevateLicenseKey`, type Secure (API `TEXT_ENCRYPTED`),
   scopes Organization, Location and Device, script access Read only, API
   access Write only. Set it per organization. A device or location value
-  overrides the organization value.
+  overrides the organization value. A new value takes a few minutes to reach
+  the agent: wait five minutes after setting it before a run.
 - `Ninja-Property-Get` comes from the NinjaOne module `NJCliPSh`
   (`C:\Program Files\WindowsPowerShell\Modules`), which the package process
   loads on first use. It works only in a process the NinjaOne agent started.
