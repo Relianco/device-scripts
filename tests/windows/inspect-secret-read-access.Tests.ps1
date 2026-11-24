@@ -86,6 +86,7 @@ $script:SrFirstFile = { param($Dir, $Filter) 'C:\Windows\Installer\1a2b.msi' }
 $fakeTail = 'KEY=' + ('v' * 14)
 $script:SrReadTail = { param($Path) @('2026-11-23 09:00:00 done', $fakeTail) }
 $script:SrReadMembers = { param($Sid) @('PC\admin') }
+$script:SrPathExists = { param($Path) $true }
 $r = Invoke-SrJob
 Assert-Same $r.ExitCode 0 'exit'
 $j = $r.Line | ConvertFrom-Json
@@ -116,8 +117,15 @@ Assert-Same (@($j.groups.administrators) -join ',') 'PC\admin' 'administrators l
 Assert-True (-not $r.Line.Contains($fakeTail)) 'no log text in output'
 Assert-True (-not $r.Line.Contains('done')) 'not even an ordinary log line'
 
+# An empty log is still present, and its ACL still reported.
+$script:SrReadTail = { param($Path) }
+$j = (Invoke-SrJob).Line | ConvertFrom-Json
+Assert-Same $j.installLog.present $true 'empty log is present'
+Assert-Same @($j.installLog.tail).Count 0 'empty tail'
+Assert-Same $j.installLog.access.standardUserRead $false 'empty log ACL reported'
+
 # A log that is not there.
-$script:SrReadTail = { param($Path) $null }
+$script:SrPathExists = { param($Path) $false }
 $j = (Invoke-SrJob).Line | ConvertFrom-Json
 Assert-Same $j.installLog.present $false 'no install log'
 

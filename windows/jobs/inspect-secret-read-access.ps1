@@ -95,7 +95,8 @@ $script:SrReadKey = {
 
 $script:SrReadSddl = { param($Path) if (Test-Path -LiteralPath $Path) { (Get-Acl -LiteralPath $Path).Sddl } else { $null } }
 $script:SrFirstFile = { param($Dir, $Filter) @(Get-ChildItem -LiteralPath $Dir -Filter $Filter -File -Force -ErrorAction Stop | Select-Object -First 1 | ForEach-Object FullName)[0] }
-$script:SrReadTail = { param($Path) if (Test-Path -LiteralPath $Path) { @(Get-Content -LiteralPath $Path -Tail 5) } else { $null } }
+$script:SrPathExists = { param($Path) Test-Path -LiteralPath $Path -PathType Leaf }
+$script:SrReadTail = { param($Path) Get-Content -LiteralPath $Path -Tail 5 }
 $script:SrReadMembers = {
     param($Sid)
     $name = ([Security.Principal.SecurityIdentifier]$Sid).Translate([Security.Principal.NTAccount]).Value.Split('\')[-1]
@@ -236,10 +237,10 @@ function Invoke-SrJob {
 
     $installLog = [ordered]@{ path = $script:SrLogPath; present = $false }
     try {
-        $tail = & $script:SrReadTail $script:SrLogPath
-        if ($null -ne $tail) {
+        # Existence apart from the tail: an empty log has no lines but still has an ACL.
+        if (& $script:SrPathExists $script:SrLogPath) {
             $installLog.present = $true
-            $installLog.tail = @($tail | ForEach-Object { Get-SrLineShape $_ })
+            $installLog.tail = @(& $script:SrReadTail $script:SrLogPath | ForEach-Object { Get-SrLineShape $_ })
             $installLog.access = Get-SrAccess (& $script:SrReadSddl $script:SrLogPath)
             $installLog.directoryAccess = Get-SrAccess (& $script:SrReadSddl (Split-Path -Parent $script:SrLogPath))
         }
