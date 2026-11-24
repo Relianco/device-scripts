@@ -39,7 +39,7 @@ function Get-FsEvents {
     if ($Levels) { $f.Level = $Levels }
     try {
         return @(Get-WinEvent -FilterHashtable $f -MaxEvents $Max -ErrorAction Stop | ForEach-Object {
-            $m = [string]$_.Message; if ($m.Length -gt 400) { $m = $m.Substring(0, 400) }
+            $m = [string]$_.Message; if ($m.Length -gt 260) { $m = $m.Substring(0, 260) }
             [ordered]@{ t = $_.TimeCreated.ToString('s'); id = $_.Id; p = $_.ProviderName; lvl = $_.Level; m = ($m -replace '\s+', ' ') }
         })
     } catch { return @("err: $($_.Exception.Message)") }
@@ -50,51 +50,24 @@ $os = Get-CimInstance Win32_OperatingSystem
 $r.host = $env:COMPUTERNAME
 $r.boot = $os.LastBootUpTime.ToString('s')
 $r.now = (Get-Date).ToString('s')
-$r.lsa = Get-FsReg 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' @('LmCompatibilityLevel', 'DisableDomainCreds', 'NoLMHash', 'RestrictAnonymous', 'RestrictAnonymousSAM', 'LsaCfgFlags', 'RunAsPPL', 'AllowOnlineID', 'everyoneincludesanonymous')
-$r.msv = Get-FsReg 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0' @('RestrictSendingNTLMTraffic', 'NtlmMinClientSec', 'NtlmMinServerSec', 'AuditReceivingNTLMTraffic', 'ClientAllowedNTLMServers', 'RestrictReceivingNTLMTraffic', 'allownullsessionfallback')
-$r.pku2u = Get-FsKeyAll 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\pku2u'
-$r.kerbPol = Get-FsKeyAll 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters'
-$r.kerbParams = Get-FsKeyAll 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters'
-$r.kerbCsp = Get-FsKeyAll 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Kerberos'
-$r.lmwParams = Get-FsKeyAll 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'
-$r.lmwPol = Get-FsKeyAll 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation'
-try { $r.smbClient = Get-SmbClientConfiguration | Select-Object RequireSecuritySignature, EnableSecuritySignature, EncryptionCiphers, EnableInsecureGuestLogons, RequireEncryption, Smb2DialectMin, Smb2DialectMax, AuditServerDoesNotSupportEncryption, AuditServerDoesNotSupportSigning, BlockNTLM, BlockNTLMServerExceptionList, EnableMailslots } catch { $r.smbClient = "err: $($_.Exception.Message)" }
-try { $r.smbConn = @(Get-SmbConnection -ErrorAction Stop | Select-Object ServerName, ShareName, UserName, Dialect, Encrypted, Signed) } catch { $r.smbConn = "err: $($_.Exception.Message)" }
-try { $r.dns = @(Resolve-DnsName $script:FsHost -ErrorAction Stop | Select-Object Name, Type, IPAddress) } catch { $r.dns = "err: $($_.Exception.Message)" }
-try { $r.dnsSrv = @(Resolve-DnsName "_kerberos._tcp.$($script:Domain)" -Type SRV -ErrorAction Stop | Where-Object Type -eq 'SRV' | Select-Object NameTarget, Port) } catch { $r.dnsSrv = "err: $($_.Exception.Message)" }
-$r.tcp = [ordered]@{}
-foreach ($t in @("$($script:FsIp):445", "$($script:FsHost):445")) {
-    $h, $p = $t -split ':'
-    $c = New-Object Net.Sockets.TcpClient
-    try { $ok = $c.ConnectAsync($h, [int]$p).Wait(4000); $r.tcp[$t] = $ok -and $c.Connected } catch { $r.tcp[$t] = "err: $($_.Exception.InnerException.Message)" } finally { $c.Dispose() }
-}
-if ($r.dnsSrv -is [array]) {
-    foreach ($s in @($r.dnsSrv | Select-Object -First 2)) {
-        foreach ($p in 88, 389) {
-            $c = New-Object Net.Sockets.TcpClient
-            try { $ok = $c.ConnectAsync($s.NameTarget, $p).Wait(4000); $r.tcp["$($s.NameTarget):$p"] = $ok -and $c.Connected } catch { $r.tcp["$($s.NameTarget):$p"] = 'err' } finally { $c.Dispose() }
-        }
-    }
-}
-$r.ip = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' } | ForEach-Object { "$($_.InterfaceAlias)=$($_.IPAddress)" })
-$r.svc = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'WireGuard*' -or $_.Name -like 'GlobalSecureAccess*' -or $_.Name -in @('LanmanWorkstation', 'Netlogon', 'KeyIso') } | ForEach-Object { "$($_.Name)=$($_.Status)" })
-try { $r.nrpt = @(Get-DnsClientNrptRule -ErrorAction Stop | ForEach-Object { "$($_.Namespace -join ',') -> $($_.NameServers -join ',')" }) } catch { $r.nrpt = 'err' }
+$r.drives = [ordered]@{}
+foreach ($k in @(Get-ChildItem 'Registry::HKEY_USERS' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^S-1-(5-21|12-1)-[\d-]+
+$r.ev.smbSec = Get-FsEvents 'Microsoft-Windows-SmbClient/Security' 40
+$r.ev.smbConn = @(Get-FsEvents 'Microsoft-Windows-SmbClient/Connectivity' 60 | Where-Object { $_ -is [string] -or $_.id -notin 30810, 30811 })
+$r.ev.ntlm = Get-FsEvents 'Microsoft-Windows-NTLM/Operational' 30
+$r.ev.kerb = Get-FsEvents 'Microsoft-Windows-Kerberos/Operational' 30
+$r.ev.sysErr = @(Get-FsEvents 'System' 60 @(1, 2, 3) | Where-Object { $_ -is [string] -or $_.p -match 'Kerberos|Lsa|Netlogon|SMB|Mup|Workstation|DNS|Time' })
+$r.ev.aad = Get-FsEvents 'Microsoft-Windows-AAD/Operational' 15 @(1, 2)
+$r.ev.sec4625 = @(Get-FsEvents 'Security' 40 | Where-Object { $_ -is [string] -or $_.id -in 4625, 4776, 4771, 4768, 4769 } | Select-Object -First 15)
 
-# Kerberos tickets per interactive logon session: names and times only.
-$r.klist = [ordered]@{}
-try {
-    $sessions = & klist.exe sessions 2>&1 | Out-String
-    $luids = @([regex]::Matches($sessions, '\[\d+\]\s+Session\s+\d+\s+0:(0x[0-9a-f]+)\s+(\S+)\s+(\S+):(\S+)') | Where-Object { $_.Groups[3].Value -notmatch 'Network|Service' -and $_.Groups[2].Value -notmatch '^(NT AUTHORITY|Font Driver|Window Manager)' })
-    $r.sessions = ($sessions -split "\r?\n" | Where-Object { $_ -match 'Session' -and $_ -notmatch 'NT AUTHORITY|Font Driver|Window Manager' }) -join ' | '
-    foreach ($m in $luids | Select-Object -First 6) {
-        $l = $m.Groups[1].Value
-        $out = & klist.exe -li $l 2>&1 | Out-String
-        $r.klist[$l] = (($out -split "\r?\n") | Where-Object { $_ -match 'Client:|Server:|Cached Tickets|KerbTicket Encryption|Start Time|Error|failed' } | ForEach-Object { $_.Trim() }) -join ' | '
-        $tgt = & klist.exe tgt -li $l 2>&1 | Out-String
-        $r.klist["$l-tgt"] = (($tgt -split "\r?\n") | Where-Object { $_ -match 'ServiceName|TargetName|DomainName|Error|failed|KeyType|StartTime' } | ForEach-Object { $_.Trim() }) -join ' | '
-    }
-} catch { $r.klist.err = $_.Exception.Message }
-
+$j = $r | ConvertTo-Json -Depth 6 -Compress
+Write-Output $j
+exit 0
+ })) {
+    foreach ($d in @(Get-ChildItem -LiteralPath "$($k.PSPath)\Network" -ErrorAction SilentlyContinue)) { $r.drives["$($k.PSChildName.Substring($k.PSChildName.Length-6)):$($d.PSChildName)"] = $d.GetValue('RemotePath') }
+}
+foreach ($n in @('SITKASERVER', 'sitkaserver.sitkalaw.local', 'svfs')) { try { $r["dns_$n"] = @(Resolve-DnsName $n -ErrorAction Stop | ForEach-Object { "$($_.Type)=$($_.IPAddress)$($_.NameHost)" }) -join ',' } catch { $r["dns_$n"] = "err: $($_.Exception.Message)" } }
+try { $r.dfs = (Get-Content -Raw "$env:SystemRoot\System32\drivers\etc\hosts" | Select-String -Pattern '^[^#].*' -AllMatches).Matches.Value -join ';' } catch { }
 $r.ev = [ordered]@{}
 $r.ev.smbSec = Get-FsEvents 'Microsoft-Windows-SmbClient/Security' 40
 $r.ev.smbConn = Get-FsEvents 'Microsoft-Windows-SmbClient/Connectivity' 30
