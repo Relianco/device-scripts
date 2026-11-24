@@ -355,6 +355,25 @@ function Select-RsSameHost {
 
 # The one Wazuh agent id that reported under this host name in the last 30 days (terms buckets of agent.id), or why not.
 # A host name is not unique across clients: two agents with it means no activity is read rather than the wrong client's.
+# The Wazuh agent names that are this NinjaOne device: the same name ignoring case, with or without a tenant prefix ("tenant--NAME").
+function Get-RsAgentNames {
+    param([string[]]$All, [string]$Device)
+    $want = ([string]$Device).ToUpperInvariant()
+    if (-not $want) { return @() }
+    # the full name or the name after a tenant prefix: a device name may itself contain "--", and both candidates must reach the one-agent check
+    return @(@($All) | Where-Object { ([string]$_).ToUpperInvariant() -ceq $want -or ([regex]::Replace([string]$_, '^[A-Za-z0-9]+--', '')).ToUpperInvariant() -ceq $want })
+}
+
+# The device's agent names from a terms aggregation of agent.name, or none and why when the list is incomplete:
+# a name left out could be a second agent with the device's name, and the one-agent check would not see it.
+function Get-RsNamesFromAgg {
+    param($Agg, [string]$Device)
+    $other = if ($Agg.Contains('sum_other_doc_count')) { $Agg['sum_other_doc_count'] } else { 0 }
+    $err = if ($Agg.Contains('doc_count_error_upper_bound')) { $Agg['doc_count_error_upper_bound'] } else { 0 }
+    if ($other -or $err) { return [ordered]@{ names = @(); note = 'the Wazuh agent list came back incomplete: activity not read' } }
+    return [ordered]@{ names = @(Get-RsAgentNames -All @(@($Agg['buckets']) | ForEach-Object { [string]$_['key'] }) -Device $Device); note = '' }
+}
+
 function Get-RsAgentFor {
     param($Buckets, [string]$Name)
     $b = @($Buckets)
@@ -609,7 +628,12 @@ function Get-RsWazuh {
         Invoke-RsHttp -Method POST -Uri ($Url.TrimEnd('/') + '/wazuh-alerts-*/_search') -Headers @{ Authorization = "Basic $auth" } -PinSha256 $env:WAZUH_INDEXER_SHA256 -Body (ConvertTo-Json -InputObject $Query -Depth 12 -Compress)
     }
     $iso = { param($t) [DateTimeOffset]::FromUnixTimeSeconds($t).ToString("yyyy-MM-dd'T'HH:mm:ss'+00:00'", [cultureinfo]::InvariantCulture) }
-    $names = @(@($Device, $Device.ToUpperInvariant(), $Device.ToLowerInvariant()) | Sort-Object -Unique -CaseSensitive)
+    $every = (& $search @{ size = 0; query = @{ range = @{ timestamp = @{ gte = (& $iso ($End - 30 * 86400)) } } }
+              aggs = @{ n = @{ terms = @{ field = 'agent.name'; size = 5000 } } } })['aggregations']['n']
+    $found = Get-RsNamesFromAgg -Agg $every -Device $Device
+    if ($found['note']) { return @{ hits = @(); cut = $false; note = $found['note'] } }
+    $names = @($found['names'])
+    if (-not $names.Count) { $names = @($Device) }   # none: the id query finds nothing and says so
     $ids = (& $search @{ size = 0; query = @{ bool = @{ filter = @(@{ terms = @{ 'agent.name' = $names } }, @{ range = @{ timestamp = @{ gte = (& $iso ($End - 30 * 86400)) } } }) } }
             aggs = @{ a = @{ terms = @{ field = 'agent.id'; size = 10 } } } })['aggregations']['a']['buckets']
     $agent = Get-RsAgentFor -Buckets @($ids) -Name $Device

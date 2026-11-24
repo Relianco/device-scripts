@@ -141,6 +141,22 @@ Ok 'activity: an install or removal no person started is only observed, never cl
 Assert-Json (Get-RsAgentFor -Buckets @(@{ key = '021' }, @{ key = '107' }) -Name 'PC-01') '{"agent":null,"note":"two Wazuh agents are named PC-01: activity not read"}' 'two agents'
 Assert-Json (Get-RsAgentFor -Buckets @(@{ key = '021' }) -Name 'PC-01') '{"agent":"021","note":""}' 'one agent'
 Assert-Json (Get-RsAgentFor -Buckets @() -Name 'PC-01') '{"agent":null,"note":"no Wazuh agent named PC-01"}' 'no agent'
+
+# Wazuh agent names as enrolled carry a tenant prefix ("tenant--NAME") or the device's own case; the pattern of real names, anonymised.
+$agentNames = @('tenanta--WS-A1', 'tenantb--WS-B2', 'MixedL-PC', 'SRV-01', 'svfs', 'WS-2510')
+Assert-Json @(Get-RsAgentNames -All $agentNames -Device 'WS-A1') '["tenanta--WS-A1"]' 'prefixed name'
+Assert-Json @(Get-RsAgentNames -All $agentNames -Device 'WS-B2') '["tenantb--WS-B2"]' 'other tenant prefix'
+Assert-Json @(Get-RsAgentNames -All $agentNames -Device 'MIXEDL-PC') '["MixedL-PC"]' 'mixed case'
+Assert-Json @(Get-RsAgentNames -All $agentNames -Device 'SVFS') '["svfs"]' 'lower case'
+Assert-Json @(Get-RsAgentNames -All $agentNames -Device 'SRV-01') '["SRV-01"]' 'same name'
+Assert-Json @(Get-RsAgentNames -All @('OPS--PC', 'tenanta--OPS--PC', 'tenanta--PC') -Device 'OPS--PC') '["OPS--PC","tenanta--OPS--PC"]' 'a device name with -- in it'
+Assert-Json @(Get-RsAgentNames -All $agentNames -Device 'WS-A') '[]' 'partial name'
+$agg = @{ buckets = @($agentNames | ForEach-Object { @{ key = $_ } }); sum_other_doc_count = 0 }
+Assert-Json (Get-RsNamesFromAgg -Agg $agg -Device 'WS-A1') '{"names":["tenanta--WS-A1"],"note":""}' 'complete agent list'
+$agg['sum_other_doc_count'] = 12
+Assert-Json (Get-RsNamesFromAgg -Agg $agg -Device 'WS-A1') '{"names":[],"note":"the Wazuh agent list came back incomplete: activity not read"}' 'incomplete agent list'
+Ok 'agent names: from an incomplete agent list nothing is read, so a second agent with the name cannot hide'
+Ok 'agent names: a tenant prefix (name--) and letter case do not hide the device; a partial name is not a match'
 Ok 'activity: when two Wazuh agents share the host name (two clients), nothing is read rather than the wrong client'
 
 function HostHit { param($C) @{ data = @{ win = @{ system = @{ eventID = '1'; computer = $C } } } } }
