@@ -202,6 +202,13 @@ $script:RsIgnoreCase = [System.Text.RegularExpressions.RegexOptions]'IgnoreCase,
 $script:RsScripted = [regex]::new('\s[-/](file|command|c|encodedcommand|enc|e|ec|executionpolicy|ep|noninteractive)\b', $script:RsIgnoreCase)
 # Tray and updater apps Windows starts from Run keys, sometimes minutes after a slow sign-in: never a person's choice.
 $script:RsStartup = [regex]::new('(Service|Installer|Setup|Assistant|Utility|notification icon|Agent UI|Tray|ClickOnce)( Application)?$', $script:RsIgnoreCase)
+# Startup apps seen in real sessions that have neither an autostart argument nor a telling description (captured Nov 2026).
+$script:RsStartupApps = [System.Collections.Generic.HashSet[string]]::new([string[]]@('sentinelui.exe', 'fsquirt.exe', 'chrmstp.exe', 'setup.exe', 'acrotray.exe',
+        'iastoriconlaunch.exe', 'devicedetector4.exe', 'globalsecureaccessclient.exe', 'tsscanuser.exe', 'adobecollabsync.exe', 'onenotem.exe'))
+# Arguments Windows, Run keys and vendors pass when they start an app at sign-in (all seen in captured sessions, Nov 2026).
+$script:RsStartupArgs = [regex]::new('(?:^|\s)(?:/minimized|-{1,2}background|/background|/setautostart|/thfirstsetup|-UserConfig|--configure-user-settings?|-Register' +
+    '|/Run6432|/Explorer|/Upgrade|-system-restarted|-{1,2}startup|/tsr|--no-startup-window|--win-session-start|--wake' +
+    '|/autostartedWithWindows\S*|msteams:system-initiated)(?=\s|"|$)', $script:RsIgnoreCase)
 $script:RsSigninStartup = 60   # seconds after a sign-in (explorer.exe started by userinit.exe) in which explorer's children are Windows' own startup apps
 $script:RsLabels = @{
     'msedge.exe' = 'Microsoft Edge'; 'chrome.exe' = 'Google Chrome'; 'firefox.exe' = 'Firefox'; 'cmd.exe' = 'Command Prompt'
@@ -254,6 +261,14 @@ function Get-RsActivity {
     $elev = 0
     $signin = -1e18
     $sorted = Sort-RsStable @($Alerts) { param($e) , [string](Get-RsOr $e['data']['win']['system']['systemTime'] '') }
+    # Sysmon starts with autostart arguments, or a shell running a script (a logon script): that start and its 4688 twin are not a person's.
+    $auto = [System.Collections.Generic.List[object]]::new()
+    foreach ($e in @($Alerts)) {
+        $sy0 = $e['data']['win']['system']; $d0 = Get-RsOr $e['data']['win']['eventdata'] @{}
+        if ([string]$sy0['eventID'] -cne '1' -or -not $sy0['systemTime']) { continue }
+        $x0 = Get-RsBase $d0['image']; $c0 = [string]$d0['commandLine']
+        if ($script:RsStartupArgs.IsMatch($c0) -or ($script:RsShells.Contains($x0) -and $script:RsScripted.IsMatch($c0))) { $auto.Add(@($x0, (ConvertTo-RsEpoch $sy0['systemTime']))) }
+    }
     foreach ($e in @($sorted)) {
         $w = $e['data']['win']
         $sy = $w['system']
@@ -319,11 +334,14 @@ function Get-RsActivity {
                 if ($script:RsSnapins.ContainsKey($k) -and -not $apps.Contains('mmc:' + $k)) { $apps['mmc:' + $k] = $script:RsSnapins[$k] }   # a custom console's file name is not ours to print
             }
         } elseif (-not $script:RsHelpers.Contains($exe) -and $parent -ceq 'explorer.exe' -and $t - $signin -gt $script:RsSigninStartup) {   # opened from the desktop, Start or taskbar
+            $isAuto = $false
+            foreach ($a in $auto) { if ($a[0] -ceq $exe -and [math]::Abs($t - $a[1]) -le 2) { $isAuto = $true; break } }
+            if ($isAuto) { continue }
             if ($apps.Contains($exe) -and $null -eq $apps[$exe] -and $desc -and -not $script:RsStartup.IsMatch($desc)) {
                 $apps[$exe] = [regex]::Replace($desc.Trim(), '\s+(MFC )?Application$', '')
                 continue
             }
-            if ($script:RsStartup.IsMatch($desc) -or $exe.Contains('systray') -or @('sentinelui.exe', 'fsquirt.exe', 'chrmstp.exe', 'setup.exe', 'acrotray.exe') -ccontains $exe) {
+            if ($script:RsStartup.IsMatch($desc) -or $exe.Contains('systray') -or $script:RsStartupApps.Contains($exe)) {
                 [void]$startup.Add($exe)   # 4688 has no description: the Sysmon twin of the same start decides for both
                 continue
             }
@@ -375,8 +393,20 @@ function Get-RsNamesFromAgg {
 }
 
 function Get-RsAgentFor {
-    param($Buckets, [string]$Name)
+    param($Buckets, [string]$Name, $Start = $null, $End = $null)
     $b = @($Buckets)
+    if ($b.Count -gt 1 -and $null -ne $Start -and @($b | Where-Object { -not ($_.Contains('mn') -and $_.Contains('mx')) }).Count -eq 0) {
+        $life = @($b | ForEach-Object { , @(([double]$_['mn']['value'] / 1000), ([double]$_['mx']['value'] / 1000), $_['key']) } | Sort-Object { $_[0] })
+        $names = @($b | ForEach-Object { $nb = $_['n']; if ($nb -and $nb.Contains('buckets')) { @($nb['buckets']) | ForEach-Object { [string]$_['key'] } } } | Sort-Object -Unique -CaseSensitive)
+        # One after the other under one tenant-prefixed name: the same client re-enrolled its computer (new key, new id). A bare name
+        # proves no client, so two computers of two clients taking turns under it stay refused.
+        $apart = $names.Count -eq 1 -and $names[0] -cmatch '^[A-Za-z0-9]+--'
+        for ($i = 1; $i -lt $life.Count; $i++) { if (-not ($life[$i - 1][1] -lt $life[$i][0])) { $apart = $false } }
+        if ($apart) {
+            $live = @($life | Where-Object { $_[0] -le $End + 300 -and $Start - 300 -le $_[1] })
+            if ($live.Count -eq 1) { return [ordered]@{ agent = $live[0][2]; note = '' } }
+        }
+    }
     if ($b.Count -gt 1) { return [ordered]@{ agent = $null; note = "two Wazuh agents are named $($Name): activity not read" } }
     if ($b.Count -eq 1) { return [ordered]@{ agent = $b[0]['key']; note = '' } }
     return [ordered]@{ agent = $null; note = "no Wazuh agent named $Name" }
@@ -635,8 +665,8 @@ function Get-RsWazuh {
     $names = @($found['names'])
     if (-not $names.Count) { $names = @($Device) }   # none: the id query finds nothing and says so
     $ids = (& $search @{ size = 0; query = @{ bool = @{ filter = @(@{ terms = @{ 'agent.name' = $names } }, @{ range = @{ timestamp = @{ gte = (& $iso ($End - 30 * 86400)) } } }) } }
-            aggs = @{ a = @{ terms = @{ field = 'agent.id'; size = 10 } } } })['aggregations']['a']['buckets']
-    $agent = Get-RsAgentFor -Buckets @($ids) -Name $Device
+            aggs = @{ a = @{ terms = @{ field = 'agent.id'; size = 10 }; aggs = @{ mn = @{ min = @{ field = 'timestamp' } }; mx = @{ max = @{ field = 'timestamp' } }; n = @{ terms = @{ field = 'agent.name'; size = 5 } } } } } })['aggregations']['a']['buckets']
+    $agent = Get-RsAgentFor -Buckets @($ids) -Name $Device -Start $Start -End $End
     if (-not $agent['agent']) { return @{ hits = @(); cut = $false; note = $agent['note'] } }
     $data = & $search @{ size = 10000; sort = @(@{ timestamp = 'asc' }); track_total_hits = $true; query = @{ bool = @{ filter = @(
                     @{ term = @{ 'agent.id' = $agent['agent'] } },

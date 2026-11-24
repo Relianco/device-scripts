@@ -381,4 +381,47 @@ try { New-RsPin ('x-' + ('ab' * 32)) | Out-Null } catch { $threw = $true }
 Assert-Same $threw $true 'a pin with other text around the hex is refused'
 Ok 'pin: only the certificate with the pinned SHA-256 is accepted; an empty or malformed pin is refused'
 
+
+# A staff sign-in watched over a remote session (captured 2026-11-18, anonymised): tray and vendor startup apps start for minutes, some with
+# autostart arguments, some without (an Intel "Delayed launcher", a dictation "Device Detector"). The technician opened PowerShell, pinged
+# the domain controller and looked up an account (net).
+$st = Get-RsActivity -Alerts (Load 'remote-sessions-wazuh-startup.json') -Spans @(, @(1795017760, 1795018434))
+Assert-Json @($st['apps']) '["PowerShell"]' 'startup apps'
+Assert-Json @($st['commands']) '["ping","net"]' 'startup commands'
+Ok 'startup noise: tray, updater and vendor startup apps after a sign-in are left out; what the technician opened and typed stays'
+
+function New-RsEv {
+    param([string]$Exe, [string]$Parent, [string]$T, $Cmd = $null, [string]$Eid = '1', [string]$Desc = '')
+    $ed = [ordered]@{ image = 'C:\Apps\' + $Exe; parentImage = 'C:\Windows\' + $Parent; user = 'CORP\user1'; description = $Desc }
+    if ($Eid -ceq '4688') { $ed = [ordered]@{ newProcessName = $ed['image']; parentProcessName = $ed['parentImage']; subjectUserName = 'user1' } }
+    if ($null -ne $Cmd) { $ed['commandLine'] = $Cmd }
+    return @{ data = @{ win = @{ system = @{ eventID = $Eid; systemTime = $T }; eventdata = $ed } } }
+}
+$W = @(, @(1795111385, 1795113834))
+$quiet = @((New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:10:00.0000000Z' 'msedge.exe --no-startup-window --win-session-start' -Desc 'Microsoft Edge'),
+           (New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:10:00.0100000Z' -Eid '4688'))
+Assert-Json @((Get-RsActivity -Alerts $quiet -Spans $W)['apps']) '[]' 'autostart launch'
+$opened = $quiet + @((New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:20:00.0000000Z' 'msedge.exe --profile-directory=Default --source-shortcut-location=taskbar' -Desc 'Microsoft Edge'),
+                     (New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:20:00.0100000Z' -Eid '4688'))
+Assert-Json @((Get-RsActivity -Alerts $opened -Spans $W)['apps']) '["Microsoft Edge"]' 'real launch after an autostart'
+Ok 'startup noise: an autostart launch (and its 4688 twin) is left out without hiding a later real launch of the same app'
+
+$logonScript = @((New-RsEv 'powershell.exe' 'explorer.exe' '2026-11-19T18:10:00.0000000Z' 'powershell.exe -ExecutionPolicy Bypass -File logon.ps1' -Desc 'Windows PowerShell'))
+Assert-Json @((Get-RsActivity -Alerts $logonScript -Spans $W)['apps']) '[]' 'logon script'
+Ok 'startup noise: a shell the desktop starts with a script (a logon script) is not an app a person opened'
+
+# A re-enrolled agent (new key, new id) reports under the same tenant-prefixed name; their lifetimes do not overlap (pattern captured 2026-11-24).
+function New-RsAgentBucket { param([string]$Key, [double]$Mn, [double]$Mx, [string]$Name) @{ key = $Key; mn = @{ value = $Mn }; mx = @{ value = $Mx }; n = @{ buckets = @(@{ key = $Name }) } } }
+$seq = @((New-RsAgentBucket 'a1' 1794335605000.0 1795398935000.0 'tenanta--PC-01'), (New-RsAgentBucket 'a2' 1795399690000.0 1795446535000.0 'tenanta--PC-01'))
+Assert-Json (Get-RsAgentFor -Buckets $seq -Name 'PC-01' -Start 1794859240 -End 1794859662) '{"agent":"a1","note":""}' 're-enrolled, old session'
+Assert-Json (Get-RsAgentFor -Buckets $seq -Name 'PC-01' -Start 1795400000 -End 1795400600) '{"agent":"a2","note":""}' 're-enrolled, new session'
+$two = '{"agent":null,"note":"two Wazuh agents are named PC-01: activity not read"}'
+$both = @((New-RsAgentBucket 'a1' 1794335605000.0 1795398935000.0 'tenanta--PC-01'), (New-RsAgentBucket 'a2' 1795000000000.0 1795446535000.0 'tenanta--PC-01'))
+Assert-Json (Get-RsAgentFor -Buckets $both -Name 'PC-01' -Start 1795400000 -End 1795400600) $two 'overlapping agents'
+$bare = @((New-RsAgentBucket 'a1' 1794335605000.0 1795398935000.0 'PC-01'), (New-RsAgentBucket 'a2' 1795399690000.0 1795446535000.0 'PC-01'))
+Assert-Json (Get-RsAgentFor -Buckets $bare -Name 'PC-01' -Start 1795400000 -End 1795400600) $two 'no tenant prefix'
+$mixed = @((New-RsAgentBucket 'a1' 1794335605000.0 1795398935000.0 'tenanta--PC-01'), (New-RsAgentBucket 'a2' 1795399690000.0 1795446535000.0 'tenantb--PC-01'))
+Assert-Json (Get-RsAgentFor -Buckets $mixed -Name 'PC-01' -Start 1795400000 -End 1795400600) $two 'two tenants'
+Ok 'agents: one tenant-prefixed name, one agent after the other is a re-enrolment; same name without a prefix, two tenants or overlapping agents are refused'
+
 Write-Output "remote-sessions: $($script:n) checks ok"
