@@ -39,13 +39,17 @@ try {
     $r = Remove-AutoElevateInstallLog
     if ($r.InstallLog -cne 'not a file' -or -not (Test-Path -LiteralPath $log)) { Fail "folder at the log path: $($r.InstallLog)" }
 
-    # Wired as a Section: the script reports InstallLog and exits 0 (no such file here).
-    Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST'
+    # Wired as a Section: a child process (not dot-sourced, so the main path runs) removes the file
+    # and reports it. The test-only path keeps it away from a real C:\AEInstallLog.log.
+    Remove-Item -LiteralPath $log -Recurse -Force
+    Set-Content -LiteralPath $log -Value 'Property(S): LICENSE_KEY = x'
+    $env:RELIAN_AE_TEST_INSTALL_LOG = $log
     $out = (& (Get-Process -Id $PID).Path -NoProfile -NonInteractive -File $scriptPath -DeploymentType Install -Action Install -PinVersion 2.11.1959 -Section RemoveInstallLog 2>&1 | Out-String)
     $code = $LASTEXITCODE
-    if ($code -ne 0 -or $out -notmatch '"InstallLog":"absent"') { Fail "Section RemoveInstallLog (exit $code): $out" }
+    if ($code -ne 0 -or $out -notmatch '"InstallLog":"removed"' -or (Test-Path -LiteralPath $log)) { Fail "Section RemoveInstallLog (exit $code): $out" }
+    if (-not (Test-Path -LiteralPath $other)) { Fail 'the Section removed another file' }
 } finally {
-    $env:RELIAN_DEPLOY_TEST = '1'
+    Remove-Item -LiteralPath 'Env:RELIAN_AE_TEST_INSTALL_LOG' -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 

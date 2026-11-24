@@ -187,6 +187,10 @@ $script:AutoElevateReport = [ordered]@{ Package = 'autoelevate' }
 $script:AutoElevateSecret = ''
 # Written by the vendor's NinjaOne install script (msiexec /lv); it holds the licence key.
 $script:AutoElevateInstallLogPath = 'C:\AEInstallLog.log'
+# Tests only: a child-process test points the Section at a temp file instead of the real log.
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and -not [string]::IsNullOrEmpty($env:RELIAN_AE_TEST_INSTALL_LOG)) {
+    $script:AutoElevateInstallLogPath = $env:RELIAN_AE_TEST_INSTALL_LOG
+}
 
 # Section RemoveInstallLog: deletes that one file and nothing else. Run it only after the vendor
 # script is gone from NinjaOne, or its next run writes the file again.

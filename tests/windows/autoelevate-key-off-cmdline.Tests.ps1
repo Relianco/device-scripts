@@ -243,7 +243,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $modules 'NJCliPSh') -Force | Out-Null
     $fake = "function Ninja-Property-Get { param([Parameter(Position = 0)][string]`$Name) if (`$Name -ceq '$script:FieldName') { '$script:FieldKey' } else { throw 'no field' } }"
     Set-Content -LiteralPath (Join-Path $modules 'NJCliPSh/NJCliPSh.psm1') -Value $fake
-    $childArgs = @('-NoProfile', '-NonInteractive', '-File', $scriptPath, '-DeploymentType', 'Install', '-Action', 'Install', '-PinVersion', '2.11.1959', '-LicenseKeyField', $script:FieldName)
+    $childArgs = @('-NoProfile', '-NonInteractive', '-File', $scriptPath, '-DeploymentType', 'Install', '-Action', 'Install', '-PinVersion', '2.11.1959', '-InstallerUrl', 'https://example.invalid/AESetup.msi', '-InstallerSha256', $script:GoodSha, '-LicenseKeyField', $script:FieldName)
     if (($childArgs -join ' ').Contains($script:FieldKey)) { Fail 'the child command line holds the key' }
     $savedPath = $env:PSModulePath
     $savedTest = $env:RELIAN_DEPLOY_TEST
