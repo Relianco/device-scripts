@@ -177,12 +177,12 @@ function ConvertFrom-SrChannelText {
     $out
 }
 
-# A key-shaped token (20+ characters, GUIDs aside) or a key assignment hides the whole line; its length is shown.
+# A key-shaped token (20+ characters, a GUID included: a key can be GUID-shaped) or a key assignment hides the
+# whole line; its length is shown.
 function Get-SrSafeLine {
     param([AllowEmptyString()][string]$Line)
-    $probe = $Line -replace '\{?[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}?', ''
-    $assignment = '(?i)(key|licen[cs]e|secret|password|passwd|token|pwd)\w*\s*[:=]\s*(?!<redacted>|\*+(\s|\z))\S'
-    if ($probe -match '[A-Za-z0-9+/=_-]{20,}' -or $probe -match $assignment) { return "<withheld: $($Line.Length) chars>" }
+    $assignment = '(?i)(key|licen[cs]e|serial|secret|password|passwd|token|pwd)\w*\s*[:=]\s*(?!<redacted>|\*+(\s|\z))\S'
+    if ($Line -match '[A-Za-z0-9+/=_-]{20,}' -or $Line -match $assignment) { return "<withheld: $($Line.Length) chars>" }
     return Get-SrText $Line
 }
 

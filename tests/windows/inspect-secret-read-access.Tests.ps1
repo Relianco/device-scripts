@@ -62,7 +62,9 @@ Assert-Same (Get-SrSafeLine 'LicenseKey=ABCDEF0123456789ABCDEF01') '<withheld: 3
 Assert-Same (Get-SrSafeLine 'msiexec /i x.msi KEY=abc123') '<withheld: 27 chars>' 'short key assignment withheld'
 Assert-Same (Get-SrSafeLine 'token Zm9vYmFyYmF6cXV4cXV1eHh4eHg=') '<withheld: 34 chars>' 'base64 token withheld'
 Assert-Same (Get-SrSafeLine 'LicenseKey=<redacted>') 'LicenseKey=<redacted>' 'redacted placeholder kept'
-Assert-Same (Get-SrSafeLine '2026-11-23 10:00:01 install exit 0 product {12345678-9ABC-DEF0-1234-56789ABCDEF0}') '2026-11-23 10:00:01 install exit 0 product {12345678-9ABC-DEF0-1234-56789ABCDEF0}' 'ordinary line with a GUID kept'
+Assert-Same (Get-SrSafeLine '2026-11-23 10:00:01 install exit 0') '2026-11-23 10:00:01 install exit 0' 'ordinary line kept'
+# A licence key can be GUID-shaped, so a GUID is withheld too.
+Assert-Same (Get-SrSafeLine "Property(S): SERIALNUMBER = '12345678-9ABC-DEF0-1234-56789ABCDEF0'") '<withheld: 66 chars>' 'GUID-shaped key withheld'
 
 # Whole job through the seams.
 $t1 = [datetime]::new(2026, 11, 1, 8, 0, 0, [DateTimeKind]::Utc); $t2 = [datetime]::new(2026, 11, 23, 9, 30, 0, [DateTimeKind]::Utc)
