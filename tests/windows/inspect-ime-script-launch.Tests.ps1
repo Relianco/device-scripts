@@ -21,7 +21,8 @@ function Entry { param($Text, $Time, $Date = '11-23-2026', $Thread = '1') "<![LO
 
 # Shapes of IME log entries: the policy JSON names the app; AgentExecutor names the PowerShell it starts.
 $appWorkload = (Entry ('[Win32App] Got policies: [{"Id":"' + $ae + '","Name":"Relian Managed - AutoElevate","Version":1,"InstallCommandLine":"x LICENSE=' + $fake + '"},{"Id":"' + $wz + '","Name":"Relian Managed - Wazuh"},{"Id":"' + $other + '","Name":"Some Other App"}]') '10:00:00.000') +
-    $crlf + (Entry ("[Win32App][ActionProcessor] App with id: $ae, installer type: PowerShellScript, runAs32Bit: False") '10:00:01.000')
+    $crlf + (Entry ("[Win32App][ActionProcessor] App with id: $ae, installer type: PowerShellScript, runAs32Bit: False") '10:00:01.000') +
+    (Entry ('[Win32App] Got policies: [{"Id":"' + $ae + '","Name":"Relian Managed - AutoElevate"},{"Id":"' + $other + '","Name":"Some Other App","InstallEx":"{"RunAs32Bit":true}"}]') '10:05:00.000')
 $agent = (Entry ("ExecutorLog AgentExecutor gets invoked" + $crlf + "powershell path is C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe") '10:00:02.000') +
     (Entry ("cmd line for running powershell is -NoProfile -executionPolicy bypass -file  ""C:\Windows\IMECache\$($ae)_1\install.ps1"" -Key $fake") '10:00:03.000') +
     (Entry ("powershell path is C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe") '11:30:00.000') +
@@ -41,6 +42,7 @@ $a = @($j.apps | Where-Object { $_.id -eq $ae })[0]
 Assert-Same $a.name 'Relian Managed - AutoElevate' 'app name from the policy JSON'
 Assert-True (@($a.markers) -contains 'PowerShellScript') 'installer type marker'
 Assert-True (@($a.markers) -contains 'runAs32Bit: False') 'runAs32Bit marker'
+Assert-True (@($a.markers) -notcontains 'runAs32Bit: True') 'the next, unmanaged app policy is not this app''s'
 $l = @($j.launches)
 Assert-Same $l.Count 3 'three managed launches, the unmanaged app left out'
 Assert-Same $l[0].appId $ae 'launch app id'

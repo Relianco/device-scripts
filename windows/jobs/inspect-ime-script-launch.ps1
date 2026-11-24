@@ -60,7 +60,7 @@ function Invoke-ImJob {
         foreach ($m in [regex]::Matches($e.Text, ('"Id":"(' + $script:ImGuid + ')","Name":"(Relian Managed - [A-Za-z0-9 ._()+-]{1,80})"'))) { $names[$m.Groups[1].Value.ToLowerInvariant()] = $m.Groups[2].Value }
     } }
 
-    # Markers: the text from one managed-app id to the next is that app's, so a policy list is not smeared over all apps.
+    # Markers: the text from one app id to the next id (any app) is that app's, so a policy list is not smeared.
     $apps = @{}
     foreach ($id in $names.Keys) { $apps[$id] = @{ markers = [Collections.Generic.SortedSet[string]]::new(); lastSeen = $null } }
     $launches = [Collections.Generic.List[object]]::new()
@@ -68,9 +68,10 @@ function Invoke-ImJob {
         # A powershell.exe path pairs only with the next script line on the same thread, and only once.
         $current = @{}
         foreach ($e in $log.Entries) {
-            $hits = @([regex]::Matches($e.Text, $script:ImGuid) | Where-Object { $names.ContainsKey($_.Value.ToLowerInvariant()) })
+            $hits = @([regex]::Matches($e.Text, $script:ImGuid))
             for ($i = 0; $i -lt $hits.Count; $i++) {
                 $id = $hits[$i].Value.ToLowerInvariant()
+                if (-not $names.ContainsKey($id)) { continue }
                 $end = if ($i + 1 -lt $hits.Count) { $hits[$i + 1].Index } else { $e.Text.Length }
                 $chunk = $e.Text.Substring($hits[$i].Index, $end - $hits[$i].Index)
                 foreach ($k in $script:ImMarkers.Keys) { if ($chunk -match $script:ImMarkers[$k]) { [void]$apps[$id].markers.Add($k) } }
