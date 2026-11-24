@@ -61,8 +61,9 @@ if ($InstallerUrl -cne [string]$release.sourceUrl -or $InstallerSha256 -cne [str
     Fail 'script defaults do not match windows/releases/autoelevate.json'
 }
 $packageText = [System.IO.File]::ReadAllText($scriptPath)
-# Registration properties are allowed now. The key comes only from AE_LICENSE_KEY, never a field.
-foreach ($banned in @('Ninja-Property', 'BLOCKER_MODE')) {
+# Registration properties are allowed now. The key may come from one NinjaOne field (LicenseKeyField,
+# owner 2026-11-24), read with Ninja-Property-Get only: the package writes no field and runs no CLI itself.
+foreach ($banned in @('Ninja-Property-Set', 'ninjarmm-cli', 'BLOCKER_MODE')) {
     if ($packageText.Contains($banned)) {
         Fail "package contains $banned"
     }

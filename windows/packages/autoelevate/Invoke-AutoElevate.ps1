@@ -4,8 +4,9 @@
 # The runner copies this script alone, so the values are inlined.
 # CompanyName, CompanyInitials, LocationName and ElevationMode come in PackageArguments.
 # The license key is the LicenseKey argument if it is not empty, else the AE_LICENSE_KEY
-# environment variable. The argument is kept in NinjaOne activity history and is on this
-# script's command line; the environment variable is neither. Either way it is redacted from
+# environment variable, else the NinjaOne field named by LicenseKeyField (Ninja-Property-Get).
+# The argument is kept in NinjaOne activity history and is on this script's command line; the
+# environment variable and the field are neither. Either way it is redacted from
 # output, and it never goes on the msiexec command line: it is written to the registry value
 # the MSI reads back (AppSearch LICENSE_KEY_REG), because Windows logs command lines.
 # MSI property names are from the AESetup.msi Property, AppSearch and CustomAction tables
@@ -28,7 +29,11 @@ param(
     # Owner decision (2026-11-10): the key may arrive as a package argument. This knowingly
     # puts it in NinjaOne activity history and on this script's command line. AE_LICENSE_KEY
     # stays supported for callers that want neither. Do not remove this parameter.
-    [string]$LicenseKey = ''
+    [string]$LicenseKey = '',
+    # The name of a NinjaOne custom field (type Secure, script Read) that holds the key. Read only
+    # when LicenseKey and AE_LICENSE_KEY are empty. The name is not secret; the value never leaves
+    # this process except to the registry value the MSI reads.
+    [string]$LicenseKeyField = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -182,9 +187,23 @@ $script:AutoElevateReport = [ordered]@{ Package = 'autoelevate' }
 $script:AutoElevateSecret = ''
 
 function Select-AutoElevateKey {
-    param([string]$Argument)
+    param([string]$Argument, [string]$Field = '')
     if (-not [string]::IsNullOrWhiteSpace($Argument)) { return [string]$Argument }
-    return [string]$env:AE_LICENSE_KEY
+    if (-not [string]::IsNullOrWhiteSpace($env:AE_LICENSE_KEY)) { return [string]$env:AE_LICENSE_KEY }
+    if ([string]::IsNullOrEmpty($Field)) { return '' }
+    # NinjaOne field names are letters and digits. Anything else could be read as a switch.
+    if (-not [regex]::IsMatch($Field, '\A[A-Za-z][A-Za-z0-9]{0,99}\z')) {
+        Add-AutoElevateError -Message 'LicenseKeyField is not a NinjaOne field name'
+        return ''
+    }
+    # The one NinjaOne call in this repo's packages (owner, 2026-11-24): the key stays in a NinjaOne
+    # secure field and reaches this process only through Ninja-Property-Get's output, never a command line.
+    try {
+        return ([string](Ninja-Property-Get $Field)).Trim()
+    } catch {
+        Add-AutoElevateError -Message "could not read the NinjaOne field $Field"
+        return ''
+    }
 }
 
 function ConvertTo-AutoElevateRedacted {
@@ -642,11 +661,11 @@ function Get-AutoElevateRegistrationProperties {
             # The MSI reads the existing registration back from the registry.
             return [pscustomobject]@{ ExitCode = $null; Reason = ''; Properties = @() }
         }
-        return & $refuse 'AutoElevate is not registered on this device: pass LicenseKey or set the AE_LICENSE_KEY environment variable, and pass CompanyName and LocationName'
+        return & $refuse 'AutoElevate is not registered on this device: pass LicenseKey, set the AE_LICENSE_KEY environment variable or name a LicenseKeyField that holds the key, and pass CompanyName and LocationName'
     }
     # Registration values go to the MSI as a set, so a partial set is refused.
     if ([string]::IsNullOrWhiteSpace($LicenseKey)) {
-        return & $refuse 'registration needs the LicenseKey argument or the AE_LICENSE_KEY environment variable'
+        return & $refuse 'registration needs the key: the LicenseKey argument, the AE_LICENSE_KEY environment variable or a LicenseKeyField that holds it'
     }
     if ([string]::IsNullOrWhiteSpace($CompanyName) -or [string]::IsNullOrWhiteSpace($LocationName)) {
         return & $refuse 'registration needs CompanyName and LocationName'
@@ -1197,7 +1216,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 # Read once, then remove from this process so msiexec and anything later does not inherit it.
-$autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey
+$autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey -Field $LicenseKeyField
 Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
 $script:AutoElevateSecret = $autoelevateKey
 $autoelevateExit = 1

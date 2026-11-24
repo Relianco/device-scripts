@@ -119,44 +119,31 @@ Fresh install with the key as an argument (the value is a placeholder):
 
 Make your own with `printf '%s' '<json>' | base64 -w0`.
 
-## NinjaOne wrapper for the key (environment variable way)
+## NinjaOne: the key from a secure field (runner 374)
 
-Putting `LicenseKey` in `-PackageArguments` keeps the key in NinjaOne's
-activity history. To keep it out of that history, use the environment
-variable. Keep it in a NinjaOne custom field of type Secure,
-set at the organization level, with script read access. A wrapper script in
-the NinjaOne library, outside this repo, reads the field into
-`$env:AE_LICENSE_KEY` for its own process. It then starts the pinned runner,
-which passes the variable to the package process. Replace each placeholder.
-The field name here is an example.
+This is the install path for a client without Intune. Runner 374 runs the
+package with `LicenseKeyField` in `-PackageArguments`. That argument is only
+the field name. The package reads the key with `Ninja-Property-Get` inside its
+own process, so the key is on no command line: not in the runner's command
+line, not in the package's, not in `ninjarmm-cli`'s (it gets the field name),
+and not in msiexec's. NinjaOne activity history holds only the field name.
+There is no msiexec log.
 
-```powershell
-$ErrorActionPreference = 'Stop'
-$runnerUrl = 'https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/runner/Invoke-RelianRunner.ps1'
-$runnerSha = '<runner-sha256>'
-$runner = Join-Path $env:TEMP ('relian-runner-' + [guid]::NewGuid().ToString('n') + '.ps1')
-Invoke-WebRequest -Uri $runnerUrl -OutFile $runner -UseBasicParsing
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $runner).Hash -ne $runnerSha) {
-    Remove-Item -LiteralPath $runner -Force
-    exit 1
-}
-$code = 1
-try {
-    $env:AE_LICENSE_KEY = [string](Ninja-Property-Get autoelevateLicenseKey)
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner `
-        -PackageUrl 'https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/packages/autoelevate/Invoke-AutoElevate.ps1' `
-        -PackageSha256 '<package-sha256>' `
-        -ToolkitUrl '<toolkit-url>' -ToolkitSha256 '<toolkit-sha256>' `
-        -BrandPackUrl '<brand-pack-url>' -BrandPackSha256 '<brand-pack-sha256>' `
-        -Action 'Install' -PinVersion '2.11.1959' `
-        -PackageArguments '<base64 of the fresh-install JSON>'
-    $code = $LASTEXITCODE
-} finally {
-    Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $runner -Force -ErrorAction SilentlyContinue
-}
-exit $code
-```
+- The field: `autoelevateLicenseKey`, type Secure (API `TEXT_ENCRYPTED`),
+  scopes Organization, Location and Device, script access Read only, API
+  access Write only. Set it per organization. A device or location value
+  overrides the organization value.
+- `Ninja-Property-Get` comes from the NinjaOne module `NJCliPSh`
+  (`C:\Program Files\WindowsPowerShell\Modules`), which the package process
+  loads on first use. It works only in a process the NinjaOne agent started.
+- The field is read only when `LicenseKey` and `AE_LICENSE_KEY` are empty. An
+  unreadable or empty field leaves the key empty. A fresh install then exits 1
+  with a reason that names the field.
+- `CompanyName` and `LocationName` stay plain package arguments. Use the
+  names exactly as the AutoElevate portal shows them.
 
-Do not print the field, and do not run the wrapper with transcript logging
-turned on.
+Example `-PackageArguments` JSON for a fresh install:
+
+`{"LicenseKeyField":"autoelevateLicenseKey","CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}`
+
+Do not run this with PowerShell transcription turned on.
