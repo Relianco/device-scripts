@@ -229,6 +229,7 @@ try {
     Reset-Case -Installed $true
     $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey '' -CompanyName 'Example Company' -LocationName 'Main Office')
     if ($code -ne 1 -or $script:Calls -contains 'msiexec uninstall') { Fail "uninstall with names and no key: exit $code calls $($script:Calls -join ', ')" }
+    if (($script:AutoElevateErrorLog -join ' ') -notmatch 'For a plain Uninstall, pass no registration values') { Fail "the refusal does not say how to uninstall: $($script:AutoElevateErrorLog -join ' ')" }
     Reset-Case -Installed $true
     $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey $script:FieldKey -CompanyName 'Example Company' -LocationName 'Main Office')
     if ($code -ne 0 -or $script:Calls -notcontains 'msiexec uninstall') { Fail "uninstall with names and the key: exit $code calls $($script:Calls -join ', ')" }

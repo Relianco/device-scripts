@@ -4,7 +4,7 @@
 # The runner copies this script alone, so the values are inlined.
 # CompanyName, CompanyInitials, LocationName and ElevationMode come in PackageArguments.
 # The license key is the LicenseKey argument if it is not empty, else the AE_LICENSE_KEY
-# environment variable, else the NinjaOne field named by LicenseKeyField (Ninja-Property-Get).
+# environment variable, else the NinjaOne field named by LicenseKeyField (Read-AutoElevateNinjaField).
 # The argument is kept in NinjaOne activity history and is on this script's command line; the
 # environment variable and the field are neither. Either way it is redacted from
 # output, and it never goes on the msiexec command line: it is written to the registry value
@@ -209,12 +209,12 @@ function Select-AutoElevateKey {
     if (-not [string]::IsNullOrWhiteSpace($Argument)) { return [string]$Argument }
     if (-not [string]::IsNullOrWhiteSpace($env:AE_LICENSE_KEY)) { return [string]$env:AE_LICENSE_KEY }
     if ([string]::IsNullOrEmpty($Field)) { return '' }
-    # The key stays in a NinjaOne secure field and reaches this process only through Ninja-Property-Get's
+    # The key stays in a NinjaOne secure field and reaches this process only through the field read's
     # output, never a command line.
     return Read-AutoElevateNinjaField -Field $Field -Label 'LicenseKeyField'
 }
 
-# Reads one NinjaOne field with Ninja-Property-Get (module NJCliPSh; the CLI gets only the field name).
+# Reads one NinjaOne field with NinjaOne's own cmdlet (module NJCliPSh; its CLI gets only the field name).
 # The one NinjaOne call in this repo's packages (owner, 2026-11-24). '' when the name is bad or the read fails.
 function Read-AutoElevateNinjaField {
     param([string]$Field, [string]$Label)
@@ -1115,7 +1115,7 @@ function Invoke-AutoElevateAction {
     if ($plan.RunInstaller -eq 'uninstall' -and (@($CompanyName, $CompanyInitials, $LocationName, $ElevationMode) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
         $check = Get-AutoElevateRegistrationProperties -LicenseKey $LicenseKey -CompanyName $CompanyName -CompanyInitials $CompanyInitials -LocationName $LocationName -ElevationMode $ElevationMode -Registered $false
         if ($null -ne $check.ExitCode) {
-            Add-AutoElevateError -Message ('not uninstalling, the install step would fail: ' + $check.Reason)
+            Add-AutoElevateError -Message ('not uninstalling: registration values were given, as in a Reinstall, and the install step would fail: ' + $check.Reason + '. For a plain Uninstall, pass no registration values')
             return 1
         }
     }

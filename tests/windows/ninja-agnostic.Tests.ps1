@@ -43,7 +43,8 @@ if (@($files).Count -lt 10) { Fail "only $(@($files).Count) files scanned" }
 function Test-NinjaCoupled {
     param([string]$Rel, [string]$Line)
     $allowed = if ($Rel -eq 'windows/packages/autoelevate/Invoke-AutoElevate.ps1') {
-        [regex]::new('Ninja-Property-Get\b', 'IgnoreCase')
+        # Only the one read in Read-AutoElevateNinjaField; any other Ninja-Property-Get line still fails.
+        [regex]::new('\A\s*return \(\[string\]\(Ninja-Property-Get \$Field\)\)\.Trim\(\)\s*\z')
     } elseif ($Rel.StartsWith('windows/read/ad-evidence/') -or $Rel -eq 'windows/releases/ad-evidence.json') {
         [regex]::new('NinjaRMMAgent', 'IgnoreCase')
     } elseif ($Rel.StartsWith('windows/packages/ninja-reset/') -or $Rel -eq 'windows/releases/ninja-reset.json') {
@@ -56,7 +57,7 @@ function Test-NinjaCoupled {
 # Self-check of the exceptions: each allows only its own text, in its own files.
 $ae = 'windows/packages/autoelevate/Invoke-AutoElevate.ps1'
 if (Test-NinjaCoupled $ae '        return ([string](Ninja-Property-Get $Field)).Trim()') { Fail 'autoelevate may read its key field' }
-foreach ($line in @('Ninja-Property-Set autoelevateLicenseKey x', '$v | Ninja-Property-Set-Piped f', '& ninjarmm-cli get f', 'Ninja-Property-Get f; Ninja-Property-Set g h')) {
+foreach ($line in @('Ninja-Property-Set autoelevateLicenseKey x', '$v | Ninja-Property-Set-Piped f', '& ninjarmm-cli get f', 'Ninja-Property-Get f; Ninja-Property-Set g h', '$x = Ninja-Property-Get someOtherField', 'return ([string](Ninja-Property-Get $Field)).Trim(); Ninja-Property-Set a b')) {
     if (-not (Test-NinjaCoupled $ae $line)) { Fail "autoelevate exception lets through [$line]" }
 }
 if (-not (Test-NinjaCoupled 'windows/packages/7-zip/Invoke-7Zip.ps1' 'Ninja-Property-Get f')) { Fail 'another package may read a field' }

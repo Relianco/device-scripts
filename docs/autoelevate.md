@@ -98,8 +98,10 @@ It is separate from normal installation and requires review before reuse.
   arguments. An uninstall step that carries registration values (`CompanyName`
   and the rest) first checks them as the install step will. If the key is not
   there (for example, a NinjaOne field set less than five minutes ago, which has
-  not reached the agent yet), it exits 1 and does not uninstall. A plain
-  `Uninstall` with no registration values is unchanged.
+  not reached the agent yet), it exits 1 and does not uninstall. The package
+  cannot tell that uninstall step from a plain `Uninstall` given the same
+  values, so a plain `Uninstall` must pass no registration values (the error
+  says so). A plain `Uninstall` with no registration values is unchanged.
 - **`Section` `Evidence`** is read-only. It reports the installed version, the
   product code, the install path, the stored registration (the key and
   `Settings` only as `present` or `absent`), both services with their state
