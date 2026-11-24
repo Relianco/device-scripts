@@ -54,6 +54,17 @@ function Start-Process {
     return [pscustomobject]@{ ExitCode = $exit }
 }
 
+# The filesystem boundary for removal: fails for the KeyFile folder when asked to.
+$script:FailKeyRemove = $false
+function Remove-Item {
+    [CmdletBinding()]
+    param([string[]]$LiteralPath, [switch]$Recurse, [switch]$Force)
+    if ($script:FailKeyRemove -and (@($LiteralPath) -join ' ') -like '*relian-pdf-xchange-key-*') {
+        throw 'The process cannot access the file because it is being used by another process.'
+    }
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $LiteralPath -Recurse:$Recurse -Force:$Force -ErrorAction $ErrorActionPreference
+}
+
 function Reset-KeyCase {
     $script:Started = [System.Collections.Generic.List[object]]::new()
     $script:Events = [System.Collections.Generic.List[string]]::new()
@@ -151,6 +162,18 @@ try {
     Assert-NoSecretAnywhere -Label 'XCVault failure'
     if ([string]::IsNullOrEmpty($script:KeyFilePath) -or (Test-Path -LiteralPath $script:KeyFilePath) -or (Test-Path -LiteralPath $script:AclPath)) {
         Fail 'the key file or its folder was left after XCVault failed'
+    }
+
+    # The KeyFile folder cannot be removed: the run fails with no marker, so Intune retries.
+    Reset-KeyCase
+    $script:FailKeyRemove = $true
+    $code = Invoke-KeyCase -KeyFileText $vaultBase64
+    $script:FailKeyRemove = $false
+    if ($code -ne 1 -or (Test-MarkerWritten)) {
+        Fail "KeyFile folder left behind: exit $code, marker $(Test-MarkerWritten)"
+    }
+    if (Test-Path -LiteralPath $script:AclPath) {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $script:AclPath -Recurse -Force
     }
 
     # The folder cannot be restricted: the key is never written and XCVault never runs.

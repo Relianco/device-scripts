@@ -997,6 +997,13 @@ function Invoke-PdfXchangeAction {
                 Add-PdfXchangeError -Message 'XCVault could not add the licence key'
                 return 1
             }
+            # The KeyFile must be gone before success is recorded; finally retries on other paths.
+            try {
+                Remove-Item -LiteralPath $keyDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                Add-PdfXchangeError -Message 'could not remove the licence folder'
+                return 1
+            }
             & $script:SetPdfXchangePolicy
             $write = Get-PdfXchangeMarkerAfterInstall -PinVersion $PinVersion
             if ([string]::IsNullOrWhiteSpace($write)) {
