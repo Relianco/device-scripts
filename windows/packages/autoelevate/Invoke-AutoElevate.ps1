@@ -4,8 +4,10 @@
 # The runner copies this script alone, so the values are inlined.
 # CompanyName, CompanyInitials, LocationName and ElevationMode come in PackageArguments.
 # The license key is the LicenseKey argument if it is not empty, else the AE_LICENSE_KEY
-# environment variable. The argument is kept in NinjaOne activity history and is on the
-# child command line; the environment variable is neither. Either way it is redacted from output.
+# environment variable. The argument is kept in NinjaOne activity history and is on this
+# script's command line; the environment variable is neither. Either way it is redacted from
+# output, and it never goes on the msiexec command line: it is written to the registry value
+# the MSI reads back (AppSearch LICENSE_KEY_REG), because Windows logs command lines.
 # MSI property names are from the AESetup.msi Property, AppSearch and CustomAction tables
 # and https://support.cyberfox.com/115003703811-System-Agent-Installation
 # -Section Evidence is a read-only report.
@@ -24,7 +26,7 @@ param(
     [string]$LocationName = '',
     [string]$ElevationMode = '',
     # Owner decision (2026-11-10): the key may arrive as a package argument. This knowingly
-    # puts it in NinjaOne activity history and on the child command line. AE_LICENSE_KEY
+    # puts it in NinjaOne activity history and on this script's command line. AE_LICENSE_KEY
     # stays supported for callers that want neither. Do not remove this parameter.
     [string]$LicenseKey = ''
 )
@@ -668,7 +670,8 @@ function Get-AutoElevateRegistrationProperties {
     if (-not [string]::IsNullOrEmpty($ElevationMode) -and @('audit', 'live', 'policy') -cnotcontains $ElevationMode) {
         return & $refuse 'ElevationMode must be audit, live or policy'
     }
-    $properties = @("LICENSE_KEY=`"$LicenseKey`"", "COMPANY_NAME=`"$CompanyName`"")
+    # No LICENSE_KEY: command lines are logged (Sysmon 1, Security 4688). Set-AutoElevateStoredLicenseKey writes it.
+    $properties = @("COMPANY_NAME=`"$CompanyName`"")
     if (-not [string]::IsNullOrEmpty($CompanyInitials)) {
         $properties += "COMPANY_INITIALS=`"$CompanyInitials`""
     }
@@ -935,6 +938,37 @@ $script:StartAutoElevateService = {
     [void](& sc.exe start $Name 2>$null)
 }
 
+# The base of HKLM in the given view. Tests replace it with a fake key.
+$script:OpenAutoElevateRegistryBase = {
+    param($View)
+    return [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]$View)
+}
+
+# Writes the key where the MSI AppSearch reads it (HKLM\SOFTWARE\AutoElevate LicenseKey,
+# RegLocator type 18, 64-bit view), from this process, so no command line carries it.
+# An empty value removes it. Returns the value it replaced ($null if none), to restore on failure.
+# SetLicenseKey0 copies it into LICENSE_KEY_FINAL.
+function Set-AutoElevateStoredLicenseKey {
+    param([string]$Value)
+    $base = & $script:OpenAutoElevateRegistryBase -View 'Registry64'
+    try {
+        if ([string]::IsNullOrEmpty($Value)) {
+            $key = $base.OpenSubKey('SOFTWARE\AutoElevate', $true)
+            if ($null -eq $key) { return }
+            try { $key.DeleteValue('LicenseKey', $false) } finally { $key.Dispose() }
+            return
+        }
+        $key = $base.CreateSubKey('SOFTWARE\AutoElevate')
+        try {
+            $prior = $key.GetValue('LicenseKey', $null)
+            $key.SetValue('LicenseKey', $Value, [Microsoft.Win32.RegistryValueKind]::String)
+            return $prior
+        } finally { $key.Dispose() }
+    } finally {
+        $base.Dispose()
+    }
+}
+
 # Returns non-secret values and presence flags. LicenseKey and Settings never leave this hook.
 $script:GetAutoElevateRegistration = {
     $values = [ordered]@{}
@@ -1055,12 +1089,28 @@ function Invoke-AutoElevateAction {
             if ($present -and -not (Stop-AutoElevateServices)) {
                 return 1
             }
+            $wroteKey = $false
+            $priorKey = $null
+            if (-not [string]::IsNullOrWhiteSpace($LicenseKey)) {
+                try {
+                    $priorKey = Set-AutoElevateStoredLicenseKey -Value $LicenseKey
+                    $wroteKey = $true
+                } catch {
+                    Restore-AutoElevateServices
+                    Add-AutoElevateError -Message 'could not write the license key to HKLM\SOFTWARE\AutoElevate'
+                    return 1
+                }
+            }
             $argumentList = Get-AutoElevateMsiArgumentList -Mode 'install' -InstallerPath $installerPath -ProductCode '' -Properties $registration.Properties
             $script:AutoElevateReport['MsiCommand'] = ConvertTo-AutoElevateRedacted -Text ('msiexec ' + ($argumentList -join ' '))
             # A throw is treated as a failed run, so the stopped services are restored below.
             $result = Invoke-AutoElevateSafe -Block { & $script:InvokeMsiExec -Mode 'install' -ArgumentList $argumentList -InstallerPath $installerPath -ProductCode '' } -Fallback $null
             $script:AutoElevateReport['MsiExitCode'] = $result
             if ($null -eq $result -or -not (Test-AutoElevateMsiSucceeded -Code ([int]$result))) {
+                # Put back what was there (nothing on a fresh device) before the agent starts again.
+                if ($wroteKey) {
+                    try { [void](Set-AutoElevateStoredLicenseKey -Value ([string]$priorKey)) } catch { Add-AutoElevateError -Message 'could not restore the license key in HKLM\SOFTWARE\AutoElevate' }
+                }
                 Restore-AutoElevateServices
                 Add-AutoElevateError -Message "installer failed (exit code: $result)"
                 return 1

@@ -84,6 +84,20 @@ function Reset-Case {
         $script:Calls.Add("start $Name")
         $script:ServiceState[$Name] = 'Running'
     }
+    $script:StoredKey = $null
+    $script:OpenAutoElevateRegistryBase = {
+        param($View)
+        $sub = [pscustomobject]@{}
+        $sub | Add-Member ScriptMethod GetValue { param($n, $d) return $d }
+        $sub | Add-Member ScriptMethod SetValue { param($n, $v, $k) $script:StoredKey = $v }
+        $sub | Add-Member ScriptMethod DeleteValue { param($n, $throw) $script:StoredKey = $null }
+        $sub | Add-Member ScriptMethod Dispose { }
+        $base = [pscustomobject]@{ Sub = $sub }
+        $base | Add-Member ScriptMethod CreateSubKey { param($p) return $this.Sub }
+        $base | Add-Member ScriptMethod OpenSubKey { param($p, $w) return $this.Sub }
+        $base | Add-Member ScriptMethod Dispose { }
+        return $base
+    }
     $script:InvokeMsiExec = {
         param($Mode, $ArgumentList)
         $script:Calls.Add("msiexec $Mode")
@@ -162,7 +176,7 @@ try {
     $code = Invoke-Case
     if ($code -ne 1 -or $script:Calls -contains 'download') { Fail "unregistered upgrade without key exit $code" }
 
-    # 5. Fresh install with key: properties passed, key redacted everywhere, no msiexec log.
+    # 5. Fresh install with key: names passed, key stored in the registry and not passed, no msiexec log.
     Reset-Case
     $script:InstalledVersion = ''
     $script:Registered = $false
@@ -170,13 +184,15 @@ try {
     $code = Invoke-Case -LicenseKey $script:Key -CompanyName 'Example Co, Inc.' -CompanyInitials 'EC' -LocationName 'Main Office' -ElevationMode 'live'
     if ($code -ne 0) { Fail "fresh with key exit $code errors $($script:AutoElevateErrorLog -join '; ')" }
     $joined = $script:MsiArgs -join ' '
-    foreach ($want in @("LICENSE_KEY=`"$($script:Key)`"", 'COMPANY_NAME="Example Co, Inc."', 'COMPANY_INITIALS="EC"', 'LOCATION_NAME="Main Office"', 'ELEVATION_MODE="live"')) {
+    if ($joined.Contains($script:Key) -or $joined -match 'LICENSE_KEY') { Fail 'fresh args carry the key' }
+    if ($script:StoredKey -cne $script:Key) { Fail 'fresh install did not store the key' }
+    foreach ($want in @('COMPANY_NAME="Example Co, Inc."', 'COMPANY_INITIALS="EC"', 'LOCATION_NAME="Main Office"', 'ELEVATION_MODE="live"')) {
         if (-not $joined.Contains($want)) { Fail "fresh args lack $want" }
     }
     if ($joined -match '/l\*v') { Fail 'fresh install with a key wrote an msiexec log' }
     $text = Get-AllText
     if ($text.Contains($script:Key)) { Fail 'key appeared in output, report or logs' }
-    if (-not ([string]$script:AutoElevateReport.MsiCommand).Contains('LICENSE_KEY="[redacted]"')) { Fail "report command not redacted: $($script:AutoElevateReport.MsiCommand)" }
+    if (([string]$script:AutoElevateReport.MsiCommand) -notlike '*COMPANY_NAME="Example Co, Inc."*') { Fail "report command: $($script:AutoElevateReport.MsiCommand)" }
 
     # 6. Key leak through a failing msiexec is redacted too.
     Reset-Case
