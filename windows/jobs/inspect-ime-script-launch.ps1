@@ -38,9 +38,10 @@ $script:ImReadLogs = {
 
 function Get-ImEntries {
     param([string]$Text)
-    foreach ($m in [regex]::Matches($Text, '(?s)<!\[LOG\[(.*?)\]LOG\]!><time="(\d{1,2}:\d{2}:\d{2})[^"]*" date="(\d{1,2})-(\d{1,2})-(\d{4})"')) {
+    foreach ($m in [regex]::Matches($Text, '(?s)<!\[LOG\[(.*?)\]LOG\]!><time="(\d{1,2}:\d{2}:\d{2})[^"]*" date="(\d{1,2})-(\d{1,2})-(\d{4})"[^>]*?thread="([^"]*)"')) {
         [pscustomobject]@{
             Text = $m.Groups[1].Value
+            Thread = $m.Groups[6].Value
             Time = '{0}-{1:00}-{2:00} {3}' -f $m.Groups[5].Value, [int]$m.Groups[3].Value, [int]$m.Groups[4].Value, $m.Groups[2].Value.PadLeft(8, '0')
         }
     }
@@ -64,7 +65,8 @@ function Invoke-ImJob {
     foreach ($id in $names.Keys) { $apps[$id] = @{ markers = [Collections.Generic.SortedSet[string]]::new(); lastSeen = $null } }
     $launches = [Collections.Generic.List[object]]::new()
     foreach ($log in $parsed) {
-        $current = $null
+        # A powershell.exe path pairs only with the next script line on the same thread, and only once.
+        $current = @{}
         foreach ($e in $log.Entries) {
             $hits = @([regex]::Matches($e.Text, $script:ImGuid) | Where-Object { $names.ContainsKey($_.Value.ToLowerInvariant()) })
             for ($i = 0; $i -lt $hits.Count; $i++) {
@@ -77,11 +79,12 @@ function Invoke-ImJob {
                 $apps[$id].lastSeen = $e.Time
             }
             $ps = [regex]::Match($e.Text, $script:ImPowerShell)
-            if ($ps.Success) { $current = $ps.Value }
+            if ($ps.Success) { $current[$e.Thread] = $ps.Value }
             $script = [regex]::Match($e.Text, ('(?i)\\IMECache\\(?:HealthScripts\\)?(' + $script:ImGuid + ')_\d+\\([A-Za-z0-9._-]{1,60}\.ps1)'))
             if ($script.Success) {
                 $id = $script.Groups[1].Value.ToLowerInvariant()
-                $launches.Add([ordered]@{ time = $e.Time; log = $log.Name; appId = $id; app = $names[$id]; powershell = $current; script = $script.Groups[2].Value })
+                $path = $current[$e.Thread]; $current.Remove($e.Thread)
+                if ($names.ContainsKey($id)) { $launches.Add([ordered]@{ time = $e.Time; log = $log.Name; appId = $id; app = $names[$id]; powershell = $path; script = $script.Groups[2].Value }) }
             }
         }
     }
