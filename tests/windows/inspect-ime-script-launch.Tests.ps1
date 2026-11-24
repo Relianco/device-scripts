@@ -30,7 +30,8 @@ $agent = (Entry ("ExecutorLog AgentExecutor gets invoked" + $crlf + "powershell 
     (Entry ("cmd line for running powershell is -file ""C:\Windows\IMECache\$($other)_1\install.ps1""") '11:31:00.000') +
     (Entry ("powershell path is C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe") '12:00:00.000' -Thread '7') +
     (Entry ("cmd line for running powershell is -file ""C:\Windows\IMECache\$($ae)_1\detect.ps1""") '12:00:01.000' -Thread '8')
-$script:ImReadLogs = { @([pscustomobject]@{ Name = 'AppWorkload.log'; Text = $appWorkload }, [pscustomobject]@{ Name = 'AgentExecutor.log'; Text = $agent }) }
+$older = Entry ("[Win32App] App with id: $ae checked") '09:00:00.000'
+$script:ImReadLogs = { @([pscustomobject]@{ Name = 'AppWorkload.log'; Text = $appWorkload }, [pscustomobject]@{ Name = 'AgentExecutor.log'; Text = $agent }, [pscustomobject]@{ Name = 'IntuneManagementExtension.log'; Text = $older }) }
 
 $r = Invoke-ImJob
 Assert-Same $r.ExitCode 0 'exit'
@@ -44,7 +45,8 @@ Assert-True (@($a.markers) -contains 'PowerShellScript') 'installer type marker'
 Assert-True (@($a.markers) -contains 'runAs32Bit: False') 'runAs32Bit marker'
 Assert-True (@($a.markers) -notcontains 'runAs32Bit: True') 'the next, unmanaged app policy is not this app''s'
 $l = @($j.launches)
-Assert-Same $l.Count 3 'three managed launches, the unmanaged app left out'
+Assert-Same $a.lastSeen '2026-11-23 12:00:01' 'an older entry in a later file does not move lastSeen back'
+Assert-Same $l.Count 2 'managed launches with a known powershell.exe only'
 Assert-Same $l[0].appId $ae 'launch app id'
 Assert-Same $l[0].app 'Relian Managed - AutoElevate' 'launch app name'
 Assert-Same $l[0].powershell 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' 'powershell path paired with the next command line'
@@ -53,9 +55,8 @@ Assert-Same $l[0].time '2026-11-23 10:00:03' 'launch time'
 Assert-Same $l[0].log 'AgentExecutor.log' 'log name'
 Assert-Same $l[1].powershell 'C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe' 'SysWOW64 launch'
 Assert-Same $l[1].script 'detect.ps1' 'detection script'
-# A path logged on another thread is not this launch's: unknown.
-Assert-Same $l[2].time '2026-11-23 12:00:01' 'cross-thread launch'
-Assert-True ($null -eq $l[2].powershell) 'no path from another thread'
+# A path logged on another thread is not this launch's, so that script line is not a launch (count above).
+Assert-True (@($l | Where-Object { $_.time -eq '2026-11-23 12:00:01' }).Count -eq 0) 'no launch without a same-thread path'
 
 # No logs: ok with nothing; unreadable folder: failed.
 $script:ImReadLogs = { @() }

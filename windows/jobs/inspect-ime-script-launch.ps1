@@ -77,7 +77,7 @@ function Invoke-ImJob {
                 foreach ($k in $script:ImMarkers.Keys) { if ($chunk -match $script:ImMarkers[$k]) { [void]$apps[$id].markers.Add($k) } }
                 $r32 = [regex]::Match($chunk, '(?i)runAs32Bit"?\s*[:=]\s*"?(true|false)')
                 if ($r32.Success) { [void]$apps[$id].markers.Add('runAs32Bit: ' + (Get-Culture).TextInfo.ToTitleCase($r32.Groups[1].Value.ToLowerInvariant())) }
-                $apps[$id].lastSeen = $e.Time
+                if ($null -eq $apps[$id].lastSeen -or $e.Time -gt $apps[$id].lastSeen) { $apps[$id].lastSeen = $e.Time }
             }
             $ps = [regex]::Match($e.Text, $script:ImPowerShell)
             if ($ps.Success) { $current[$e.Thread] = $ps.Value }
@@ -85,7 +85,7 @@ function Invoke-ImJob {
             if ($script.Success) {
                 $id = $script.Groups[1].Value.ToLowerInvariant()
                 $path = $current[$e.Thread]; $current.Remove($e.Thread)
-                if ($names.ContainsKey($id)) { $launches.Add([ordered]@{ time = $e.Time; log = $log.Name; appId = $id; app = $names[$id]; powershell = $path; script = $script.Groups[2].Value }) }
+                if ($path -and $names.ContainsKey($id)) { $launches.Add([ordered]@{ time = $e.Time; log = $log.Name; appId = $id; app = $names[$id]; powershell = $path; script = $script.Groups[2].Value }) }
             }
         }
     }
