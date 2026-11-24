@@ -153,12 +153,19 @@ There is no msiexec log.
 - The field is read only when `LicenseKey` and `AE_LICENSE_KEY` are empty. An
   unreadable or empty field leaves the key empty. A fresh install then exits 1
   with a reason that names the field.
-- `CompanyName` and `LocationName` stay plain package arguments. Use the
-  names exactly as the AutoElevate portal shows them.
+- `CompanyName` and `LocationName` are plain package arguments, or, with
+  `CompanyNameField` and `LocationNameField`, NinjaOne fields read the same
+  way (an argument wins over its field). With fields, one condition on a shared
+  policy serves every organization, each with its own values, as the vendor
+  script did. Use the names exactly as the AutoElevate portal shows them.
 
-Example `-PackageArguments` JSON for a fresh install:
+Example `-PackageArguments` JSON for a fresh install, names as arguments:
 
 `{"LicenseKeyField":"autoelevateLicenseKey","CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}`
+
+Names from fields (one shared condition for every organization):
+
+`{"LicenseKeyField":"autoelevateLicenseKey","CompanyNameField":"autoElevateCompany","LocationNameField":"autoElevateLocation","ElevationMode":"live"}`
 
 Do not run this with PowerShell transcription turned on. The package keeps the
 key out of cmdlet pipelines, so module logging (event 4103) does not record it

@@ -33,7 +33,9 @@ param(
     # The name of a NinjaOne custom field (type Secure, script Read) that holds the key. Read only
     # when LicenseKey and AE_LICENSE_KEY are empty. The name is not secret; the value never leaves
     # this process except to the registry value the MSI reads.
-    [string]$LicenseKeyField = ''
+    [string]$LicenseKeyField = '',
+    [string]$CompanyNameField = '',
+    [string]$LocationNameField = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -207,19 +209,33 @@ function Select-AutoElevateKey {
     if (-not [string]::IsNullOrWhiteSpace($Argument)) { return [string]$Argument }
     if (-not [string]::IsNullOrWhiteSpace($env:AE_LICENSE_KEY)) { return [string]$env:AE_LICENSE_KEY }
     if ([string]::IsNullOrEmpty($Field)) { return '' }
+    # The key stays in a NinjaOne secure field and reaches this process only through Ninja-Property-Get's
+    # output, never a command line.
+    return Read-AutoElevateNinjaField -Field $Field -Label 'LicenseKeyField'
+}
+
+# Reads one NinjaOne field with Ninja-Property-Get (module NJCliPSh; the CLI gets only the field name).
+# The one NinjaOne call in this repo's packages (owner, 2026-11-24). '' when the name is bad or the read fails.
+function Read-AutoElevateNinjaField {
+    param([string]$Field, [string]$Label)
     # NinjaOne field names are letters and digits. Anything else could be read as a switch.
     if (-not [regex]::IsMatch($Field, '\A[A-Za-z][A-Za-z0-9]{0,99}\z')) {
-        Add-AutoElevateError -Message 'LicenseKeyField is not a NinjaOne field name'
+        Add-AutoElevateError -Message "$Label is not a NinjaOne field name"
         return ''
     }
-    # The one NinjaOne call in this repo's packages (owner, 2026-11-24): the key stays in a NinjaOne
-    # secure field and reaches this process only through Ninja-Property-Get's output, never a command line.
     try {
         return ([string](Ninja-Property-Get $Field)).Trim()
     } catch {
         Add-AutoElevateError -Message "could not read the NinjaOne field $Field"
         return ''
     }
+}
+
+# CompanyName or LocationName: the argument if given, else the NinjaOne field named for it.
+function Select-AutoElevateName {
+    param([string]$Value, [string]$Field = '')
+    if (-not [string]::IsNullOrWhiteSpace($Value) -or [string]::IsNullOrEmpty($Field)) { return $Value }
+    return Read-AutoElevateNinjaField -Field $Field -Label 'a name field'
 }
 
 function ConvertTo-AutoElevateRedacted {
@@ -1247,6 +1263,8 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 
 # Read once, then remove from this process so msiexec and anything later does not inherit it.
 $autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey -Field $LicenseKeyField
+$CompanyName = Select-AutoElevateName -Value $CompanyName -Field $CompanyNameField
+$LocationName = Select-AutoElevateName -Value $LocationName -Field $LocationNameField
 Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
 $script:AutoElevateSecret = $autoelevateKey
 $autoelevateExit = 1

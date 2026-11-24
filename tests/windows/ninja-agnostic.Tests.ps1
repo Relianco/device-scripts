@@ -37,8 +37,8 @@ if (@($files).Count -lt 10) { Fail "only $(@($files).Count) files scanned" }
 
 # ninja-reset removes and reinstalls the NinjaOne agent itself: it may name the agent (NinjaRMMAgent) and the
 # pinned installer on the public resources CDN. ad-evidence only names the agent service as the default remote
-# "sc.exe query" target. autoelevate may read one field, the licence key (LicenseKeyField), with
-# Ninja-Property-Get, so the key never goes on a command line (owner, 2026-11-24); it writes none.
+# "sc.exe query" target. autoelevate may read its key and name fields (LicenseKeyField, CompanyNameField,
+# LocationNameField) with Ninja-Property-Get, so the key never goes on a command line (owner, 2026-11-24); it writes none.
 # Every other pattern (CLI, fields, API, deploy token) still applies.
 function Test-NinjaCoupled {
     param([string]$Rel, [string]$Line)

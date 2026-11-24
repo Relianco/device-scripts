@@ -259,6 +259,28 @@ try {
     if ($out.Contains($script:FieldKey)) { Fail 'child output holds the key' }
     if ($childExit -ne 1 -or $out -notmatch 'registration needs CompanyName and LocationName') { Fail "child did not get the key from the field (exit $childExit): $out" }
 
+    # 4b. The names can come from NinjaOne fields too (CompanyNameField, LocationNameField), so one
+    #     condition on a shared policy serves every organization. ElevationMode LIVE (wrong case) is
+    #     the next check after the key and the names, so reaching it proves all three were read.
+    $fake = "function Ninja-Property-Get { param([Parameter(Position = 0)][string]`$Name) switch -CaseSensitive (`$Name) { '$script:FieldName' { '$script:FieldKey' } 'aeCompany' { 'Example Company' } 'aeLocation' { 'Main Office' } default { throw 'no field' } } }"
+    Set-Content -LiteralPath (Join-Path $modules 'NJCliPSh/NJCliPSh.psm1') -Value $fake
+    $childArgs += @('-CompanyNameField', 'aeCompany', '-LocationNameField', 'aeLocation', '-ElevationMode', 'LIVE')
+    try {
+        $env:PSModulePath = $modules + [IO.Path]::PathSeparator + $savedPath
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST'
+        $out = (& (Get-Process -Id $PID).Path @childArgs 2>&1 | Out-String)
+        $childExit = $LASTEXITCODE
+    } finally {
+        $env:PSModulePath = $savedPath
+        $env:RELIAN_DEPLOY_TEST = $savedTest
+    }
+    if ($childExit -ne 1 -or $out -notmatch 'ElevationMode must be audit, live or policy') { Fail "child did not get the names from the fields (exit $childExit): $out" }
+
+    # 4c. A name given as an argument wins over its field, and that field is not read.
+    $script:FieldCalls.Clear()
+    if ((Select-AutoElevateName -Value 'Given Co' -Field 'aeCompany') -cne 'Given Co' -or $script:FieldCalls.Count) { Fail 'CompanyName argument must win over CompanyNameField' }
+    if ((Select-AutoElevateName -Value '' -Field '') -ne '' -or $script:FieldCalls.Count) { Fail 'no name field: no read' }
+
 } finally {
     Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $script:Root) { Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue }

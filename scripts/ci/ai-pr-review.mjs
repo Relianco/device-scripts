@@ -49,7 +49,7 @@ const RULES = `- A committed file must not contain a secret, a token, a password
 - SecureConnectionError is a connection failure and is retryable. Do not report it.
 - The OpenAI client may retry HTTP 409 and 425 once. Do not report that single retry.
 - A new test must fail on the old behavior. A test with no assertion is a defect.
-- The runner and a package must not call the NinjaOne API. One exception (owner, 2026-11-24, README): windows/packages/autoelevate may read its licence key field with Ninja-Property-Get (LicenseKeyField), so the key never goes on a command line; no other call and no field write.
+- The runner and a package must not call the NinjaOne API. One exception (owner, 2026-11-24, README): windows/packages/autoelevate may read its licence key and name fields with Ninja-Property-Get (LicenseKeyField, CompanyNameField, LocationNameField), so the key never goes on a command line; no other call and no field write.
 - Parameter blocks are not Mandatory. A Mandatory parameter prompts when the file is dot-sourced.
 - Mandatory is a defect only on parameters of a package entry script. A Mandatory parameter on a test helper is not a defect.
 - curl and az arguments are an array, or they are written inline. Arguments stored in one scalar string are a defect, because zsh does not word-split that string.
