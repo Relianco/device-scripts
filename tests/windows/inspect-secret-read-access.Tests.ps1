@@ -40,7 +40,9 @@ Assert-Same (Get-SrAccess 'D:(D;;0x1;;;IU)(A;;0x1;;;IU)').standardUserRead $fals
 Assert-Same (Get-SrAccess 'D:(A;;0x1;;;S-1-5-21-1-2-3-1001)').standardUserRead $false 'a named account is not a group of all staff'
 Assert-Same @((Get-SrAccess 'D:(A;;0x1;;;S-1-5-21-1-2-3-1001)').aces)[0].who 'name-of-S-1-5-21-1-2-3-1001' 'unknown SID translated through the seam'
 # Every staff token holds Everyone, Users, Authenticated Users and INTERACTIVE, so a deny on any of them blocks all.
-Assert-Same (Get-SrAccess 'D:(D;;0x1;;;WD)(A;;0x1;;;BU)').standardUserRead $false 'deny for Everyone blocks a Users grant'
+Assert-Same (Get-SrAccess 'D:(D;;0x1;;;WD)(A;;0x1;;;BU)').standardUserRead $false 'deny for Everyone blocks a later Users grant'
+# Windows reads the DACL in order: a read already granted is not taken back by a later (inherited) deny.
+Assert-Same (Get-SrAccess 'D:(A;;0x1;;;BU)(D;ID;0x1;;;WD)').standardUserRead $true 'earlier grant wins over a later deny'
 # A null DACL is unrestricted; an empty one grants nothing; no descriptor is unknown.
 Assert-Same (Get-SrAccess 'O:BAG:SYD:NO_ACCESS_CONTROL').standardUserRead $true 'null DACL is world-readable'
 Assert-Same (Get-SrAccess 'O:BAG:SYD:P').standardUserRead $false 'empty DACL grants nothing'
