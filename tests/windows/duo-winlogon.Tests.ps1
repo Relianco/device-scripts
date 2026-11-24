@@ -165,7 +165,9 @@ $pc.Values['EnableSSPRFix'] = @(0, 'DWord')
 Assert ((Test-DuoState $settings $null '6.0.0.4198') -eq 'setting EnableSSPRFix differs') 'state needs EnableSSPRFix 1'
 # A settings change that fails is undone: EnableSSPRFix, absent before, is removed again.
 $pc = New-Pc '6.0.0.4198'; $pc.Provider = $false; Use-Pc $pc
+$script:SetValue = { param($Name, $Value, $Kind) $script:PC.Calls.Add("set $Name"); $script:PC.Values[$Name] = @($Value, $Kind) }
 $r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
+Assert ($pc.Calls.Contains('set EnableSSPRFix')) 'EnableSSPRFix written before the failure'
 Assert ($r.status -eq 'failed' -and -not $pc.Values.ContainsKey('EnableSSPRFix') -and $pc.Values['IKey'][0] -eq 'DIOLD000000000000000') "failed configure undone: $($r.status) $($r.error)"
 $pc = New-Pc '4.3.1.4861'; $pc.Policy = @('FailOpen'); Use-Pc $pc
 $r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
