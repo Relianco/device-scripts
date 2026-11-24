@@ -43,7 +43,7 @@ A pasted loader can run only what you pinned. This is what each piece can and ca
 - **Pinned bytes.** A pin names exact bytes, so moving `main` cannot change what a pinned device runs.
 - **No NinjaOne calls from packages.** The runners and packages read and write no NinjaOne field and call no NinjaOne API. A package reports one JSON line on stdout and an exit code.
 - **Field writers are named.** Only `Invoke-RelianReadJob` (its result line), the inventory collectors, and `windows/collectors/runner-report-field.ps1` (the storage ProfileReport) write NinjaOne fields.
-- **Secrets stay off the command line, with one exception.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyData` for PDF-XChange. `autoelevate` also accepts a `LicenseKey` package argument, which NinjaOne keeps in activity history; prefer `AE_LICENSE_KEY`.
+- **Secrets stay off the command line, with one exception.** A package that needs a secret reads an environment variable its caller sets, such as `AuthKey` for Tailscale or `PdfXchangeKeyFile` for PDF-XChange. `autoelevate` also accepts a `LicenseKey` package argument, which NinjaOne keeps in activity history; prefer `AE_LICENSE_KEY`.
 - **Read-only means tested.** Read-only packages are scanned for write commands or run against stubs.
 - **Changing packages say so.** Each header names what it changes, what it backs up first, and what it never does.
 - **No installs in CI.** CI runs the tests. It does not install an application.
@@ -198,7 +198,7 @@ Each downloads a hash-pinned vendor installer, pinned in the script and in `wind
 - `global-secure-access`: replaces older Global Secure Access clients with a verified Microsoft bundle. Install and Update only. See [the notes](windows/packages/global-secure-access/README.md).
 - `microsoft-365`: Microsoft 365 Apps with the Office Deployment Tool and a pinned `configuration.xml`. The Office payloads download at install time and are not pinned.
 - `notepadpp`: Notepad++.
-- `pdf-xchange`: PDF-XChange PRO, or an in-place upgrade of V10 or V11. The licence comes only from the `PdfXchangeKeyData` variable; the vendor updater is turned off. On a PC with full Adobe Acrobat it leaves the `.pdf` default alone.
+- `pdf-xchange`: PDF-XChange PRO, or an in-place upgrade of V10 or V11. The licence comes only from the `PdfXchangeKeyFile` variable (base64 of the `.xcvault` KeyFile), which XCVault reads from a SYSTEM-and-Administrators-only temp file, never from a command line; the vendor updater is turned off. On a PC with full Adobe Acrobat it leaves the `.pdf` default alone.
 - `putty`: PuTTY.
 - `quicklook`: QuickLook.
 - `sysmon`: Sysmon.

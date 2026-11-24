@@ -7,8 +7,9 @@
 # The URL is the versioned 64-bit PDF-XChange PRO MSI that the winget manifest
 # TrackerSoftware.PDF-XChangePRO 11.1.2.0 records. It shares its UpgradeCode with V10,
 # so it upgrades a V10 or older V11 install in place and keeps user settings.
-# The licence key is never a parameter: parameters are kept in the caller's history.
-# It comes only from the PdfXchangeKeyData environment variable, which the caller sets.
+# The licence is never a parameter: parameters are kept in the caller's history.
+# It comes only from the PdfXchangeKeyFile environment variable: base64 of the .xcvault
+# KeyFile from the PDF-XChange account. It never reaches a process command line.
 # PdfXchangeOrganization and PdfXchangeUserMail are optional registration details.
 [CmdletBinding()]
 param(
@@ -694,20 +695,41 @@ function Get-PdfXchangeMsiArgumentList {
     return $list
 }
 
-# Licence keys are 'P' + product letters + version digits, a dash, then base64.
-# Whitespace is removed: a key copied from an email or PDF arrives wrapped, and the
-# vendor says a key with white space in it fails. Anything else unexpected is refused,
-# so a quote can never reach a command line. Returns '' when the key is unusable.
-function Get-PdfXchangeKeyData {
+# V11 SysAdmin manual (https://www.pdf-xchange.com/sysadmin_MAN.pdf), "Applying Keys After Product
+# Installation" and "XCVault Command Line Options" (KB 557, KB 483): a licence comes as KeyData (the
+# key string, which XCVault takes only on its command line with /AddKeyData) or as a KeyFile (.xcvault),
+# which "xcvault.exe /AddKeys "<filename>" [/M] [/S]" reads from disk. Command lines are logged
+# (Security 4688, Sysmon event 1), so this package uses only the KeyFile.
+# Returns the KeyFile bytes, or $null when the text is not base64 of 1 byte to 64 KB.
+# Whitespace is removed so a wrapped value still decodes.
+function Get-PdfXchangeKeyFileBytes {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) {
-        return ''
+        return $null
     }
-    $key = [regex]::Replace($Text, '\s', '')
-    if ($key -cnotmatch '^P[A-Z]{2}[0-9]{1,3}-[A-Za-z0-9+/=]{16,}$') {
-        return ''
+    $compact = [regex]::Replace($Text, '\s', '')
+    # 87384 base64 characters decode to at most 65536 bytes.
+    if ($compact.Length -gt 87384) {
+        return $null
     }
-    return $key
+    try {
+        $bytes = [Convert]::FromBase64String($compact)
+    } catch {
+        return $null
+    }
+    if ($bytes.Length -lt 1 -or $bytes.Length -gt 65536) {
+        return $null
+    }
+    return ,$bytes
+}
+
+# Reads a secret from the process environment and removes it, so msiexec and XCVault
+# do not inherit it.
+function Pop-PdfXchangeEnvironmentSecret {
+    param([string]$Name)
+    $value = [System.Environment]::GetEnvironmentVariable($Name)
+    Remove-Item -LiteralPath ('Env:' + $Name) -ErrorAction SilentlyContinue
+    return [string]$value
 }
 
 # Organization and e-mail are registration details shown in Help > About. They are
@@ -725,13 +747,14 @@ function Get-PdfXchangeRegistrationText {
 }
 
 function Get-PdfXchangeVaultArgumentList {
-    param([string]$KeyData)
-    if ([string]::IsNullOrWhiteSpace($KeyData)) {
+    param([string]$KeyFilePath)
+    if ([string]::IsNullOrWhiteSpace($KeyFilePath) -or $KeyFilePath.Contains('"')) {
         return $null
     }
+    # /AddKeys reads the keys from the .xcvault file; only its path is on the command line.
     # /M stores the key in HKLM for every user. /S suppresses the result dialog, which
     # would otherwise wait unseen in the SYSTEM session.
-    return @('/AddKeyData', ('"{0}"' -f $KeyData), '/M', '/S')
+    return @('/AddKeys', ('"{0}"' -f $KeyFilePath), '/M', '/S')
 }
 
 function Test-PdfXchangeMsiSucceeded {
@@ -806,8 +829,8 @@ $script:InvokeMsiExec = {
 
 # XCVault is only started from this hook. It is waited on and never killed.
 $script:InvokeXcVault = {
-    param($KeyData)
-    $argumentList = Get-PdfXchangeVaultArgumentList -KeyData $KeyData
+    param($KeyFilePath)
+    $argumentList = Get-PdfXchangeVaultArgumentList -KeyFilePath $KeyFilePath
     if ($null -eq $argumentList) {
         return 1
     }
@@ -820,6 +843,19 @@ $script:InvokeXcVault = {
         return 1
     }
     return [int]$process.ExitCode
+}
+
+# The KeyFile folder: SYSTEM and Administrators only, inheritance off. Set while the folder
+# is still empty, before the KeyFile is written into it.
+$script:ProtectPdfXchangeKeyDirectory = {
+    param($Path)
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetOwner([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544')
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new([System.Security.Principal.SecurityIdentifier]$sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
 # Machine policy from the vendor's ADMX templates (TrackerVault.admx, TrackerUpdater.admx).
@@ -847,7 +883,8 @@ function Invoke-PdfXchangeAction {
         [string]$InstallerSha256,
         [string]$CancelPath,
         [string]$MarkerRoot,
-        [string]$KeyText = '',
+        [string]$KeyFileText = '',
+        [string]$KeyDataText = '',
         [string]$OrganizationText = '',
         [string]$UserMailText = ''
     )
@@ -891,14 +928,18 @@ function Invoke-PdfXchangeAction {
         return 130
     }
 
-    $keyData = ''
+    $keyFileBytes = $null
     $organization = ''
     $userMail = ''
     if ($plan.RunInstaller -in @('install', 'repair')) {
-        # Checked before the 450 MB download. The key is never printed.
-        $keyData = Get-PdfXchangeKeyData -Text $KeyText
-        if ([string]::IsNullOrWhiteSpace($keyData)) {
-            Add-PdfXchangeError -Message 'licence key missing or malformed in PdfXchangeKeyData'
+        # Checked before the 450 MB download. The licence is never printed.
+        if ([string]::IsNullOrWhiteSpace($KeyFileText) -and -not [string]::IsNullOrWhiteSpace($KeyDataText)) {
+            Add-PdfXchangeError -Message 'PdfXchangeKeyData is no longer read: XCVault would put the key on its command line. Set PdfXchangeKeyFile to the base64 of the .xcvault KeyFile instead'
+            return 1
+        }
+        $keyFileBytes = Get-PdfXchangeKeyFileBytes -Text $KeyFileText
+        if ($null -eq $keyFileBytes) {
+            Add-PdfXchangeError -Message 'licence KeyFile missing in PdfXchangeKeyFile, not base64, or larger than 64 KB'
             return 1
         }
         $organization = Get-PdfXchangeRegistrationText -Text $OrganizationText
@@ -910,6 +951,7 @@ function Invoke-PdfXchangeAction {
     }
 
     $cache = ''
+    $keyDir = ''
     try {
         if ($plan.RunInstaller -in @('install', 'repair')) {
             $cache = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-pdf-xchange-' + [guid]::NewGuid().ToString('n'))
@@ -940,7 +982,17 @@ function Invoke-PdfXchangeAction {
                 Add-PdfXchangeError -Message 'installer failed'
                 return 1
             }
-            $vault = & $script:InvokeXcVault -KeyData $keyData
+            $keyDir = Join-Path ([System.IO.Path]::GetTempPath()) ('relian-pdf-xchange-key-' + [guid]::NewGuid().ToString('n'))
+            try {
+                New-Item -ItemType Directory -Path $keyDir -Force | Out-Null
+                & $script:ProtectPdfXchangeKeyDirectory -Path $keyDir
+            } catch {
+                Add-PdfXchangeError -Message 'could not create the restricted licence folder'
+                return 1
+            }
+            $keyFile = Join-Path $keyDir 'Personal.xcvault'
+            [System.IO.File]::WriteAllBytes($keyFile, [byte[]]$keyFileBytes)
+            $vault = & $script:InvokeXcVault -KeyFilePath $keyFile
             if ($null -eq $vault -or [int]$vault -ne 0) {
                 Add-PdfXchangeError -Message 'XCVault could not add the licence key'
                 return 1
@@ -983,6 +1035,13 @@ function Invoke-PdfXchangeAction {
         }
         return 0
     } finally {
+        if (-not [string]::IsNullOrWhiteSpace($keyDir) -and (Test-Path -LiteralPath $keyDir)) {
+            try {
+                Remove-Item -LiteralPath $keyDir -Recurse -Force -ErrorAction Stop
+            } catch {
+                Add-PdfXchangeError -Message 'could not remove the licence folder'
+            }
+        }
         # A locked cache file must not turn a finished install into a failure.
         if (-not [string]::IsNullOrWhiteSpace($cache)) {
             try {
@@ -1005,6 +1064,10 @@ if ($PSBoundParameters.ContainsKey('InstallerSha256') -and [string]::IsNullOrWhi
     exit 0
 }
 
+# Read once and removed from the environment, so no child process inherits them.
+$pdfXchangeKeyFile = Pop-PdfXchangeEnvironmentSecret -Name 'PdfXchangeKeyFile'
+$pdfXchangeKeyData = Pop-PdfXchangeEnvironmentSecret -Name 'PdfXchangeKeyData'
+
 foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
     if (-not $PSBoundParameters.ContainsKey($name)) {
         [Console]::Error.WriteLine("missing parameter $name")
@@ -1013,7 +1076,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 try {
-    $pdfXchangeExit = [int](Invoke-PdfXchangeAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot -KeyText $env:PdfXchangeKeyData -OrganizationText $env:PdfXchangeOrganization -UserMailText $env:PdfXchangeUserMail)
+    $pdfXchangeExit = [int](Invoke-PdfXchangeAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $MarkerRoot -KeyFileText $pdfXchangeKeyFile -KeyDataText $pdfXchangeKeyData -OrganizationText $env:PdfXchangeOrganization -UserMailText $env:PdfXchangeUserMail)
     exit $pdfXchangeExit
 } catch {
     $detail = [string]$_.Exception.Message
