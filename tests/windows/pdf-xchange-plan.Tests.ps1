@@ -355,30 +355,17 @@ if (@($regArgs | Where-Object { $_ -like 'KEYDATA*' }).Count -ne 0) {
     Fail 'msiexec arguments carry KEYDATA, which the MSI does not hide from its log'
 }
 
-# Licence key shape. A fake key: the real one never enters this repo.
-$fakeKey = 'PXP10-' + ('AbCd+/' * 6) + 'Q=='
-$wrapped = $fakeKey.Substring(0, 14) + " `r`n " + $fakeKey.Substring(14, 10) + "`t" + $fakeKey.Substring(24)
-if ((Get-PdfXchangeKeyData -Text $wrapped) -cne $fakeKey) {
-    Fail 'a key wrapped with spaces and line breaks was not joined'
+# A fake KeyFile: the real one never enters this repo.
+$fakeKeyFile = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('<Vault>PXP10-AbCdAbCd</Vault>'))
+$vaultArgs = Get-PdfXchangeVaultArgumentList -KeyFilePath 'C:\Windows\Temp\k y\Personal.xcvault'
+if ($null -eq $vaultArgs -or $vaultArgs.Count -ne 4 -or $vaultArgs[0] -cne '/AddKeys' -or
+    $vaultArgs[1] -cne '"C:\Windows\Temp\k y\Personal.xcvault"' -or $vaultArgs[2] -cne '/M' -or $vaultArgs[3] -cne '/S') {
+    Fail 'XCVault arguments are not /AddKeys "<file>" /M /S'
 }
-foreach ($bad in @('', '   ', '%pdfxchangekey%', ($fakeKey + '"'), ($fakeKey + "'"), ('"' + $fakeKey + '"'), 'PXP10-short', ($fakeKey -replace '^PXP10-', 'PXP10_'), ($fakeKey + ' & calc'))) {
-    if ((Get-PdfXchangeKeyData -Text $bad) -cne '') {
-        Fail "malformed key was accepted: case $([array]::IndexOf(@('', '   '), $bad))"
+foreach ($bad in @('', 'C:\a"b\Personal.xcvault')) {
+    if ($null -ne (Get-PdfXchangeVaultArgumentList -KeyFilePath $bad)) {
+        Fail 'XCVault arguments were built without a usable key file path'
     }
-}
-$vaultArgs = Get-PdfXchangeVaultArgumentList -KeyData $fakeKey
-if ($null -eq $vaultArgs -or $vaultArgs.Count -ne 4 -or $vaultArgs[0] -cne '/AddKeyData' -or
-    $vaultArgs[1] -cne ('"' + $fakeKey + '"') -or $vaultArgs[2] -cne '/M' -or $vaultArgs[3] -cne '/S') {
-    Fail 'XCVault arguments are not /AddKeyData "<key>" /M /S'
-}
-# Start-Process joins the list with spaces; the joined line must split back to the same key.
-$joined = $vaultArgs -join ' '
-$split = [regex]::Matches($joined, '"[^"]*"|\S+') | ForEach-Object { $_.Value }
-if (@($split).Count -ne 4 -or $split[1].Trim('"') -cne $fakeKey) {
-    Fail 'XCVault command line does not round-trip the key as one argument'
-}
-if ($null -ne (Get-PdfXchangeVaultArgumentList -KeyData '')) {
-    Fail 'XCVault arguments were built without a key'
 }
 foreach ($bad in @('Ex"ample', "Ex`nample", ('x' * 129))) {
     if ($null -ne (Get-PdfXchangeRegistrationText -Text $bad)) {
@@ -426,7 +413,7 @@ function Reset-PdfXchangeCase {
     $script:VaultCalls = [System.Collections.Generic.List[string]]::new()
     $script:VaultExit = 0
     $script:PolicyCalls = 0
-    $script:CaseKey = $fakeKey
+    $script:CaseKey = $fakeKeyFile
     $script:PdfXchangeErrorLog = [System.Collections.Generic.List[string]]::new()
     $script:InstalledVersion = ''
     $script:ProductCode = '{11111111-2222-3333-4444-555555555555}'
@@ -451,9 +438,12 @@ function Reset-PdfXchangeCase {
         return [string]$script:ProductCode
     }
     $script:InvokeXcVault = {
-        param($KeyData)
-        $script:VaultCalls.Add([string]$KeyData)
+        param($KeyFilePath)
+        $script:VaultCalls.Add([System.IO.File]::ReadAllText($KeyFilePath))
         return $script:VaultExit
+    }
+    $script:ProtectPdfXchangeKeyDirectory = {
+        param($Path)
     }
     $script:SetPdfXchangePolicy = {
         $script:PolicyCalls++
@@ -492,7 +482,7 @@ function Invoke-Case {
         [string]$InstallerSha256 = $script:GoodSha,
         [string]$CancelPath = ''
     )
-    return [int](Invoke-PdfXchangeAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot -KeyText $script:CaseKey)
+    return [int](Invoke-PdfXchangeAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -InstallerUrl $InstallerUrl -InstallerSha256 $InstallerSha256 -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot -KeyFileText $script:CaseKey)
 }
 
 function Assert-Case {
@@ -543,7 +533,7 @@ function Assert-Case {
 
 try {
     # The licence key is required before any download.
-    foreach ($missing in @('', '%pdfxchangekey%')) {
+    foreach ($missing in @('', '%pdfxchangekeyfile%')) {
         Reset-PdfXchangeCase
         $script:CaseKey = $missing
         $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
@@ -553,13 +543,12 @@ try {
         }
     }
 
-    # A fresh install adds the joined key with XCVault and sets policy once.
+    # A fresh install adds the KeyFile with XCVault and sets policy once.
     Reset-PdfXchangeCase
-    $script:CaseKey = $wrapped
     $code = Invoke-Case -Action 'Install' -PinVersion '2.0.0.0'
     Assert-Case -Code $code -ExpectCode 0 -ExpectDownloads 1 -ExpectSleeps 0 -ExpectMsi 1 -ExpectMarker '2.0.0.0' -Label 'install with key'
-    if ($script:VaultCalls.Count -ne 1 -or $script:VaultCalls[0] -cne $fakeKey -or $script:PolicyCalls -ne 1) {
-        Fail 'install did not pass the joined key to XCVault once and set policy'
+    if ($script:VaultCalls.Count -ne 1 -or $script:VaultCalls[0] -cne '<Vault>PXP10-AbCdAbCd</Vault>' -or $script:PolicyCalls -ne 1) {
+        Fail 'install did not pass the KeyFile to XCVault once and set policy'
     }
 
     # An older V10 upgrades in place: one msiexec /i, no uninstall first.
