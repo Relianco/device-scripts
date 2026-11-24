@@ -4,8 +4,9 @@
 # The runner copies this script alone, so the values are inlined.
 # CompanyName, CompanyInitials, LocationName and ElevationMode come in PackageArguments.
 # The license key is the LicenseKey argument if it is not empty, else the AE_LICENSE_KEY
-# environment variable. The argument is kept in NinjaOne activity history and is on this
-# script's command line; the environment variable is neither. Either way it is redacted from
+# environment variable, else the NinjaOne field named by LicenseKeyField (Read-AutoElevateNinjaField).
+# The argument is kept in NinjaOne activity history and is on this script's command line; the
+# environment variable and the field are neither. Either way it is redacted from
 # output, and it never goes on the msiexec command line: it is written to the registry value
 # the MSI reads back (AppSearch LICENSE_KEY_REG), because Windows logs command lines.
 # MSI property names are from the AESetup.msi Property, AppSearch and CustomAction tables
@@ -28,7 +29,13 @@ param(
     # Owner decision (2026-11-10): the key may arrive as a package argument. This knowingly
     # puts it in NinjaOne activity history and on this script's command line. AE_LICENSE_KEY
     # stays supported for callers that want neither. Do not remove this parameter.
-    [string]$LicenseKey = ''
+    [string]$LicenseKey = '',
+    # The name of a NinjaOne custom field (type Secure, script Read) that holds the key. Read only
+    # when LicenseKey and AE_LICENSE_KEY are empty. The name is not secret; the value never leaves
+    # this process except to the registry value the MSI reads.
+    [string]$LicenseKeyField = '',
+    [string]$CompanyNameField = '',
+    [string]$LocationNameField = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -180,11 +187,55 @@ function Get-AutoElevatePlan {
 $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
 $script:AutoElevateReport = [ordered]@{ Package = 'autoelevate' }
 $script:AutoElevateSecret = ''
+# Written by the vendor's NinjaOne install script (msiexec /lv); it holds the licence key.
+$script:AutoElevateInstallLogPath = 'C:\AEInstallLog.log'
+# Tests only: a child-process test points the Section at a temp file instead of the real log.
+if ($env:RELIAN_DEPLOY_TEST -eq '1' -and -not [string]::IsNullOrEmpty($env:RELIAN_AE_TEST_INSTALL_LOG)) {
+    $script:AutoElevateInstallLogPath = $env:RELIAN_AE_TEST_INSTALL_LOG
+}
+
+# Section RemoveInstallLog: deletes that one file and nothing else. Run it only after the vendor
+# script is gone from NinjaOne, or its next run writes the file again.
+function Remove-AutoElevateInstallLog {
+    $path = $script:AutoElevateInstallLogPath
+    if (-not (Test-Path -LiteralPath $path)) { return [pscustomobject]@{ InstallLog = 'absent' } }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ InstallLog = 'not a file' } }
+    Remove-Item -LiteralPath $path -Force
+    return [pscustomobject]@{ InstallLog = 'removed' }
+}
 
 function Select-AutoElevateKey {
-    param([string]$Argument)
+    param([string]$Argument, [string]$Field = '')
     if (-not [string]::IsNullOrWhiteSpace($Argument)) { return [string]$Argument }
-    return [string]$env:AE_LICENSE_KEY
+    if (-not [string]::IsNullOrWhiteSpace($env:AE_LICENSE_KEY)) { return [string]$env:AE_LICENSE_KEY }
+    if ([string]::IsNullOrEmpty($Field)) { return '' }
+    # The key stays in a NinjaOne secure field and reaches this process only through the field read's
+    # output, never a command line.
+    return Read-AutoElevateNinjaField -Field $Field -Label 'LicenseKeyField'
+}
+
+# Reads one NinjaOne field with NinjaOne's own cmdlet (module NJCliPSh; its CLI gets only the field name).
+# The one NinjaOne call in this repo's packages (owner, 2026-11-24). '' when the name is bad or the read fails.
+function Read-AutoElevateNinjaField {
+    param([string]$Field, [string]$Label)
+    # NinjaOne field names are letters and digits. Anything else could be read as a switch.
+    if (-not [regex]::IsMatch($Field, '\A[A-Za-z][A-Za-z0-9]{0,99}\z')) {
+        Add-AutoElevateError -Message "$Label is not a NinjaOne field name"
+        return ''
+    }
+    try {
+        return ([string](Ninja-Property-Get $Field)).Trim()
+    } catch {
+        Add-AutoElevateError -Message "could not read the NinjaOne field $Field"
+        return ''
+    }
+}
+
+# CompanyName or LocationName: the argument if given, else the NinjaOne field named for it.
+function Select-AutoElevateName {
+    param([string]$Value, [string]$Field = '')
+    if (-not [string]::IsNullOrWhiteSpace($Value) -or [string]::IsNullOrEmpty($Field)) { return $Value }
+    return Read-AutoElevateNinjaField -Field $Field -Label 'a name field'
 }
 
 function ConvertTo-AutoElevateRedacted {
@@ -636,17 +687,22 @@ function Get-AutoElevateRegistrationProperties {
         [bool]$Registered
     )
     $refuse = { param($Reason) [pscustomobject]@{ ExitCode = 1; Reason = $Reason; Properties = @() } }
-    $given = @(@($LicenseKey, $CompanyName, $CompanyInitials, $LocationName, $ElevationMode) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($given.Count -eq 0) {
+    # A language foreach, not Where-Object: module logging (4103) records values bound to a cmdlet.
+    $givenCount = 0
+    foreach ($value in @($LicenseKey, $CompanyName, $CompanyInitials, $LocationName, $ElevationMode)) {
+        if (-not [string]::IsNullOrWhiteSpace($value)) { $givenCount++ }
+    }
+    $value = $null
+    if ($givenCount -eq 0) {
         if ($Registered) {
             # The MSI reads the existing registration back from the registry.
             return [pscustomobject]@{ ExitCode = $null; Reason = ''; Properties = @() }
         }
-        return & $refuse 'AutoElevate is not registered on this device: pass LicenseKey or set the AE_LICENSE_KEY environment variable, and pass CompanyName and LocationName'
+        return & $refuse 'AutoElevate is not registered on this device: pass LicenseKey, set the AE_LICENSE_KEY environment variable or name a LicenseKeyField that holds the key, and pass CompanyName and LocationName'
     }
     # Registration values go to the MSI as a set, so a partial set is refused.
     if ([string]::IsNullOrWhiteSpace($LicenseKey)) {
-        return & $refuse 'registration needs the LicenseKey argument or the AE_LICENSE_KEY environment variable'
+        return & $refuse 'registration needs the key: the LicenseKey argument, the AE_LICENSE_KEY environment variable or a LicenseKeyField that holds it'
     }
     if ([string]::IsNullOrWhiteSpace($CompanyName) -or [string]::IsNullOrWhiteSpace($LocationName)) {
         return & $refuse 'registration needs CompanyName and LocationName'
@@ -1054,6 +1110,15 @@ function Invoke-AutoElevateAction {
         return 130
     }
     $present = -not [string]::IsNullOrWhiteSpace($installed)
+    # Registration values on an uninstall mean a Reinstall (runner: uninstall step, then install step,
+    # same arguments). Refuse it while the key is missing, or the device is left without the agent.
+    if ($plan.RunInstaller -eq 'uninstall' -and (@($CompanyName, $CompanyInitials, $LocationName, $ElevationMode) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })) {
+        $check = Get-AutoElevateRegistrationProperties -LicenseKey $LicenseKey -CompanyName $CompanyName -CompanyInitials $CompanyInitials -LocationName $LocationName -ElevationMode $ElevationMode -Registered $false
+        if ($null -ne $check.ExitCode) {
+            Add-AutoElevateError -Message ('not uninstalling: registration values were given, as in a Reinstall, and the install step would fail: ' + $check.Reason + '. For a plain Uninstall, pass no registration values')
+            return 1
+        }
+    }
 
     $cache = ''
     try {
@@ -1197,7 +1262,9 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 # Read once, then remove from this process so msiexec and anything later does not inherit it.
-$autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey
+$autoelevateKey = Select-AutoElevateKey -Argument $LicenseKey -Field $LicenseKeyField
+$CompanyName = Select-AutoElevateName -Value $CompanyName -Field $CompanyNameField
+$LocationName = Select-AutoElevateName -Value $LocationName -Field $LocationNameField
 Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
 $script:AutoElevateSecret = $autoelevateKey
 $autoelevateExit = 1
@@ -1206,6 +1273,9 @@ try {
     if ($Section -eq 'Evidence') {
         $script:AutoElevateReport = Get-AutoElevateEvidence
         $autoelevateExit = 0
+    } elseif ($Section -eq 'RemoveInstallLog') {
+        $script:AutoElevateReport['InstallLog'] = (Remove-AutoElevateInstallLog).InstallLog
+        $autoelevateExit = if ($script:AutoElevateReport['InstallLog'] -eq 'not a file') { 1 } else { 0 }
     } elseif (-not [string]::IsNullOrEmpty($Section)) {
         Add-AutoElevateError -Message 'unsupported Section'
     } else {

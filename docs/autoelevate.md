@@ -88,6 +88,20 @@ It is separate from normal installation and requires review before reuse.
   (MsiInstaller events) and the MSI exit code in the report. A machine policy
   that turns on Windows Installer logging still writes one, so keep that
   policy off.
+- **`Section` `RemoveInstallLog`** deletes `C:\AEInstallLog.log` and nothing
+  else, and reports `InstallLog`: `removed`, `absent` or `not a file` (exit 1,
+  left alone). The vendor's NinjaOne install script writes that file with
+  `msiexec /lv`, and it holds the key. Run it only after that script is gone
+  from NinjaOne, or its next run writes the file again.
+- **`Reinstall` keeps the agent when the key is missing.** The runner runs
+  `Reinstall` as an uninstall step and then an install step, with the same
+  arguments. An uninstall step that carries registration values (`CompanyName`
+  and the rest) first checks them as the install step will. If the key is not
+  there (for example, a NinjaOne field set less than five minutes ago, which has
+  not reached the agent yet), it exits 1 and does not uninstall. The package
+  cannot tell that uninstall step from a plain `Uninstall` given the same
+  values, so a plain `Uninstall` must pass no registration values (the error
+  says so). A plain `Uninstall` with no registration values is unchanged.
 - **`Section` `Evidence`** is read-only. It reports the installed version, the
   product code, the install path, the stored registration (the key and
   `Settings` only as `present` or `absent`), both services with their state
@@ -110,6 +124,7 @@ README.
 | Run | `-Action` | `-PackageArguments` | JSON |
 |---|---|---|---|
 | Evidence | `Install` | `eyJTZWN0aW9uIjoiRXZpZGVuY2UifQ==` | `{"Section":"Evidence"}` |
+| Remove the vendor install log | `Install` | `eyJTZWN0aW9uIjoiUmVtb3ZlSW5zdGFsbExvZyJ9` | `{"Section":"RemoveInstallLog"}` |
 | Upgrade a registered agent | `Install` | none | |
 | Fresh install | `Install` | `eyJDb21wYW55TmFtZSI6IkV4YW1wbGUgQ29tcGFueSIsIkNvbXBhbnlJbml0aWFscyI6IkVDIiwiTG9jYXRpb25OYW1lIjoiTWFpbiBPZmZpY2UiLCJFbGV2YXRpb25Nb2RlIjoibGl2ZSJ9` | `{"CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}` |
 
@@ -119,44 +134,42 @@ Fresh install with the key as an argument (the value is a placeholder):
 
 Make your own with `printf '%s' '<json>' | base64 -w0`.
 
-## NinjaOne wrapper for the key (environment variable way)
+## NinjaOne: the key from a secure field (runner 374)
 
-Putting `LicenseKey` in `-PackageArguments` keeps the key in NinjaOne's
-activity history. To keep it out of that history, use the environment
-variable. Keep it in a NinjaOne custom field of type Secure,
-set at the organization level, with script read access. A wrapper script in
-the NinjaOne library, outside this repo, reads the field into
-`$env:AE_LICENSE_KEY` for its own process. It then starts the pinned runner,
-which passes the variable to the package process. Replace each placeholder.
-The field name here is an example.
+This is the install path for a client without Intune. Runner 374 runs the
+package with `LicenseKeyField` in `-PackageArguments`. That argument is only
+the field name. The package reads the key with `Ninja-Property-Get` inside its
+own process, so the key is on no command line: not in the runner's command
+line, not in the package's, not in `ninjarmm-cli`'s (it gets the field name),
+and not in msiexec's. NinjaOne activity history holds only the field name.
+There is no msiexec log.
 
-```powershell
-$ErrorActionPreference = 'Stop'
-$runnerUrl = 'https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/runner/Invoke-RelianRunner.ps1'
-$runnerSha = '<runner-sha256>'
-$runner = Join-Path $env:TEMP ('relian-runner-' + [guid]::NewGuid().ToString('n') + '.ps1')
-Invoke-WebRequest -Uri $runnerUrl -OutFile $runner -UseBasicParsing
-if ((Get-FileHash -Algorithm SHA256 -LiteralPath $runner).Hash -ne $runnerSha) {
-    Remove-Item -LiteralPath $runner -Force
-    exit 1
-}
-$code = 1
-try {
-    $env:AE_LICENSE_KEY = [string](Ninja-Property-Get autoelevateLicenseKey)
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner `
-        -PackageUrl 'https://raw.githubusercontent.com/Relianco/device-scripts/<commit>/windows/packages/autoelevate/Invoke-AutoElevate.ps1' `
-        -PackageSha256 '<package-sha256>' `
-        -ToolkitUrl '<toolkit-url>' -ToolkitSha256 '<toolkit-sha256>' `
-        -BrandPackUrl '<brand-pack-url>' -BrandPackSha256 '<brand-pack-sha256>' `
-        -Action 'Install' -PinVersion '2.11.1959' `
-        -PackageArguments '<base64 of the fresh-install JSON>'
-    $code = $LASTEXITCODE
-} finally {
-    Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $runner -Force -ErrorAction SilentlyContinue
-}
-exit $code
-```
+- The field: `autoelevateLicenseKey`, type Secure (API `TEXT_ENCRYPTED`),
+  scopes Organization, Location and Device, script access Read only, API
+  access Write only. Set it per organization. A device or location value
+  overrides the organization value. A new value takes a few minutes to reach
+  the agent: wait five minutes after setting it before a run.
+- `Ninja-Property-Get` comes from the NinjaOne module `NJCliPSh`
+  (`C:\Program Files\WindowsPowerShell\Modules`), which the package process
+  loads on first use. It works only in a process the NinjaOne agent started.
+- The field is read only when `LicenseKey` and `AE_LICENSE_KEY` are empty. An
+  unreadable or empty field leaves the key empty. A fresh install then exits 1
+  with a reason that names the field.
+- `CompanyName` and `LocationName` are plain package arguments, or, with
+  `CompanyNameField` and `LocationNameField`, NinjaOne fields read the same
+  way (an argument wins over its field). With fields, one condition on a shared
+  policy serves every organization, each with its own values, as the vendor
+  script did. Use the names exactly as the AutoElevate portal shows them.
 
-Do not print the field, and do not run the wrapper with transcript logging
-turned on.
+Example `-PackageArguments` JSON for a fresh install, names as arguments:
+
+`{"LicenseKeyField":"autoelevateLicenseKey","CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}`
+
+Names from fields (one shared condition for every organization):
+
+`{"LicenseKeyField":"autoelevateLicenseKey","CompanyNameField":"autoElevateCompany","LocationNameField":"autoElevateLocation","ElevationMode":"live"}`
+
+Do not run this with PowerShell transcription turned on. The package keeps the
+key out of cmdlet pipelines, so module logging (event 4103) does not record it
+from the package, but NinjaOne's `NJCliPSh` module is not ours: keep module
+logging off for it.

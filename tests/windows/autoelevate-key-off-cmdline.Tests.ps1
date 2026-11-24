@@ -20,6 +20,18 @@ $env:RELIAN_DEPLOY_TEST = '1'
 # Obviously fake keys, built at run time so the repo holds no key-shaped literal.
 $script:ArgKey = -join @('FAKEARGKEY', '0000', 'NOTREAL')
 $script:EnvKey = -join @('FAKEENVKEY', '1111', 'NOTREAL')
+$script:FieldKey = -join @('FAKEFIELDKEY', '3333', 'NOTREAL')
+$script:FieldName = 'autoelevateLicenseKey'
+
+# NinjaOne's Ninja-Property-Get (module NJCliPSh) is the boundary: it runs ninjarmm-cli with the
+# field name. The fake records every argument it is handed, which stands for that command line.
+$script:FieldCalls = [System.Collections.Generic.List[string]]::new()
+function Ninja-Property-Get {
+    param([Parameter(Position = 0)][string]$Name)
+    $script:FieldCalls.Add($Name)
+    if ($Name -ceq $script:FieldName) { return ($script:FieldKey + "`r`n") }
+    throw 'field not found'
+}
 $utf8 = [System.Text.UTF8Encoding]::new($false)
 $script:GoodBytes = $utf8.GetBytes('autoelevate-installer')
 $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -89,13 +101,38 @@ function Invoke-Case {
     return [int](Invoke-AutoElevateAction -DeploymentType 'Install' -Action 'Install' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey $LicenseKey -CompanyName 'Example Company' -CompanyInitials 'EC' -LocationName 'Main Office' -ElevationMode 'live')
 }
 
+# PowerShell module logging (event 4103) records every value a cmdlet is bound to, so the key must
+# not pass through a cmdlet pipeline. These wrappers shadow the cmdlets and note any key they see.
+$script:PipelineKeyHits = [System.Collections.Generic.List[string]]::new()
+function Test-HoldsFakeKey { param($Value) return ([string]$Value) -match 'FAKE[A-Z]*KEY' }
+function Where-Object {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [Parameter(Position = 0)][scriptblock]$FilterScript)
+    process {
+        if (Test-HoldsFakeKey $InputObject) { $script:PipelineKeyHits.Add('Where-Object') }
+        $InputObject | Microsoft.PowerShell.Core\Where-Object -FilterScript $FilterScript
+    }
+}
+function ForEach-Object {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [Parameter(Position = 0)][scriptblock]$Process)
+    process {
+        if (Test-HoldsFakeKey $InputObject) { $script:PipelineKeyHits.Add('ForEach-Object') }
+        $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Process
+    }
+}
+
 try {
     # 1. The key, from -LicenseKey or AE_LICENSE_KEY, on a fresh or an installed device,
     #    is on no argument list handed to a process hook, nor in the report.
-    foreach ($source in @('argument', 'environment')) {
+    foreach ($source in @('argument', 'environment', 'field')) {
         foreach ($installed in @($false, $true)) {
             Reset-Case -Installed $installed
-            if ($source -eq 'environment') {
+            if ($source -eq 'field') {
+                $script:FieldCalls.Clear()
+                $key = Select-AutoElevateKey -Argument '' -Field $script:FieldName
+                $want = $script:FieldKey
+                if ($key -cne $want) { Fail "[field] the key was not read from the field (got $($key.Length) characters)" }
+                if (($script:FieldCalls -join '|') -cne $script:FieldName) { Fail "[field] Ninja-Property-Get calls: $($script:FieldCalls -join '|')" }
+            } elseif ($source -eq 'environment') {
                 $env:AE_LICENSE_KEY = $script:EnvKey
                 $key = Select-AutoElevateKey -Argument ''
                 Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY'
@@ -113,11 +150,36 @@ try {
             if ($all -match 'LICENSE_KEY') { Fail "[$label] LICENSE_KEY property still passed: $(ConvertTo-AutoElevateRedacted -Text $all)" }
             $msi = [string]$script:AutoElevateReport.MsiCommand
             if ($msi.Contains($want) -or $msi -match 'LICENSE_KEY') { Fail "[$label] report MsiCommand names the key: $msi" }
+            if (@($script:HookArgs | Where-Object { $_ -match '^msiexec ' -and $_ -match '(^|\s)/l' }).Count) { Fail "[$label] msiexec writes a log (/l), which would hold the key" }
             foreach ($prop in @('COMPANY_NAME="Example Company"', 'COMPANY_INITIALS="EC"', 'LOCATION_NAME="Main Office"', 'ELEVATION_MODE="live"')) {
                 if (-not $all.Contains($prop)) { Fail "[$label] msiexec lacks $prop" }
             }
         }
     }
+
+    if ($script:PipelineKeyHits.Count) { Fail "the key went through a cmdlet pipeline (module logging 4103 would record it): $($script:PipelineKeyHits -join ', ')" }
+
+    # 1b. Precedence: a LicenseKey argument, then AE_LICENSE_KEY, then the field. The field is
+    #     read only when both are empty, so a caller that passes the key causes no NinjaOne call.
+    $script:FieldCalls.Clear()
+    if ((Select-AutoElevateKey -Argument $script:ArgKey -Field $script:FieldName) -cne $script:ArgKey -or $script:FieldCalls.Count) { Fail 'argument must win over the field, with no field read' }
+    $env:AE_LICENSE_KEY = $script:EnvKey
+    $got = Select-AutoElevateKey -Argument '' -Field $script:FieldName
+    Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY'
+    if ($got -cne $script:EnvKey -or $script:FieldCalls.Count) { Fail 'AE_LICENSE_KEY must win over the field, with no field read' }
+    if ((Select-AutoElevateKey -Argument '' -Field '') -ne '' -or $script:FieldCalls.Count) { Fail 'no field named: no field read, empty key' }
+
+    # 1c. A field name that is not a NinjaOne field name is refused before any call; an unreadable
+    #     field gives an empty key and an error naming the field, never a throw or a value.
+    $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
+    foreach ($bad in @('a b', 'x;y', '-Name', ('a' * 101))) {
+        if ((Select-AutoElevateKey -Argument '' -Field $bad) -ne '') { Fail "bad field name [$bad] gave a key" }
+    }
+    if ($script:FieldCalls.Count) { Fail "bad field names reached Ninja-Property-Get: $($script:FieldCalls -join '|')" }
+    if ($script:AutoElevateErrorLog.Count -ne 4) { Fail "bad field names logged $($script:AutoElevateErrorLog.Count) errors" }
+    $script:AutoElevateErrorLog.Clear()
+    if ((Select-AutoElevateKey -Argument '' -Field 'missingField') -ne '') { Fail 'an unreadable field gave a key' }
+    if (($script:AutoElevateErrorLog -join ' ') -notmatch 'missingField') { Fail "unreadable field error: $($script:AutoElevateErrorLog -join ' ')" }
 
     # 2. The key is written from this process to HKLM\SOFTWARE\AutoElevate LicenseKey,
     #    REG_SZ, 64-bit view (the AESetup.msi RegLocator row, type 18), before msiexec.
@@ -159,6 +221,66 @@ try {
     if ($code -ne 1) { Fail "installed 1603 exit $code" }
     $want = @('open Registry64', 'create SOFTWARE\AutoElevate', ('set LicenseKey=' + $script:ArgKey + ' (String)'), 'open Registry64', 'create SOFTWARE\AutoElevate', ('set LicenseKey=' + $oldKey + ' (String)'))
     if (($script:Reg -join '|') -cne ($want -join '|')) { Fail "installed 1603 did not restore the old key: $(($script:Reg -join '|').Replace($script:ArgKey, '[new]'))" }
+
+    # 3c. Runner 374 Reinstall = Uninstall step, then Install step, each with the same arguments.
+    #     An Uninstall that carries registration values is the first half of a re-registration: it
+    #     must not remove the agent when the key is not there yet (an org field takes minutes to
+    #     reach the agent), or the device is left without AutoElevate.
+    Reset-Case -Installed $true
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey '' -CompanyName 'Example Company' -LocationName 'Main Office')
+    if ($code -ne 1 -or $script:Calls -contains 'msiexec uninstall') { Fail "uninstall with names and no key: exit $code calls $($script:Calls -join ', ')" }
+    if (($script:AutoElevateErrorLog -join ' ') -notmatch 'For a plain Uninstall, pass no registration values') { Fail "the refusal does not say how to uninstall: $($script:AutoElevateErrorLog -join ' ')" }
+    Reset-Case -Installed $true
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey $script:FieldKey -CompanyName 'Example Company' -LocationName 'Main Office')
+    if ($code -ne 0 -or $script:Calls -notcontains 'msiexec uninstall') { Fail "uninstall with names and the key: exit $code calls $($script:Calls -join ', ')" }
+    Reset-Case -Installed $true
+    $code = [int](Invoke-AutoElevateAction -DeploymentType 'Uninstall' -Action 'Uninstall' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot)
+    if ($code -ne 0 -or $script:Calls -notcontains 'msiexec uninstall') { Fail "plain uninstall: exit $code calls $($script:Calls -join ', ')" }
+
+    # 4. End to end, as runner 374 starts it: a child process with only LicenseKeyField on its command
+    #    line finds Ninja-Property-Get by module autoload (NJCliPSh, as on a NinjaOne device), gets the
+    #    key, and moves on to the next check. No names, so it stops before the registry and the download.
+    $modules = Join-Path $script:Root 'modules'
+    New-Item -ItemType Directory -Path (Join-Path $modules 'NJCliPSh') -Force | Out-Null
+    $fake = "function Ninja-Property-Get { param([Parameter(Position = 0)][string]`$Name) if (`$Name -ceq '$script:FieldName') { '$script:FieldKey' } else { throw 'no field' } }"
+    Set-Content -LiteralPath (Join-Path $modules 'NJCliPSh/NJCliPSh.psm1') -Value $fake
+    $childArgs = @('-NoProfile', '-NonInteractive', '-File', $scriptPath, '-DeploymentType', 'Install', '-Action', 'Install', '-PinVersion', '2.11.1959', '-InstallerUrl', 'https://example.invalid/AESetup.msi', '-InstallerSha256', $script:GoodSha, '-LicenseKeyField', $script:FieldName)
+    if (($childArgs -join ' ').Contains($script:FieldKey)) { Fail 'the child command line holds the key' }
+    $savedPath = $env:PSModulePath
+    $savedTest = $env:RELIAN_DEPLOY_TEST
+    try {
+        $env:PSModulePath = $modules + [IO.Path]::PathSeparator + $savedPath
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST'
+        $out = (& (Get-Process -Id $PID).Path @childArgs 2>&1 | Out-String)
+        $childExit = $LASTEXITCODE
+    } finally {
+        $env:PSModulePath = $savedPath
+        $env:RELIAN_DEPLOY_TEST = $savedTest
+    }
+    if ($out.Contains($script:FieldKey)) { Fail 'child output holds the key' }
+    if ($childExit -ne 1 -or $out -notmatch 'registration needs CompanyName and LocationName') { Fail "child did not get the key from the field (exit $childExit): $out" }
+
+    # 4b. The names can come from NinjaOne fields too (CompanyNameField, LocationNameField), so one
+    #     condition on a shared policy serves every organization. ElevationMode LIVE (wrong case) is
+    #     the next check after the key and the names, so reaching it proves all three were read.
+    $fake = "function Ninja-Property-Get { param([Parameter(Position = 0)][string]`$Name) switch -CaseSensitive (`$Name) { '$script:FieldName' { '$script:FieldKey' } 'aeCompany' { 'Example Company' } 'aeLocation' { 'Main Office' } default { throw 'no field' } } }"
+    Set-Content -LiteralPath (Join-Path $modules 'NJCliPSh/NJCliPSh.psm1') -Value $fake
+    $childArgs += @('-CompanyNameField', 'aeCompany', '-LocationNameField', 'aeLocation', '-ElevationMode', 'LIVE')
+    try {
+        $env:PSModulePath = $modules + [IO.Path]::PathSeparator + $savedPath
+        Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST'
+        $out = (& (Get-Process -Id $PID).Path @childArgs 2>&1 | Out-String)
+        $childExit = $LASTEXITCODE
+    } finally {
+        $env:PSModulePath = $savedPath
+        $env:RELIAN_DEPLOY_TEST = $savedTest
+    }
+    if ($childExit -ne 1 -or $out -notmatch 'ElevationMode must be audit, live or policy') { Fail "child did not get the names from the fields (exit $childExit): $out" }
+
+    # 4c. A name given as an argument wins over its field, and that field is not read.
+    $script:FieldCalls.Clear()
+    if ((Select-AutoElevateName -Value 'Given Co' -Field 'aeCompany') -cne 'Given Co' -or $script:FieldCalls.Count) { Fail 'CompanyName argument must win over CompanyNameField' }
+    if ((Select-AutoElevateName -Value '' -Field '') -ne '' -or $script:FieldCalls.Count) { Fail 'no name field: no read' }
 
 } finally {
     Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
