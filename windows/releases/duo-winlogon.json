@@ -1,0 +1,17 @@
+{
+  "name": "Duo Authentication for Windows Logon",
+  "version": "6.0.0.4198",
+  "sourceUrl": "https://dl.duosecurity.com/DuoWinLogon_MSIs_Policies_and_Documentation-6.0.0.zip",
+  "zipSha256": "24e30573e1429e6aaa9578969212b82be485df337860394fd68b5dc180b68e7a",
+  "checksums": "https://duo.com/docs/checksums",
+  "msi": {
+    "x64": {
+      "file": "DuoWindowsLogon64.msi",
+      "sha256": "ce64870036390a8dcf91b04a68676bccbeacbe3ec51616aad0f3685187258f30"
+    },
+    "arm64": {
+      "file": "DuoWindowsLogonARM64.msi",
+      "sha256": "58101667e6cdc1d91114ddd1923e33bd5e6d7eaefc54a77ba44a81122bbc9c2e"
+    }
+  }
+}
