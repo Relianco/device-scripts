@@ -104,6 +104,8 @@ Assert ($r.status -eq 'upgraded' -and $r.before -eq '4.3.1.4861' -and $r.after -
 Assert ($pc.Products[0].Version -eq '6.0.0.4198' -and $pc.Values['ProvidersWhitelist'][0] -eq '{X}') 'dropped value restored'
 Assert ($pc.Values['SKey'][0] -eq $secret -and $pc.Values['IKey'][0] -eq 'DIAB1234567890WXYZ12' -and $pc.Values['FailOpen'][0] -eq 0) 'settings written'
 Assert ($pc.Marker -eq '0123abcd') 'marker'
+# Duo 6.0.0+ lets Entra SSPR ("Reset password" at sign-in) run only with EnableSSPRFix = 1 (https://duo.com/docs/rdp-faq).
+Assert ($pc.Values.ContainsKey('EnableSSPRFix') -and $pc.Values['EnableSSPRFix'][0] -eq 1 -and $pc.Values['EnableSSPRFix'][1] -eq 'DWord') 'EnableSSPRFix 1 DWORD'
 Assert (-not $line.Contains($secret)) 'secret not in output'
 foreach ($c in $pc.Calls) { Assert ($c -notmatch 'IKEY|SKEY|HOST=|' + $secret) "no key in $c" }
 Assert (@($pc.Calls | Where-Object { $_ -like 'msi /i*' }).Count -eq 1 -and ($pc.Calls -join ';') -match 'ISADMIN=1') 'one install, ISADMIN'
@@ -157,6 +159,14 @@ Assert ($r.status -eq 'installed' -and $r.restartPending -eq $true -and $pc.Mark
 $pc = New-Pc '6.0.0.4198'; Use-Pc $pc
 $r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
 Assert ($r.status -eq 'configured' -and -not ($pc.Calls -join ';').Contains('msi ')) 'configured only'
+Assert ($pc.Values['EnableSSPRFix'][0] -eq 1) 'configure sets EnableSSPRFix'
+# A PC whose EnableSSPRFix went back to 0 is not in the managed state.
+$pc.Values['EnableSSPRFix'] = @(0, 'DWord')
+Assert ((Test-DuoState $settings $null '6.0.0.4198') -eq 'setting EnableSSPRFix differs') 'state needs EnableSSPRFix 1'
+# A settings change that fails is undone: EnableSSPRFix, absent before, is removed again.
+$pc = New-Pc '6.0.0.4198'; $pc.Provider = $false; Use-Pc $pc
+$r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
+Assert ($r.status -eq 'failed' -and -not $pc.Values.ContainsKey('EnableSSPRFix') -and $pc.Values['IKey'][0] -eq 'DIOLD000000000000000') "failed configure undone: $($r.status) $($r.error)"
 $pc = New-Pc '4.3.1.4861'; $pc.Policy = @('FailOpen'); Use-Pc $pc
 $r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
 Assert ($r.status -eq 'refused' -and $pc.Calls.Count -eq 0) 'policy override refused'
