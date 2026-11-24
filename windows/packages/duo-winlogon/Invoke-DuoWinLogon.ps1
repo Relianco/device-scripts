@@ -5,7 +5,7 @@
     No key ever goes on a command line: msiexec gets only the MSI path, /qn /norestart and ISADMIN=1 (the MSI's
     silent-install launch condition). The integration settings arrive in-process as -Settings (IKey, SKey, Host and
     Marker, the key's fingerprint) from the caller (the Relian-CIPP Intune app) and are written to Duo's own key,
-    HKLM\SOFTWARE\Duo Security\DuoCredProv (64-bit view), with AutoPush 1, FailOpen 0 and RdpOnly 0. Without -Settings
+    HKLM\SOFTWARE\Duo Security\DuoCredProv (64-bit view), with AutoPush 1, FailOpen 0, RdpOnly 0 and EnableSSPRFix 1. Without -Settings
     (runner use) the PC keeps its own settings.
 
     Plan, from the installed product: none -> install the pin; older than the pin -> upgrade in place, but only from a
@@ -55,7 +55,11 @@ $script:VcRedist = @{
     ARM64 = @('https://download.visualstudio.microsoft.com/download/pr/78d061c5-9ef3-42ab-98ed-3309d1095dc4/3C81BCF5B06156858362400D7066F65ECE38E8ACCB5E687FC65BEF5735F31FFC/VC_redist.arm64.exe', '3c81bcf5b06156858362400d7066f65ece38e8accb5e687fc65bef5735f31ffc')
 }
 $script:DuoKey = 'SOFTWARE\Duo Security\DuoCredProv'
-$script:Managed = @('IKey', 'SKey', 'Host', 'AutoPush', 'FailOpen', 'RdpOnly')
+$script:Managed = @('IKey', 'SKey', 'Host', 'AutoPush', 'FailOpen', 'RdpOnly', 'EnableSSPRFix')
+# The fleet's behaviour, read on 2026-11-23: automatic push, fail closed, console and RDP. EnableSSPRFix 1 (6.0.0+, off by
+# default) lets Entra SSPR ("Reset password" at sign-in) run instead of an unauthenticated WsiAccount desktop
+# (https://duo.com/docs/rdp-faq).
+$script:Dwords = @(@('AutoPush', 1), @('FailOpen', 0), @('RdpOnly', 0), @('EnableSSPRFix', 1))
 $script:ProviderClsid = '{44E2ED41-48C7-4712-A3C3-250C5E6D5D84}'  # CDuoPasswordCredentialProvider, the same in 4.x to 6.x
 $script:MsiOk = @(0, 3010, 1641)
 
@@ -260,8 +264,7 @@ function Invoke-DuoMsi([string[]]$Arguments) {
 
 function Set-DuoSettings($Settings) {
     foreach ($n in @('IKey', 'SKey', 'Host')) { & $script:SetValue $n $Settings[$n] 'String' }
-    # The fleet's behaviour, read on 2026-11-23: automatic push, fail closed, console and RDP.
-    foreach ($d in @(@('AutoPush', 1), @('FailOpen', 0), @('RdpOnly', 0))) { & $script:SetValue $d[0] $d[1] 'DWord' }
+    foreach ($d in $script:Dwords) { & $script:SetValue $d[0] $d[1] 'DWord' }
 }
 
 function Restore-DuoValues($Snapshot, [switch]$MissingOnly) {
@@ -285,7 +288,7 @@ function Test-DuoState($Settings, $Snapshot, [string]$MinVersion, [switch]$Exact
     }
     if ($null -ne $Settings) {
         foreach ($n in @('IKey', 'SKey', 'Host')) { if (-not $now.Values.ContainsKey($n) -or [string]$now.Values[$n][0] -cne $Settings[$n]) { return "setting $n differs" } }
-        foreach ($d in @(@('AutoPush', 1), @('FailOpen', 0), @('RdpOnly', 0))) { if (-not $now.Values.ContainsKey($d[0]) -or [int]$now.Values[$d[0]][0] -ne $d[1]) { return "setting $($d[0]) differs" } }
+        foreach ($d in $script:Dwords) { if (-not $now.Values.ContainsKey($d[0]) -or [int]$now.Values[$d[0]][0] -ne $d[1]) { return "setting $($d[0]) differs" } }
     }
     $null
 }
