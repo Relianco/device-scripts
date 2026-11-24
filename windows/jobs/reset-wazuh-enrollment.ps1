@@ -48,7 +48,12 @@ $script:WrStopService = {
     }
 }
 
-$script:WrStartService = { Start-Service -Name 'WazuhSvc' -ErrorAction Stop }
+# A stop that ran past the wait may still be pending: let it finish (bounded) before the start.
+$script:WrStartService = {
+    $service = Get-Service -Name 'WazuhSvc' -ErrorAction Stop
+    if ($service.Status -eq 'StopPending') { $service.WaitForStatus('Stopped', [TimeSpan]::FromSeconds($script:WrStopSeconds)) }
+    Start-Service -Name 'WazuhSvc' -ErrorAction Stop
+}
 
 # SYSTEM and Administrators only, inheritance off.
 $script:WrProtect = {
@@ -76,19 +81,26 @@ $script:WrIsReparse = {
     return (Test-Path -LiteralPath $Path) -and [bool]((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)
 }
 
-function Assert-WrNotReparse {
+$script:WrReadOwner = { param([string]$Path) (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value }
+
+# Reparse points are refused. An existing folder must be owned by SYSTEM or Administrators: another owner could
+# rewrite its DACL after ours and delete the backup.
+function Assert-WrBackupDirSafe {
     foreach ($path in @((Split-Path -Parent $script:WrBackupDir), $script:WrBackupDir)) {
         if (& $script:WrIsReparse $path) { throw 'refusing a backup folder that is a reparse point' }
+        if ((Test-Path -LiteralPath $path) -and @('S-1-5-18', 'S-1-5-32-544') -notcontains [string](& $script:WrReadOwner $path)) {
+            throw 'refusing a backup folder not owned by SYSTEM or Administrators'
+        }
     }
 }
 
 # A new SYSTEM and Administrators file under the backup folder, protected while empty, then filled and read back.
 function New-WrBackup {
     param([string]$KeysPath)
-    Assert-WrNotReparse
+    Assert-WrBackupDirSafe
     if (-not (Test-Path -LiteralPath $script:WrBackupDir)) {
         $null = New-Item -ItemType Directory -Path $script:WrBackupDir -Force
-        Assert-WrNotReparse
+        Assert-WrBackupDirSafe
     }
     & $script:WrProtect $script:WrBackupDir
     $path = Join-Path $script:WrBackupDir ('client.keys.bak-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))
@@ -96,7 +108,7 @@ function New-WrBackup {
     [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
     & $script:WrProtect $path
     & $script:WrCopyInto $KeysPath $path
-    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -ne [Convert]::ToBase64String([IO.File]::ReadAllBytes($KeysPath))) {
+    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($KeysPath))) {
         throw 'backup read-back differs from client.keys'
     }
     return $path
@@ -153,10 +165,10 @@ function Invoke-WrJob {
         } elseif ($ReportOnly) {
             $r.Status = 'drift'; $r.ExitCode = 1
         } else {
+            $stopped = $true
             & $script:WrStopService $script:WrStopSeconds
             $r.Service = [string](& $script:WrServiceStatus)
             if ($r.Service -ne 'Stopped') { throw "WazuhSvc did not stop within $script:WrStopSeconds seconds" }
-            $stopped = $true
             $r.Backup = New-WrBackup $keys
             [IO.File]::Open($keys, [IO.FileMode]::Truncate, [IO.FileAccess]::Write, [IO.FileShare]::None).Dispose()
             $truncated = $true

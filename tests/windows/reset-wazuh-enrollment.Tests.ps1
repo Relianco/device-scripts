@@ -15,7 +15,10 @@ $env:RELIAN_DEPLOY_TEST = '1'
 
 $tmpRoot = Join-Path ([IO.Path]::GetTempPath()) ('reset-wazuh-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $tmpRoot
-$keyBytes = [Text.Encoding]::ASCII.GetBytes("001 PC-01 any 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`n")
+# Fixture identity and secrets are generated per run, so nothing real-looking is committed.
+$fakeKey = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
+$fakePass = [Guid]::NewGuid().ToString('N')
+$keyBytes = [Text.Encoding]::ASCII.GetBytes("$(Get-Random -Minimum 100 -Maximum 999) test-$(Get-Random) any $fakeKey`n")
 
 function Reset-Test {
     param([string]$Service = 'Running', $Keys = $keyBytes, [switch]$AuthdPass, [string]$InstallLocation = 'agent', [switch]$NoUninstall)
@@ -23,9 +26,10 @@ function Reset-Test {
     $script:AgentDir = Join-Path $script:Case 'ossec-agent'
     $null = New-Item -ItemType Directory -Path $script:AgentDir -Force
     if ($null -ne $Keys) { [IO.File]::WriteAllBytes((Join-Path $script:AgentDir 'client.keys'), [byte[]]$Keys) }
-    if ($AuthdPass) { [IO.File]::WriteAllText((Join-Path $script:AgentDir 'authd.pass'), 'enrolment-secret') }
+    if ($AuthdPass) { [IO.File]::WriteAllText((Join-Path $script:AgentDir 'authd.pass'), $fakePass) }
     $script:FakeService = $Service
     $script:StopLeaves = ''
+    $script:BadOwner = ''
     $script:Log = [Collections.Generic.List[string]]::new()
     $script:FakeEntries = @()
     if (-not $NoUninstall) {
@@ -46,6 +50,7 @@ $script:WrStopService = {
     $script:Log.Add("stop $Seconds")
     if ($script:StopLeaves) { $script:FakeService = $script:StopLeaves } else { $script:FakeService = 'Stopped' }
 }
+$script:WrReadOwner = { param([string]$Path) if ($Path -eq $script:BadOwner) { 'S-1-5-21-1-2-3-1001' } else { 'S-1-5-18' } }
 $script:WrStartService = { $script:Log.Add('start'); $script:FakeService = 'Running' }
 $script:WrProtect = {
     param([string]$Path)
@@ -98,7 +103,7 @@ Assert-Same $r.ExitCode 2 'no agent exit'
 # The JSON line never carries the key or the secret.
 Reset-Test -AuthdPass
 $line = ConvertTo-WrJobLine (Invoke-WrJob -ReportOnly)
-Assert-True ($line -notmatch '0123456789abcdef|enrolment-secret') 'line has no file contents'
+Assert-True (-not $line.Contains($fakeKey) -and -not $line.Contains($fakePass)) 'line has no file contents'
 Assert-True (-not $line.Contains("`n")) 'one line'
 $doc = $line | ConvertFrom-Json
 Assert-Same $doc.job 'reset-wazuh-enrollment' 'job name in line'
@@ -138,7 +143,7 @@ Assert-Same $r.Status 'unchanged' 'apply on empty keys unchanged'
 Assert-Same $r.ExitCode 0 'apply on empty keys exit'
 Assert-True (-not ($script:Log -match '^(stop|protect)')) 'empty keys: no stop, no backup'
 
-# The service does not stop in time: nothing copied or truncated, failed.
+# The service does not stop in time: nothing copied or truncated, failed, and the service is started again.
 Reset-Test
 $script:StopLeaves = 'StopPending'
 $r = Invoke-WrJob
@@ -146,6 +151,29 @@ Assert-Same $r.Status 'failed' 'stop timeout fails'
 Assert-Same $r.ExitCode 2 'stop timeout exit'
 Assert-Same (Keys) $keyBytes.Length 'stop timeout keeps client.keys'
 Assert-Same (@(Backups).Count) 0 'stop timeout writes no backup'
+Assert-Same $script:FakeService 'Running' 'stop timeout starts the service again'
+
+# A backup that differs only in the case of its base64 text is still a different backup.
+Reset-Test -Keys ([byte[]](0))
+$savedCopy = $script:WrCopyInto
+$script:WrCopyInto = { param([string]$Source, [string]$Destination) [IO.File]::WriteAllBytes($Destination, [byte[]](104)) }
+$r = Invoke-WrJob
+$script:WrCopyInto = $savedCopy
+Assert-Same $r.Status 'failed' 'case-only base64 difference fails'
+Assert-Same (Keys) 1 'case-only difference keeps client.keys'
+
+# A backup folder (or its parent) owned by anyone but SYSTEM or Administrators is refused before anything is written.
+foreach ($leaf in @('dir', 'parent')) {
+    Reset-Test
+    $null = New-Item -ItemType Directory -Path $script:WrBackupDir -Force
+    $script:BadOwner = $(if ($leaf -eq 'dir') { $script:WrBackupDir } else { Split-Path -Parent $script:WrBackupDir })
+    $r = Invoke-WrJob
+    Assert-Same $r.Status 'failed' "untrusted $leaf owner fails"
+    Assert-Same (Keys) $keyBytes.Length "untrusted $leaf owner keeps client.keys"
+    Assert-Same (@(Backups).Count) 0 "untrusted $leaf owner writes no backup"
+    Assert-True (-not ($script:Log -match '^protect')) "untrusted $leaf owner changes no ACL"
+    Assert-Same $script:FakeService 'Running' "untrusted $leaf owner starts the service again"
+}
 
 # A backup that cannot be protected: keys kept, the service started again.
 Reset-Test
