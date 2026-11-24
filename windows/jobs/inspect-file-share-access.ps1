@@ -58,11 +58,6 @@ $r.kerbParams = Get-FsKeyAll 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\Kerbero
 $r.kerbCsp = Get-FsKeyAll 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Kerberos'
 $r.lmwParams = Get-FsKeyAll 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanWorkstation\Parameters'
 $r.lmwPol = Get-FsKeyAll 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\LanmanWorkstation'
-$r.hardened = Get-FsKeyAll 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\NetworkProvider\HardenedPaths'
-$r.pmSecOpt = Get-FsKeyAll 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\LocalPoliciesSecurityOptions'
-$r.pmLmw = Get-FsKeyAll 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\LanmanWorkstation'
-$r.pmKerb = Get-FsKeyAll 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Kerberos'
-$r.pmRights = Get-FsKeyAll 'HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\UserRights'
 try { $r.smbClient = Get-SmbClientConfiguration | Select-Object RequireSecuritySignature, EnableSecuritySignature, EncryptionCiphers, EnableInsecureGuestLogons, RequireEncryption, Smb2DialectMin, Smb2DialectMax, AuditServerDoesNotSupportEncryption, AuditServerDoesNotSupportSigning, BlockNTLM, BlockNTLMServerExceptionList, EnableMailslots } catch { $r.smbClient = "err: $($_.Exception.Message)" }
 try { $r.smbConn = @(Get-SmbConnection -ErrorAction Stop | Select-Object ServerName, ShareName, UserName, Dialect, Encrypted, Signed) } catch { $r.smbConn = "err: $($_.Exception.Message)" }
 try { $r.dns = @(Resolve-DnsName $script:FsHost -ErrorAction Stop | Select-Object Name, Type, IPAddress) } catch { $r.dns = "err: $($_.Exception.Message)" }
