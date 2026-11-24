@@ -34,6 +34,7 @@ function Reset-Case {
     $script:Calls = [System.Collections.Generic.List[string]]::new()
     $script:Reg = [System.Collections.Generic.List[string]]::new()
     $script:MsiExit = 0
+    $script:PriorKey = $null
     $script:AutoElevateErrorLog = [System.Collections.Generic.List[string]]::new()
     $script:InstalledVersion = if ($Installed) { '2.8.2' } else { '' }
     $script:ServiceState = if ($Installed) { @{ AutoElevateAgent = 'Running'; AEDelayedStartService = 'Running' } } else { @{} }
@@ -71,6 +72,7 @@ function Reset-Case {
         $script:Calls.Add('registry')
         $script:Reg.Add("open $View")
         $sub = [pscustomobject]@{}
+        $sub | Add-Member ScriptMethod GetValue { param($n, $d) if ($null -ne $script:PriorKey) { return $script:PriorKey } return $d }
         $sub | Add-Member ScriptMethod SetValue { param($n, $v, $k) $script:Reg.Add("set $n=$v ($k)") }
         $sub | Add-Member ScriptMethod DeleteValue { param($n, $throw) $script:Reg.Add("delete $n") }
         $sub | Add-Member ScriptMethod Dispose { }
@@ -148,12 +150,15 @@ try {
     if (($script:Reg -join '|') -cne ($want -join '|')) { Fail "fresh 1603 registry calls: $(ConvertTo-AutoElevateRedacted -Text ($script:Reg -join '|'))" }
     if ((($script:AutoElevateErrorLog -join ' ') + (ConvertTo-Json -InputObject $script:AutoElevateReport -Compress)).Contains($script:ArgKey)) { Fail 'fresh 1603 leaked the key' }
 
-    # 3b. msiexec fails on an installed device: the installed product owns the value, it stays.
+    # 3b. msiexec fails on an installed device: the key the agent had before is put back.
+    $oldKey = -join @('FAKEOLDKEY', '2222', 'NOTREAL')
     Reset-Case -Installed $true
+    $script:PriorKey = $oldKey
     $script:MsiExit = 1603
     $code = Invoke-Case -LicenseKey $script:ArgKey
     if ($code -ne 1) { Fail "installed 1603 exit $code" }
-    if (($script:Reg -join '|') -match 'delete') { Fail "installed 1603 removed the key: $(ConvertTo-AutoElevateRedacted -Text ($script:Reg -join '|'))" }
+    $want = @('open Registry64', 'create SOFTWARE\AutoElevate', ('set LicenseKey=' + $script:ArgKey + ' (String)'), 'open Registry64', 'create SOFTWARE\AutoElevate', ('set LicenseKey=' + $oldKey + ' (String)'))
+    if (($script:Reg -join '|') -cne ($want -join '|')) { Fail "installed 1603 did not restore the old key: $(($script:Reg -join '|').Replace($script:ArgKey, '[new]'))" }
 
 } finally {
     Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue

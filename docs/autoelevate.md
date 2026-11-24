@@ -78,9 +78,10 @@ It is separate from normal installation and requires review before reuse.
   process, to `HKLM\SOFTWARE\AutoElevate` `LicenseKey` (REG_SZ, 64-bit
   view), where the MSI reads it as above. msiexec gets only `COMPANY_NAME`,
   `COMPANY_INITIALS`, `LOCATION_NAME` and `ELEVATION_MODE`. If msiexec
-  fails on a device that had no agent before, the package removes the value
-  again. On a device that had the agent, the value stays with it. A failed
-  registry write exits 1 before msiexec runs.
+  fails, the package puts back what was there before, before it restarts the
+  services: it removes the value on a device that had none, and restores the
+  old key on a device that had one. A failed registry write exits 1 before
+  msiexec runs.
 - **No msiexec log.** The MSI loads the stored key into `LICENSE_KEY_REG` and
   does not hide it, so a verbose msiexec log would hold the key. The package
   writes no msiexec log. For a failed install, use `Section` `Evidence`

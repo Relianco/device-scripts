@@ -88,6 +88,7 @@ function Reset-Case {
     $script:OpenAutoElevateRegistryBase = {
         param($View)
         $sub = [pscustomobject]@{}
+        $sub | Add-Member ScriptMethod GetValue { param($n, $d) return $d }
         $sub | Add-Member ScriptMethod SetValue { param($n, $v, $k) $script:StoredKey = $v }
         $sub | Add-Member ScriptMethod DeleteValue { param($n, $throw) $script:StoredKey = $null }
         $sub | Add-Member ScriptMethod Dispose { }

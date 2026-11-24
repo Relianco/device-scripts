@@ -946,7 +946,8 @@ $script:OpenAutoElevateRegistryBase = {
 
 # Writes the key where the MSI AppSearch reads it (HKLM\SOFTWARE\AutoElevate LicenseKey,
 # RegLocator type 18, 64-bit view), from this process, so no command line carries it.
-# An empty value removes it. SetLicenseKey0 copies it into LICENSE_KEY_FINAL.
+# An empty value removes it. Returns the value it replaced ($null if none), to restore on failure.
+# SetLicenseKey0 copies it into LICENSE_KEY_FINAL.
 function Set-AutoElevateStoredLicenseKey {
     param([string]$Value)
     $base = & $script:OpenAutoElevateRegistryBase -View 'Registry64'
@@ -958,7 +959,11 @@ function Set-AutoElevateStoredLicenseKey {
             return
         }
         $key = $base.CreateSubKey('SOFTWARE\AutoElevate')
-        try { $key.SetValue('LicenseKey', $Value, [Microsoft.Win32.RegistryValueKind]::String) } finally { $key.Dispose() }
+        try {
+            $prior = $key.GetValue('LicenseKey', $null)
+            $key.SetValue('LicenseKey', $Value, [Microsoft.Win32.RegistryValueKind]::String)
+            return $prior
+        } finally { $key.Dispose() }
     } finally {
         $base.Dispose()
     }
@@ -1085,9 +1090,10 @@ function Invoke-AutoElevateAction {
                 return 1
             }
             $wroteKey = $false
+            $priorKey = $null
             if (-not [string]::IsNullOrWhiteSpace($LicenseKey)) {
                 try {
-                    Set-AutoElevateStoredLicenseKey -Value $LicenseKey
+                    $priorKey = Set-AutoElevateStoredLicenseKey -Value $LicenseKey
                     $wroteKey = $true
                 } catch {
                     Restore-AutoElevateServices
@@ -1101,11 +1107,11 @@ function Invoke-AutoElevateAction {
             $result = Invoke-AutoElevateSafe -Block { & $script:InvokeMsiExec -Mode 'install' -ArgumentList $argumentList -InstallerPath $installerPath -ProductCode '' } -Fallback $null
             $script:AutoElevateReport['MsiExitCode'] = $result
             if ($null -eq $result -or -not (Test-AutoElevateMsiSucceeded -Code ([int]$result))) {
-                Restore-AutoElevateServices
-                # On a fresh device no product owns the value, so it is not left behind.
-                if ($wroteKey -and -not $present) {
-                    try { Set-AutoElevateStoredLicenseKey -Value '' } catch { Add-AutoElevateError -Message 'could not remove the license key from HKLM\SOFTWARE\AutoElevate' }
+                # Put back what was there (nothing on a fresh device) before the agent starts again.
+                if ($wroteKey) {
+                    try { [void](Set-AutoElevateStoredLicenseKey -Value ([string]$priorKey)) } catch { Add-AutoElevateError -Message 'could not restore the license key in HKLM\SOFTWARE\AutoElevate' }
                 }
+                Restore-AutoElevateServices
                 Add-AutoElevateError -Message "installer failed (exit code: $result)"
                 return 1
             }
