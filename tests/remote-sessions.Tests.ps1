@@ -391,9 +391,11 @@ Assert-Json @($st['commands']) '["ping","net"]' 'startup commands'
 Ok 'startup noise: tray, updater and vendor startup apps after a sign-in are left out; what the technician opened and typed stays'
 
 function New-RsEv {
-    param([string]$Exe, [string]$Parent, [string]$T, $Cmd = $null, [string]$Eid = '1', [string]$Desc = '')
-    $ed = [ordered]@{ image = 'C:\Apps\' + $Exe; parentImage = 'C:\Windows\' + $Parent; user = 'CORP\user1'; description = $Desc }
-    if ($Eid -ceq '4688') { $ed = [ordered]@{ newProcessName = $ed['image']; parentProcessName = $ed['parentImage']; subjectUserName = 'user1' } }
+    param([string]$Exe, [string]$Parent, [string]$T, $Cmd = $null, [string]$Eid = '1', [string]$Desc = '', [int]$ProcId = 4242)
+    $ed = [ordered]@{ image = 'C:\Apps\' + $Exe; parentImage = 'C:\Windows\' + $Parent; user = 'CORP\user1'; description = $Desc; processId = [string]$ProcId }
+    if ($Eid -ceq '4688') {   # Sysmon gives the process id in decimal, 4688 in hex
+        $ed = [ordered]@{ newProcessName = $ed['image']; parentProcessName = $ed['parentImage']; subjectUserName = 'user1'; newProcessId = '0x' + $ProcId.ToString('x') }
+    }
     if ($null -ne $Cmd) { $ed['commandLine'] = $Cmd }
     return @{ data = @{ win = @{ system = @{ eventID = $Eid; systemTime = $T }; eventdata = $ed } } }
 }
@@ -405,6 +407,11 @@ $opened = $quiet + @((New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:20:00.
                      (New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:20:00.0100000Z' -Eid '4688'))
 Assert-Json @((Get-RsActivity -Alerts $opened -Spans $W)['apps']) '["Microsoft Edge"]' 'real launch after an autostart'
 Ok 'startup noise: an autostart launch (and its 4688 twin) is left out without hiding a later real launch of the same app'
+# A person opening the app a second after Windows autostarted it is another process: only the autostarted process id is left out.
+$soon = $quiet + @((New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:10:01.0000000Z' 'msedge.exe --profile-directory=Default' -Desc 'Microsoft Edge' -ProcId 5000),
+                   (New-RsEv 'msedge.exe' 'explorer.exe' '2026-11-19T18:10:01.0100000Z' -Eid '4688' -ProcId 5000))
+Assert-Json @((Get-RsActivity -Alerts $soon -Spans $W)['apps']) '["Microsoft Edge"]' 'second instance a second after an autostart'
+Ok 'startup noise: the autostart skip follows the process id (Sysmon processId, 4688 newProcessId), not the app name and time'
 
 $logonScript = @((New-RsEv 'powershell.exe' 'explorer.exe' '2026-11-19T18:10:00.0000000Z' 'powershell.exe -ExecutionPolicy Bypass -File logon.ps1' -Desc 'Windows PowerShell'))
 Assert-Json @((Get-RsActivity -Alerts $logonScript -Spans $W)['apps']) '[]' 'logon script'
@@ -423,5 +430,12 @@ Assert-Json (Get-RsAgentFor -Buckets $bare -Name 'PC-01' -Start 1795400000 -End 
 $mixed = @((New-RsAgentBucket 'a1' 1794335605000.0 1795398935000.0 'tenanta--PC-01'), (New-RsAgentBucket 'a2' 1795399690000.0 1795446535000.0 'tenantb--PC-01'))
 Assert-Json (Get-RsAgentFor -Buckets $mixed -Name 'PC-01' -Start 1795400000 -End 1795400600) $two 'two tenants'
 Ok 'agents: one tenant-prefixed name, one agent after the other is a re-enrolment; same name without a prefix, two tenants or overlapping agents are refused'
+# The agent.id terms aggregation returns at most 10 buckets: when it says agents are left out (sum_other_doc_count) or its counts may
+# be wrong (doc_count_error_upper_bound), an unseen agent could overlap the one picked, so no agent is picked.
+$cutNote = '{"agent":null,"note":"the Wazuh agent list for PC-01 is incomplete: activity not read"}'
+Assert-Json (Get-RsAgentFor -Buckets $seq -Name 'PC-01' -Start 1795400000 -End 1795400600 -Other 12) $cutNote 'agents left out'
+Assert-Json (Get-RsAgentFor -Buckets $seq -Name 'PC-01' -Start 1795400000 -End 1795400600 -ErrorBound 3) $cutNote 'counts may be wrong'
+Assert-Json (Get-RsAgentFor -Buckets @(@{ key = '021' }) -Name 'PC-01' -Other 5) $cutNote 'one agent shown of more'
+Ok 'agents: an agent list the indexer cut short (sum_other_doc_count, doc_count_error_upper_bound) is refused'
 
 Write-Output "remote-sessions: $($script:n) checks ok"

@@ -261,13 +261,16 @@ function Get-RsActivity {
     $elev = 0
     $signin = -1e18
     $sorted = Sort-RsStable @($Alerts) { param($e) , [string](Get-RsOr $e['data']['win']['system']['systemTime'] '') }
+    # A process id: Sysmon's processId (decimal), or 4688's newProcessId (hex; 4688's processId is the parent's).
+    $procId = { param($d) $v = [string](Get-RsOr $d['newProcessId'] $d['processId']); if (-not $v) { return $null }
+        if ($v -match '^0[xX]') { return [Convert]::ToInt64($v.Substring(2), 16) } return [long]$v }
     # Sysmon starts with autostart arguments, or a shell running a script (a logon script): that start and its 4688 twin are not a person's.
     $auto = [System.Collections.Generic.List[object]]::new()
     foreach ($e in @($Alerts)) {
         $sy0 = $e['data']['win']['system']; $d0 = Get-RsOr $e['data']['win']['eventdata'] @{}
         if ([string]$sy0['eventID'] -cne '1' -or -not $sy0['systemTime']) { continue }
         $x0 = Get-RsBase $d0['image']; $c0 = [string]$d0['commandLine']
-        if ($script:RsStartupArgs.IsMatch($c0) -or ($script:RsShells.Contains($x0) -and $script:RsScripted.IsMatch($c0))) { $auto.Add(@($x0, (ConvertTo-RsEpoch $sy0['systemTime']))) }
+        if ($script:RsStartupArgs.IsMatch($c0) -or ($script:RsShells.Contains($x0) -and $script:RsScripted.IsMatch($c0))) { $auto.Add(@($x0, (& $procId $d0), (ConvertTo-RsEpoch $sy0['systemTime']))) }
     }
     foreach ($e in @($sorted)) {
         $w = $e['data']['win']
@@ -335,7 +338,8 @@ function Get-RsActivity {
             }
         } elseif (-not $script:RsHelpers.Contains($exe) -and $parent -ceq 'explorer.exe' -and $t - $signin -gt $script:RsSigninStartup) {   # opened from the desktop, Start or taskbar
             $isAuto = $false
-            foreach ($a in $auto) { if ($a[0] -ceq $exe -and [math]::Abs($t - $a[1]) -le 2) { $isAuto = $true; break } }
+            $p = & $procId $d
+            foreach ($a in $auto) { if ($a[0] -ceq $exe -and $null -ne $a[1] -and $a[1] -eq $p -and [math]::Abs($t - $a[2]) -le 2) { $isAuto = $true; break } }   # the time guards against a reused id
             if ($isAuto) { continue }
             if ($apps.Contains($exe) -and $null -eq $apps[$exe] -and $desc -and -not $script:RsStartup.IsMatch($desc)) {
                 $apps[$exe] = [regex]::Replace($desc.Trim(), '\s+(MFC )?Application$', '')
@@ -393,7 +397,9 @@ function Get-RsNamesFromAgg {
 }
 
 function Get-RsAgentFor {
-    param($Buckets, [string]$Name, $Start = $null, $End = $null)
+    param($Buckets, [string]$Name, $Start = $null, $End = $null, [long]$Other = 0, [long]$ErrorBound = 0)
+    # Other and ErrorBound are the aggregation's sum_other_doc_count and doc_count_error_upper_bound: a cut list may hide an agent.
+    if ($Other -or $ErrorBound) { return [ordered]@{ agent = $null; note = "the Wazuh agent list for $Name is incomplete: activity not read" } }
     $b = @($Buckets)
     if ($b.Count -gt 1 -and $null -ne $Start -and @($b | Where-Object { -not ($_.Contains('mn') -and $_.Contains('mx')) }).Count -eq 0) {
         $life = @($b | ForEach-Object { , @(([double]$_['mn']['value'] / 1000), ([double]$_['mx']['value'] / 1000), $_['key']) } | Sort-Object { $_[0] })
@@ -665,8 +671,8 @@ function Get-RsWazuh {
     $names = @($found['names'])
     if (-not $names.Count) { $names = @($Device) }   # none: the id query finds nothing and says so
     $ids = (& $search @{ size = 0; query = @{ bool = @{ filter = @(@{ terms = @{ 'agent.name' = $names } }, @{ range = @{ timestamp = @{ gte = (& $iso ($End - 30 * 86400)) } } }) } }
-            aggs = @{ a = @{ terms = @{ field = 'agent.id'; size = 10 }; aggs = @{ mn = @{ min = @{ field = 'timestamp' } }; mx = @{ max = @{ field = 'timestamp' } }; n = @{ terms = @{ field = 'agent.name'; size = 5 } } } } } })['aggregations']['a']['buckets']
-    $agent = Get-RsAgentFor -Buckets @($ids) -Name $Device -Start $Start -End $End
+            aggs = @{ a = @{ terms = @{ field = 'agent.id'; size = 10 }; aggs = @{ mn = @{ min = @{ field = 'timestamp' } }; mx = @{ max = @{ field = 'timestamp' } }; n = @{ terms = @{ field = 'agent.name'; size = 5 } } } } } })['aggregations']['a']
+    $agent = Get-RsAgentFor -Buckets @($ids['buckets']) -Name $Device -Start $Start -End $End -Other ([long](Get-RsOr $ids['sum_other_doc_count'] 0)) -ErrorBound ([long](Get-RsOr $ids['doc_count_error_upper_bound'] 0))
     if (-not $agent['agent']) { return @{ hits = @(); cut = $false; note = $agent['note'] } }
     $data = & $search @{ size = 10000; sort = @(@{ timestamp = 'asc' }); track_total_hits = $true; query = @{ bool = @{ filter = @(
                     @{ term = @{ 'agent.id' = $agent['agent'] } },
