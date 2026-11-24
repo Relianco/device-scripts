@@ -160,4 +160,7 @@ Example `-PackageArguments` JSON for a fresh install:
 
 `{"LicenseKeyField":"autoelevateLicenseKey","CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}`
 
-Do not run this with PowerShell transcription turned on.
+Do not run this with PowerShell transcription turned on. The package keeps the
+key out of cmdlet pipelines, so module logging (event 4103) does not record it
+from the package, but NinjaOne's `NJCliPSh` module is not ours: keep module
+logging off for it.

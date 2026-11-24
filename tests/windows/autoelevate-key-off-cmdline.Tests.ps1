@@ -101,6 +101,25 @@ function Invoke-Case {
     return [int](Invoke-AutoElevateAction -DeploymentType 'Install' -Action 'Install' -PinVersion '2.11.1959' -InstallerUrl 'https://example.invalid/AESetup.msi' -InstallerSha256 $script:GoodSha -CancelPath '' -MarkerRoot $script:MarkerRoot -LicenseKey $LicenseKey -CompanyName 'Example Company' -CompanyInitials 'EC' -LocationName 'Main Office' -ElevationMode 'live')
 }
 
+# PowerShell module logging (event 4103) records every value a cmdlet is bound to, so the key must
+# not pass through a cmdlet pipeline. These wrappers shadow the cmdlets and note any key they see.
+$script:PipelineKeyHits = [System.Collections.Generic.List[string]]::new()
+function Test-HoldsFakeKey { param($Value) return ([string]$Value) -match 'FAKE[A-Z]*KEY' }
+function Where-Object {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [Parameter(Position = 0)][scriptblock]$FilterScript)
+    process {
+        if (Test-HoldsFakeKey $InputObject) { $script:PipelineKeyHits.Add('Where-Object') }
+        $InputObject | Microsoft.PowerShell.Core\Where-Object -FilterScript $FilterScript
+    }
+}
+function ForEach-Object {
+    param([Parameter(ValueFromPipeline = $true)]$InputObject, [Parameter(Position = 0)][scriptblock]$Process)
+    process {
+        if (Test-HoldsFakeKey $InputObject) { $script:PipelineKeyHits.Add('ForEach-Object') }
+        $InputObject | Microsoft.PowerShell.Core\ForEach-Object -Process $Process
+    }
+}
+
 try {
     # 1. The key, from -LicenseKey or AE_LICENSE_KEY, on a fresh or an installed device,
     #    is on no argument list handed to a process hook, nor in the report.
@@ -137,6 +156,8 @@ try {
             }
         }
     }
+
+    if ($script:PipelineKeyHits.Count) { Fail "the key went through a cmdlet pipeline (module logging 4103 would record it): $($script:PipelineKeyHits -join ', ')" }
 
     # 1b. Precedence: a LicenseKey argument, then AE_LICENSE_KEY, then the field. The field is
     #     read only when both are empty, so a caller that passes the key causes no NinjaOne call.

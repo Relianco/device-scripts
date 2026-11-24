@@ -667,8 +667,13 @@ function Get-AutoElevateRegistrationProperties {
         [bool]$Registered
     )
     $refuse = { param($Reason) [pscustomobject]@{ ExitCode = 1; Reason = $Reason; Properties = @() } }
-    $given = @(@($LicenseKey, $CompanyName, $CompanyInitials, $LocationName, $ElevationMode) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    if ($given.Count -eq 0) {
+    # A language foreach, not Where-Object: module logging (4103) records values bound to a cmdlet.
+    $givenCount = 0
+    foreach ($value in @($LicenseKey, $CompanyName, $CompanyInitials, $LocationName, $ElevationMode)) {
+        if (-not [string]::IsNullOrWhiteSpace($value)) { $givenCount++ }
+    }
+    $value = $null
+    if ($givenCount -eq 0) {
         if ($Registered) {
             # The MSI reads the existing registration back from the registry.
             return [pscustomobject]@{ ExitCode = $null; Reason = ''; Properties = @() }
