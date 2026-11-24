@@ -82,14 +82,28 @@ $script:ReadProducts = {
         } finally { $key.Close() }
     }
 }
-$script:ReadValues = {
+$script:ReadTree = {
+    # Duo's whole key: values (with type) and every subkey (Offline, Users: offline and passwordless enrolments), or $null.
+    function Read-DuoKeyTree($k) {
+        $t = @{ Values = @{}; Keys = @{} }
+        foreach ($n in $k.GetValueNames()) { $t.Values[$n] = @($k.GetValue($n, $null, 'DoNotExpandEnvironmentNames'), [string]$k.GetValueKind($n)) }
+        foreach ($s in $k.GetSubKeyNames()) { $c = $k.OpenSubKey($s); if ($null -ne $c) { try { $t.Keys[$s] = Read-DuoKeyTree $c } finally { $c.Close() } } }
+        $t
+    }
     $k = (Open-DuoHklm).OpenSubKey($script:DuoKey)
     if ($null -eq $k) { return $null }
-    try {
-        $v = @{}
-        foreach ($n in $k.GetValueNames()) { $v[$n] = @($k.GetValue($n, $null, 'DoNotExpandEnvironmentNames'), [string]$k.GetValueKind($n)) }
-        $v
-    } finally { $k.Close() }
+    try { Read-DuoKeyTree $k } finally { $k.Close() }
+}
+$script:WriteTree = {
+    # Writes a captured tree back under Duo's key. -MissingOnly writes only values and subkeys that are not there now.
+    param($Tree, [bool]$MissingOnly)
+    function Write-DuoKeyTree($k, $t, [bool]$MissingOnly) {
+        $have = @($k.GetValueNames())
+        foreach ($n in $t.Values.Keys) { if (-not $MissingOnly -or $have -notcontains $n) { $k.SetValue($n, $t.Values[$n][0], [Microsoft.Win32.RegistryValueKind]$t.Values[$n][1]) } }
+        foreach ($s in $t.Keys.Keys) { $c = $k.CreateSubKey($s); try { Write-DuoKeyTree $c $t.Keys[$s] $MissingOnly } finally { $c.Close() } }
+    }
+    $k = (Open-DuoHklm).CreateSubKey($script:DuoKey)
+    try { Write-DuoKeyTree $k $Tree $MissingOnly } finally { $k.Close() }
 }
 $script:SetValue = {
     param($Name, $Value, $Kind)
@@ -158,6 +172,7 @@ $script:ExpandMsi = {
 }
 $script:RunExe = { param($File, $Arguments) (Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru).ExitCode }
 $script:RunMsi = { param($Arguments) (Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $Arguments -Wait -PassThru).ExitCode }
+$script:Pause = { param($Seconds) Start-Sleep -Seconds $Seconds }
 
 function ConvertTo-DuoVersion([string]$Text) {
     try { return [version]$Text.Trim() } catch { return $null }
@@ -206,6 +221,16 @@ function Install-DuoVcRuntime([string]$Arch, [string]$Dir) {
     if (-not (& $script:VcPresent)) { throw 'VC++ 2015-2022 runtime still missing' }
 }
 
+function Invoke-DuoMsi([string[]]$Arguments) {
+    # 1618: another installation is running (Windows Update, an Intune app). Wait and try again rather than give up.
+    for ($i = 1; $i -le 6; $i++) {
+        $code = [int](& $script:RunMsi $Arguments)
+        if ($code -ne 1618) { return $code }
+        & $script:Pause 30
+    }
+    $code
+}
+
 function Set-DuoSettings($Settings) {
     foreach ($n in @('IKey', 'SKey', 'Host')) { & $script:SetValue $n $Settings[$n] 'String' }
     # The fleet's behaviour, read on 2026-11-23: automatic push, fail closed, console and RDP.
@@ -213,38 +238,41 @@ function Set-DuoSettings($Settings) {
 }
 
 function Restore-DuoValues($Snapshot, [switch]$MissingOnly) {
-    $now = & $script:ReadValues
-    if ($null -eq $now) { $now = @{} }
-    if ($null -ne $Snapshot) {
-        foreach ($n in $Snapshot.Keys) { if (-not $MissingOnly -or -not $now.ContainsKey($n)) { & $script:SetValue $n $Snapshot[$n][0] $Snapshot[$n][1] } }
-    }
+    if ($null -ne $Snapshot) { & $script:WriteTree $Snapshot ([bool]$MissingOnly) }
     if (-not $MissingOnly) {
-        foreach ($n in $script:Managed) { if ($null -eq $Snapshot -or -not $Snapshot.ContainsKey($n)) { & $script:DeleteValue $n } }
+        foreach ($n in $script:Managed) { if ($null -eq $Snapshot -or -not $Snapshot.Values.ContainsKey($n)) { & $script:DeleteValue $n } }
     }
 }
 
-function Test-DuoState($Settings, $Snapshot, [string]$MinVersion) {
-    # $null when the PC is good, else why not.
+function Test-DuoState($Settings, $Snapshot, [string]$MinVersion, [switch]$Exact) {
+    # $null when the PC is good, else why not. -Exact: the installed version must be $MinVersion itself (a rollback).
     $installed = Get-DuoInstalled @(& $script:ReadProducts)
     if (-not $installed -or [version]$installed -lt [version]$MinVersion) { return "version '$installed'" }
+    if ($Exact -and $installed -ne $MinVersion) { return "version '$installed', expected '$MinVersion'" }
     if (-not (& $script:ProviderRegistered)) { return 'credential provider not registered' }
-    $now = & $script:ReadValues
+    $now = & $script:ReadTree
     if ($null -eq $now) { return 'Duo settings key missing' }
-    if ($null -ne $Snapshot) { foreach ($n in $Snapshot.Keys) { if (-not $now.ContainsKey($n)) { return "value $n missing" } } }
+    if ($null -ne $Snapshot) {
+        foreach ($n in $Snapshot.Values.Keys) { if (-not $now.Values.ContainsKey($n)) { return "value $n missing" } }
+        foreach ($s in $Snapshot.Keys.Keys) { if (-not $now.Keys.ContainsKey($s)) { return "subkey $s missing" } }
+    }
     if ($null -ne $Settings) {
-        foreach ($n in @('IKey', 'SKey', 'Host')) { if (-not $now.ContainsKey($n) -or [string]$now[$n][0] -cne $Settings[$n]) { return "setting $n differs" } }
-        foreach ($d in @(@('AutoPush', 1), @('FailOpen', 0), @('RdpOnly', 0))) { if (-not $now.ContainsKey($d[0]) -or [int]$now[$d[0]][0] -ne $d[1]) { return "setting $($d[0]) differs" } }
+        foreach ($n in @('IKey', 'SKey', 'Host')) { if (-not $now.Values.ContainsKey($n) -or [string]$now.Values[$n][0] -cne $Settings[$n]) { return "setting $n differs" } }
+        foreach ($d in @(@('AutoPush', 1), @('FailOpen', 0), @('RdpOnly', 0))) { if (-not $now.Values.ContainsKey($d[0]) -or [int]$now.Values[$d[0]][0] -ne $d[1]) { return "setting $($d[0]) differs" } }
     }
     $null
 }
 
 function Remove-DuoProducts([string]$Keep) {
-    foreach ($p in @(& $script:ReadProducts)) { if ($p.Version -ne $Keep) { [void](& $script:RunMsi @('/x', $p.Code, '/qn', '/norestart')) } }
+    # Removes every Duo product except version $Keep; $true when none of them is left.
+    foreach ($p in @(& $script:ReadProducts)) { if ($p.Version -ne $Keep) { [void](Invoke-DuoMsi @('/x', $p.Code, '/qn', '/norestart')) } }
+    -not @(@(& $script:ReadProducts) | Where-Object { $_.Version -ne $Keep }).Count
 }
 
 function Invoke-DuoWinLogon($Settings) {
     $r = [ordered]@{ version = '1'; timestamp = [datetime]::UtcNow.ToString('o'); status = 'failed'; action = ''; before = ''; after = ''; restartPending = $false; error = $null }
     $dir = $null
+    $keepDir = $false
     $changed = $false
     $snapshot = $null
     $plan = ''
@@ -257,7 +285,7 @@ function Invoke-DuoWinLogon($Settings) {
         $r.action = $plan
         if ($plan -eq 'refuse') { $r.status = 'refused'; $r.error = "no pinned rollback build for '$($r.before)'"; return ($r | ConvertTo-Json -Compress) }
         $arch = Get-DuoArch
-        $snapshot = & $script:ReadValues
+        $snapshot = & $script:ReadTree
         $dir = & $script:NewWorkDir
         $old = $null
         if ($plan -eq 'upgrade') { $old = Get-DuoMsiFile $script:DuoArchive[$r.before] $arch $dir }  # before anything changes
@@ -265,7 +293,7 @@ function Invoke-DuoWinLogon($Settings) {
             Install-DuoVcRuntime $arch $dir
             $new = Get-DuoMsiFile $script:DuoPin $arch $dir
             $changed = $true
-            $code = & $script:RunMsi @('/i', ('"' + $new + '"'), '/qn', '/norestart', 'ISADMIN=1')
+            $code = Invoke-DuoMsi @('/i', ('"' + $new + '"'), '/qn', '/norestart', 'ISADMIN=1')
             if ($script:MsiOk -notcontains [int]$code) { throw "msiexec exit $code" }
             if ([int]$code -ne 0) { $r.restartPending = $true }
             if ($plan -eq 'upgrade') { Restore-DuoValues $snapshot -MissingOnly }
@@ -282,27 +310,28 @@ function Invoke-DuoWinLogon($Settings) {
         if ($changed) {
             try {
                 if ($plan -eq 'install') {
-                    Remove-DuoProducts ''
-                    if (@(& $script:ReadProducts).Count) { $r.error += '; Duo could not be removed again: check this PC now' }
+                    if (-not (Remove-DuoProducts '')) { throw 'Duo could not be removed again' }
                 } elseif ($plan -eq 'upgrade') {
-                    Remove-DuoProducts $r.before
-                    if (-not @(& $script:ReadProducts).Count) {
-                        $code = & $script:RunMsi @('/i', ('"' + $old + '"'), '/qn', '/norestart', 'ISADMIN=1')
+                    if (-not (Remove-DuoProducts $r.before)) { throw 'the new build could not be removed' }
+                    if (-not @(@(& $script:ReadProducts) | Where-Object { $_.Version -eq $r.before }).Count) {
+                        $code = Invoke-DuoMsi @('/i', ('"' + $old + '"'), '/qn', '/norestart', 'ISADMIN=1')
                         if ($script:MsiOk -notcontains [int]$code) { throw "old build msiexec exit $code" }
                     }
                     Restore-DuoValues $snapshot
-                    $back = Test-DuoState $null $snapshot $r.before
+                    $back = Test-DuoState $null $snapshot $r.before -Exact
                     if ($back) { throw $back }
                     $r.status = 'rolledBack'
                 } else {
                     Restore-DuoValues $snapshot
                 }
             } catch {
-                $r.error += "; ROLLBACK FAILED ($($_.Exception.Message)): check this PC now"
+                # The old build's MSI stays in the SYSTEM-only work folder for a person to finish by hand.
+                $keepDir = $true
+                $r.error += "; ROLLBACK FAILED ($($_.Exception.Message)): check this PC now; old MSI kept in $dir"
             }
         }
     } finally {
-        if ($dir) { & $script:RemoveWorkDir $dir }
+        if ($dir -and -not $keepDir) { & $script:RemoveWorkDir $dir }
     }
     try { $r.after = Get-DuoInstalled @(& $script:ReadProducts) } catch { $r.after = '' }
     $r | ConvertTo-Json -Compress

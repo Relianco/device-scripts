@@ -36,12 +36,14 @@ Assert ((Get-DuoPlan -Products @([pscustomobject]@{ Version = '' })) -eq 'refuse
 $secret = 'b2' * 20
 $settings = @{ IKey = 'DIAB1234567890WXYZ12'; SKey = $secret; Host = 'api-0000abcd.duosecurity.com'; Marker = '0123abcd' }
 function New-Pc([string]$Version) {
-    $pc = @{ Products = @(); Values = @{}; Provider = $false; Vc = $true; Calls = [Collections.Generic.List[string]]::new(); Policy = @(); Marker = $null
-             NewBreaksProvider = $false; NewDropsValue = ''; VcFixes = $true; MsiCode = 0 }
+    $pc = @{ Products = @(); Values = @{}; Keys = @{}; Provider = $false; Vc = $true; Calls = [Collections.Generic.List[string]]::new(); Policy = @(); Marker = $null
+             NewBreaksProvider = $false; NewDropsValue = ''; VcFixes = $true; MsiCode = 0; Busy = @{}; KeptDir = $false }
     if ($Version) {
         $pc.Products = @([pscustomobject]@{ Name = 'Duo Authentication for Windows Logon x64'; Version = $Version; Code = '{OLD}' })
         $pc.Values = @{ IKey = @('DIOLD000000000000000', 'String'); SKey = @(('c3' * 20), 'String'); Host = @('api-0000abcd.duosecurity.com', 'String')
                         AutoPush = @(1, 'DWord'); FailOpen = @(0, 'DWord'); RdpOnly = @(0, 'DWord'); ProvidersWhitelist = @('{X}', 'String') }
+        # Offline enrolment data lives in a subkey; Windows Installer deletes the whole key when Duo is uninstalled.
+        $pc.Keys = @{ Offline = @{ Values = @{ User1 = @('enrolled', 'String') }; Keys = @{} } }
         $pc.Provider = $true
     }
     $pc
@@ -49,7 +51,18 @@ function New-Pc([string]$Version) {
 function Use-Pc($pc) {
     $script:PC = $pc
     $script:ReadProducts = { $script:PC.Products }
-    $script:ReadValues = { if ($script:PC.Products.Count -or $script:PC.Values.Count) { $copy = @{}; foreach ($k in $script:PC.Values.Keys) { $copy[$k] = $script:PC.Values[$k] }; $copy } else { $null } }
+    $script:ReadTree = {
+        if (-not ($script:PC.Products.Count -or $script:PC.Values.Count)) { return $null }
+        $v = @{}; foreach ($k in $script:PC.Values.Keys) { $v[$k] = $script:PC.Values[$k] }
+        $s = @{}; foreach ($k in $script:PC.Keys.Keys) { $s[$k] = $script:PC.Keys[$k] }
+        @{ Values = $v; Keys = $s }
+    }
+    $script:WriteTree = {
+        param($Tree, [bool]$MissingOnly)
+        foreach ($n in $Tree.Values.Keys) { if (-not $MissingOnly -or -not $script:PC.Values.ContainsKey($n)) { $script:PC.Values[$n] = $Tree.Values[$n] } }
+        foreach ($n in $Tree.Keys.Keys) { if (-not $MissingOnly -or -not $script:PC.Keys.ContainsKey($n)) { $script:PC.Keys[$n] = $Tree.Keys[$n] } }
+    }
+    $script:Pause = { param($Seconds) }
     $script:SetValue = { param($Name, $Value, $Kind) $script:PC.Values[$Name] = @($Value, $Kind) }
     $script:DeleteValue = { param($Name) [void]$script:PC.Values.Remove($Name) }
     $script:PolicyValueNames = { $script:PC.Policy }
@@ -57,13 +70,16 @@ function Use-Pc($pc) {
     $script:VcPresent = { $script:PC.Vc }
     $script:WriteMarker = { param($Value) $script:PC.Marker = $Value }
     $script:NewWorkDir = { [IO.Path]::GetTempPath() }
-    $script:RemoveWorkDir = { param($Dir) }
+    $script:RemoveWorkDir = { param($Dir) $script:PC.Calls.Add('removedir') }
     $script:Fetch = { param($Url, $Sha, $Dest) $script:PC.Calls.Add("fetch $Url"); $Dest }
     $script:ExpandMsi = { param($Zip, $Name, $Sha, $Dir) "$Dir\$Name|$Sha" }
     $script:RunExe = { param($File, $Arguments) $script:PC.Calls.Add("exe $File $($Arguments -join ' ')"); if ($script:PC.VcFixes) { $script:PC.Vc = $true }; 0 }
     $script:RunMsi = {
         param($Arguments)
         $script:PC.Calls.Add('msi ' + ($Arguments -join ' '))
+        # A queued 1618 (another installation running) for this kind of call changes nothing.
+        $kind = if ($Arguments[0] -eq '/x') { 'x' } elseif ($Arguments[1] -match '42768db1') { 'iold' } else { 'inew' }
+        if ($script:PC.Busy.ContainsKey($kind) -and $script:PC.Busy[$kind] -gt 0) { $script:PC.Busy[$kind]--; return 1618 }
         if ($Arguments[0] -eq '/i') {
             $msiSha = ($Arguments[1] -split '\|')[1].Trim('"')
             $ver = if ($msiSha -eq $script:DuoPin.Msi['x64'][1]) { '6.0.0.4198' } else { '4.3.1.4861' }
@@ -74,6 +90,7 @@ function Use-Pc($pc) {
             return $script:PC.MsiCode
         }
         $script:PC.Products = @($script:PC.Products | Where-Object { $_.Code -ne $Arguments[1] }); $script:PC.Provider = $false
+        $script:PC.Values = @{}; $script:PC.Keys = @{}
         0
     }
 }
@@ -100,7 +117,18 @@ $r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
 Assert ($r.status -eq 'rolledBack' -and $r.after -eq '4.3.1.4861') "rollback status $($r.status)"
 Assert (($pc.Calls -join ';') -match 'msi /x \{NEW\}.*msi /i .*42768db1') 'removed new, reinstalled old'
 foreach ($k in $before.Keys) { Assert ($pc.Values[$k][0] -eq $before[$k]) "old value $k back" }
+Assert ($pc.Keys.ContainsKey('Offline') -and $pc.Keys['Offline'].Values['User1'][0] -eq 'enrolled') 'offline enrolments back'
 Assert ($pc.Provider -and $null -eq $pc.Marker) 'provider back, no marker'
+
+# Another installation running while the old build goes back: waited for, not given up.
+$pc = New-Pc '4.3.1.4861'; $pc.NewBreaksProvider = $true; $pc.Busy = @{ iold = 2 }; Use-Pc $pc
+$r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
+Assert ($r.status -eq 'rolledBack' -and $r.after -eq '4.3.1.4861') "rollback after 1618: $($r.status) $($r.error)"
+
+# The new build cannot be removed: never reported as rolled back; the old MSI stays for a person.
+$pc = New-Pc '4.3.1.4861'; $pc.NewBreaksProvider = $true; $pc.Busy = @{ x = 99 }; Use-Pc $pc
+$r = (Invoke-DuoWinLogon -Settings $settings) | ConvertFrom-Json
+Assert ($r.status -eq 'failed' -and $r.error -match 'ROLLBACK FAILED' -and -not $pc.Calls.Contains('removedir')) "failed rollback reported: $($r.status) $($r.error)"
 
 # An old build with no pinned rollback copy is left alone.
 $pc = New-Pc '4.2.0.100'; Use-Pc $pc
