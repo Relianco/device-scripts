@@ -385,7 +385,8 @@ Ok 'pin: only the certificate with the pinned SHA-256 is accepted; an empty or m
 # A staff sign-in watched over a remote session (captured 2026-11-18, anonymised): tray and vendor startup apps start for minutes, some with
 # autostart arguments, some without (an Intel "Delayed launcher", a dictation "Device Detector"). The technician opened PowerShell, pinged
 # the domain controller and looked up an account (net).
-$st = Get-RsActivity -Alerts (Load 'remote-sessions-wazuh-startup.json') -Spans @(, @(1795017760, 1795018434))
+# Only the events within a minute of the window (the slack) are kept, in three files to stay readable in review.
+$st = Get-RsActivity -Alerts @(1..3 | ForEach-Object { Load "remote-sessions-wazuh-startup-$_.json" }) -Spans @(, @(1795017760, 1795018434))
 Assert-Json @($st['apps']) '["PowerShell"]' 'startup apps'
 Assert-Json @($st['commands']) '["ping","net"]' 'startup commands'
 Ok 'startup noise: tray, updater and vendor startup apps after a sign-in are left out; what the technician opened and typed stays'
