@@ -57,14 +57,23 @@ Assert-Same $gl.channelAccess $psOp 'channelAccess parsed'
 Assert-Same $gl.maxSize '15728640' 'maxSize parsed'
 Assert-Same $gl.enabled 'true' 'enabled parsed'
 
-# Log lines: a key-shaped token or a key assignment is withheld, its length shown.
-Assert-Same (Get-SrSafeLine 'LicenseKey=ABCDEF0123456789ABCDEF01') '<withheld: 35 chars>' 'key assignment withheld'
-Assert-Same (Get-SrSafeLine 'msiexec /i x.msi KEY=abc123') '<withheld: 27 chars>' 'short key assignment withheld'
-Assert-Same (Get-SrSafeLine 'token Zm9vYmFyYmF6cXV4cXV1eHh4eHg=') '<withheld: 34 chars>' 'base64 token withheld'
-Assert-Same (Get-SrSafeLine 'LicenseKey=<redacted>') 'LicenseKey=<redacted>' 'redacted placeholder kept'
-Assert-Same (Get-SrSafeLine '2026-11-23 10:00:01 install exit 0') '2026-11-23 10:00:01 install exit 0' 'ordinary line kept'
-# A licence key can be GUID-shaped, so a GUID is withheld too.
-Assert-Same (Get-SrSafeLine "Property(S): SERIALNUMBER = '12345678-9ABC-DEF0-1234-56789ABCDEF0'") '<withheld: 66 chars>' 'GUID-shaped key withheld'
+# Log lines are reported as a shape, never as text. Key-like values are built at run time, not committed.
+$fakeKey = 'Q' * 24
+$s = Get-SrLineShape ('2026-11-23 10:00:01 LicenseKey=' + $fakeKey)
+Assert-Same $s.length 55 'line length'
+Assert-Same $s.timestamp '2026-11-23 10:00:01' 'leading timestamp kept'
+Assert-Same $s.keyShaped $true 'long token flagged'
+Assert-Same $s.redacted $false 'no redaction marker'
+Assert-Same (Get-SrLineShape ('msiexec /i x.msi KEY=' + ('k' * 6))).keyShaped $true 'short key assignment flagged'
+Assert-Same (Get-SrLineShape ('License key: ' + (('W' * 4), ('X' * 4), ('Y' * 4), ('Z' * 4) -join '-'))).keyShaped $true 'dashed key after a key word flagged'
+Assert-Same (Get-SrLineShape ('--password ' + ('p' * 7))).keyShaped $true 'password argument flagged'
+Assert-Same (Get-SrLineShape ("SERIALNUMBER = '" + [guid]::NewGuid() + "'")).keyShaped $true 'GUID-shaped key flagged'
+$s = Get-SrLineShape 'LicenseKey=<redacted>'
+Assert-Same $s.redacted $true 'redaction marker seen'
+Assert-Same $s.keyShaped $false 'redacted placeholder is not a key'
+$s = Get-SrLineShape 'install exit 0'
+Assert-Same $s.keyShaped $false 'ordinary line not flagged'
+Assert-True ($null -eq $s.timestamp) 'no timestamp'
 
 # Whole job through the seams.
 $t1 = [datetime]::new(2026, 11, 1, 8, 0, 0, [DateTimeKind]::Utc); $t2 = [datetime]::new(2026, 11, 23, 9, 30, 0, [DateTimeKind]::Utc)
@@ -74,7 +83,8 @@ $script:SrRead4104 = { @($t2, $t1, $t2) }
 $script:SrReadKey = { param($Path) if ($Path -eq 'SOFTWARE\AutoElevate') { [pscustomobject]@{ Sddl = 'D:PAI(A;CIID;KR;;;BU)'; ValueNames = @('LicenseKey', 'AgentMode'); SubKeyNames = @() } } }
 $script:SrReadSddl = { param($Path) if ($Path -like '*.log') { 'D:(A;;FA;;;SY)' } else { 'D:(A;OICI;0x1200a9;;;BU)' } }
 $script:SrFirstFile = { param($Dir, $Filter) 'C:\Windows\Installer\1a2b.msi' }
-$script:SrReadTail = { param($Path) @('a', 'KEY=secretvalue123') }
+$fakeTail = 'KEY=' + ('v' * 14)
+$script:SrReadTail = { param($Path) @('2026-11-23 09:00:00 done', $fakeTail) }
 $script:SrReadMembers = { param($Sid) @('PC\admin') }
 $r = Invoke-SrJob
 Assert-Same $r.ExitCode 0 'exit'
@@ -100,10 +110,11 @@ Assert-Same @($j.registry | Where-Object { $_.path -eq 'HKLM\SOFTWARE\PDF-XChang
 Assert-Same $j.installer.directory.access.standardUserRead $true 'Installer directory listable'
 Assert-Same $j.installer.sampleFile.access.standardUserRead $true 'sample msi readable'
 Assert-Same $j.installLog.present $true 'install log present'
-Assert-Same (@($j.installLog.tail) -join '|') 'a|<withheld: 18 chars>' 'tail redacted'
+Assert-Same (@($j.installLog.tail | ForEach-Object { "$($_.length)/$($_.keyShaped)" }) -join '|') '24/False|18/True' 'tail reported as shapes'
 Assert-Same $j.installLog.access.standardUserRead $false 'log not readable by staff'
 Assert-Same (@($j.groups.administrators) -join ',') 'PC\admin' 'administrators listed'
-Assert-True ($r.Line -notmatch 'secretvalue') 'no secret in output'
+Assert-True (-not $r.Line.Contains($fakeTail)) 'no log text in output'
+Assert-True (-not $r.Line.Contains('done')) 'not even an ordinary log line'
 
 # A log that is not there.
 $script:SrReadTail = { param($Path) $null }

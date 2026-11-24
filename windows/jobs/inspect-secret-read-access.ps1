@@ -2,7 +2,7 @@
 # can read the places a licence key or a script body can end up on a PC: the PowerShell, Security and Sysmon event
 # log channels (and any CustomSD policy), the AutoElevate and PDF-XChange registry keys, C:\Windows\Installer and
 # the AutoElevate install log. It prints SDDL, translated ACEs, counts and value NAMES only: never a registry value,
-# never event text. Log lines that look like they hold a key are replaced by their length. It writes nothing.
+# never event text, never log text (log lines are reported as length, timestamp and flags). It writes nothing.
 # -ReportOnly is accepted because the loader forwards it, and ignored. Exit 0. Prints one JSON line.
 [CmdletBinding()]
 param([switch]$ReportOnly)
@@ -177,13 +177,19 @@ function ConvertFrom-SrChannelText {
     $out
 }
 
-# A key-shaped token (20+ characters, a GUID included: a key can be GUID-shaped) or a key assignment hides the
-# whole line; its length is shown.
-function Get-SrSafeLine {
+# A log line is reported as a shape, never as text: a denylist cannot prove a line holds no secret.
+# keyShaped: a 20+ character token (a GUID included: a key can be GUID-shaped), or a key word followed by a value
+# that is not a redaction placeholder. redacted: the package's redaction marker is on the line.
+function Get-SrLineShape {
     param([AllowEmptyString()][string]$Line)
-    $assignment = '(?i)(key|licen[cs]e|serial|secret|password|passwd|token|pwd)\w*\s*[:=]\s*(?!<redacted>|\*+(\s|\z))\S'
-    if ($Line -match '[A-Za-z0-9+/=_-]{20,}' -or $Line -match $assignment) { return "<withheld: $($Line.Length) chars>" }
-    return Get-SrText $Line
+    $assignment = '(?i)(key|licen[cs]e|serial|secret|password|passwd|token|pwd)\w*["'']?\s*(?:[:=]|\s)\s*["'']?(?!<redacted>|\*+(\s|\z))[^\s"'']'
+    $stamp = [regex]::Match($Line, '\A\s*\[?(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})')
+    [ordered]@{
+        timestamp = $(if ($stamp.Success) { $stamp.Groups[1].Value } else { $null })
+        length = $Line.Length
+        redacted = ($Line -match '(?i)redacted|\*{3,}')
+        keyShaped = ($Line -match '[A-Za-z0-9+/=_-]{20,}' -or $Line -match $assignment)
+    }
 }
 
 function Get-SrUtc { param([datetime]$Time) $Time.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
@@ -233,7 +239,7 @@ function Invoke-SrJob {
         $tail = & $script:SrReadTail $script:SrLogPath
         if ($null -ne $tail) {
             $installLog.present = $true
-            $installLog.tail = @($tail | ForEach-Object { Get-SrSafeLine $_ })
+            $installLog.tail = @($tail | ForEach-Object { Get-SrLineShape $_ })
             $installLog.access = Get-SrAccess (& $script:SrReadSddl $script:SrLogPath)
             $installLog.directoryAccess = Get-SrAccess (& $script:SrReadSddl (Split-Path -Parent $script:SrLogPath))
         }
