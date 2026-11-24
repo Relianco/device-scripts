@@ -17,7 +17,11 @@ It is separate from normal installation and requires review before reuse.
   <https://support.cyberfox.com/115003703811-System-Agent-Installation>.
 - `LICENSE_KEY`, `COMPANY_NAME` and `LOCATION_NAME` are required on a device
   that has no stored registration. The MSI fails without them (2.9.4 and
-  later). `COMPANY_INITIALS` is optional.
+  later). `COMPANY_INITIALS` is optional. The MSI also takes the key from the
+  registry: AppSearch reads `HKLM\SOFTWARE\AutoElevate` `LicenseKey` (64-bit
+  view) into `LICENSE_KEY_REG`, `SetLicenseKey0` copies it into
+  `LICENSE_KEY_FINAL`, and `SetLicenseKey1` lets a `LICENSE_KEY` property
+  override it. The checks and the stored value use `LICENSE_KEY_FINAL`.
 - The vendor guide names the mode property `ELEVATION_MODE`, with the values
   `audit` (the default), `live` and `policy`, lowercase only. The MSI also
   accepts `AGENT_MODE` as an older alias. The package sends `ELEVATION_MODE`.
@@ -67,14 +71,22 @@ It is separate from normal installation and requires review before reuse.
   hash or download failures, and strips pinned URLs from error text). The
   argument way is kept in NinjaOne's activity and parameter history, and is on
   the package process command line while it runs. The environment variable is
-  neither. The MSI does not hide `LICENSE_KEY`,
-  and on an upgrade it loads the stored key into `LICENSE_KEY_REG`, so a
-  verbose msiexec log would hold the key. The package writes no msiexec log.
-  For a failed install, use `Section` `Evidence` (MsiInstaller events) and
-  the MSI exit code in the report. A machine policy that turns on Windows
-  Installer logging still writes one, so keep that policy off. msiexec still gets
-  the key on its command line, which local administrators can read while it
-  runs. The agent stores the key in the registry anyway.
+  neither.
+- **The key never goes on the msiexec command line.** Windows logs process
+  command lines (Sysmon event 1, Security 4688) and Wazuh collects them. Before
+  msiexec, the package writes the key itself, through .NET and with no child
+  process, to `HKLM\SOFTWARE\AutoElevate` `LicenseKey` (REG_SZ, 64-bit
+  view), where the MSI reads it as above. msiexec gets only `COMPANY_NAME`,
+  `COMPANY_INITIALS`, `LOCATION_NAME` and `ELEVATION_MODE`. If msiexec
+  fails on a device that had no agent before, the package removes the value
+  again. On a device that had the agent, the value stays with it. A failed
+  registry write exits 1 before msiexec runs.
+- **No msiexec log.** The MSI loads the stored key into `LICENSE_KEY_REG` and
+  does not hide it, so a verbose msiexec log would hold the key. The package
+  writes no msiexec log. For a failed install, use `Section` `Evidence`
+  (MsiInstaller events) and the MSI exit code in the report. A machine policy
+  that turns on Windows Installer logging still writes one, so keep that
+  policy off.
 - **`Section` `Evidence`** is read-only. It reports the installed version, the
   product code, the install path, the stored registration (the key and
   `Settings` only as `present` or `absent`), both services with their state
