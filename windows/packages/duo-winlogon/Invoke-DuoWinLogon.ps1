@@ -155,11 +155,25 @@ $script:NewWorkDir = {
     $dir
 }
 $script:RemoveWorkDir = { param($Dir) if ($Dir) { Remove-Item -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue } }
-$script:Fetch = {
-    param($Url, $Sha, $Dest)
-    $tls = [int][Net.ServicePointManager]::SecurityProtocol; if ($tls -ne 0 -and ($tls -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tls -bor 3072 }
+$script:Download = {
+    param($Url, $Dest)
+    $tlsNow = [int][Net.ServicePointManager]::SecurityProtocol; if ($tlsNow -ne 0 -and ($tlsNow -band 15360) -eq 0) { [Net.ServicePointManager]::SecurityProtocol = $tlsNow -bor 3072 }
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Dest).Hash.ToLowerInvariant() -ne $Sha) { throw "hash mismatch: $Url" }
+}
+$script:Fetch = {
+    # Three tries for a timeout, a connection or name failure, or HTTP 408/429/5xx; anything else fails at once. The
+    # hash is checked once, after: a mismatch is never retried and the file is removed.
+    param($Url, $Sha, $Dest)
+    for ($try = 1; ; $try++) {
+        try { & $script:Download $Url $Dest; break } catch {
+            if ($try -ge 3 -or -not (Test-DuoTransient $_.Exception)) { throw }
+            & $script:Pause (5 * $try)
+        }
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Dest).Hash.ToLowerInvariant() -ne $Sha) {
+        Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+        throw "hash mismatch: $Url"
+    }
     $Dest
 }
 $script:ExpandMsi = {
@@ -173,6 +187,19 @@ $script:ExpandMsi = {
 $script:RunExe = { param($File, $Arguments) (Start-Process -FilePath $File -ArgumentList $Arguments -Wait -PassThru).ExitCode }
 $script:RunMsi = { param($Arguments) (Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" -ArgumentList $Arguments -Wait -PassThru).ExitCode }
 $script:Pause = { param($Seconds) Start-Sleep -Seconds $Seconds }
+
+function Test-DuoTransient($Exception) {
+    $e = $Exception
+    while ($null -ne $e) {
+        if ($e -is [Net.WebException]) {
+            if (@('Timeout', 'NameResolutionFailure', 'ConnectFailure', 'ReceiveFailure', 'SendFailure', 'ConnectionClosed', 'KeepAliveFailure') -contains [string]$e.Status) { return $true }
+            if ($null -ne $e.Response) { try { return @(408, 429, 500, 502, 503, 504) -contains [int]$e.Response.StatusCode } catch { return $false } }
+        }
+        if ($e -is [TimeoutException] -or $e -is [Net.Sockets.SocketException]) { return $true }
+        $e = $e.InnerException
+    }
+    $false
+}
 
 function ConvertTo-DuoVersion([string]$Text) {
     try { return [version]$Text.Trim() } catch { return $null }
@@ -338,14 +365,16 @@ function Invoke-DuoWinLogon($Settings) {
 }
 
 function Invoke-DuoUninstall {
-    Remove-DuoProducts ''
+    [void](Remove-DuoProducts '')
     $left = @(& $script:ReadProducts).Count
     if ($left) { return '{"version":"1","status":"failed","error":"Duo is still installed"}' }
     '{"version":"1","status":"uninstalled"}'
 }
 
 if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') { return }
-if ($PinVersion -and $PinVersion -ne $script:DuoPin.Version) { [Console]::Error.WriteLine("PinVersion $PinVersion is not this package's pin $($script:DuoPin.Version)"); exit 1 }
+# An empty pin disables the package: nothing is read or changed.
+if ([string]::IsNullOrWhiteSpace($PinVersion)) { exit 0 }
+if ($PinVersion -ne $script:DuoPin.Version) { [Console]::Error.WriteLine("PinVersion $PinVersion is not this package's pin $($script:DuoPin.Version)"); exit 1 }
 if ($Action -eq 'Uninstall') { $line = Invoke-DuoUninstall; Write-Output $line; if ($line.Contains('"uninstalled"')) { exit 0 }; exit 1 }
 if (@('Install', 'Update', 'Repair') -notcontains $Action) { [Console]::Error.WriteLine('Unsupported action.'); exit 1 }
 $line = Invoke-DuoWinLogon -Settings $Settings

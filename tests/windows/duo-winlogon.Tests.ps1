@@ -166,4 +166,35 @@ $pc = New-Pc '5.2.1.2007'; Use-Pc $pc
 $r = (Invoke-DuoWinLogon -Settings $null) | ConvertFrom-Json
 Assert ($r.status -eq 'upgraded' -and $pc.Values['IKey'][0] -eq 'DIOLD000000000000000' -and $null -eq $pc.Marker) 'upgrade without settings'
 
+# Uninstall: one JSON line, success when no Duo product is left.
+$pc = New-Pc '6.0.0.4198'; Use-Pc $pc
+$u = @(Invoke-DuoUninstall)
+Assert ($u.Count -eq 1 -and $u[0] -match '"status":"uninstalled"' -and $pc.Products.Count -eq 0) "uninstall: $($u -join '|')"
+
+# Downloads: transient failures are retried (3 tries), anything else is not; the hash is checked once, after.
+. $path  # real Fetch again
+$script:Pause = { param($Seconds) }
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('duo-fetch-' + [guid]::NewGuid().ToString('N'))
+$script:tries = 0
+$script:Download = { param($Url, $Dest) $script:tries++; if ($script:tries -lt 3) { throw [Net.WebException]::new('timed out', [Net.WebExceptionStatus]::Timeout) }; [IO.File]::WriteAllText($Dest, 'abc') }
+# sha256('abc') from FIPS 180-2.
+Assert ((& $script:Fetch 'https://example.invalid/a' 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' $tmp) -eq $tmp -and $script:tries -eq 3) 'transient retried'
+$script:tries = 0
+$script:Download = { param($Url, $Dest) $script:tries++; throw [Exception]::new('404 Not Found') }
+$threw = $false; try { & $script:Fetch 'https://example.invalid/a' 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' $tmp } catch { $threw = $true }
+Assert ($threw -and $script:tries -eq 1) 'non-transient not retried'
+$script:tries = 0
+$script:Download = { param($Url, $Dest) $script:tries++; [IO.File]::WriteAllText($Dest, 'abd') }
+$threw = $false; try { & $script:Fetch 'https://example.invalid/a' 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad' $tmp } catch { $threw = $_.Exception.Message -match 'hash mismatch' }
+Assert ($threw -and $script:tries -eq 1 -and -not (Test-Path -LiteralPath $tmp)) 'hash mismatch: one try, file removed'
+
+# An empty pin disables the package: nothing runs, exit 0. A different pin is refused.
+$env:RELIAN_DEPLOY_TEST = ''
+& pwsh -NoProfile -File $path -DeploymentType Install -Action Install -PinVersion '' | Out-Null
+Assert ($LASTEXITCODE -eq 0) 'empty pin exits 0'
+& pwsh -NoProfile -File $path -DeploymentType Install -Action Uninstall -PinVersion '' | Out-Null
+Assert ($LASTEXITCODE -eq 0) 'empty pin uninstall exits 0'
+& pwsh -NoProfile -File $path -DeploymentType Install -Action Install -PinVersion '5.0.0' 2>$null | Out-Null
+Assert ($LASTEXITCODE -eq 1) 'wrong pin exits 1'
+
 Write-Output 'duo-winlogon ok'
