@@ -5,9 +5,9 @@ removes the AutoElevate agent from the hash-pinned `AESetup.msi` in
 `windows/releases/autoelevate.json`.
 
 For a service that rejects normal stop requests with error 1061, see the
-[manual recovery reference](../windows/packages/autoelevate/reference/README.md).
-It preserves the scoped recovery sequence and SCM helper used for that case.
-It is separate from normal installation and requires review before reuse.
+[hung-agent repair](../windows/packages/autoelevate/reference/README.md)
+(`Invoke-AutoElevateHungRepair.ps1`). It is separate from normal installation and
+needs a review of the device before each run.
 
 ## Where the facts come from
 
