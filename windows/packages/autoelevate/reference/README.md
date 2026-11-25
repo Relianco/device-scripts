@@ -6,8 +6,14 @@ to run MSI while its service could not stop. Repeating the installer could not
 resolve that condition. Recovery stopped the verified hung process safely, then
 let the existing package upgrade and register the agent.
 
-This directory is **not a deployment entry point**. It has no release manifest,
-runner integration, or automatic process termination. [ServiceRecovery.ps1](ServiceRecovery.ps1)
+[Invoke-AutoElevateHungRepair.ps1](../Invoke-AutoElevateHungRepair.ps1) runs this
+sequence for one device. It is separate from the normal package and has no release
+manifest: run it by hand, after review, never from a policy or a schedule.
+Do not use any earlier private copy of this repair. The one used before 2026-11-25
+pinned the package at `ee89218`, which puts the license key on the msiexec command
+line, where Sysmon event 1 and Security 4688 record it.
+
+This directory is **not a deployment entry point**. [ServiceRecovery.ps1](ServiceRecovery.ps1)
 preserves the reusable SCM snapshot/restore code and identity guards used during
 the recovery. Loading it only defines types and functions. Calling
 `[AeRecovery]::Write()` changes Windows service configuration and requires an
@@ -18,7 +24,27 @@ Use the [normal package](../Invoke-AutoElevate.ps1) and
 replace the package's installer verification, planning, version detection,
 registration, reporting, or reboot policy.
 
+## Running the repair
+
+Runner parameters as in the README, with `-PackageUrl` at
+`windows/packages/autoelevate/Invoke-AutoElevateHungRepair.ps1`, `-Action "Repair"`,
+`-PinVersion "2.11.1959"` and these package arguments (base64 of the JSON):
+
+`{"CompanyName":"Example Company","CompanyInitials":"EC","LocationName":"Main Office","ElevationMode":"live"}`
+
+All four are required, as the AutoElevate portal shows them. The key is never an
+argument: the repair reads the device's stored key and refuses, before it stops or
+downloads anything, when that key is missing or not valid. Gates before a run:
+`Section` `Evidence` of the normal package shows `LicenseKey` `present` and the
+agent `Running` below the pin, and the normal package failed because the service did
+not stop.
+
+The repair pins the package and [ServiceRecovery.ps1](ServiceRecovery.ps1) by commit
+and hash (`$script:AePackageCommit` and the hashes below it). Re-pin both together.
+
 ## Sequence used
+
+The repair script follows it; step 7 waits up to 30 seconds for a normal stop first.
 
 1. Establish that the service really is stuck: capture service state, PID, binary
    path/version/hash/signature, the normal stop error and service recovery
@@ -86,11 +112,12 @@ that separately in the initiating user's profile.
 
 `tests/windows/autoelevate-recovery-reference.Tests.ps1` compiles the native helper
 and tests recovery-access selection, clear-state guards and PID/path refusal
-without invoking SCM, downloading files or installing anything. Existing package
-plan/upgrade tests cover the normal Repair route. These tests do not simulate
-Windows SCM, ACL persistence, MSI or process termination end to end. The reference
-is deliberately missing an automatic orchestration entry point; the reviewed
-sequence above remains necessary when reusing its building blocks.
+without invoking SCM, downloading files or installing anything.
+`tests/windows/autoelevate-hung-repair.Tests.ps1` runs the repair against a mocked
+device with the pinned package's own code: the key is on no command line, every
+refusal comes before a change, and only the verified process is terminated. These
+tests do not simulate Windows SCM, ACL persistence, MSI or process termination end
+to end.
 
 Native API references:
 

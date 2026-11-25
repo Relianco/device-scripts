@@ -96,6 +96,9 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/folder-inventory.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # AutoElevate hung-agent repair: Windows PowerShell 5.1 is the host on a device.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/autoelevate-hung-repair.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           # Windows PowerShell 5.1 is the host on Server 2016 guests.
           powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/comet-vss-provider.Tests.ps1
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
