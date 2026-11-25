@@ -267,6 +267,7 @@ try {
     if ($script:Tries -ne 1) { Fail "[no retry] $($script:Tries) attempts" }
 
     # 8. As the runner starts it: an empty pin is off (exit 0); another pin or action exits 1.
+    Remove-Item -LiteralPath 'Env:RELIAN_DEPLOY_TEST'
     $hostPath = (Get-Process -Id $PID).Path
     foreach ($case in @(@('Repair', '', 0), @('Repair', '2.11.1960', 1), @('Reinstall', '2.11.1959', 1), @('Uninstall', '2.11.1959', 1))) {
         $line = @('-NoProfile', '-NonInteractive', '-File', ('"' + $scriptPath + '"'), '-DeploymentType', $case[0], '-Action', $case[0])
@@ -276,6 +277,7 @@ try {
     }
 } finally {
     Remove-Item -LiteralPath 'Env:AE_LICENSE_KEY' -ErrorAction SilentlyContinue
+    $env:RELIAN_DEPLOY_TEST = '1'
     Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
