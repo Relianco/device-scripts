@@ -50,9 +50,9 @@ Assert-True (-not (Test-PdUserDevModeOk ([byte[]]@(1, 2, 3)))) 'a short buffer i
 
 # --- fake machine
 function Reset-Test {
-    param($Printers = @(), $Jobs = @{}, $Loaded = @(), $Profiles = @(), $Values = @{}, $InUse = @(), [switch]$SetIgnored, [switch]$DevModeFixes, [switch]$UnloadFails, $ReadThrows = '')
+    param($Printers = @(), $Jobs = @{}, $Loaded = @(), $Profiles = @(), $Values = @{}, $InUse = @(), $Denied = @(), [switch]$SetIgnored, [switch]$DevModeFixes, [switch]$UnloadFails, $ReadThrows = '')
     $script:F = @{ Config = @{}; Driver = @{}; Jobs = $Jobs; Loaded = [Collections.Generic.List[string]]::new(); Profiles = $Profiles
-        Values = $Values; InUse = $InUse; SetIgnored = [bool]$SetIgnored; DevModeFixes = [bool]$DevModeFixes; UnloadFails = [bool]$UnloadFails; ReadThrows = $ReadThrows }
+        Values = $Values; InUse = $InUse; Denied = $Denied; SetIgnored = [bool]$SetIgnored; DevModeFixes = [bool]$DevModeFixes; UnloadFails = [bool]$UnloadFails; ReadThrows = $ReadThrows }
     foreach ($p in $Printers) { $script:F.Config[$p[0]] = @{ Color = $p[2]; Duplex = $p[3] }; $script:F.Driver[$p[0]] = $p[1] }
     foreach ($s in $Loaded) { $script:F.Loaded.Add($s) }
     $script:Log = [Collections.Generic.List[string]]::new()
@@ -75,8 +75,9 @@ $script:PdHiveNames = { @($script:F.Loaded) }
 $script:PdProfiles = { @($script:F.Profiles | ForEach-Object { [pscustomobject]@{ Sid = $_; Path = "fixture\$_" } }) }
 $script:PdLoadHive = { param($Mount, $File)
     $sid = $Mount.Substring('RelianPD_'.Length)
-    if ($script:F.InUse -contains $sid) { return $false }
-    $script:Log.Add("load $Mount"); $script:F.Loaded.Add($Mount); return $true
+    if ($script:F.InUse -contains $sid) { return 'in-use' }
+    if ($script:F.Denied -contains $sid) { return 'ERROR: Access is denied.' }
+    $script:Log.Add("load $Mount"); $script:F.Loaded.Add($Mount); return 'ok'
 }
 $script:PdUnloadHive = { param($Mount)
     $script:Log.Add("unload $Mount")
@@ -164,6 +165,12 @@ Assert-Same ((@($r.Users | Where-Object { $_.sid -eq $c }))[0].status) 'in-use' 
 Assert-Same ((@($r.Users | Where-Object { $_.sid -eq $b }))[0].status) 'changed' 'signed-out user fixed'
 Assert-Same $r.ExitCode 0 'users exit'
 Assert-Same (@($script:F.Loaded) -join ',') "$a,$($a)_Classes,.DEFAULT,S-1-5-18" 'no hive left loaded'
+
+# A hive that fails to load for any reason but contention fails the run.
+Reset-Test -Printers @() -Profiles @($b) -Denied @($b)
+$r = Invoke-PdJob
+Assert-Same ($r.Users[0].status) 'failed' 'denied load is failed, not in-use'
+Assert-Same $r.ExitCode 2 'denied load exit'
 
 # A read that throws still unloads the hive and fails the run.
 Reset-Test -Printers @() -Profiles @($b) -ReadThrows $b

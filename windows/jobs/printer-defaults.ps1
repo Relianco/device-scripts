@@ -111,11 +111,13 @@ $script:PdProfiles = {
         }
     } finally { $k.Dispose() }
 }
-# False when the file is in use (its user is signed in elsewhere, or a service holds it).
+# 'ok', 'in-use' (a sharing violation: its user is signed in elsewhere, or a service holds it), or reg.exe's error.
 $script:PdLoadHive = {
     param($Mount, $File)
-    $null = & reg.exe load "HKU\$Mount" $File 2>&1
-    return ($LASTEXITCODE -eq 0)
+    $out = (& reg.exe load "HKU\$Mount" $File 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -eq 0) { return 'ok' }
+    if ($out -match 'being used by another process') { return 'in-use' }
+    return $out
 }
 # Handles this process opened keep the hive loaded, so collect them first and retry.
 $script:PdUnloadHive = {
@@ -398,8 +400,11 @@ function Invoke-PdJob {
             try {
                 if ($loaded -notcontains $sid) {
                     $prof = @($profiles | Where-Object { $_.Sid -eq $sid })[0]
-                    if (-not (& $script:PdLoadHive ($script:PdMountPrefix + $sid) ($prof.Path.TrimEnd('\') + '\NTUSER.DAT'))) {
+                    $load = [string](& $script:PdLoadHive ($script:PdMountPrefix + $sid) ($prof.Path.TrimEnd('\') + '\NTUSER.DAT'))
+                    if ($load -eq 'in-use') {
                         $u = [ordered]@{ sid = $sid; status = 'in-use'; drift = ''; error = '' }
+                    } elseif ($load -ne 'ok') {
+                        $u = [ordered]@{ sid = $sid; status = 'failed'; drift = ''; error = 'hive load: ' + $load }
                     } else {
                         $mount = $script:PdMountPrefix + $sid; $root = $mount
                     }
