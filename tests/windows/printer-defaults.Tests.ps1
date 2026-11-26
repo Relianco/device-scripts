@@ -28,8 +28,8 @@ foreach ($p in @(
         @('Adobe PDF', 'Adobe PDF Converter'), @('Microsoft Print to PDF', 'Microsoft Print To PDF'),
         @('OneNote (Desktop)', 'Send to Microsoft OneNote 16 Driver'), @('Fax', 'Microsoft Shared Fax Driver'),
         @('Microsoft XPS Document Writer', 'Microsoft XPS Document Writer v4'),
-        @('TOSHIBA e-STUDIO3505AC-11780774', 'TOSHIBA e-STUDIO Fax'), @('Splashtop PDF Remote Printer', 'Microsoft Print To PDF'),
-        @('PaperPort Image Printer', 'Nuance Image Printer Driver'), @('Xerox AltaLink C8055 (9C:93:4E:99:75:7C) (Fax)', ''))) {
+        @('TOSHIBA e-STUDIO0000AC-1', 'TOSHIBA e-STUDIO Fax'), @('Splashtop PDF Remote Printer', 'Microsoft Print To PDF'),
+        @('PaperPort Image Printer', 'Nuance Image Printer Driver'), @('Xerox AltaLink C8055 (00:00:5E:00:53:01) (Fax)', ''))) {
     Assert-True (Test-PdSkipPrinter -Name $p[0] -Driver $p[1]) "skip $($p[0])"
 }
 foreach ($p in @(@('Convey', 'TOSHIBA Universal Printer 2'), @('CX3535 MFP(PCL)', 'CX3535 MFP(PCL)'), @('\\svfs\TOSHIBA Universal PS3', ''))) {
@@ -40,7 +40,10 @@ foreach ($p in @(@('Convey', 'TOSHIBA Universal Printer 2'), @('CX3535 MFP(PCL)'
 Assert-True (Test-PdUserDevModeOk (New-DevMode 1 1)) 'mono simplex ok'
 Assert-True (Test-PdUserDevModeOk (New-DevMode 1 0)) 'mono, duplex unset ok'
 Assert-True (-not (Test-PdUserDevModeOk (New-DevMode 2 1))) 'colour not ok'
-Assert-True (-not (Test-PdUserDevModeOk (New-DevMode 0 1))) 'colour unset not ok'
+Assert-True (Test-PdUserDevModeOk (New-DevMode 0 1)) 'colour unset inherits the printer default, ok'
+Assert-True (-not (Test-PdUserDevModeOk (New-DevMode 0 2))) 'colour unset, two-sided not ok'
+Assert-True (Test-PdUserDevModeOk (New-DevMode 2 1) -KeepColour) 'a colour-option queue may keep colour'
+Assert-True (-not (Test-PdUserDevModeOk (New-DevMode 2 2) -KeepColour)) 'a colour-option queue must still be one-sided'
 Assert-True (-not (Test-PdUserDevModeOk (New-DevMode 1 2))) 'long-edge not ok'
 Assert-True (-not (Test-PdUserDevModeOk (New-DevMode 1 3))) 'short-edge not ok'
 Assert-True (-not (Test-PdUserDevModeOk ([byte[]]@(1, 2, 3)))) 'a short buffer is not ok'
@@ -69,7 +72,7 @@ $script:PdSetDevMode = { param($Name)
 }
 $script:PdJobCount = { param($Name) if ($script:F.Jobs.ContainsKey($Name)) { $script:F.Jobs[$Name] } else { 0 } }
 $script:PdHiveNames = { @($script:F.Loaded) }
-$script:PdProfiles = { @($script:F.Profiles | ForEach-Object { [pscustomobject]@{ Sid = $_; Path = "C:\Users\$_" } }) }
+$script:PdProfiles = { @($script:F.Profiles | ForEach-Object { [pscustomobject]@{ Sid = $_; Path = "D:\Profiles\$_" } }) }
 $script:PdLoadHive = { param($Mount, $File)
     $sid = $Mount.Substring('RelianPD_'.Length)
     if ($script:F.InUse -contains $sid) { return $false }
@@ -178,6 +181,37 @@ Assert-True ($r.Error -like '*RelianPD_*') 'unload failure named'
 Reset-Test -Printers @() -Loaded @("RelianPD_$c")
 $r = Invoke-PdJob
 Assert-Same ((Lines '*load *') -join ';') "unload RelianPD_$c" 'stale mount unloaded'
+
+# Colour options: a Colour/Color name, or a plain queue with a BW twin, keeps colour; it is still made one-sided.
+$names = @('Business Printer Colour', 'Business Printer BW', 'Xerox WorkCentre 7845', 'Xerox WorkCentre 7845 BW', 'Party Printer Color', 'Convey', '\\srv\Xerox AltaLink C8055', '\\srv\Xerox AltaLink C8055 BW')
+Assert-True (Test-PdKeepColour -Name 'Business Printer Colour' -AllNames $names) 'Colour name kept'
+Assert-True (Test-PdKeepColour -Name 'Party Printer Color' -AllNames $names) 'Color name kept'
+Assert-True (Test-PdKeepColour -Name 'Xerox WorkCentre 7845' -AllNames $names) 'plain twin kept'
+Assert-True (Test-PdKeepColour -Name '\\srv\Xerox AltaLink C8055' -AllNames $names) 'plain twin connection kept'
+Assert-True (-not (Test-PdKeepColour -Name 'Business Printer BW' -AllNames $names)) 'BW queue not kept'
+Assert-True (-not (Test-PdKeepColour -Name 'Xerox WorkCentre 7845 BW' -AllNames $names)) 'BW twin not kept'
+Assert-True (-not (Test-PdKeepColour -Name 'Convey' -AllNames $names)) 'ordinary queue not kept'
+Assert-True (-not (Test-PdKeepColour -Name 'Business Printer Colour' -AllNames $names -Pattern 'NOMATCH')) 'pattern is a parameter'
+
+$x = 'S-1-5-21-1-2-3-1005'
+Reset-Test -Printers @(@('Business Printer Colour', 'Xerox Global Print Driver PS', $true, 'TwoSidedLongEdge'), @('Business Printer BW', 'Xerox Global Print Driver PS', $true, 'TwoSidedLongEdge'),
+    @('Xerox WorkCentre 7845', 'Xerox Global Print Driver PCL6', $true, 'OneSided'), @('Xerox WorkCentre 7845 BW', 'Xerox Global Print Driver PCL6', $true, 'OneSided')) -Loaded @($x) -Values @{
+    $x = @(@('DevModePerUser', 'Business Printer Colour', (New-DevMode 2 1)), @('DevModePerUser', 'Business Printer BW', (New-DevMode 2 1)), @('DevModePerUser', 'Xerox WorkCentre 7845', (New-DevMode 2 2)))
+}
+$r = Invoke-PdJob
+Assert-Same ((Lines 'set *') -join ';') 'set Business Printer BW color=False duplex=OneSided;set Business Printer Colour color= duplex=OneSided;set Xerox WorkCentre 7845 BW color=False duplex=' 'colour options only made one-sided'
+Assert-Same (Entry $r 'Business Printer Colour').status 'changed' 'colour option status'
+Assert-Same (Entry $r 'Business Printer Colour').after 'color/OneSided' 'colour option after'
+Assert-Same (Entry $r 'Xerox WorkCentre 7845').status 'unchanged' 'twin already one-sided'
+Assert-Same (Entry $r 'Xerox WorkCentre 7845').keepColour 'True' 'twin flagged'
+Assert-Same ((Lines 'delete *') -join ';') "delete $x DevModePerUser Business Printer BW;delete $x DevModePerUser Xerox WorkCentre 7845" 'user: BW colour and twin two-sided deleted, colour option kept'
+
+# A queue that cannot be read is not changed.
+Reset-Test -Printers $machine -Jobs @{ 'Convey' = 'throw' }
+$script:PdJobCount = { param($Name) if ($script:F.Jobs[$Name] -eq 'throw') { throw 'spooler RPC failed' } else { 0 } }
+$r = Invoke-PdJob
+Assert-Same (Entry $r 'Convey').status 'failed' 'unreadable queue fails'
+Assert-Same @(Lines 'set Convey*').Count 0 'unreadable queue untouched'
 
 # One JSON line.
 $line = ConvertTo-PdJobLine $r

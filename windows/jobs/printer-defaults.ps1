@@ -8,15 +8,18 @@
 # says two-sided; the printer then uses the machine default. Signed-in users are read in their loaded hive. Signed-out
 # users' NTUSER.DAT is loaded under HKU\RelianPD_<sid> only when not in use, and always unloaded; a mount left by an
 # earlier run is unloaded first. A hive that will not unload fails the run.
+# Colour options (a Colour/Color name, -KeepColourPattern, or a plain queue with a "<name> BW" twin) keep colour and
+# are still made one-sided, machine and user. The job loader forwards only -ReportOnly, so the default pattern is what runs.
 # -ReportOnly changes nothing (hives are still loaded to be read, and unloaded).
 # Exit 0 compliant or changed, 1 drift under -ReportOnly or a busy printer, 2 failed. Prints one JSON line.
 [CmdletBinding()]
-param([switch]$ReportOnly)
+param([switch]$ReportOnly, [string]$KeepColourPattern = '(?i)\bcolou?r\b')
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $script:PdMountPrefix = 'RelianPD_'
+$script:PdKeepColourPattern = $KeepColourPattern
 $script:PdSkipPattern = 'PDF|OneNote|XPS|Fax|Image Printer|Microsoft Print to|Send To|Root Print Queue'
 
 function Test-PdSkipPrinter {
@@ -24,12 +27,20 @@ function Test-PdSkipPrinter {
     return ($Name -match $script:PdSkipPattern) -or ($Driver -match $script:PdSkipPattern)
 }
 
+# The colour option of a printer keeps colour: a name matching the pattern (Colour/Color), or a plain queue whose
+# "<name> BW" twin exists. It is still made one-sided.
+function Test-PdKeepColour {
+    param([string]$Name, [string[]]$AllNames = @(), [string]$Pattern = $script:PdKeepColourPattern)
+    return ($Name -match $Pattern) -or ($AllNames -contains "$Name BW")
+}
+
 # DEVMODEW: dmFields (uint32) at 72, dmColor at 92 (1 mono, 2 colour), dmDuplex at 94 (1 simplex, 2/3 two-sided).
+# A field whose dmFields bit is clear does not override the printer default, so it is fine.
 function Test-PdUserDevModeOk {
-    param([byte[]]$Bytes)
+    param([byte[]]$Bytes, [switch]$KeepColour)
     if ($null -eq $Bytes -or $Bytes.Length -lt 96) { return $false }
     $fields = [BitConverter]::ToUInt32($Bytes, 72)
-    if (-not ($fields -band 0x800) -or [BitConverter]::ToInt16($Bytes, 92) -ne 1) { return $false }
+    if (-not $KeepColour -and ($fields -band 0x800) -and [BitConverter]::ToInt16($Bytes, 92) -ne 1) { return $false }
     if (($fields -band 0x1000) -and [BitConverter]::ToInt16($Bytes, 94) -ne 1) { return $false }
     return $true
 }
@@ -37,12 +48,14 @@ function Test-PdUserDevModeOk {
 function Format-PdConfig {
     param($Config)
     if ($null -eq $Config) { return '' }
-    return '{0}/{1}' -f $(if ($Config.Color) { 'color' } else { 'mono' }), $Config.Duplex
+    $s = '{0}/{1}' -f $(if ($Config.Color) { 'color' } else { 'mono' }), $Config.Duplex
+    if ($Config.PSObject.Properties['Ticket'] -and $Config.Ticket) { $s += '/ticket:' + $Config.Ticket }
+    return $s
 }
 
 function Test-PdConfigOk {
-    param($Config)
-    return (-not $Config.Color) -and ([string]$Config.Duplex -eq 'OneSided')
+    param($Config, [switch]$KeepColour)
+    return ($KeepColour -or -not $Config.Color) -and ([string]$Config.Duplex -eq 'OneSided')
 }
 
 # --- seams (the tests replace these)
@@ -52,7 +65,10 @@ $script:PdGetPrinters = {
 $script:PdGetConfig = {
     param($Name)
     $c = Get-PrintConfiguration -PrinterName $Name -ErrorAction Stop
-    [pscustomobject]@{ Color = [bool]$c.Color; Duplex = [string]$c.DuplexingMode }
+    # The driver's own reading of its default, private DEVMODE included: the PrintTicket PageOutputColor option.
+    $ticket = ''
+    if ([string]$c.PrintTicketXML -match 'PageOutputColor"\s*>\s*<psf:Option name="(?:[a-z0-9]+:)?([A-Za-z]+)"') { $ticket = $Matches[1] }
+    [pscustomobject]@{ Color = [bool]$c.Color; Duplex = [string]$c.DuplexingMode; Ticket = $ticket }
 }
 $script:PdSetConfig = {
     param($Name, $Color, $Duplex)
@@ -63,15 +79,16 @@ $script:PdSetConfig = {
 }
 $script:PdJobCount = {
     param($Name)
-    @(Get-PrintJob -PrinterName $Name -ErrorAction SilentlyContinue).Count
+    # Stop: an unreadable queue must not count as empty.
+    @(Get-PrintJob -PrinterName $Name -ErrorAction Stop).Count
 }
 $script:PdSetDevMode = {
-    param($Name)
+    param($Name, $KeepColour)
     Initialize-PdWinSpool
     $b = [Relian.PrinterDefaultsWinSpool]::ReadDevMode([string]$Name)
     if ($b.Length -lt 96) { throw 'DEVMODE too small' }
-    $fields = [BitConverter]::ToUInt32($b, 72) -bor [uint32]0x1800
-    [Array]::Copy([BitConverter]::GetBytes([int16]1), 0, $b, 92, 2)
+    $fields = [BitConverter]::ToUInt32($b, 72) -bor [uint32]0x1000
+    if (-not $KeepColour) { $fields = $fields -bor [uint32]0x0800; [Array]::Copy([BitConverter]::GetBytes([int16]1), 0, $b, 92, 2) }
     [Array]::Copy([BitConverter]::GetBytes([int16]1), 0, $b, 94, 2)
     [Array]::Copy([BitConverter]::GetBytes([uint32]$fields), 0, $b, 72, 4)
     [Relian.PrinterDefaultsWinSpool]::WriteDevMode([string]$Name, $b)
@@ -311,26 +328,27 @@ namespace Relian {
 }
 
 function Invoke-PdPrinter {
-    param($Printer, [switch]$ReportOnly)
-    $e = [ordered]@{ name = $Printer.Name; status = ''; before = ''; after = ''; error = '' }
+    param($Printer, [string[]]$AllNames = @(), [switch]$ReportOnly)
+    $keep = Test-PdKeepColour -Name $Printer.Name -AllNames $AllNames
+    $e = [ordered]@{ name = $Printer.Name; status = ''; keepColour = $keep; before = ''; after = ''; error = '' }
     if (Test-PdSkipPrinter -Name $Printer.Name -Driver $Printer.Driver) { $e.status = 'skipped'; return $e }
     try {
         $cfg = & $script:PdGetConfig $Printer.Name
         $e.before = Format-PdConfig $cfg
         $e.after = $e.before
-        if (Test-PdConfigOk $cfg) { $e.status = 'unchanged'; return $e }
+        if (Test-PdConfigOk $cfg -KeepColour:$keep) { $e.status = 'unchanged'; return $e }
         if ($ReportOnly) { $e.status = 'drift'; return $e }
         if ((& $script:PdJobCount $Printer.Name) -gt 0) { $e.status = 'busy'; return $e }
-        $color = $(if ($cfg.Color) { $false } else { $null })
+        $color = $(if ($cfg.Color -and -not $keep) { $false } else { $null })
         $duplex = $(if ([string]$cfg.Duplex -ne 'OneSided') { 'OneSided' } else { $null })
         try { & $script:PdSetConfig $Printer.Name $color $duplex } catch { $e.error = 'Set-PrintConfiguration: ' + $_.Exception.Message }
         $cfg = & $script:PdGetConfig $Printer.Name
-        if (-not (Test-PdConfigOk $cfg)) {
-            & $script:PdSetDevMode $Printer.Name
+        if (-not (Test-PdConfigOk $cfg -KeepColour:$keep)) {
+            & $script:PdSetDevMode $Printer.Name $keep
             $cfg = & $script:PdGetConfig $Printer.Name
         }
         $e.after = Format-PdConfig $cfg
-        $e.status = $(if (Test-PdConfigOk $cfg) { 'changed' } else { 'failed' })
+        $e.status = $(if (Test-PdConfigOk $cfg -KeepColour:$keep) { 'changed' } else { 'failed' })
     } catch {
         $e.status = 'failed'; $e.error = $_.Exception.Message
     }
@@ -340,9 +358,11 @@ function Invoke-PdPrinter {
 function Invoke-PdUser {
     param([string]$Sid, [string]$Root, $Drivers, [switch]$ReportOnly)
     $u = [ordered]@{ sid = $Sid; status = 'compliant'; drift = ''; error = '' }
-    $bad = @(& $script:PdReadUserValues $Root | Where-Object {
+    $values = @(& $script:PdReadUserValues $Root)
+    $all = @($Drivers.Keys) + @($values | ForEach-Object { $_.Name })
+    $bad = @($values | Where-Object {
             $drv = $(if ($Drivers.ContainsKey($_.Name)) { $Drivers[$_.Name] } else { '' })
-            -not (Test-PdSkipPrinter -Name $_.Name -Driver $drv) -and -not (Test-PdUserDevModeOk $_.Bytes)
+            -not (Test-PdSkipPrinter -Name $_.Name -Driver $drv) -and -not (Test-PdUserDevModeOk $_.Bytes -KeepColour:(Test-PdKeepColour -Name $_.Name -AllNames $all))
         })
     $u.drift = (@($bad | ForEach-Object { "$($_.Key)\$($_.Name)" }) -join ';')
     if ($bad.Count -eq 0) { return $u }
@@ -365,7 +385,8 @@ function Invoke-PdJob {
         $printers = @(& $script:PdGetPrinters)
         $drivers = @{}
         foreach ($p in $printers) { $drivers[$p.Name] = $p.Driver }
-        $r.Printers = @(foreach ($p in $printers) { [pscustomobject](Invoke-PdPrinter -Printer $p -ReportOnly:$ReportOnly) })
+        $names = @($printers | ForEach-Object { $_.Name })
+        $r.Printers = @(foreach ($p in $printers) { [pscustomobject](Invoke-PdPrinter -Printer $p -AllNames $names -ReportOnly:$ReportOnly) })
 
         $loaded = @($hives | Where-Object { $_ -match '^S-1-(5-21|12-1)-[\d-]+$' })
         $profiles = @(& $script:PdProfiles)
