@@ -149,16 +149,16 @@ $script:PdReadUserValues = {
 $script:PdBackupUserValues = {
     param($Sid, $Values)
     $dir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\PrinterDefaultsBackup'
-    $null = New-Item -ItemType Directory -Path $dir -Force
+    $null = New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop
     $acl = New-Object Security.AccessControl.DirectorySecurity
     $acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
-    Set-Acl -LiteralPath $dir -AclObject $acl
+    Set-Acl -LiteralPath $dir -AclObject $acl -ErrorAction Stop
     $doc = [ordered]@{ sid = $Sid; utc = [DateTime]::UtcNow.ToString('o'); values = @($Values | ForEach-Object { [ordered]@{ key = $_.Key; name = $_.Name; data = [Convert]::ToBase64String([byte[]]$_.Bytes) } }) }
     $path = Join-Path $dir ('{0}-{1}-{2}.json' -f $Sid, [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($doc | ConvertTo-Json -Depth 4))
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
-    if (@((Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).values).Count -ne @($Values).Count) { throw 'backup read-back differs' }
+    if (@((Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json).values).Count -ne @($Values).Count) { throw 'backup read-back differs' }
 }
 $script:PdDeleteUserValue = {
     param($Root, $Key, $Name)
