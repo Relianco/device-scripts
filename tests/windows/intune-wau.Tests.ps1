@@ -130,7 +130,7 @@ try {
     if (Test-RelianWauMods -InstallLocation $modsRoot) { Fail 'missing mods passed detection' }
     & $script:SetWauMods -InstallLocation $modsRoot
     if (-not (Test-RelianWauMods -InstallLocation $modsRoot)) { Fail 'the mods the installer writes failed detection' }
-    Add-Content -LiteralPath (Join-Path $modsRoot 'mods_WAU-mods.ps1') -Value '# edited'
+    Add-Content -LiteralPath (Join-Path (Join-Path $modsRoot 'mods') '_WAU-mods.ps1') -Value '# edited'
     if (Test-RelianWauMods -InstallLocation $modsRoot) { Fail 'edited mods passed detection' }
 } finally {
     Remove-Item -LiteralPath $modsRoot -Recurse -Force -ErrorAction SilentlyContinue

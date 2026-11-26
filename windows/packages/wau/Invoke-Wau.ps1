@@ -667,8 +667,6 @@ $Processes = @{
     'Mozilla.Firefox.en-CA'        = @('firefox')
     'PuTTY.PuTTY'                  = @('putty', 'pageant', 'puttygen', 'psftp', 'pscp', 'plink')
     'WinSCP.WinSCP'                = @('WinSCP')
-    'Microsoft.VCRedist.2015+.x64' = @()
-    'Microsoft.VCRedist.2015+.x86' = @()
 }
 
 $list = Join-Path (Split-Path -Parent $PSScriptRoot) 'included_apps.txt'

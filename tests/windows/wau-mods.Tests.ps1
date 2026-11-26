@@ -72,6 +72,8 @@ try {
     if (Test-Skipped '7zip.7zip') { Fail '7-Zip was skipped while it was not running' }
     # An app with no known process names waits for a night with nobody signed in.
     if (-not (Test-Skipped 'Some.UnknownApp')) { Fail 'an unmapped app updated while someone was signed in' }
+    # Shared runtimes have no process of their own: they wait for a night with nobody signed in.
+    if (-not (Test-Skipped 'Microsoft.VCRedist.2015+.x64')) { Fail 'the VC++ runtime updated while someone was signed in' }
 
     # Two sessions, one locked and one not: in use.
     $global:WauFakeProcs = @((P 'explorer' 1), (P 'LogonUI' 1), (P 'explorer' 2))
