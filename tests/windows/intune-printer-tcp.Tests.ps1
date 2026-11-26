@@ -279,6 +279,11 @@ if (-not (Test-RelianPrinterTcpInstalled -Printers @($toshiba) -PrinterName $que
     Fail 'ToshibaUniversalPcl2 with TOSHIBA Universal Printer 2 was absent'
 }
 
+$xerox = New-PrinterTcpDetectPrinter -Name $queueName -DriverName 'Xerox Global Print Driver PCL6' -HostAddress $queueAddress
+if (-not (Test-RelianPrinterTcpInstalled -Printers @($xerox) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'XeroxGlobalPcl6')) {
+    Fail 'XeroxGlobalPcl6 with Xerox Global Print Driver PCL6 was absent'
+}
+
 $wrongDriver = New-PrinterTcpDetectPrinter -Name $queueName -DriverName 'Other Driver' -HostAddress $queueAddress
 if (Test-RelianPrinterTcpInstalled -Printers @($wrongDriver) -PrinterName $queueName -PrinterAddress $queueAddress -PrinterModel 'BrotherHlL2370Dw') {
     Fail 'a different driver for that model was present'

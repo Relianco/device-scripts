@@ -61,8 +61,8 @@ if ([string]$release.name -cne 'printer-tcp') {
 }
 $releaseDrivers = @($release.drivers)
 $models = Get-PrinterTcpModels
-if (@($models).Count -ne 3 -or $releaseDrivers.Count -ne 3) {
-    Fail 'model catalog must contain exactly three drivers'
+if (@($models).Count -ne 4 -or $releaseDrivers.Count -ne 4) {
+    Fail 'model catalog must contain exactly four drivers'
 }
 $scriptText = Get-Content -LiteralPath $scriptPath -Raw -Encoding utf8
 foreach ($driver in $releaseDrivers) {
@@ -111,7 +111,8 @@ foreach ($driver in $releaseDrivers) {
 $brother = Get-PrinterTcpModel -Id 'BrotherHlL2370Dw'
 $konica = Get-PrinterTcpModel -Id 'KonicaUniversalPcl'
 $toshiba = Get-PrinterTcpModel -Id 'ToshibaUniversalPcl2'
-if ($null -eq $brother -or $null -eq $konica -or $null -eq $toshiba) {
+$xerox = Get-PrinterTcpModel -Id 'XeroxGlobalPcl6'
+if ($null -eq $brother -or $null -eq $konica -or $null -eq $toshiba -or $null -eq $xerox) {
     Fail 'known model was missing'
 }
 if ($brother.DriverName -cne 'Brother HL-L2370DW series') {
@@ -134,6 +135,22 @@ if (-not [string]::IsNullOrEmpty([string]$toshiba.Referer)) {
 }
 if (-not [string]::IsNullOrEmpty([string]$toshiba.OuterSubject)) {
     Fail 'Toshiba zip set an OuterSubject'
+}
+# Values from the Xerox download page and x3UNIVX.inf in UNIV_5.1116.2.0_PCL6_x64.zip.
+if ($xerox.DriverName -cne 'Xerox Global Print Driver PCL6') {
+    Fail 'Xerox driver name is not the name in x3UNIVX.inf'
+}
+if ($xerox.SourceUrl -cne 'https://download.support.xerox.com/pub/drivers/GLOBALPRINTDRIVER/drivers/win10x64/ar/UNIV_5.1116.2.0_PCL6_x64.zip') {
+    Fail 'Xerox source URL is not the official download'
+}
+if ($xerox.Sha256 -cne 'd25c343d51bea1e6b03ff653d4ed1904cf1ca7229bb895be1fe980490ed5b888' -or [int64]$xerox.Size -ne 38853832) {
+    Fail 'Xerox pin does not match the downloaded zip'
+}
+if ($xerox.Version -cne '51116.200.0.0' -or $xerox.Inf -cne 'x3UNIVX.inf' -or $xerox.Catalog -cne 'x3UNIVX.cat') {
+    Fail 'Xerox version, inf or catalog does not match x3UNIVX.inf'
+}
+if ($xerox.Stage -cne 'Zip' -or -not [string]::IsNullOrEmpty([string]$xerox.Referer) -or -not [string]::IsNullOrEmpty([string]$xerox.OuterSubject)) {
+    Fail 'Xerox zip must stage as Zip with no Referer or OuterSubject'
 }
 $konicaReferer = 'https://onyxweb.mykonicaminolta.com/OneStopProductSupport?appMode=Public&target=Drivers'
 if ([string]$konica.Referer -cne $konicaReferer) {
@@ -833,6 +850,8 @@ $script:OriginalKonicaUrl = [string]$konica.SourceUrl
 $script:OriginalKonicaSha = [string]$konica.Sha256
 $script:OriginalToshibaUrl = [string]$toshiba.SourceUrl
 $script:OriginalToshibaSha = [string]$toshiba.Sha256
+$script:OriginalXeroxUrl = [string]$xerox.SourceUrl
+$script:OriginalXeroxSha = [string]$xerox.Sha256
 $script:Root = Join-Path ([System.IO.Path]::GetTempPath()) ('printer-tcp-plan-' + [guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $script:Root -Force | Out-Null
 $script:MarkerRoot = Join-Path $script:Root 'marker'
@@ -844,6 +863,8 @@ function Restore-Models {
     $konica.Sha256 = $script:OriginalKonicaSha
     $toshiba.SourceUrl = $script:OriginalToshibaUrl
     $toshiba.Sha256 = $script:OriginalToshibaSha
+    $xerox.SourceUrl = $script:OriginalXeroxUrl
+    $xerox.Sha256 = $script:OriginalXeroxSha
 }
 
 function Reset-Case {
@@ -1042,6 +1063,24 @@ function Reset-Case {
     $script:ExpandZip = {
         param($ZipPath, $Destination)
         $script:ExpandKinds.Add('Zip')
+        if ([System.IO.Path]::GetFileName($ZipPath) -clike 'UNIV_*') {
+            # Xerox layout: one folder whose name ends in .inf, catalog name in another case.
+            $dir = Join-Path $Destination 'UNIV_5.1116.2.0_PCL6_x64_Driver.inf'
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $inf = @(
+                '[SourceDisksNames]'
+                '100 = %Disk1%'
+                ''
+                '[SourceDisksFiles]'
+                'x3core0AJ.dll = 100'
+                'xUNIVX0AJ.gpd = 100'
+            ) -join "`r`n"
+            [System.IO.File]::WriteAllText((Join-Path $dir 'x3UNIVX.inf'), $inf)
+            [System.IO.File]::WriteAllBytes((Join-Path $dir 'x3core0AJ.dll'), [byte[]]@(4))
+            [System.IO.File]::WriteAllBytes((Join-Path $dir 'xUNIVx0AJ.gpd'), [byte[]]@(3))
+            [System.IO.File]::WriteAllBytes((Join-Path $dir 'x3UNIVx.cat'), [byte[]]@(2))
+            return
+        }
         $dir = Join-Path $Destination 'UNI/Driver/64bit'
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
         $inf = @(
@@ -1096,6 +1135,12 @@ function Reset-Case {
             }
             return [pscustomobject]@{ Status = 'Valid'; Subject = $whql; HasTimestamp = $true }
         }
+        if ($leaf -ceq 'x3UNIVx.cat') {
+            if (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $Path) 'x3core0AJ.dll')) {
+                $script:LayoutOk = $true
+            }
+            return [pscustomobject]@{ Status = 'Valid'; Subject = $whql; HasTimestamp = $true }
+        }
         if ($Path -like '*.zip') {
             return [pscustomobject]@{ Status = 'UnknownError'; Subject = '' }
         }
@@ -1111,6 +1156,9 @@ function Reset-Case {
         if ($leaf -ceq 'KOUWNJ1_.inf') {
             $script:DriverNames.Add('KONICA MINOLTA Universal PCL')
             $script:DriverVersions['KONICA MINOLTA Universal PCL'] = '3.9.1203.500'
+        } elseif ($leaf -ceq 'x3UNIVX.inf') {
+            $script:DriverNames.Add('Xerox Global Print Driver PCL6')
+            $script:DriverVersions['Xerox Global Print Driver PCL6'] = '51116.200.0.0'
         } elseif ($leaf -ceq 'eSf6u.inf') {
             $script:DriverNames.Add('TOSHIBA Universal Printer 2')
             $script:DriverVersions['TOSHIBA Universal Printer 2'] = '7.222.5412.313'
@@ -1129,6 +1177,8 @@ function Use-FakePins {
     $konica.SourceUrl = 'https://example.invalid/konica.exe'
     $toshiba.Sha256 = $script:GoodSha
     $toshiba.SourceUrl = 'https://example.invalid/toshiba.zip'
+    $xerox.Sha256 = $script:GoodSha
+    $xerox.SourceUrl = 'https://example.invalid/xerox.zip'
 }
 
 function Read-Marker {
@@ -1486,6 +1536,26 @@ try {
     $toshibaMarker = @(Read-Marker)
     if ($toshibaMarker.Count -ne 1 -or [string]$toshibaMarker[0].model -cne 'ToshibaUniversalPcl2' -or [string]$toshibaMarker[0].address -cne '192.0.2.12') {
         Fail 'Toshiba marker was wrong'
+    }
+
+    Reset-Case
+    Use-FakePins
+    $code = Invoke-Case -PrinterModel 'XeroxGlobalPcl6' -PinVersion '51116.200.0.0' -PrinterName 'Reception Xerox BW' -PrinterAddress '192.0.2.13' -PrinterColor 'Grayscale' -PrinterDuplex 'OneSided'
+    if ($code -ne 0 -or $script:DownloadCount -ne 1 -or $script:Referers.Count -ne 1 -or $script:Referers[0] -cne '') {
+        Fail "Xerox install returned $code downloads $($script:DownloadCount)"
+    }
+    if ($script:ExpandKinds.Count -ne 1 -or $script:ExpandKinds[0] -cne 'Zip' -or -not $script:LayoutOk) {
+        Fail 'Xerox install did not expand the zip or pass layout before the catalog check'
+    }
+    if ($script:PnpPaths.Count -ne 1 -or $script:PnpPaths[0].Replace('\', '/') -notlike '*/UNIV_5.1116.2.0_PCL6_x64_Driver.inf/x3UNIVX.inf') {
+        Fail "Xerox pnputil path '$($script:PnpPaths -join ',')'"
+    }
+    if ($script:AddCalls.Count -ne 1 -or $script:AddCalls[0].DriverName -cne 'Xerox Global Print Driver PCL6' -or $script:AddCalls[0].PortName -cne 'IP_192.0.2.13') {
+        Fail 'Xerox queue was not created with Xerox Global Print Driver PCL6 on 9100'
+    }
+    $xeroxMarker = @(Read-Marker)
+    if ($xeroxMarker.Count -ne 1 -or [string]$xeroxMarker[0].model -cne 'XeroxGlobalPcl6' -or [string]$xeroxMarker[0].address -cne '192.0.2.13') {
+        Fail 'Xerox marker was wrong'
     }
 
     Reset-Case

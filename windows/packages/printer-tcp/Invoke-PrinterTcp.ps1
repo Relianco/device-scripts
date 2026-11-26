@@ -21,7 +21,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# Three models are fixed in this script. A release file cannot add another.
+# Four models are fixed in this script. A release file cannot add another.
 $script:PrinterTcpKonicaReferer = 'https://onyxweb.mykonicaminolta.com/OneStopProductSupport?appMode=Public&target=Drivers'
 $script:PrinterTcpModels = @(
     [pscustomobject]@{
@@ -62,6 +62,20 @@ $script:PrinterTcpModels = @(
         Version      = '7.222.5412.313'
         Inf          = 'eSf6u.inf'
         Catalog      = 'eSf6u.cat'
+        Stage        = 'Zip'
+        Referer      = ''
+        OuterSubject = ''
+    }
+    [pscustomobject]@{
+        Id           = 'XeroxGlobalPcl6'
+        DriverName   = 'Xerox Global Print Driver PCL6'
+        SourceUrl    = 'https://download.support.xerox.com/pub/drivers/GLOBALPRINTDRIVER/drivers/win10x64/ar/UNIV_5.1116.2.0_PCL6_x64.zip'
+        File         = 'UNIV_5.1116.2.0_PCL6_x64.zip'
+        Sha256       = 'd25c343d51bea1e6b03ff653d4ed1904cf1ca7229bb895be1fe980490ed5b888'
+        Size         = [int64]38853832
+        Version      = '51116.200.0.0'
+        Inf          = 'x3UNIVX.inf'
+        Catalog      = 'x3UNIVX.cat'
         Stage        = 'Zip'
         Referer      = ''
         OuterSubject = ''

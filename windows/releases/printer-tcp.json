@@ -36,6 +36,18 @@
       "inf": "eSf6u.inf",
       "catalog": "eSf6u.cat",
       "stage": "Zip"
+    },
+    {
+      "id": "XeroxGlobalPcl6",
+      "driverName": "Xerox Global Print Driver PCL6",
+      "sourceUrl": "https://download.support.xerox.com/pub/drivers/GLOBALPRINTDRIVER/drivers/win10x64/ar/UNIV_5.1116.2.0_PCL6_x64.zip",
+      "file": "UNIV_5.1116.2.0_PCL6_x64.zip",
+      "sha256": "d25c343d51bea1e6b03ff653d4ed1904cf1ca7229bb895be1fe980490ed5b888",
+      "size": 38853832,
+      "version": "51116.200.0.0",
+      "inf": "x3UNIVX.inf",
+      "catalog": "x3UNIVX.cat",
+      "stage": "Zip"
     }
   ]
 }

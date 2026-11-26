@@ -45,6 +45,9 @@ function Get-RelianPrinterTcpDriverName {
     if ($ModelId -ceq 'ToshibaUniversalPcl2') {
         return 'TOSHIBA Universal Printer 2'
     }
+    if ($ModelId -ceq 'XeroxGlobalPcl6') {
+        return 'Xerox Global Print Driver PCL6'
+    }
     return ''
 }
 
