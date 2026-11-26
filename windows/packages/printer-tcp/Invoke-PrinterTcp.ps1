@@ -15,7 +15,9 @@ param(
     [string]$PrinterModel = '',
     [string]$PrinterColor = '',
     [string]$PrinterDuplex = '',
-    [string]$PrinterTray = ''
+    [string]$PrinterTray = '',
+    # Take over a queue of this name that this package did not create, when it already prints to PrinterAddress.
+    [switch]$AdoptQueue
 )
 
 $ErrorActionPreference = 'Stop'
@@ -625,7 +627,8 @@ function Get-PrinterTcpPlan {
         $ExistingPrinters = $null,
         $ExistingPorts = $null,
         [bool]$DriverInstalled = $false,
-        $InstalledDriverVersion = ''
+        $InstalledDriverVersion = '',
+        [bool]$AdoptQueue = $false
     )
 
     $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl $SourceUrl -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
@@ -664,8 +667,11 @@ function Get-PrinterTcpPlan {
 
     $printer = Get-PrinterTcpListedPrinter -ExistingPrinters $ExistingPrinters -Name $PrinterName
     # A queue this marker does not list is left alone. Do not call Set-Printer.
+    # AdoptQueue takes it over only when it already prints to this address (a cut-over from another installer).
     if ($null -ne $printer -and $null -eq $entry) {
-        return New-PrinterTcpPlan -ExitCode 1
+        if (-not $AdoptQueue -or -not [string]::Equals((Get-PrinterTcpLiveHost -Printer $printer), $PrinterAddress, [System.StringComparison]::Ordinal)) {
+            return New-PrinterTcpPlan -ExitCode 1
+        }
     }
 
     $versionMatches = $false
@@ -2330,7 +2336,8 @@ function Invoke-PrinterTcpAction {
         [string]$PrinterModel,
         [string]$PrinterColor = '',
         [string]$PrinterDuplex = '',
-        [string]$PrinterTray = ''
+        [string]$PrinterTray = '',
+        [bool]$AdoptQueue = $false
     )
 
     $validation = [int](Get-PrinterTcpValidationCode -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -SourceUrl '' -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
@@ -2382,7 +2389,7 @@ function Invoke-PrinterTcpAction {
         }
     }
     $planPrinters = ConvertTo-PrinterTcpPlanPrinters -Printers $livePrinters -Ports $livePorts
-    $plan = Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -SourceUrl '' -MarkerPrinters $markerRead.Printers -ExistingPrinters $planPrinters -ExistingPorts $livePorts -DriverInstalled $driverInstalled -InstalledDriverVersion $installedVersion
+    $plan = Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -SourceUrl '' -MarkerPrinters $markerRead.Printers -ExistingPrinters $planPrinters -ExistingPorts $livePorts -DriverInstalled $driverInstalled -InstalledDriverVersion $installedVersion -AdoptQueue $AdoptQueue
     if ($null -ne $plan.ExitCode) {
         return [int]$plan.ExitCode
     }
@@ -2487,7 +2494,7 @@ foreach ($name in @('DeploymentType', 'Action', 'PinVersion')) {
 }
 
 try {
-    $printerTcpExit = [int](Invoke-PrinterTcpAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
+    $printerTcpExit = [int](Invoke-PrinterTcpAction -DeploymentType $DeploymentType -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -AdoptQueue ([bool]$AdoptQueue))
     exit $printerTcpExit
 } catch {
     $detail = [string]$_.Exception.Message

@@ -550,9 +550,10 @@ function Get-Plan {
         $ExistingPrinters = $null,
         $ExistingPorts = $null,
         [bool]$DriverInstalled = $false,
-        $InstalledDriverVersion = ''
+        $InstalledDriverVersion = '',
+        [bool]$AdoptQueue = $false
     )
-    return Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -SourceUrl $SourceUrl -MarkerPrinters $MarkerPrinters -ExistingPrinters $ExistingPrinters -ExistingPorts $ExistingPorts -DriverInstalled $DriverInstalled -InstalledDriverVersion $InstalledDriverVersion
+    return Get-PrinterTcpPlan -Action $Action -PinVersion $PinVersion -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -SourceUrl $SourceUrl -MarkerPrinters $MarkerPrinters -ExistingPrinters $ExistingPrinters -ExistingPorts $ExistingPorts -DriverInstalled $DriverInstalled -InstalledDriverVersion $InstalledDriverVersion -AdoptQueue $AdoptQueue
 }
 
 foreach ($action in @('Install', 'Update', 'Repair', 'Uninstall', 'Reinstall')) {
@@ -609,6 +610,15 @@ Assert-Plan -Plan (Get-Plan -Action 'Repair' -MarkerPrinters $readyMarker -Exist
 $unmanaged = @(New-Printer -Name 'Front Desk' -DriverName 'Other Driver' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
 Assert-Plan -Plan (Get-Plan -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -ExitCode 1) -Label 'unmanaged queue'
 Assert-Plan -Plan (Get-Plan -Action 'Repair' -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true) -Expect (New-Expect -ExitCode 1) -Label 'Repair unmanaged queue'
+# AdoptQueue: an unmanaged queue of the same name on the same address is taken over in place (driver swapped, marker written).
+Assert-Plan -Plan (Get-Plan -ExistingPrinters $unmanaged -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -AdoptQueue $true) -Expect (New-Expect -UpdateQueue $true -PreviousDriver 'Other Driver' -PreviousPort 'IP_192.0.2.10' -WriteMarker $true) -Label 'adopt unmanaged queue on the same address'
+$adoptSameDriver = @(New-Printer -Name 'Front Desk' -DriverName 'Brother HL-L2370DW series' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
+Assert-Plan -Plan (Get-Plan -ExistingPrinters $adoptSameDriver -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -AdoptQueue $true) -Expect (New-Expect -WriteMarker $true) -Label 'adopt unmanaged queue that already has the driver'
+$adoptElsewhere = @(New-Printer -Name 'Front Desk' -DriverName 'Other Driver' -PortName 'IP_192.0.2.99' -HostAddress '192.0.2.99')
+Assert-Plan -Plan (Get-Plan -ExistingPrinters $adoptElsewhere -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -AdoptQueue $true) -Expect (New-Expect -ExitCode 1) -Label 'adopt refuses a queue on another address'
+$adoptUsb = @(New-Printer -Name 'Front Desk' -DriverName 'Other Driver' -PortName 'USB001' -HostAddress '')
+Assert-Plan -Plan (Get-Plan -ExistingPrinters $adoptUsb -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0' -AdoptQueue $true) -Expect (New-Expect -ExitCode 1) -Label 'adopt refuses a queue with no address'
+Assert-Plan -Plan (Get-Plan -Action 'Uninstall' -ExistingPrinters $unmanaged -ExistingPorts $readyPort -AdoptQueue $true) -Expect (New-Expect -ExitCode 0) -Label 'adopt never uninstalls an unmanaged queue'
 
 $oldDriver = @(New-Printer -Name 'Front Desk' -DriverName 'Old Driver' -PortName 'IP_192.0.2.10' -HostAddress '192.0.2.10')
 Assert-Plan -Plan (Get-Plan -MarkerPrinters $readyMarker -ExistingPrinters $oldDriver -ExistingPorts $readyPort -DriverInstalled $true -InstalledDriverVersion '1.6.0.0') -Expect (New-Expect -UpdateQueue $true -PreviousDriver 'Old Driver' -PreviousPort 'IP_192.0.2.10' -WriteMarker $true) -Label 'managed driver differs'
@@ -1203,9 +1213,10 @@ function Invoke-Case {
         [string]$PrinterColor = '',
         [string]$PrinterDuplex = '',
         [string]$PrinterTray = '',
-        [string]$CancelPath = ''
+        [string]$CancelPath = '',
+        [bool]$AdoptQueue = $false
     )
-    return [int](Invoke-PrinterTcpAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray)
+    return [int](Invoke-PrinterTcpAction -DeploymentType $Action -Action $Action -PinVersion $PinVersion -CancelPath $CancelPath -MarkerRoot $script:MarkerRoot -PrinterName $PrinterName -PrinterAddress $PrinterAddress -PrinterModel $PrinterModel -PrinterColor $PrinterColor -PrinterDuplex $PrinterDuplex -PrinterTray $PrinterTray -AdoptQueue $AdoptQueue)
 }
 
 try {
@@ -1318,6 +1329,25 @@ try {
     }
     if (@(Read-Marker).Count -ne 0) {
         Fail 'unmanaged queue wrote a marker'
+    }
+
+    Reset-Case
+    Use-FakePins
+    $script:DriverNames.Add('Brother HL-L2370DW series')
+    $script:DriverVersions['Brother HL-L2370DW series'] = '1.6.0.0'
+    $script:LivePorts.Add([pscustomobject]@{ Name = 'IP_192.0.2.10'; HostAddress = '192.0.2.10' })
+    $script:LivePrinters.Add([pscustomobject]@{
+            Name       = 'Front Desk'
+            DriverName = 'Old Driver'
+            PortName   = 'IP_192.0.2.10'
+        })
+    $code = Invoke-Case -AdoptQueue $true
+    if ($code -ne 0 -or $script:AddCalls.Count -ne 0 -or $script:SetCalls.Count -ne 1 -or $script:SetCalls[0].DriverName -cne 'Brother HL-L2370DW series') {
+        Fail "adopted queue returned $code adds $($script:AddCalls.Count) sets $($script:SetCalls.Count)"
+    }
+    $adopted = @(Read-Marker)
+    if ($adopted.Count -ne 1 -or [string]$adopted[0].name -cne 'Front Desk' -or [string]$adopted[0].address -cne '192.0.2.10') {
+        Fail 'adopted queue was not written to the marker'
     }
 
     Reset-Case
