@@ -68,6 +68,31 @@ if (@($plan.Add).Count -ne 1 -or $plan.Add[0] -cne 'files.example.invalid') { Fa
 $plan = Get-WgcNrptPlan -Existing $existing -Namespaces @() -Servers @() -Tag $tag
 if (@($plan.Remove).Count -ne 2 -or @($plan.Remove | Where-Object Name -ceq 'c').Count -ne 0) { Fail 'uninstall nrpt plan' }
 
+# Architecture: the native OS architecture wins over this process's view, so an x64-emulated or
+# x86 PowerShell on an ARM64 PC still gets the ARM64 MSI.
+$realGetArch = $script:GetArch
+$savedArch = @($env:PROCESSOR_ARCHITECTURE, $env:PROCESSOR_ARCHITEW6432)
+try {
+    $script:ReadNativeArch = { 'ARM64' }
+    $env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
+    if ((& $realGetArch) -cne 'ARM64') { Fail 'x64-emulated process on ARM64 not read as ARM64' }
+    $script:ReadNativeArch = { $null }
+    $env:PROCESSOR_ARCHITECTURE = 'x86'; $env:PROCESSOR_ARCHITEW6432 = 'ARM64'
+    if ((& $realGetArch) -cne 'ARM64') { Fail 'x86 process on ARM64 not read as ARM64' }
+    $env:PROCESSOR_ARCHITECTURE = 'AMD64'; $env:PROCESSOR_ARCHITEW6432 = $null
+    if ((& $realGetArch) -cne 'AMD64') { Fail 'x64 PC not read as AMD64' }
+} finally {
+    $env:PROCESSOR_ARCHITECTURE, $env:PROCESSOR_ARCHITEW6432 = $savedArch
+}
+# A 32-bit PowerShell sees Program Files (x86); WireGuard is in the native Program Files.
+$savedPf = @($env:ProgramFiles, $env:ProgramW6432)
+try {
+    $env:ProgramFiles = 'C:\PF86'; $env:ProgramW6432 = 'C:\PF64'
+    if ((Get-WgcProgramFiles) -cne [IO.Path]::Combine('C:\PF64', 'WireGuard')) { Fail 'WireGuard folder not under the native Program Files' }
+} finally {
+    $env:ProgramFiles, $env:ProgramW6432 = $savedPf
+}
+
 # Install flow with every side effect mocked.
 $state = [ordered]@{ Installed = ''; Msi = 0; Config = ''; Key = ''; Written = 0; Service = $null; Restarts = 0; Folder = 0; Rules = [System.Collections.Generic.List[object]]::new(); Gsa = 0; FolderBeforeWrite = $true }
 $script:GetArch = { 'AMD64' }

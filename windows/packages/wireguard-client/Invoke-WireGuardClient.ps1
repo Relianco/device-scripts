@@ -411,7 +411,11 @@ function Test-WgcCancelled {
 }
 
 function Get-WgcProgramFiles {
-    $root = $env:ProgramFiles
+    # ProgramW6432 is the native folder, also in a 32-bit process; ProgramFiles is then Program Files (x86).
+    $root = $env:ProgramW6432
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = $env:ProgramFiles
+    }
     if ([string]::IsNullOrWhiteSpace($root)) {
         $root = 'C:\Program Files'
     }
@@ -428,8 +432,21 @@ function Get-WgcConfigRoot {
 
 # ---- Side effects. Each is a script block so the tests replace it. ----
 
+# The machine-wide value is the OS architecture even when this PowerShell runs x64-emulated on ARM64,
+# where both process variables say AMD64.
+$script:ReadNativeArch = {
+    try {
+        return [string](Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE -ErrorAction Stop).PROCESSOR_ARCHITECTURE
+    } catch {
+        return $null
+    }
+}
+
 $script:GetArch = {
-    return [string]$env:PROCESSOR_ARCHITECTURE
+    foreach ($arch in @((& $script:ReadNativeArch), $env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE)) {
+        if (-not [string]::IsNullOrWhiteSpace($arch)) { return [string]$arch }
+    }
+    return ''
 }
 
 $script:GetInstalledVersion = {
