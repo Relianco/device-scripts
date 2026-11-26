@@ -1188,7 +1188,7 @@ function Use-FakePins {
     $toshiba.Sha256 = $script:GoodSha
     $toshiba.SourceUrl = 'https://example.invalid/toshiba.zip'
     $xerox.Sha256 = $script:GoodSha
-    $xerox.SourceUrl = 'https://example.invalid/xerox.zip'
+    $xerox.SourceUrl = 'https://example.invalid/UNIV_5.1116.2.0_PCL6_x64.zip'
 }
 
 function Read-Marker {
