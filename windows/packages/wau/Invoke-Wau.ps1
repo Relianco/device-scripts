@@ -693,6 +693,8 @@ foreach ($id in $ids) {
         $test = "@(Get-Process | Where-Object { `$_.SessionId -ne 0 -and @($SignInScreen) -notcontains `$_.ProcessName }).Count -gt 0"
         $why = 'while anyone is signed in (no known process names)'
     }
+    # WAU 2.12.0 per-app hooks are not JSON: functions/Update-App.ps1 runs `if ((& $ModsPreInstall) -eq $false) { ... return }`,
+    # so $false skips the app. The JSON Action protocol is only for this file (functions/Test-WAUMods.ps1) and has no Skip.
     $body = @(
         "# Relian: written by _WAU-mods.ps1. WAU skips $id $why.",
         "if ($test) { `$false } else { `$true }"
