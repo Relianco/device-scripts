@@ -32,7 +32,7 @@ foreach ($p in @(
         @('PaperPort Image Printer', 'Nuance Image Printer Driver'), @('Office Copier (Fax)', ''))) {
     Assert-True (Test-PdSkipPrinter -Name $p[0] -Driver $p[1]) "skip $($p[0])"
 }
-foreach ($p in @(@('Convey', 'TOSHIBA Universal Printer 2'), @('CX3535 MFP(PCL)', 'CX3535 MFP(PCL)'), @('\\svfs\TOSHIBA Universal PS3', ''))) {
+foreach ($p in @(@('Front Desk', 'TOSHIBA Universal Printer 2'), @('CX3535 MFP(PCL)', 'CX3535 MFP(PCL)'), @('\\svfs\TOSHIBA Universal PS3', ''))) {
     Assert-True (-not (Test-PdSkipPrinter -Name $p[0] -Driver $p[1])) "keep $($p[0])"
 }
 
@@ -94,7 +94,7 @@ $script:PdDeleteUserValue = { param($Root, $Key, $Name) $script:Log.Add("delete 
 function Lines { param($Pattern) @($script:Log | Where-Object { $_ -like $Pattern }) }
 function Entry { param($Result, $Name) @($Result.Printers | Where-Object { $_.name -eq $Name })[0] }
 
-$machine = @(@('Convey', 'TOSHIBA Universal Printer 2', $true, 'TwoSidedLongEdge'), @('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided'),
+$machine = @(@('Front Desk', 'TOSHIBA Universal Printer 2', $true, 'TwoSidedLongEdge'), @('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided'),
     @('Adobe PDF', 'Adobe PDF Converter', $true, 'OneSided'), @('Konica', 'KONICA MINOLTA Universal PCL', $false, 'TwoSidedLongEdge'),
     @('TOSHIBA e-STUDIO3505AC-1', 'TOSHIBA e-STUDIO Fax', $true, 'TwoSidedLongEdge'))
 
@@ -103,11 +103,11 @@ Reset-Test -Printers $machine
 $r = Invoke-PdJob
 Assert-Same $r.ExitCode 0 'run exit'
 Assert-Same $r.Status 'changed' 'run status'
-Assert-Same ((Lines 'set *') -join ';') 'set Convey color=False duplex=OneSided;set Konica color= duplex=OneSided' 'set calls'
+Assert-Same ((Lines 'set *') -join ';') 'set Front Desk color=False duplex=OneSided;set Konica color= duplex=OneSided' 'set calls'
 Assert-Same @(Lines 'devmode *').Count 0 'no DEVMODE fallback when Set-PrintConfiguration took'
-Assert-Same (Entry $r 'Convey').status 'changed' 'Convey status'
-Assert-Same (Entry $r 'Convey').before 'color/TwoSidedLongEdge' 'Convey before'
-Assert-Same (Entry $r 'Convey').after 'mono/OneSided' 'Convey after'
+Assert-Same (Entry $r 'Front Desk').status 'changed' 'Front Desk status'
+Assert-Same (Entry $r 'Front Desk').before 'color/TwoSidedLongEdge' 'Front Desk before'
+Assert-Same (Entry $r 'Front Desk').after 'mono/OneSided' 'Front Desk after'
 Assert-Same (Entry $r 'Copy Room').status 'unchanged' 'Copy Room status'
 Assert-Same (Entry $r 'Adobe PDF').status 'skipped' 'PDF skipped'
 Assert-Same (Entry $r 'TOSHIBA e-STUDIO3505AC-1').status 'skipped' 'fax driver skipped'
@@ -119,20 +119,22 @@ Assert-Same $r.ExitCode 0 'idempotent exit'
 Assert-Same @(Lines 'set *').Count 2 'no new set calls on the second run'
 
 # ReportOnly: changes nothing and reports drift.
-Reset-Test -Printers $machine -Loaded @('S-1-5-21-1-2-3-1001') -Values @{ 'S-1-5-21-1-2-3-1001' = @(, @('DevModePerUser', 'Convey', (New-DevMode 2 1))) }
+Reset-Test -Printers $machine -Loaded @('S-1-5-21-1-2-3-1001') -Values @{ 'S-1-5-21-1-2-3-1001' = @(, @('DevModePerUser', 'Front Desk', (New-DevMode 2 1))) }
 $r = Invoke-PdJob -ReportOnly
 Assert-Same $r.Status 'drift' 'report status'
 Assert-Same $r.ExitCode 1 'report exit'
 Assert-Same @(Lines 'set *').Count 0 'report sets nothing'
 Assert-Same @(Lines 'delete *').Count 0 'report deletes nothing'
-Assert-Same (Entry $r 'Convey').status 'drift' 'report printer status'
-Assert-Same $r.Users[0].drift 'DevModePerUser\Convey' 'report names the user value'
+Assert-Same (Entry $r 'Front Desk').status 'drift' 'report printer status'
+Assert-Same $r.Users[0].drift 'DevModePerUser\Front Desk' 'report names the user value'
 
 # A printer with a job in its queue is not touched; the run says busy so it is retried.
-Reset-Test -Printers $machine -Jobs @{ 'Convey' = 1 }
+Reset-Test -Printers $machine -Jobs @{ 'Front Desk' = 1 } -Loaded @('S-1-5-21-1-2-3-1009') -Values @{ 'S-1-5-21-1-2-3-1009' = @(@('DevModePerUser', 'Front Desk', (New-DevMode 2 1)), @('DevModePerUser', 'Konica', (New-DevMode 2 1))) }
 $r = Invoke-PdJob
-Assert-Same (Entry $r 'Convey').status 'busy' 'busy printer status'
-Assert-Same @(Lines 'set Convey*').Count 0 'busy printer untouched'
+Assert-Same ((Lines 'delete *') -join ';') 'delete S-1-5-21-1-2-3-1009 DevModePerUser Konica' 'busy printer user value kept for the next run'
+Assert-Same ($r.Users[0].status) 'busy' 'user with a busy printer value is busy'
+Assert-Same (Entry $r 'Front Desk').status 'busy' 'busy printer status'
+Assert-Same @(Lines 'set Front Desk*').Count 0 'busy printer untouched'
 Assert-Same @(Lines 'set Konica*').Count 1 'the other printer is still done'
 Assert-Same $r.Status 'busy' 'overall busy'
 Assert-Same $r.ExitCode 1 'busy exit'
@@ -140,26 +142,26 @@ Assert-Same $r.ExitCode 1 'busy exit'
 # A driver that ignores Set-PrintConfiguration gets the DEVMODE write.
 Reset-Test -Printers $machine -SetIgnored -DevModeFixes
 $r = Invoke-PdJob
-Assert-Same ((Lines 'devmode *') -join ';') 'devmode Convey;devmode Konica' 'DEVMODE fallback'
-Assert-Same (Entry $r 'Convey').status 'changed' 'fallback status'
+Assert-Same ((Lines 'devmode *') -join ';') 'devmode Front Desk;devmode Konica' 'DEVMODE fallback'
+Assert-Same (Entry $r 'Front Desk').status 'changed' 'fallback status'
 Assert-Same $r.ExitCode 0 'fallback exit'
 
 # Neither works: failed, exit 2.
 Reset-Test -Printers $machine -SetIgnored
 $r = Invoke-PdJob
-Assert-Same (Entry $r 'Convey').status 'failed' 'still colour after both writes'
+Assert-Same (Entry $r 'Front Desk').status 'failed' 'still colour after both writes'
 Assert-Same $r.Status 'failed' 'overall failed'
 Assert-Same $r.ExitCode 2 'failed exit'
 
 # Users: signed-in hive in place; signed-out hive loaded, fixed and unloaded; an in-use hive is skipped.
 $a = 'S-1-5-21-1-2-3-1001'; $b = 'S-1-12-1-4-5-6-7'; $c = 'S-1-5-21-1-2-3-1003'
 Reset-Test -Printers $machine -Loaded @($a, "$($a)_Classes", '.DEFAULT', 'S-1-5-18') -Profiles @($a, $b, $c) -InUse @($c) -Values @{
-    $a = @(@('DevModePerUser', 'Convey', (New-DevMode 2 1)), @('DevModePerUser', 'Microsoft Print to PDF', (New-DevMode 2 1)),
+    $a = @(@('DevModePerUser', 'Front Desk', (New-DevMode 2 1)), @('DevModePerUser', 'Microsoft Print to PDF', (New-DevMode 2 1)),
         @('DevModes2', 'Copy Room', (New-DevMode 1 1)), @('DevModePerUser', 'TOSHIBA e-STUDIO3505AC-1', (New-DevMode 2 2)))
     $b = @(, @('DevModes2', '\\svfs\TOSHIBA Universal PS3', (New-DevMode 1 2)))
 }
 $r = Invoke-PdJob
-Assert-Same ((Lines 'delete *') -join ';') "delete $a DevModePerUser Convey;delete RelianPD_$b DevModes2 \\svfs\TOSHIBA Universal PS3" 'only drifted, non-skipped user values deleted'
+Assert-Same ((Lines 'delete *') -join ';') "delete $a DevModePerUser Front Desk;delete RelianPD_$b DevModes2 \\svfs\TOSHIBA Universal PS3" 'only drifted, non-skipped user values deleted'
 Assert-Same ((Lines '*load *') -join ';') "load RelianPD_$b;unload RelianPD_$b" 'signed-out hive loaded once and unloaded'
 Assert-Same ((@($r.Users | Where-Object { $_.sid -eq $c }))[0].status) 'in-use' 'in-use hive skipped'
 Assert-Same ((@($r.Users | Where-Object { $_.sid -eq $b }))[0].status) 'changed' 'signed-out user fixed'
@@ -190,14 +192,14 @@ $r = Invoke-PdJob
 Assert-Same ((Lines '*load *') -join ';') "unload RelianPD_$c" 'stale mount unloaded'
 
 # Colour options: a Colour/Color name, or a plain queue with a BW twin, keeps colour; it is still made one-sided.
-$names = @('Business Printer Colour', 'Business Printer BW', 'Xerox WorkCentre 7845', 'Xerox WorkCentre 7845 BW', 'Party Printer Color', 'Convey', '\\srv\Xerox AltaLink C8055', '\\srv\Xerox AltaLink C8055 BW')
+$names = @('Business Printer Colour', 'Business Printer BW', 'Xerox WorkCentre 7845', 'Xerox WorkCentre 7845 BW', 'Party Printer Color', 'Front Desk', '\\srv\Xerox AltaLink C8055', '\\srv\Xerox AltaLink C8055 BW')
 Assert-True (Test-PdKeepColour -Name 'Business Printer Colour' -AllNames $names) 'Colour name kept'
 Assert-True (Test-PdKeepColour -Name 'Party Printer Color' -AllNames $names) 'Color name kept'
 Assert-True (Test-PdKeepColour -Name 'Xerox WorkCentre 7845' -AllNames $names) 'plain twin kept'
 Assert-True (Test-PdKeepColour -Name '\\srv\Xerox AltaLink C8055' -AllNames $names) 'plain twin connection kept'
 Assert-True (-not (Test-PdKeepColour -Name 'Business Printer BW' -AllNames $names)) 'BW queue not kept'
 Assert-True (-not (Test-PdKeepColour -Name 'Xerox WorkCentre 7845 BW' -AllNames $names)) 'BW twin not kept'
-Assert-True (-not (Test-PdKeepColour -Name 'Convey' -AllNames $names)) 'ordinary queue not kept'
+Assert-True (-not (Test-PdKeepColour -Name 'Front Desk' -AllNames $names)) 'ordinary queue not kept'
 Assert-True (-not (Test-PdKeepColour -Name 'Business Printer Colour' -AllNames $names -Pattern 'NOMATCH')) 'pattern is a parameter'
 
 $x = 'S-1-5-21-1-2-3-1005'
@@ -223,11 +225,11 @@ Assert-Same @(Lines 'devmode *').Count 1 'ticket colour gets the DEVMODE write'
 Assert-Same (Entry $r 'Xerox Q BW').after 'mono/OneSided/ticket:Monochrome' 'ticket read back'
 
 # A queue that cannot be read is not changed.
-Reset-Test -Printers $machine -Jobs @{ 'Convey' = 'throw' }
+Reset-Test -Printers $machine -Jobs @{ 'Front Desk' = 'throw' }
 $script:PdJobCount = { param($Name) if ($script:F.Jobs[$Name] -eq 'throw') { throw 'spooler RPC failed' } else { 0 } }
 $r = Invoke-PdJob
-Assert-Same (Entry $r 'Convey').status 'failed' 'unreadable queue fails'
-Assert-Same @(Lines 'set Convey*').Count 0 'unreadable queue untouched'
+Assert-Same (Entry $r 'Front Desk').status 'failed' 'unreadable queue fails'
+Assert-Same @(Lines 'set Front Desk*').Count 0 'unreadable queue untouched'
 
 # One JSON line.
 $line = ConvertTo-PdJobLine $r

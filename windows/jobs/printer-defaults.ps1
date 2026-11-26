@@ -359,7 +359,7 @@ function Invoke-PdPrinter {
 }
 
 function Invoke-PdUser {
-    param([string]$Sid, [string]$Root, $Drivers, [switch]$ReportOnly)
+    param([string]$Sid, [string]$Root, $Drivers, [string[]]$Busy = @(), [switch]$ReportOnly)
     $u = [ordered]@{ sid = $Sid; status = 'compliant'; drift = ''; error = '' }
     $values = @(& $script:PdReadUserValues $Root)
     $all = @($Drivers.Keys) + @($values | ForEach-Object { $_.Name })
@@ -370,8 +370,10 @@ function Invoke-PdUser {
     $u.drift = (@($bad | ForEach-Object { "$($_.Key)\$($_.Name)" }) -join ';')
     if ($bad.Count -eq 0) { return $u }
     if ($ReportOnly) { $u.status = 'drift'; return $u }
-    foreach ($v in $bad) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
-    $u.status = 'changed'
+    # A printer with a job in its queue is left alone, its users' preferences too, until a later run.
+    $later = @($bad | Where-Object { $Busy -contains $_.Name })
+    foreach ($v in @($bad | Where-Object { $Busy -notcontains $_.Name })) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    $u.status = $(if ($later.Count -gt 0) { 'busy' } else { 'changed' })
     return $u
 }
 
@@ -391,6 +393,7 @@ function Invoke-PdJob {
         $names = @($printers | ForEach-Object { $_.Name })
         $r.Printers = @(foreach ($p in $printers) { [pscustomobject](Invoke-PdPrinter -Printer $p -AllNames $names -ReportOnly:$ReportOnly) })
 
+        $busy = @($r.Printers | Where-Object { $_.status -eq 'busy' } | ForEach-Object { $_.name })
         $loaded = @($hives | Where-Object { $_ -match '^S-1-(5-21|12-1)-[\d-]+$' })
         $profiles = @(& $script:PdProfiles)
         $sids = [Collections.Generic.List[string]]::new()
@@ -409,7 +412,7 @@ function Invoke-PdJob {
                         $mount = $script:PdMountPrefix + $sid; $root = $mount
                     }
                 }
-                if (-not $u) { $u = Invoke-PdUser -Sid $sid -Root $root -Drivers $drivers -ReportOnly:$ReportOnly }
+                if (-not $u) { $u = Invoke-PdUser -Sid $sid -Root $root -Drivers $drivers -Busy $busy -ReportOnly:$ReportOnly }
             } catch {
                 $u = [ordered]@{ sid = $sid; status = 'failed'; drift = ''; error = $_.Exception.Message }
             } finally {
