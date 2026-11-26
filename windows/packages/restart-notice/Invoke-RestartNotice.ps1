@@ -49,7 +49,8 @@ param(
     [string]$PromptMinutes = '',
     [string]$CountdownMinutes = '',
     [string]$ReportOnly = '',
-    [string]$MaintenanceRestart = 'false'
+    [string]$MaintenanceRestart = 'false',
+    [string]$Force = 'false'
 )
 
 $ProgressPreference = 'SilentlyContinue'
@@ -65,10 +66,14 @@ function Write-Status {
 
 # Pure: validated arguments. Throws on anything malformed.
 function Get-RnArgs {
-    param([string]$Message, [string]$SnoozeMinutes, [string]$PromptMinutes, [string]$CountdownMinutes, [string]$ReportOnly = '', [string]$MaintenanceRestart = 'false')
+    param([string]$Message, [string]$SnoozeMinutes, [string]$PromptMinutes, [string]$CountdownMinutes, [string]$ReportOnly = '', [string]$MaintenanceRestart = 'false', [string]$Force = 'false')
     $a = @{ Message = $RnDefaultMessage; SnoozeMinutes = 60; PromptMinutes = 10; CountdownMinutes = 15; ReportOnly = $false }
     if($MaintenanceRestart -cnotmatch '\A(true|false)\z') { throw 'MaintenanceRestart must be true or false.' }
     $a.MaintenanceRestart=$MaintenanceRestart -ceq 'true'
+    if($Force -cnotmatch '\A(true|false)\z') { throw 'Force must be true or false.' }
+    $a.Force=$Force -ceq 'true'
+    # Force restarts with nothing pending, so it always takes the servicing guard.
+    if($a.Force) { $a.MaintenanceRestart=$true }
     if ($ReportOnly -ne '') {
         if ($ReportOnly -cnotmatch '\A(true|false)\z') { throw 'ReportOnly must be true or false.' }
         $a.ReportOnly = $ReportOnly -ceq 'true'
@@ -343,6 +348,7 @@ function Invoke-RnMain {
         Out-RnResult (New-RnResult 'deferred' 'maintenance restart deferred: pending-state probe failed' @())
         return 0
     }
+    if ($pending.Count -eq 0 -and $A.ContainsKey('Force') -and $A.Force) { $pending = @('forced') }
     if ($pending.Count -eq 0) {
         & $script:RnClearSnooze
         Out-RnResult (New-RnResult 'none' 'no restart pending' @())
@@ -1028,7 +1034,7 @@ if (@('Install', 'Update', 'Repair', 'Reinstall', 'Uninstall') -notcontains $Act
 }
 if ($Action -eq 'Uninstall') { Write-Output 'Nothing to change. Nothing was installed.'; exit 0 }
 try {
-    $rnArgs = Get-RnArgs -Message $Message -SnoozeMinutes $SnoozeMinutes -PromptMinutes $PromptMinutes -CountdownMinutes $CountdownMinutes -ReportOnly $ReportOnly -MaintenanceRestart $MaintenanceRestart
+    $rnArgs = Get-RnArgs -Message $Message -SnoozeMinutes $SnoozeMinutes -PromptMinutes $PromptMinutes -CountdownMinutes $CountdownMinutes -ReportOnly $ReportOnly -MaintenanceRestart $MaintenanceRestart -Force $Force
 } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 
 $script:RnJson = $null

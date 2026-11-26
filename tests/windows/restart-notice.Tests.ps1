@@ -672,5 +672,35 @@ $script:RnMaintenanceCountdown={ param($Text,$Seconds) $null }
 Assert-Same (Invoke-RnMain $maintenanceArgs) 0 'early missing countdown UI safely waited'
 if($script:Log -notcontains 'sleep:900') { Fail 'early missing UI collapsed maintenance countdown' }
 
+# Force: same notice flow, restarts with nothing pending, still behind the servicing guard.
+Assert-Same (Get-RnArgs).Force $false 'force default off'
+Assert-Throws { Get-RnArgs -Force 'yes' } 'invalid force flag'
+$forceArgs = Get-RnArgs -Force 'true'
+Assert-Same $forceArgs.Force $true 'force opt-in'
+Assert-Same $forceArgs.MaintenanceRestart $true 'force brings the servicing guard'
+Reset-Mocks -Pending @() -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ @{Safe=$true} }
+Assert-Same (Invoke-RnMain $forceArgs) 0 'forced no-user exit'
+Assert-Same (Get-Last).status 'restartedNoUser' 'forced no-user status'
+Assert-Same ((Get-Last).pending -join ',') 'forced' 'forced pending reason'
+Assert-Same (@($script:Log | Where-Object { $_ -eq 'restart' }).Count) 1 'forced restarts once'
+Reset-Mocks -Pending @() -Sessions @() -Users @()
+$script:RnMaintenanceGuard={ @{Safe=$false;Reason='setupOrServicingProcess'} }
+Assert-Same (Invoke-RnMain $forceArgs) 0 'forced busy exit'
+Assert-Same (Get-Last).status 'deferred' 'forced busy defers'
+Assert-NoRestart 'forced while msiexec runs'
+Reset-Mocks -Pending @() -PromptResult 'Timeout'
+$script:RnMaintenanceGuard={ @{Safe=$true} }
+$script:RnMaintenanceCountdown={ param($Text,$Seconds) $script:Log.Add("controlledCountdown:$Seconds"); 'Timeout' }
+Assert-Same (Invoke-RnMain $forceArgs) 0 'forced user exit'
+if (-not ($script:Log -match '^prompt')) { Fail 'forced user got no notice' }
+if ($script:Log -notcontains 'controlledCountdown:900') { Fail 'forced user got no countdown' }
+Assert-Same (Get-Last).status 'restartedAfterCountdown' 'forced user status'
+Assert-Same (@($script:Log | Where-Object { $_ -eq 'restart' }).Count) 1 'forced user restarts once'
+Reset-Mocks -Pending @() -Marker $m
+Assert-Same (Invoke-RnMain $args60) 0 'unforced none exit'
+Assert-Same (Get-Last).status 'none' 'without Force nothing pending stays none'
+Assert-NoRestart 'unforced none'
+
 Write-Output 'restart-notice tests passed'
 exit 0
