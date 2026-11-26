@@ -10,7 +10,7 @@ param(
     [string]$Action,
     [string]$PinVersion,
     [string]$ListUrl = '',
-    [string]$UpdatesAtTime = '12:00:00',
+    [string]$UpdatesAtTime = '01:00:00',
     [string]$AvdUpdatesAtTime = '02:00:00',
     [string]$InstallerUrl = 'https://github.com/Romanitho/Winget-AutoUpdate/releases/download/v2.12.0/WAU.msi',
     [string]$InstallerSha256 = 'f5ab2303fdf82fbfcb2248cca4f96479fe17d74584a528b0f86b3dbe9f9e9718',
@@ -76,12 +76,11 @@ function Get-WauMsiProperties {
         [string]$UpdatesAtTime,
         [string]$AvdUpdatesAtTime
     )
-    $atLogon = '1'
+    # Never at logon: updates run only after hours (owner, 2026-11-25). The mods stop a run outside 00:00-05:00.
+    $atLogon = '0'
     $time = $UpdatesAtTime
     $delay = '02:00'
     if ($MultiSession) {
-        # Every user logon on a multi-session host would start a run.
-        $atLogon = '0'
         $time = $AvdUpdatesAtTime
         $delay = '00:30'
     }
@@ -626,6 +625,84 @@ $script:SetImeLogLink = {
     return 'linked'
 }
 
+# WAU mods (WAU runs mods\_WAU-mods.ps1 before it updates anything). Plain ASCII, LF line ends: Detect-Wau.ps1 checks the hash.
+$script:WauModsText = @'
+# Relian Managed - App Updates: WAU mods. Written by Relian's WAU package (device-scripts windows/packages/wau),
+# which overwrites any change. WAU runs this file before it updates anything; a JSON Action "Abort" ends the run and
+# the next night's run tries again. Rules (owner, 2026-11-25): updates only after hours, only when the PC is not in
+# use, and never close a running app.
+#  1. After hours: only 00:00-04:59 local time. WAU's task (daily 01:00 plus up to 2 h random delay) is set to start
+#     a missed run when the PC comes back (StartWhenAvailable), so a morning catch-up run stops here.
+#  2. Not in use: a session with a desktop (explorer) and no lock screen (LogonUI) stops the run. A disconnected
+#     session also counts as in use.
+#  3. Never close an app: every listed app gets an <id>-preinstall.ps1 that makes WAU skip it while one of its
+#     processes runs, in any session. An app with no known process names is skipped while anyone is signed in.
+param([datetime]$Now = (Get-Date))
+
+function Out-RelianAbort([string]$Message) {
+    @{ Action = 'Abort'; Message = "Relian: $Message"; LogLevel = 'Yellow' } | ConvertTo-Json -Compress
+}
+
+if ($Now.Hour -ge 5) {
+    Out-RelianAbort "outside 00:00-05:00 ($($Now.ToString('HH:mm'))), waits for the next night"
+    exit 0
+}
+
+$procs = @(Get-Process)
+$locked = @($procs | Where-Object { $_.ProcessName -eq 'LogonUI' } | ForEach-Object { $_.SessionId })
+foreach ($desktop in @($procs | Where-Object { $_.ProcessName -eq 'explorer' })) {
+    if ($locked -notcontains $desktop.SessionId) {
+        Out-RelianAbort "session $($desktop.SessionId) is signed in and not locked, waits for the next night"
+        exit 0
+    }
+}
+
+# Process names per winget id (without .exe).
+$Processes = @{
+    '7zip.7zip'                    = @('7zFM', '7zG')
+    'Notepad++.Notepad++'          = @('notepad++')
+    'VideoLAN.VLC'                 = @('vlc')
+    'Zoom.Zoom'                    = @('Zoom')
+    'Mozilla.Firefox'              = @('firefox')
+    'Mozilla.Firefox.en-CA'        = @('firefox')
+    'PuTTY.PuTTY'                  = @('putty', 'pageant', 'puttygen', 'psftp', 'pscp', 'plink')
+    'WinSCP.WinSCP'                = @('WinSCP')
+    'Microsoft.VCRedist.2015+.x64' = @()
+    'Microsoft.VCRedist.2015+.x86' = @()
+}
+
+$list = Join-Path (Split-Path -Parent $PSScriptRoot) 'included_apps.txt'
+if (-not (Test-Path -LiteralPath $list)) {
+    Out-RelianAbort 'no included_apps.txt'
+    exit 0
+}
+$ids = @(Get-Content -LiteralPath $list | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') })
+foreach ($id in $ids) {
+    if ($id -cnotmatch '\A[A-Za-z0-9][A-Za-z0-9.+_-]{0,99}\z') {
+        Out-RelianAbort 'a list line is not a winget id'
+        exit 0
+    }
+}
+foreach ($id in $ids) {
+    $names = @('explorer')
+    if ($Processes.ContainsKey($id)) { $names = @($Processes[$id]) }
+    $quoted = ($names | ForEach-Object { "'$_'" }) -join ', '
+    $body = @(
+        "# Relian: written by _WAU-mods.ps1. WAU skips $id while one of these processes runs.",
+        "`$names = @($quoted)",
+        "if (@(Get-Process | Where-Object { `$names -contains `$_.ProcessName }).Count -gt 0) { `$false } else { `$true }"
+    )
+    Set-Content -LiteralPath (Join-Path $PSScriptRoot "$id-preinstall.ps1") -Value $body -Encoding ascii
+}
+'@
+
+$script:SetWauMods = {
+    param($InstallLocation)
+    $dir = Join-Path $InstallLocation 'mods'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $dir '_WAU-mods.ps1'), $script:WauModsText.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
+}
+
 $script:RemoveImeLogLink = {
     $programData = $env:ProgramData
     if ([string]::IsNullOrWhiteSpace($programData)) {
@@ -720,6 +797,15 @@ function Invoke-WauAction {
 
     $plan = Get-WauPlan -Action $Action -PinVersion $PinVersion -InstalledVersion $installed -ConfigMatches $configMatches -WingetPresent $wingetPresent
     if ($null -ne $plan.ExitCode) {
+        # An install that is already right still gets the current mods (installs from before the mods existed).
+        if ([int]$plan.ExitCode -eq 0 -and $Action -ne 'Uninstall' -and $installed -ne '') {
+            try {
+                & $script:SetWauMods -InstallLocation ([string]$config['InstallLocation'])
+            } catch {
+                Add-WauError -Message 'could not write the WAU mods'
+                return 1
+            }
+        }
         if ([int]$plan.ExitCode -eq $script:WauRetryExitCode) {
             Add-WauError -Message 'winget is not installed yet; retry after the winget package'
         } elseif ([int]$plan.ExitCode -ne 0) {
@@ -802,11 +888,19 @@ function Invoke-WauAction {
             Add-WauError -Message 'installer succeeded but the WAU config does not match (check WAU policies)'
             return 1
         }
+        $location = ''
+        if ($after.ContainsKey('InstallLocation')) {
+            $location = [string]$after['InstallLocation']
+        }
+        # The mods are the after-hours and running-app guard. Without them the install has failed.
         try {
-            $location = ''
-            if ($after.ContainsKey('InstallLocation')) {
-                $location = [string]$after['InstallLocation']
-            }
+            if ([string]::IsNullOrWhiteSpace($location)) { throw 'no install location' }
+            & $script:SetWauMods -InstallLocation $location
+        } catch {
+            Add-WauError -Message 'could not write the WAU mods'
+            return 1
+        }
+        try {
             if (-not [string]::IsNullOrWhiteSpace($location)) {
                 [void](& $script:SetImeLogLink -InstallLocation $location)
             }

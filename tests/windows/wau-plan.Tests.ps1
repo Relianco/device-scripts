@@ -87,7 +87,7 @@ $pcProps = Get-WauMsiProperties -MultiSession $false -ListUrl $ring -UpdatesAtTi
 $avdProps = Get-WauMsiProperties -MultiSession $true -ListUrl $ring -UpdatesAtTime '12:00:00' -AvdUpdatesAtTime '02:00:00'
 $common = @('DISABLEWAUAUTOUPDATE=1', 'USEWHITELIST=1', "LISTPATH=$ring", 'UPDATESINTERVAL=Daily')
 $tail = @('USERCONTEXT=0', 'NOTIFICATIONLEVEL=None', 'DONOTRUNONMETERED=1', 'MAXLOGFILES=7', 'MAXLOGSIZE=1048576', 'RUN_WAU=NO')
-$expectedPc = @('/i', ('"' + $msi + '"'), '/qn', '/norestart') + $common + @('UPDATESATTIME=12:00:00', 'UPDATESATTIMEDELAY=02:00', 'UPDATESATLOGON=1') + $tail
+$expectedPc = @('/i', ('"' + $msi + '"'), '/qn', '/norestart') + $common + @('UPDATESATTIME=12:00:00', 'UPDATESATTIMEDELAY=02:00', 'UPDATESATLOGON=0') + $tail
 $expectedAvd = @('/i', ('"' + $msi + '"'), '/qn', '/norestart') + $common + @('UPDATESATTIME=02:00:00', 'UPDATESATTIMEDELAY=00:30', 'UPDATESATLOGON=0') + $tail
 $actualPc = @(Get-WauMsiArgumentList -Mode 'install' -InstallerPath $msi -Properties $pcProps)
 $actualAvd = @(Get-WauMsiArgumentList -Mode 'install' -InstallerPath $msi -Properties $avdProps)
@@ -122,7 +122,7 @@ function New-WauConfig {
 $pcExpected = Get-WauExpectedConfig -Properties $pcProps
 if (-not (Test-WauConfigMatches -Config (New-WauConfig -Properties $pcProps) -Expected $pcExpected)) { Fail 'matching config rejected' }
 foreach ($change in @(
-        @('WAU_DisableAutoUpdate', 0), @('WAU_UseWhiteList', 0), @('WAU_UserContext', 1), @('WAU_UpdatesAtLogon', 0),
+        @('WAU_DisableAutoUpdate', 0), @('WAU_UseWhiteList', 0), @('WAU_UserContext', 1), @('WAU_UpdatesAtLogon', 1),
         @('WAU_ListPath', 'https://relianpub.blob.core.windows.net/pub/wau/early/'), @('WAU_NotificationLevel', 'Full'),
         @('WAU_UpdatesInterval', 'Never'), @('WAU_UpdatesAtTime', '06:00:00')
     )) {
@@ -178,7 +178,7 @@ function Reset-Fakes {
     $script:State = @{
         Before = $Before; After = $After; Edition = $Edition; Winget = $Winget; Bytes = $Bytes; FailFirst = $FailFirst
         Downloads = 0; Sleeps = 0; Msi = [System.Collections.Generic.List[object]]::new(); Reads = 0
-        Protected = 0; Linked = ''; Unlinked = 0; Codes = @('{FB0EB14E-95AC-45D7-A951-432316FFCBD4}')
+        Protected = 0; Linked = ''; Modded = ''; ModsFail = $false; Unlinked = 0; Codes = @('{FB0EB14E-95AC-45D7-A951-432316FFCBD4}')
     }
     $script:WauErrorLog.Clear()
 }
@@ -204,6 +204,7 @@ $script:InvokeMsiExec = {
     return 0
 }
 $script:SetImeLogLink = { param($InstallLocation) $script:State.Linked = $InstallLocation; return 'linked' }
+$script:SetWauMods = { param($InstallLocation) if ($script:State.ModsFail) { throw 'disk' }; $script:State.Modded = $InstallLocation }
 $script:RemoveImeLogLink = { $script:State.Unlinked++ }
 
 function Invoke-Install {
@@ -218,10 +219,16 @@ if ($code -ne 0) { Fail "fresh install exited $code ($($script:WauErrorLog -join
 if ($script:State.Downloads -ne 1 -or $script:State.Msi.Count -ne 1 -or $script:State.Protected -ne 1) { Fail 'fresh install did not download, protect and run msiexec once' }
 $run = $script:State.Msi[0]
 $runArgs = @($run.Args)
-if ($runArgs[0] -cne '/i' -or $runArgs -notcontains 'UPDATESATLOGON=1' -or $runArgs -contains 'REINSTALL=ALL') { Fail "fresh install arguments: $($runArgs -join ' ')" }
+if ($runArgs[0] -cne '/i' -or $runArgs -notcontains 'UPDATESATLOGON=0' -or $runArgs -contains 'REINSTALL=ALL') { Fail "fresh install arguments: $($runArgs -join ' ')" }
 if ([string]$run.Dir -notlike '*relian-wau-*' -or $runArgs[1] -cne ('"' + (Join-Path $run.Dir 'WAU.msi') + '"')) { Fail 'msiexec did not run from the protected cache' }
 if (Test-Path -LiteralPath $run.Dir) { Fail 'cache was not removed' }
 if ($script:State.Linked -cne 'C:\Program Files\Winget-AutoUpdate\') { Fail 'IME log link was not made' }
+if ($script:State.Modded -cne 'C:\Program Files\Winget-AutoUpdate\') { Fail 'fresh install did not write the mods' }
+
+# The mods are the running-app guard: no mods, no success.
+Reset-Fakes -Before $null -After (New-WauConfig -Properties $pcProps)
+$script:State.ModsFail = $true
+if ((Invoke-Install) -ne 1) { Fail 'install passed although the mods were not written' }
 
 # AVD host gets the multi-session properties.
 Reset-Fakes -Before $null -After (New-WauConfig -Properties $avdProps) -Edition 'ServerRdsh'
@@ -231,6 +238,8 @@ if ((@($script:State.Msi[0].Args) -join '|') -cne ((@('/i', ('"' + (Join-Path $s
 # Already right: nothing downloads.
 Reset-Fakes -Before (New-WauConfig -Properties $pcProps) -After $null -Winget $false
 if ((Invoke-Install) -ne 0 -or $script:State.Downloads -ne 0 -or $script:State.Msi.Count -ne 0) { Fail 'a matching install was touched' }
+# A matching install from before the mods existed gets them, with no download.
+if ($script:State.Modded -cne 'C:\Program Files\Winget-AutoUpdate\') { Fail 'a matching install did not get the mods' }
 
 # Same version, other ring: reconfigure.
 $early = Get-WauMsiProperties -MultiSession $false -ListUrl 'https://relianpub.blob.core.windows.net/pub/wau/early/' -UpdatesAtTime '12:00:00' -AvdUpdatesAtTime '02:00:00'

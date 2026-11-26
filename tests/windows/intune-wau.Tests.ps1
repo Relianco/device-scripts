@@ -43,7 +43,7 @@ if ($null -eq $meta.detectReplace -or @($meta.detectReplace).Count -ne 0) { Fail
 if (-not (Test-Path -LiteralPath (Join-Path $packageDir ([string]$meta.setupFile)))) { Fail 'setupFile is not next to intune.json' }
 
 $pin = [string]$release.version
-$expectedInstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Install -Action Install -PinVersion $pin -ListUrl https://relianpub.blob.core.windows.net/pub/wau/broad/ -UpdatesAtTime 12:00:00 -AvdUpdatesAtTime 02:00:00"
+$expectedInstall = "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Install -Action Install -PinVersion $pin -ListUrl https://relianpub.blob.core.windows.net/pub/wau/broad/ -UpdatesAtTime 01:00:00 -AvdUpdatesAtTime 02:00:00"
 $expectedUninstall = "C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Wau.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion $pin"
 if ([string]$meta.installCommand -cne $expectedInstall) { Fail 'install command' }
 if ([string]$meta.uninstallCommand -cne $expectedUninstall) { Fail 'uninstall command' }
@@ -108,7 +108,7 @@ foreach ($below in @('2.11.9', '2.1.0', '', 'not-a-version')) {
 }
 if (Test-RelianWauInstalled -Installed $null -Policy $null -EditionId 'Professional') { Fail 'no install was present' }
 foreach ($change in @(
-        @('WAU_DisableAutoUpdate', 0), @('WAU_UseWhiteList', 0), @('WAU_UserContext', 1), @('WAU_UpdatesAtLogon', 0),
+        @('WAU_DisableAutoUpdate', 0), @('WAU_UseWhiteList', 0), @('WAU_UserContext', 1), @('WAU_UpdatesAtLogon', 1),
         @('WAU_ListPath', 'https://relianpub.blob.core.windows.net/pub/wau/early/'), @('WAU_ListPath', ''),
         @('WAU_NotificationLevel', 'Full'), @('WAU_UpdatesInterval', 'Weekly'), @('WAU_UpdatesAtTime', '06:00:00')
     )) {
@@ -123,6 +123,18 @@ if (Test-RelianWauInstalled -Installed $pc -Policy @{ WAU_DisableAutoUpdate = 0 
 if (Test-RelianWauInstalled -Installed $pc -Policy @{ WAU_UseWhiteList = 0 } -EditionId 'Professional') { Fail 'policy turning the allow list off was ignored' }
 if (-not (Test-RelianWauInstalled -Installed $pc -Policy @{ WAU_DisableAutoUpdate = 1 } -EditionId 'Professional')) { Fail 'an agreeing policy failed detection' }
 if (Test-RelianWauInstalled -Installed $null -Policy $pc -EditionId 'Professional') { Fail 'policy values alone were an install' }
+
+# Detection also needs the mods file exactly as the installer writes it (the running-app guard).
+$modsRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('wau-detect-mods-' + [guid]::NewGuid().ToString('n'))
+try {
+    if (Test-RelianWauMods -InstallLocation $modsRoot) { Fail 'missing mods passed detection' }
+    & $script:SetWauMods -InstallLocation $modsRoot
+    if (-not (Test-RelianWauMods -InstallLocation $modsRoot)) { Fail 'the mods the installer writes failed detection' }
+    Add-Content -LiteralPath (Join-Path $modsRoot 'mods_WAU-mods.ps1') -Value '# edited'
+    if (Test-RelianWauMods -InstallLocation $modsRoot) { Fail 'edited mods passed detection' }
+} finally {
+    Remove-Item -LiteralPath $modsRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # No home-directory path in committed files. Client names are not listed here, because a list of them is client data.
 $banned = @(('/' + 'home' + '/'))

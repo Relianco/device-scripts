@@ -8,7 +8,7 @@ Set-StrictMode -Version Latest
 
 $WauPinVersion = '2.12.0'
 $WauListUrl = 'https://relianpub.blob.core.windows.net/pub/wau/broad/'
-$WauUpdatesAtTime = '12:00:00'
+$WauUpdatesAtTime = '01:00:00'
 $WauAvdUpdatesAtTime = '02:00:00'
 
 function Convert-RelianWauVersionText {
@@ -28,7 +28,7 @@ function Convert-RelianWauVersionText {
     return [version]('{0}.{1}.{2}.{3}' -f $parsed.Major, $parsed.Minor, $build, $revision)
 }
 
-# The registry values the package installs. Multi-session (EditionID ServerRdsh) does not run at logon.
+# The registry values the package installs. Never at logon; multi-session (EditionID ServerRdsh) has its own time.
 function Get-RelianWauExpectedConfig {
     param(
         [string]$EditionId,
@@ -37,11 +37,10 @@ function Get-RelianWauExpectedConfig {
         [string]$AvdUpdatesAtTime
     )
     $multiSession = $EditionId -ceq 'ServerRdsh'
-    $atLogon = '1'
+    $atLogon = '0'
     $time = $UpdatesAtTime
     $delay = '02:00'
     if ($multiSession) {
-        $atLogon = '0'
         $time = $AvdUpdatesAtTime
         $delay = '00:30'
     }
@@ -124,6 +123,26 @@ function Read-RelianWauRegistryValues {
     }
 }
 
+# mods\_WAU-mods.ps1 exactly as the package installer writes it (sha256 of its LF text).
+$WauModsSha256 = '9ddce96779963a0b93347676a64cd9dcd68ddcdcd01ed1cde9358d0e47cd2bd4'
+function Test-RelianWauMods {
+    param([string]$InstallLocation)
+    if ([string]::IsNullOrWhiteSpace($InstallLocation)) {
+        return $false
+    }
+    $path = Join-Path (Join-Path $InstallLocation 'mods') '_WAU-mods.ps1'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return $false
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = ([System.BitConverter]::ToString($sha.ComputeHash([System.IO.File]::ReadAllBytes($path)))).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha.Dispose()
+    }
+    return $hash -ceq $WauModsSha256
+}
+
 if ($env:RELIAN_DEPLOY_TEST -eq '1') {
     return
 }
@@ -135,7 +154,11 @@ try {
     if ($null -ne $edition -and $edition.ContainsKey('EditionID')) {
         $editionId = [string]$edition['EditionID']
     }
-    $present = [bool](Test-RelianWauInstalled -Installed (Read-RelianWauRegistryValues -SubKey 'SOFTWARE\Romanitho\Winget-AutoUpdate') -Policy (Read-RelianWauRegistryValues -SubKey 'SOFTWARE\Policies\Romanitho\Winget-AutoUpdate') -EditionId $editionId)
+    $installed = Read-RelianWauRegistryValues -SubKey 'SOFTWARE\Romanitho\Winget-AutoUpdate'
+    $present = [bool](Test-RelianWauInstalled -Installed $installed -Policy (Read-RelianWauRegistryValues -SubKey 'SOFTWARE\Policies\Romanitho\Winget-AutoUpdate') -EditionId $editionId)
+    if ($present) {
+        $present = [bool](Test-RelianWauMods -InstallLocation ([string]$installed['InstallLocation']))
+    }
 } catch {
     $present = $false
 }
