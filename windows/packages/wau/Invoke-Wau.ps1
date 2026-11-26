@@ -633,8 +633,8 @@ $script:WauModsText = @'
 # use, and never close a running app.
 #  1. After hours: only 00:00-04:59 local time. WAU's task (daily 01:00 plus up to 2 h random delay) is set to start
 #     a missed run when the PC comes back (StartWhenAvailable), so a morning catch-up run stops here.
-#  2. Not in use: a session with a desktop (explorer) and no lock screen (LogonUI) stops the run. A disconnected
-#     session also counts as in use.
+#  2. Not in use: a session with a desktop (explorer) and no lock screen (LogonUI) stops the run. A locked or
+#     disconnected session does not stop it; its open apps are still never closed (rule 3).
 #  3. Never close an app: every listed app gets an <id>-preinstall.ps1 that makes WAU skip it while one of its
 #     processes runs, in any session. An app with no known process names is skipped while anyone is signed in.
 param([datetime]$Now = (Get-Date))
@@ -659,7 +659,7 @@ foreach ($desktop in @($procs | Where-Object { $_.ProcessName -eq 'explorer' }))
 
 # Process names per winget id (without .exe).
 $Processes = @{
-    '7zip.7zip'                    = @('7zFM', '7zG')
+    '7zip.7zip'                    = @('7zFM', '7zG', '7z')
     'Notepad++.Notepad++'          = @('notepad++')
     'VideoLAN.VLC'                 = @('vlc')
     'Zoom.Zoom'                    = @('Zoom')

@@ -70,6 +70,10 @@ try {
     if ((Invoke-Gate '2026-11-26 01:20') -cne 'Continue') { Fail 'a locked PC was stopped' }
     if (-not (Test-Skipped 'VideoLAN.VLC')) { Fail 'a running VLC was not skipped' }
     if (Test-Skipped '7zip.7zip') { Fail '7-Zip was skipped while it was not running' }
+    # The 7-Zip command line counts as 7-Zip running.
+    $global:WauFakeProcs = @((P 'explorer' 1), (P 'LogonUI' 1), (P '7z' 1))
+    if (-not (Test-Skipped '7zip.7zip')) { Fail '7-Zip updated while 7z.exe was running' }
+    $global:WauFakeProcs = @((P 'explorer' 1), (P 'LogonUI' 1), (P 'vlc' 1))
     # An app with no known process names waits for a night with nobody signed in.
     if (-not (Test-Skipped 'Some.UnknownApp')) { Fail 'an unmapped app updated while someone was signed in' }
     # Shared runtimes have no process of their own: they wait for a night with nobody signed in.
