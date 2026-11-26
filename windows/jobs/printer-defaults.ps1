@@ -371,8 +371,8 @@ function Invoke-PdUser {
     if ($bad.Count -eq 0) { return $u }
     if ($ReportOnly) { $u.status = 'drift'; return $u }
     # A printer with a job in its queue is left alone, its users' preferences too, until a later run.
-    $later = @($bad | Where-Object { $Busy -contains $_.Name })
-    foreach ($v in @($bad | Where-Object { $Busy -notcontains $_.Name })) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    $later = @($bad | Where-Object { ($Busy -contains $_.Name) -or ($Drivers.ContainsKey($_.Name) -and (& $script:PdJobCount $_.Name) -gt 0) })
+    foreach ($v in @($bad | Where-Object { $later -notcontains $_ })) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
     $u.status = $(if ($later.Count -gt 0) { 'busy' } else { 'changed' })
     return $u
 }

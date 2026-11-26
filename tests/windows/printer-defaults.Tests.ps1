@@ -139,6 +139,12 @@ Assert-Same @(Lines 'set Konica*').Count 1 'the other printer is still done'
 Assert-Same $r.Status 'busy' 'overall busy'
 Assert-Same $r.ExitCode 1 'busy exit'
 
+# A compliant printer with a job queued: its users' preferences also wait.
+Reset-Test -Printers $machine -Jobs @{ 'Copy Room' = 2 } -Loaded @('S-1-5-21-1-2-3-1009') -Values @{ 'S-1-5-21-1-2-3-1009' = @(, @('DevModePerUser', 'Copy Room', (New-DevMode 2 1))) }
+$r = Invoke-PdJob
+Assert-Same @(Lines 'delete *').Count 0 'compliant busy printer user value kept'
+Assert-Same $r.Status 'busy' 'compliant busy printer makes the run busy'
+
 # A driver that ignores Set-PrintConfiguration gets the DEVMODE write.
 Reset-Test -Printers $machine -SetIgnored -DevModeFixes
 $r = Invoke-PdJob
