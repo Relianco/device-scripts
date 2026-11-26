@@ -5,7 +5,8 @@
 # that ignores it gets the same change through its default DEVMODE. A printer with a job in its queue is not touched
 # (status busy, run again later). PDF, OneNote, XPS, fax and image printers are left alone.
 # Users: HKU\<sid>\Printers\DevModePerUser and DevModes2. A value is deleted (not rewritten) when it is not monochrome or
-# says two-sided; the printer then uses the machine default. Signed-in users are read in their loaded hive. Signed-out
+# says two-sided; the printer then uses the machine default. Deleted values are first written to
+# %ProgramData%\Relian\PrinterDefaultsBackup (SYSTEM and Administrators only); a failed backup deletes nothing. Signed-in users are read in their loaded hive. Signed-out
 # users' NTUSER.DAT is loaded under HKU\RelianPD_<sid> only when not in use, and always unloaded; a mount left by an
 # earlier run is unloaded first. A hive that will not unload fails the run.
 # Colour options (a Colour/Color name, -KeepColourPattern, or a plain queue with a "<name> BW" twin) keep colour and
@@ -142,6 +143,22 @@ $script:PdReadUserValues = {
             }
         } finally { $k.Dispose() }
     }
+}
+# Each value to be deleted, as base64, in a new SYSTEM-only JSON file. Throws on any failure, so nothing is deleted.
+# Undo: reg add "HKU\<sid>\Printers\<key>" /v "<name>" /t REG_BINARY /d <hex of data> (with the user's hive loaded).
+$script:PdBackupUserValues = {
+    param($Sid, $Values)
+    $dir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\PrinterDefaultsBackup'
+    $null = New-Item -ItemType Directory -Path $dir -Force
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+    Set-Acl -LiteralPath $dir -AclObject $acl
+    $doc = [ordered]@{ sid = $Sid; utc = [DateTime]::UtcNow.ToString('o'); values = @($Values | ForEach-Object { [ordered]@{ key = $_.Key; name = $_.Name; data = [Convert]::ToBase64String([byte[]]$_.Bytes) } }) }
+    $path = Join-Path $dir ('{0}-{1}-{2}.json' -f $Sid, [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($doc | ConvertTo-Json -Depth 4))
+    $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
+    if (@((Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json).values).Count -ne @($Values).Count) { throw 'backup read-back differs' }
 }
 $script:PdDeleteUserValue = {
     param($Root, $Key, $Name)
@@ -372,7 +389,9 @@ function Invoke-PdUser {
     if ($ReportOnly) { $u.status = 'drift'; return $u }
     # A printer with a job in its queue is left alone, its users' preferences too, until a later run.
     $later = @($bad | Where-Object { ($Busy -contains $_.Name) -or ($Drivers.ContainsKey($_.Name) -and (& $script:PdJobCount $_.Name) -gt 0) })
-    foreach ($v in @($bad | Where-Object { $later -notcontains $_ })) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    $now = @($bad | Where-Object { $later -notcontains $_ })
+    if ($now.Count -gt 0) { & $script:PdBackupUserValues $Sid $now }
+    foreach ($v in $now) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
     $u.status = $(if ($later.Count -gt 0) { 'busy' } else { 'changed' })
     return $u
 }

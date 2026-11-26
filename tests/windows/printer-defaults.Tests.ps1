@@ -90,6 +90,10 @@ $script:PdReadUserValues = { param($Root)
     @(if ($script:F.Values.ContainsKey($sid)) { $script:F.Values[$sid] | ForEach-Object { [pscustomobject]@{ Key = $_[0]; Name = $_[1]; Bytes = [byte[]]$_[2] } } })
 }
 $script:PdDeleteUserValue = { param($Root, $Key, $Name) $script:Log.Add("delete $Root $Key $Name") }
+$script:PdBackupUserValues = { param($Sid, $Values)
+    if ($script:F.ContainsKey('BackupThrows') -and $script:F.BackupThrows) { throw 'disk full' }
+    $script:Log.Add("backup $Sid " + (@($Values | ForEach-Object { $_.Name }) -join ','))
+}
 
 function Lines { param($Pattern) @($script:Log | Where-Object { $_ -like $Pattern }) }
 function Entry { param($Result, $Name) @($Result.Printers | Where-Object { $_.name -eq $Name })[0] }
@@ -173,6 +177,16 @@ Assert-Same ((@($r.Users | Where-Object { $_.sid -eq $c }))[0].status) 'in-use' 
 Assert-Same ((@($r.Users | Where-Object { $_.sid -eq $b }))[0].status) 'changed' 'signed-out user fixed'
 Assert-Same $r.ExitCode 0 'users exit'
 Assert-Same (@($script:F.Loaded) -join ',') "$a,$($a)_Classes,.DEFAULT,S-1-5-18" 'no hive left loaded'
+
+# Every value is backed up before it is deleted; a failed backup deletes nothing.
+Reset-Test -Printers $machine -Loaded @($a) -Values @{ $a = @(@('DevModePerUser', 'Front Desk', (New-DevMode 2 1)), @('DevModes2', 'Konica', (New-DevMode 1 2))) }
+$r = Invoke-PdJob
+Assert-Same (($script:Log | Where-Object { $_ -like 'backup *' -or $_ -like 'delete *' }) -join ';') "backup $a Front Desk,Konica;delete $a DevModePerUser Front Desk;delete $a DevModes2 Konica" 'backup before delete'
+Reset-Test -Printers $machine -Loaded @($a) -Values @{ $a = @(, @('DevModePerUser', 'Front Desk', (New-DevMode 2 1))) }
+$script:F.BackupThrows = $true
+$r = Invoke-PdJob
+Assert-Same @(Lines 'delete *').Count 0 'failed backup deletes nothing'
+Assert-Same $r.ExitCode 2 'failed backup fails the run'
 
 # A hive that fails to load for any reason but contention fails the run.
 Reset-Test -Printers @() -Profiles @($b) -Denied @($b)
