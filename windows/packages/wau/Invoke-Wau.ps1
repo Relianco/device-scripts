@@ -636,7 +636,8 @@ $script:WauModsText = @'
 #  2. Not in use: a session with a desktop (explorer) and no lock screen (LogonUI) stops the run. A locked or
 #     disconnected session does not stop it; its open apps are still never closed (rule 3).
 #  3. Never close an app: every listed app gets an <id>-preinstall.ps1 that makes WAU skip it while one of its
-#     processes runs, in any session. An app with no known process names is skipped while anyone is signed in.
+#     processes runs, in any session. An app with no known process names is skipped while anyone is signed in
+#     (any process in a user session beyond the sign-in screen's own).
 param([datetime]$Now = (Get-Date))
 
 function Out-RelianAbort([string]$Message) {
@@ -681,14 +682,20 @@ foreach ($id in $ids) {
         exit 0
     }
 }
+# What runs in a session at the sign-in screen with nobody signed in. Anything else there means someone is signed in.
+$SignInScreen = "'csrss', 'winlogon', 'LogonUI', 'dwm', 'fontdrvhost', 'LockApp'"
 foreach ($id in $ids) {
-    $names = @('explorer')
-    if ($Processes.ContainsKey($id)) { $names = @($Processes[$id]) }
-    $quoted = ($names | ForEach-Object { "'$_'" }) -join ', '
+    if ($Processes.ContainsKey($id)) {
+        $quoted = (@($Processes[$id]) | ForEach-Object { "'$_'" }) -join ', '
+        $test = "@(Get-Process | Where-Object { @($quoted) -contains `$_.ProcessName }).Count -gt 0"
+        $why = 'while one of its processes runs'
+    } else {
+        $test = "@(Get-Process | Where-Object { `$_.SessionId -ne 0 -and @($SignInScreen) -notcontains `$_.ProcessName }).Count -gt 0"
+        $why = 'while anyone is signed in (no known process names)'
+    }
     $body = @(
-        "# Relian: written by _WAU-mods.ps1. WAU skips $id while one of these processes runs.",
-        "`$names = @($quoted)",
-        "if (@(Get-Process | Where-Object { `$names -contains `$_.ProcessName }).Count -gt 0) { `$false } else { `$true }"
+        "# Relian: written by _WAU-mods.ps1. WAU skips $id $why.",
+        "if ($test) { `$false } else { `$true }"
     )
     Set-Content -LiteralPath (Join-Path $PSScriptRoot "$id-preinstall.ps1") -Value $body -Encoding ascii
 }

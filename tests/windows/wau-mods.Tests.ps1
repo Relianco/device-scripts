@@ -78,6 +78,13 @@ try {
     $global:WauFakeProcs = @((P 'explorer' 1), (P 'LogonUI' 1), (P 'vlc' 1))
     # An app with no known process names waits for a night with nobody signed in.
     if (-not (Test-Skipped 'Some.UnknownApp')) { Fail 'an unmapped app updated while someone was signed in' }
+    # A signed-in session without Explorer (RemoteApp, a crashed shell) still holds unmapped apps back.
+    $global:WauFakeProcs = @((P 'csrss' 1), (P 'winlogon' 1), (P 'LogonUI' 1), (P 'dwm' 1), (P 'sihost' 1))
+    if (-not (Test-Skipped 'Some.UnknownApp')) { Fail 'an unmapped app updated while a session without Explorer was signed in' }
+    # The sign-in screen alone (no one signed in) does not.
+    $global:WauFakeProcs = @((P 'svchost' 0), (P 'csrss' 1), (P 'winlogon' 1), (P 'LogonUI' 1), (P 'dwm' 1), (P 'fontdrvhost' 1))
+    if (Test-Skipped 'Some.UnknownApp') { Fail 'an unmapped app was held back by the sign-in screen alone' }
+    $global:WauFakeProcs = @((P 'explorer' 1), (P 'LogonUI' 1), (P 'vlc' 1))
     # Shared runtimes have no process of their own: they wait for a night with nobody signed in.
     if (-not (Test-Skipped 'Microsoft.VCRedist.2015+.x64')) { Fail 'the VC++ runtime updated while someone was signed in' }
 

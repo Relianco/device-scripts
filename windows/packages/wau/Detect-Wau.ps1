@@ -124,7 +124,7 @@ function Read-RelianWauRegistryValues {
 }
 
 # mods\_WAU-mods.ps1 exactly as the package installer writes it (sha256 of its LF text).
-$WauModsSha256 = 'd3561ef030ca05f865a8ff0f7fddeb9d8a5944b3eb064ebb33addbcbcbff78c1'
+$WauModsSha256 = '93bab49c4da070188f1cd86a5684a880a5acccb258d43ee92e5b468f5923f095'
 function Test-RelianWauMods {
     param([string]$InstallLocation)
     if ([string]::IsNullOrWhiteSpace($InstallLocation)) {
