@@ -16,7 +16,9 @@ function Fail {
 $env:RELIAN_DEPLOY_TEST = '1'
 . $scriptPath
 
-$root = Join-Path ([System.IO.Path]::GetTempPath()) ('wau-mods-' + [guid]::NewGuid().ToString('n'))
+# The fake install sits two levels inside a sandbox, so a file that escapes mods\ is still found and removed.
+$sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ('wau-mods-' + [guid]::NewGuid().ToString('n'))
+$root = Join-Path (Join-Path $sandbox 'a') 'install'
 New-Item -ItemType Directory -Path $root -Force | Out-Null
 try {
     # The real writer, into a fake install folder.
@@ -84,16 +86,16 @@ try {
     if ((Invoke-Gate '2026-11-26 01:20') -cne 'Abort') { Fail 'an unlocked second session was ignored' }
 
     # A list line that is not a winget id stops the run before any file is named after it.
-    Set-Content -LiteralPath (Join-Path $root 'included_apps.txt') -Value @('VideoLAN.VLC', '..\..\evil') -Encoding ascii
+    Set-Content -LiteralPath (Join-Path $root 'included_apps.txt') -Value @('VideoLAN.VLC', '..\..\evil', '../../evil') -Encoding ascii
     $global:WauFakeProcs = @()
     if ((Invoke-Gate '2026-11-26 01:20') -cne 'Abort') { Fail 'a bad list line was accepted' }
-    if (@(Get-ChildItem -LiteralPath $root -Recurse -Filter '*evil*').Count -ne 0) { Fail 'a file was named after a bad list line' }
+    if (@(Get-ChildItem -LiteralPath $sandbox -Recurse -Filter '*evil*').Count -ne 0) { Fail 'a file was named after a bad list line' }
 
     # The mods never ask WAU for a restart.
     $text = Get-Content -LiteralPath $gate -Raw
     if ($text -match 'Reboot' -or $text -match 'Restart-Computer' -or $text -match 'shutdown') { Fail 'the mods mention a restart' }
 } finally {
-    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Output 'wau-mods tests passed'
