@@ -55,7 +55,8 @@ function Format-PdConfig {
 
 function Test-PdConfigOk {
     param($Config, [switch]$KeepColour)
-    return ($KeepColour -or -not $Config.Color) -and ([string]$Config.Duplex -eq 'OneSided')
+    $ticketColour = $Config.PSObject.Properties['Ticket'] -and $Config.Ticket -and $Config.Ticket -notmatch '^(Monochrome|Grayscale)$'
+    return ($KeepColour -or (-not $Config.Color -and -not $ticketColour)) -and ([string]$Config.Duplex -eq 'OneSided')
 }
 
 # --- seams (the tests replace these)

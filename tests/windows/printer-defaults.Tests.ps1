@@ -29,7 +29,7 @@ foreach ($p in @(
         @('OneNote (Desktop)', 'Send to Microsoft OneNote 16 Driver'), @('Fax', 'Microsoft Shared Fax Driver'),
         @('Microsoft XPS Document Writer', 'Microsoft XPS Document Writer v4'),
         @('TOSHIBA e-STUDIO0000AC-1', 'TOSHIBA e-STUDIO Fax'), @('Splashtop PDF Remote Printer', 'Microsoft Print To PDF'),
-        @('PaperPort Image Printer', 'Nuance Image Printer Driver'), @('Xerox AltaLink C8055 (00:00:5E:00:53:01) (Fax)', ''))) {
+        @('PaperPort Image Printer', 'Nuance Image Printer Driver'), @('Office Copier (Fax)', ''))) {
     Assert-True (Test-PdSkipPrinter -Name $p[0] -Driver $p[1]) "skip $($p[0])"
 }
 foreach ($p in @(@('Convey', 'TOSHIBA Universal Printer 2'), @('CX3535 MFP(PCL)', 'CX3535 MFP(PCL)'), @('\\svfs\TOSHIBA Universal PS3', ''))) {
@@ -72,7 +72,7 @@ $script:PdSetDevMode = { param($Name)
 }
 $script:PdJobCount = { param($Name) if ($script:F.Jobs.ContainsKey($Name)) { $script:F.Jobs[$Name] } else { 0 } }
 $script:PdHiveNames = { @($script:F.Loaded) }
-$script:PdProfiles = { @($script:F.Profiles | ForEach-Object { [pscustomobject]@{ Sid = $_; Path = "D:\Profiles\$_" } }) }
+$script:PdProfiles = { @($script:F.Profiles | ForEach-Object { [pscustomobject]@{ Sid = $_; Path = "fixture\$_" } }) }
 $script:PdLoadHive = { param($Mount, $File)
     $sid = $Mount.Substring('RelianPD_'.Length)
     if ($script:F.InUse -contains $sid) { return $false }
@@ -205,6 +205,15 @@ Assert-Same (Entry $r 'Business Printer Colour').after 'color/OneSided' 'colour 
 Assert-Same (Entry $r 'Xerox WorkCentre 7845').status 'unchanged' 'twin already one-sided'
 Assert-Same (Entry $r 'Xerox WorkCentre 7845').keepColour 'True' 'twin flagged'
 Assert-Same ((Lines 'delete *') -join ';') "delete $x DevModePerUser Business Printer BW;delete $x DevModePerUser Xerox WorkCentre 7845" 'user: BW colour and twin two-sided deleted, colour option kept'
+
+# A driver whose Color reads false while its PrintTicket still says Color is not compliant; DEVMODE fallback runs.
+Reset-Test -Printers @(, @('Xerox Q BW', 'Xerox Global Print Driver PS', $false, 'OneSided')) -SetIgnored
+$script:F.Config['Xerox Q BW'] = @{ Color = $false; Duplex = 'OneSided'; Ticket = 'Color' }
+$script:PdSetDevMode = { param($Name) $script:Log.Add("devmode $Name"); $script:F.Config[$Name] = @{ Color = $false; Duplex = 'OneSided'; Ticket = 'Monochrome' } }
+$r = Invoke-PdJob
+Assert-Same (Entry $r 'Xerox Q BW').status 'changed' 'ticket colour is drift'
+Assert-Same @(Lines 'devmode *').Count 1 'ticket colour gets the DEVMODE write'
+Assert-Same (Entry $r 'Xerox Q BW').after 'mono/OneSided/ticket:Monochrome' 'ticket read back'
 
 # A queue that cannot be read is not changed.
 Reset-Test -Printers $machine -Jobs @{ 'Convey' = 'throw' }
