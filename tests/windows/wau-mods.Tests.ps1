@@ -92,6 +92,14 @@ try {
     $global:WauFakeProcs = @((P 'explorer' 1), (P 'LogonUI' 1), (P 'explorer' 2))
     if ((Invoke-Gate '2026-11-26 01:20') -cne 'Abort') { Fail 'an unlocked second session was ignored' }
 
+    # A per-app check that cannot be written stops the run (WAU would otherwise update that app unguarded).
+    $blocker = Join-Path $mods 'VideoLAN.VLC-preinstall.ps1'
+    Remove-Item -LiteralPath $blocker -Force
+    New-Item -ItemType Directory -Path $blocker | Out-Null
+    $global:WauFakeProcs = @()
+    if ((Invoke-Gate '2026-11-26 01:20') -cne 'Abort') { Fail 'a run went ahead although a per-app check could not be written' }
+    Remove-Item -LiteralPath $blocker -Recurse -Force
+
     # A list line that is not a winget id stops the run before any file is named after it.
     Set-Content -LiteralPath (Join-Path $root 'included_apps.txt') -Value @('VideoLAN.VLC', '..\..\evil', '../../evil') -Encoding ascii
     $global:WauFakeProcs = @()

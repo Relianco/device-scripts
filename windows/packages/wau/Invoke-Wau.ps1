@@ -699,7 +699,12 @@ foreach ($id in $ids) {
         "# Relian: written by _WAU-mods.ps1. WAU skips $id $why.",
         "if ($test) { `$false } else { `$true }"
     )
-    Set-Content -LiteralPath (Join-Path $PSScriptRoot "$id-preinstall.ps1") -Value $body -Encoding ascii
+    try {
+        Set-Content -LiteralPath (Join-Path $PSScriptRoot "$id-preinstall.ps1") -Value $body -Encoding ascii -ErrorAction Stop
+    } catch {
+        Out-RelianAbort "could not write the check for $id, waits for the next night"
+        exit 0
+    }
 }
 '@
 
