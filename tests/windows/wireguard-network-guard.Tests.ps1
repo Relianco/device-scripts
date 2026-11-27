@@ -63,7 +63,7 @@ Assert-Like $xmlAmp '*Relian &amp; Co*' 'ampersand escaped once in Task XML'
 Assert-True ($xmlAmp -notlike '*&amp;amp;*') 'ampersand is not double-escaped in Task XML'
 Assert-Like $xmlAmp '*-InstallRoot*' 'InstallRoot included in Task XML arguments'
 
-# Task settings. Priority 7 (BelowNormal) starved powershell.exe on a CPU-saturated PC (LWL-TEST-W11, 2026-11-27: start
+# Task settings. Priority 7 (BelowNormal) starved powershell.exe on a CPU-saturated test PC (2026-11-27: start
 # 53 s or stuck past 90 s, Check stuck past 90 s; at Normal 1.6-2.9 s and 9.8 s), and with Queue every later trigger
 # waited behind the starved run. Priority 4 is Normal (taskschd PriorityType). A 15-minute repeating trigger catches a
 # run that failed or an event that never came.
@@ -193,6 +193,12 @@ try {
         }
         $script:WgUntrustedDirectory = {
             param([string]$Path, [switch]$OwnerOnly)
+        }
+        $script:dirCalls = [System.Collections.Generic.List[string]]::new()
+        $script:WgNewLockedDirectory = {
+            param([string]$Path)
+            [void]$script:dirCalls.Add($Path)
+            $null = New-Item -ItemType Directory -Path $Path -Force
         }
     }
 
@@ -409,6 +415,9 @@ try {
     Assert-Same $aside.Count 1 'foreign folder set aside once'
     Assert-True (Test-Path -LiteralPath (Join-Path $aside[0].FullName 'planted.txt')) 'set-aside folder keeps its content for review'
     Assert-True (Test-Path -LiteralPath (Join-Path $plantedRoot 'config.json')) 'config.json written to the fresh folder'
+    # Born locked (SYSTEM and Administrators only), never created open and hardened afterwards: a handle opened in that
+    # window would keep its rights.
+    Assert-Same ($script:dirCalls -join ',') $plantedRoot 'fresh folder created through the locked-creation seam'
 
     # Case H3: someone recreates the folder between the move and New-Item. Its owner is not SYSTEM or Administrators, and
     # an owner cannot be forged, so Install refuses it before hardening and writes nothing into it.

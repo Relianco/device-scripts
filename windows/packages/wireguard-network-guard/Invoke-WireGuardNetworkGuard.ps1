@@ -675,14 +675,10 @@ $script:WgUntrustedDirectory = {
     }
 }
 
-$script:WgHardenDirectoryAcl = {
-    param([string]$Path)
-    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
-        return
-    }
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    $isContainer = [bool]$item.PSIsContainer
-    $acl = if ($isContainer) {
+# Protected ACL: SYSTEM and Administrators full control, Administrators owner, nothing inherited.
+function New-WgLockedAcl {
+    param([bool]$IsContainer)
+    $acl = if ($IsContainer) {
         New-Object System.Security.AccessControl.DirectorySecurity
     } else {
         New-Object System.Security.AccessControl.FileSecurity
@@ -703,7 +699,33 @@ $script:WgHardenDirectoryAcl = {
     }
     $adminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
     $acl.SetOwner($adminSid)
-    Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+    return $acl
+}
+
+$script:WgHardenDirectoryAcl = {
+    param([string]$Path)
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        return
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Set-Acl -LiteralPath $Path -AclObject (New-WgLockedAcl -IsContainer ([bool]$item.PSIsContainer)) -ErrorAction Stop
+}
+
+# Creates the install folder already locked, so there is no moment with the parent's inherited (Users) rights in which
+# someone could open a handle that outlives the hardening. If the path appeared meanwhile it is returned unchanged, and
+# the owner check after this call refuses it.
+$script:WgNewLockedDirectory = {
+    param([string]$Path)
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        $null = New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop
+        return
+    }
+    $acl = New-WgLockedAcl -IsContainer $true
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $null = [IO.Directory]::CreateDirectory($Path, $acl)
+    } else {
+        $null = [IO.FileSystemAclExtensions]::CreateDirectory($acl, $Path)
+    }
 }
 
 function Resolve-WgGatewayMac {
@@ -1137,7 +1159,7 @@ function Invoke-WgRun {
             }
         }
         if (-not (Test-Path -LiteralPath $root)) {
-            $null = New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop
+            & $script:WgNewLockedDirectory -Path $root
         }
         # Someone may have recreated the folder between the move and New-Item: refuse it before hardening.
         $why = & $script:WgUntrustedDirectory -Path $root -OwnerOnly
