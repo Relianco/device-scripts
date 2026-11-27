@@ -61,11 +61,16 @@ To prevent a false match, the guard never trusts a `Stale`, `Delay`, `Probe`, `I
 
 When you run `Install`, the package stages a copy of the script and `config.json` in `%ProgramData%\Relian\WireGuardNetworkGuard`. It removes any pre-existing target file before writing and locks both the folder and file ACLs to `SYSTEM` and `Administrators`.
 
-It then registers the scheduled task `\Relian\Relian-WireGuardNetworkGuard` as `SYSTEM` with three triggers:
+It then registers the scheduled task `\Relian\Relian-WireGuardNetworkGuard` as `SYSTEM` with four triggers:
 
 * **Boot:** Runs when Windows starts.
 * **Network change:** Runs on `Microsoft-Windows-NetworkProfile/Operational` Event IDs `10000` (connected) and `10001` (disconnected).
 * **Wake from sleep:** Runs on `Microsoft-Windows-Power-Troubleshooter` Event ID `1`.
+* **Every 15 minutes:** A backstop. It corrects the tunnel within 15 minutes when an event never fires or a run fails.
+
+The task runs at Normal priority (task priority `4`), with a 5-minute limit, and queues triggers that arrive during a run. Below Normal priority (`7`, the Task Scheduler default) starved PowerShell on a PC whose CPU was saturated by its security agents. On a test PC, PowerShell took 53 seconds just to start or was still stuck after 90 seconds, so every queued run hit the time limit.
+
+Install never reuses an install folder that it did not create (a link, another owner, or write access for anyone else). It moves that folder aside as `WireGuardNetworkGuard.old-<UTC time>` and creates a new one, because a handle opened before an ACL change keeps its rights.
 
 ### 5. Restores the VPN on uninstall
 

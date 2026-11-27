@@ -650,14 +650,35 @@ $script:WgTestTaskPresent = {
     return ($null -ne $existing)
 }
 
-$script:WgHardenDirectoryAcl = {
-    param([string]$Path)
+# Why a folder that already exists cannot be trusted, or nothing: a link, an owner other than SYSTEM or Administrators,
+# or an Allow rule (not inherit-only) giving anyone else write, delete or ACL rights. Same rule as Relian-CIPP
+# templates/intune/managed/locked-folder/common.ps1. -OwnerOnly skips the rules: a folder this run just made inherits
+# the parent's Users rights until it is hardened, but its owner is already ours and nobody can forge one.
+$script:WgUntrustedDirectory = {
+    param([string]$Path, [switch]$OwnerOnly)
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         return
     }
+    $trusted = @('S-1-5-18', 'S-1-5-32-544')
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
-    $isContainer = [bool]$item.PSIsContainer
-    $acl = if ($isContainer) {
+    if (([int64]$item.Attributes -band [int64][IO.FileAttributes]::ReparsePoint) -ne 0) { return "$Path is a link" }
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($trusted -notcontains $owner) { return "$Path is owned by $owner" }
+    if ($OwnerOnly) { return }
+    $rights = [System.Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($r.AccessControlType -eq 'Allow' -and -not ($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            $trusted -notcontains $r.IdentityReference.Value -and ($r.FileSystemRights -band $rights)) {
+            return "$Path gives $($r.IdentityReference.Value) $($r.FileSystemRights)"
+        }
+    }
+}
+
+# Protected ACL: SYSTEM and Administrators full control, Administrators owner, nothing inherited.
+function New-WgLockedAcl {
+    param([bool]$IsContainer)
+    $acl = if ($IsContainer) {
         New-Object System.Security.AccessControl.DirectorySecurity
     } else {
         New-Object System.Security.AccessControl.FileSecurity
@@ -678,7 +699,33 @@ $script:WgHardenDirectoryAcl = {
     }
     $adminSid = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
     $acl.SetOwner($adminSid)
-    Set-Acl -LiteralPath $Path -AclObject $acl -ErrorAction Stop
+    return $acl
+}
+
+$script:WgHardenDirectoryAcl = {
+    param([string]$Path)
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        return
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    Set-Acl -LiteralPath $Path -AclObject (New-WgLockedAcl -IsContainer ([bool]$item.PSIsContainer)) -ErrorAction Stop
+}
+
+# Creates the install folder already locked, so there is no moment with the parent's inherited (Users) rights in which
+# someone could open a handle that outlives the hardening. If the path appeared meanwhile it is returned unchanged, and
+# the owner check after this call refuses it.
+$script:WgNewLockedDirectory = {
+    param([string]$Path)
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        $null = New-Item -ItemType Directory -Path $Path -Force -ErrorAction Stop
+        return
+    }
+    $acl = New-WgLockedAcl -IsContainer $true
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        $null = [IO.Directory]::CreateDirectory($Path, $acl)
+    } else {
+        $null = [IO.FileSystemAclExtensions]::CreateDirectory($acl, $Path)
+    }
 }
 
 function Resolve-WgGatewayMac {
@@ -856,6 +903,14 @@ function New-WgTaskXml {
     <Description>Stops WireGuardTunnel services when connected to a trusted office network and starts them on external networks.</Description>
   </RegistrationInfo>
   <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
     <BootTrigger>
       <Enabled>true</Enabled>
     </BootTrigger>
@@ -890,8 +945,8 @@ function New-WgTaskXml {
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <Priority>4</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -1095,8 +1150,21 @@ function Invoke-WgRun {
         if (-not (Test-WgNoReparsePoint -Path $root)) {
             throw "refusing reparse point at $root"
         }
+        if (Test-Path -LiteralPath $root) {
+            # Never re-permission a folder someone else made: a handle opened before the ACL change keeps its rights.
+            $why = & $script:WgUntrustedDirectory -Path $root
+            if ($why) {
+                Write-WgStatus "setting aside untrusted install folder: $why" 'WARN'
+                [IO.Directory]::Move($root, "$root.old-$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))")
+            }
+        }
         if (-not (Test-Path -LiteralPath $root)) {
-            $null = New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop
+            & $script:WgNewLockedDirectory -Path $root
+        }
+        # Someone may have recreated the folder between the move and New-Item: refuse it before hardening.
+        $why = & $script:WgUntrustedDirectory -Path $root -OwnerOnly
+        if ($why) {
+            throw "refusing install folder: $why"
         }
         & $script:WgHardenDirectoryAcl -Path $root
 
