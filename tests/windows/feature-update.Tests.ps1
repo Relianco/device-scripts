@@ -223,6 +223,23 @@ Assert-Like (Get-FurVerdict $r) 'disk space (appraiser)*' 'appraiser disk'
 $r = New-Record; $r.hw.tpmVersion = '1.2'
 Assert-Like (Get-FurVerdict $r) 'hardware ineligible (TPM 1.2)*' 'tpm 1.2'
 
+# Windows 11 bar (https://learn.microsoft.com/windows/whats-new/windows-11-requirements): UEFI + TPM 2.0.
+# Secure Boot CAPABLE is enough; Secure Boot off is a note, not a hold.
+$r = New-Record; $r.hw.uefi = $true; $r.hw.tpmReady = $true; $r.hw.secureBoot = $false
+Assert-Same (Get-FurVerdict $r) 'not offered by WU; note: Secure Boot off (UEFI + TPM 2.0 is the bar, not a hold)' 'uefi tpm2 secure boot off'
+$r.wuSearch.featureOffered = $true
+Assert-Same (Get-FurVerdict $r) 'ok/offered; note: Secure Boot off (UEFI + TPM 2.0 is the bar, not a hold)' 'offered, secure boot off'
+$r = New-Record; $r.hw.uefi = $true; $r.hw.tpmReady = $true; $r.hw.secureBoot = $true
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'secure boot on, no note'
+
+# Legacy BIOS boot is a hard hold (needs MBR2GPT); so is a TPM that is present but not ready.
+$r = New-Record; $r.hw.uefi = $false; $r.hw.tpmReady = $true
+Assert-Like (Get-FurVerdict $r) 'hardware ineligible (legacy BIOS boot, MBR2GPT needed)*' 'legacy bios'
+$r = New-Record; $r.hw.uefi = $true; $r.hw.tpmReady = $false
+Assert-Like (Get-FurVerdict $r) 'hardware ineligible (TPM not ready)*' 'tpm not ready'
+$r = New-Record; $r.hw.uefi = $null; $r.hw.tpmReady = $true; $r.hw.secureBoot = $null
+Assert-Same (Get-FurVerdict $r) 'not offered by WU' 'boot mode unknown is not a hold'
+
 # Search failure, and several reasons joined in order.
 $r = New-Record; $r.wuSearch.error = 'timeout after 150 s'
 Assert-Same (Get-FurVerdict $r) 'WU search failed (timeout after 150 s)' 'search failed'
