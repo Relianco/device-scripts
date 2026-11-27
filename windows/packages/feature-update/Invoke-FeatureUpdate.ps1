@@ -27,6 +27,11 @@
     Install, Update, Repair and Reinstall all run the check (and the fix when
     Fix is "true"). Uninstall changes nothing and exits 0: nothing was installed.
 
+    Hardware bar is Microsoft's Windows 11 requirement
+    (https://learn.microsoft.com/windows/whats-new/windows-11-requirements): UEFI boot and
+    TPM 2.0 present and ready. Legacy BIOS boot (needs MBR2GPT) and no or unready TPM 2.0
+    are holds. Secure Boot off on a UEFI PC is only a "note:" in the verdict.
+
     The result is one line of compact JSON, printed last on stdout, with a
     short "verdict". The package writes no RMM field: the caller reads stdout and
     the exit code.
@@ -107,6 +112,9 @@ function Get-FurVerdict {
     if ($hw) {
         if ($hw.tpmPresent -eq $false) { $reasons.Add("hardware ineligible (no TPM)") }
         elseif ($hw.tpmVersion -and "$($hw.tpmVersion)" -notmatch '^2') { $reasons.Add("hardware ineligible (TPM $($hw.tpmVersion))") }
+        elseif ((Test-Has $hw 'tpmReady') -and $hw.tpmReady -eq $false) { $reasons.Add("hardware ineligible (TPM not ready)") }
+        # The Windows 11 bar is UEFI + TPM 2.0. Secure Boot capable is enough; off is only a note below.
+        if ((Test-Has $hw 'uefi') -and $hw.uefi -eq $false) { $reasons.Add("hardware ineligible (legacy BIOS boot, MBR2GPT needed)") }
         if ($null -ne $hw.freeGB -and [double]$hw.freeGB -lt 20) { $reasons.Add("disk space ($($hw.freeGB) GB free)") }
     }
 
@@ -222,6 +230,7 @@ function Get-FurVerdict {
         elseif ($search.error) { $reasons.Add("WU search failed ($($search.error))") }
         else { $reasons.Add("not offered by WU") }
     }
+    if ($hw -and (Test-Has $hw 'uefi') -and $hw.uefi -eq $true -and (Test-Has $hw 'secureBoot') -and $hw.secureBoot -eq $false) { $reasons.Add("note: Secure Boot off (UEFI + TPM 2.0 is the bar, not a hold)") }
     return ($reasons -join '; ')
 }
 
@@ -386,7 +395,12 @@ function Get-HardwareInfo {
             $hw.tpmReady = [bool]($tpm.IsEnabled_InitialValue -and $tpm.IsActivated_InitialValue)
         } else { $hw.tpmPresent = $false }
     } catch { $hw.tpmPresent = $null; $hw.tpmError = Limit-Text "$_" 80 }
-    try { $hw.secureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction Stop) } catch { $hw.secureBoot = $null }
+    # Confirm-SecureBootUEFI answers on UEFI (true or false) and throws "not supported on this platform" on legacy BIOS.
+    try { $hw.secureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction Stop); $hw.uefi = $true }
+    catch {
+        $hw.secureBoot = $null
+        $hw.uefi = if ("$_" -match 'not supported on this platform') { $false } else { $null }
+    }
     try { $hw.cpu = Limit-Text ((Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).Name) 80 } catch { }
     try { $hw.ramGB = [math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB, 1) } catch { }
     try {
