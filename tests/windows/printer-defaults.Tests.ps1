@@ -287,13 +287,16 @@ Assert-Same (Get-PdDetectExit $r) 0 'detect: unreadable queue or hive alone does
 $script:PdGetPrinters = { throw 'spooler stopped' }
 Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: a job-level error is never compliant'
 
-# The whole script with -Detect on a machine with no print cmdlets (this test host): job error, exit 1, one JSON line.
-$env:RELIAN_DEPLOY_TEST = ''
-$out = @(& pwsh -NoProfile -File $modulePath -Detect 2>&1)
-$code = $LASTEXITCODE
-$env:RELIAN_DEPLOY_TEST = '1'
-Assert-Same $code 1 'script -Detect exit with no spooler'
-Assert-Same (($out[-1] | ConvertFrom-Json).mode) 'report' 'script -Detect changes nothing'
+# The whole script with -Detect where there are no print cmdlets (Linux CI): job error, exit 1, one JSON line. Skipped
+# where Get-Printer exists: the child would read that host's real printers and user hives, not a fixed failure.
+if (-not (Get-Command Get-Printer -ErrorAction SilentlyContinue)) {
+    $env:RELIAN_DEPLOY_TEST = ''
+    $out = @(& pwsh -NoProfile -File $modulePath -Detect 2>&1)
+    $code = $LASTEXITCODE
+    $env:RELIAN_DEPLOY_TEST = '1'
+    Assert-Same $code 1 'script -Detect exit with no spooler'
+    Assert-Same (($out[-1] | ConvertFrom-Json).mode) 'report' 'script -Detect changes nothing'
+}
 
 # One JSON line.
 $line = ConvertTo-PdJobLine $r

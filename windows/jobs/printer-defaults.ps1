@@ -405,6 +405,7 @@ function Invoke-PdUser {
         $b = [byte[]]$v.Bytes
         if ($b.Length -ge 96 -and (Test-PdKeepColour -Name $v.Name -AllNames $all) -and ([BitConverter]::ToUInt32($b, 72) -band 0x800) -and [BitConverter]::ToInt16($b, 92) -eq 2) {
             $b = [byte[]]$b.Clone(); [Array]::Copy([BitConverter]::GetBytes([int16]1), 0, $b, 94, 2)
+            [Array]::Copy([BitConverter]::GetBytes([uint32]([BitConverter]::ToUInt32($b, 72) -bor 0x1000)), 0, $b, 72, 4)  # DM_DUPLEX, so dmDuplex counts
             & $script:PdWriteUserValue $Root $v.Key $v.Name $b
         } else { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
     }
