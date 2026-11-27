@@ -63,6 +63,21 @@ Assert-Like $xmlAmp '*Relian &amp; Co*' 'ampersand escaped once in Task XML'
 Assert-True ($xmlAmp -notlike '*&amp;amp;*') 'ampersand is not double-escaped in Task XML'
 Assert-Like $xmlAmp '*-InstallRoot*' 'InstallRoot included in Task XML arguments'
 
+# Task settings. Priority 7 (BelowNormal) starved powershell.exe on a CPU-saturated PC (LWL-TEST-W11, 2026-11-27: start
+# 53 s or stuck past 90 s, Check stuck past 90 s; at Normal 1.6-2.9 s and 9.8 s), and with Queue every later trigger
+# waited behind the starved run. Priority 4 is Normal (taskschd PriorityType). A 15-minute repeating trigger catches a
+# run that failed or an event that never came.
+$taskDoc = [xml](New-WgTaskXml -ScriptPath 'C:\ProgramData\Relian\WireGuardNetworkGuard\Invoke-WireGuardNetworkGuard.ps1' -InstallRoot 'C:\ProgramData\Relian\WireGuardNetworkGuard')
+$tns = New-Object System.Xml.XmlNamespaceManager($taskDoc.NameTable)
+$tns.AddNamespace('t', 'http://schemas.microsoft.com/windows/2004/02/mit/task')
+Assert-Same $taskDoc.SelectSingleNode('//t:Settings/t:Priority', $tns).InnerText '4' 'task runs at Normal priority (4)'
+Assert-Same $taskDoc.SelectSingleNode('//t:Settings/t:ExecutionTimeLimit', $tns).InnerText 'PT5M' 'task time limit is 5 minutes'
+Assert-Same $taskDoc.SelectSingleNode('//t:Settings/t:MultipleInstancesPolicy', $tns).InnerText 'Queue' 'queued triggers still run after the current one'
+Assert-Same $taskDoc.SelectSingleNode('//t:Triggers/t:TimeTrigger/t:Repetition/t:Interval', $tns).InnerText 'PT15M' 'backstop trigger repeats every 15 minutes'
+Assert-True ($null -eq $taskDoc.SelectSingleNode('//t:Triggers/t:TimeTrigger/t:Repetition/t:Duration', $tns)) 'backstop repeats indefinitely (no Duration)'
+Assert-Same @($taskDoc.SelectNodes('//t:Triggers/t:EventTrigger', $tns)).Count 2 'network and wake event triggers kept'
+Assert-True ($null -ne $taskDoc.SelectSingleNode('//t:Triggers/t:BootTrigger', $tns)) 'boot trigger kept'
+
 # Inline IP=MAC and shared TrustedGatewayMacs parsing.
 $rulesInline = @(ConvertFrom-WgGatewayRules -TrustedGateways '192.0.2.1=00:11:22:33:44:55,198.51.100.1=00-11-22-33-44-55|00-11-22-33-44-56')
 Assert-Same $rulesInline.Count 2 'two inline gateway rules parsed'
@@ -174,6 +189,9 @@ try {
             return $script:fakeTasks.ContainsKey($TaskName)
         }
         $script:WgHardenDirectoryAcl = {
+            param([string]$Path)
+        }
+        $script:WgUntrustedDirectory = {
             param([string]$Path)
         }
     }
@@ -371,6 +389,26 @@ try {
     }
     $resDelay = Invoke-WgRun -Options $optsDeployTypeCheck
     Assert-Same $resDelay.record.onTrustedNetwork $false 'Neighbor remaining in Delay state after probe is not trusted'
+
+    # Case H2: an install folder that someone else made (a user can create folders under ProgramData) is set aside, never
+    # re-permissioned in place: a handle opened before the ACL change keeps its rights, so its maker could later swap the
+    # script the SYSTEM task runs. The new folder is created fresh.
+    Reset-WgFake
+    $plantedRoot = Join-Path $tmpRoot 'PlantedRoot'
+    $null = New-Item -ItemType Directory -Path $plantedRoot -Force
+    Set-Content -LiteralPath (Join-Path $plantedRoot 'planted.txt') -Value 'x'
+    $script:WgUntrustedDirectory = {
+        param([string]$Path)
+        if (Test-Path -LiteralPath (Join-Path $Path 'planted.txt')) { return "$Path is owned by S-1-5-21-1-2-3-1001" }
+    }
+    $optsPlanted = Get-WgOptions -Action 'Install' -TrustedGateways '192.0.2.25=00-11-22-33-44-55' -InstallRoot $plantedRoot -SourceScriptPath $fakeSourceScript
+    $resPlanted = Invoke-WgRun -Options $optsPlanted
+    Assert-Same $resPlanted.exitCode 0 'Install over a foreign folder exits 0'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $plantedRoot 'planted.txt'))) 'foreign folder is not reused'
+    $aside = @(Get-ChildItem -LiteralPath $tmpRoot -Directory | Where-Object { $_.Name -like 'PlantedRoot.old-*' })
+    Assert-Same $aside.Count 1 'foreign folder set aside once'
+    Assert-True (Test-Path -LiteralPath (Join-Path $aside[0].FullName 'planted.txt')) 'set-aside folder keeps its content for review'
+    Assert-True (Test-Path -LiteralPath (Join-Path $plantedRoot 'config.json')) 'config.json written to the fresh folder'
 
     # Case I: Real child process execution of Uninstall on an empty InstallRoot with RELIAN_DEPLOY_TEST unset emits valid JSON on stdout and exits 0.
     Remove-Item Env:\RELIAN_DEPLOY_TEST -ErrorAction SilentlyContinue

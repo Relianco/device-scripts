@@ -650,6 +650,29 @@ $script:WgTestTaskPresent = {
     return ($null -ne $existing)
 }
 
+# Why a folder that already exists cannot be trusted, or nothing: a link, an owner other than SYSTEM or Administrators,
+# or an Allow rule (not inherit-only) giving anyone else write, delete or ACL rights. Same rule as Relian-CIPP
+# templates/intune/managed/locked-folder/common.ps1.
+$script:WgUntrustedDirectory = {
+    param([string]$Path)
+    if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
+        return
+    }
+    $trusted = @('S-1-5-18', 'S-1-5-32-544')
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if (([int64]$item.Attributes -band [int64][IO.FileAttributes]::ReparsePoint) -ne 0) { return "$Path is a link" }
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($trusted -notcontains $owner) { return "$Path is owned by $owner" }
+    $rights = [System.Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+    foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($r.AccessControlType -eq 'Allow' -and -not ($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -and
+            $trusted -notcontains $r.IdentityReference.Value -and ($r.FileSystemRights -band $rights)) {
+            return "$Path gives $($r.IdentityReference.Value) $($r.FileSystemRights)"
+        }
+    }
+}
+
 $script:WgHardenDirectoryAcl = {
     param([string]$Path)
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
@@ -856,6 +879,14 @@ function New-WgTaskXml {
     <Description>Stops WireGuardTunnel services when connected to a trusted office network and starts them on external networks.</Description>
   </RegistrationInfo>
   <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT15M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
     <BootTrigger>
       <Enabled>true</Enabled>
     </BootTrigger>
@@ -890,8 +921,8 @@ function New-WgTaskXml {
     <Hidden>false</Hidden>
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
-    <ExecutionTimeLimit>PT2M</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>
+    <Priority>4</Priority>
   </Settings>
   <Actions Context="Author">
     <Exec>
@@ -1094,6 +1125,14 @@ function Invoke-WgRun {
     if ($mode -eq 'install') {
         if (-not (Test-WgNoReparsePoint -Path $root)) {
             throw "refusing reparse point at $root"
+        }
+        if (Test-Path -LiteralPath $root) {
+            # Never re-permission a folder someone else made: a handle opened before the ACL change keeps its rights.
+            $why = & $script:WgUntrustedDirectory -Path $root
+            if ($why) {
+                Write-WgStatus "setting aside untrusted install folder: $why" 'WARN'
+                [IO.Directory]::Move($root, "$root.old-$((Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss'))")
+            }
         }
         if (-not (Test-Path -LiteralPath $root)) {
             $null = New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop
