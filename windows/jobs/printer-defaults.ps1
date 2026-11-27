@@ -143,7 +143,8 @@ $script:PdReadUserValues = {
         try {
             foreach ($n in @($k.GetValueNames())) {
                 $v = $k.GetValue($n)
-                [pscustomobject]@{ Key = $key; Name = $n; Bytes = $(if ($v -is [byte[]]) { $v } else { $null }) }
+                $bytes = $null; if ($v -is [byte[]]) { $bytes = $v }  # plain assignment: a $(...) would unroll an empty REG_BINARY to $null
+                [pscustomobject]@{ Key = $key; Name = $n; Bytes = $bytes }
             }
         } finally { $k.Dispose() }
     }
