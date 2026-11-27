@@ -192,7 +192,7 @@ try {
             param([string]$Path)
         }
         $script:WgUntrustedDirectory = {
-            param([string]$Path)
+            param([string]$Path, [switch]$OwnerOnly)
         }
     }
 
@@ -398,7 +398,7 @@ try {
     $null = New-Item -ItemType Directory -Path $plantedRoot -Force
     Set-Content -LiteralPath (Join-Path $plantedRoot 'planted.txt') -Value 'x'
     $script:WgUntrustedDirectory = {
-        param([string]$Path)
+        param([string]$Path, [switch]$OwnerOnly)
         if (Test-Path -LiteralPath (Join-Path $Path 'planted.txt')) { return "$Path is owned by S-1-5-21-1-2-3-1001" }
     }
     $optsPlanted = Get-WgOptions -Action 'Install' -TrustedGateways '192.0.2.25=00-11-22-33-44-55' -InstallRoot $plantedRoot -SourceScriptPath $fakeSourceScript
@@ -409,6 +409,22 @@ try {
     Assert-Same $aside.Count 1 'foreign folder set aside once'
     Assert-True (Test-Path -LiteralPath (Join-Path $aside[0].FullName 'planted.txt')) 'set-aside folder keeps its content for review'
     Assert-True (Test-Path -LiteralPath (Join-Path $plantedRoot 'config.json')) 'config.json written to the fresh folder'
+
+    # Case H3: someone recreates the folder between the move and New-Item. Its owner is not SYSTEM or Administrators, and
+    # an owner cannot be forged, so Install refuses it before hardening and writes nothing into it.
+    Reset-WgFake
+    $racedRoot = Join-Path $tmpRoot 'RacedRoot'
+    $null = New-Item -ItemType Directory -Path $racedRoot -Force
+    $script:WgUntrustedDirectory = {
+        param([string]$Path, [switch]$OwnerOnly)
+        return "$Path is owned by S-1-5-21-1-2-3-1001"
+    }
+    $optsRaced = Get-WgOptions -Action 'Install' -TrustedGateways '192.0.2.25=00-11-22-33-44-55' -InstallRoot $racedRoot -SourceScriptPath $fakeSourceScript
+    $racedThrew = $false
+    try { $resRaced = Invoke-WgRun -Options $optsRaced } catch { $racedThrew = $true }
+    Assert-True $racedThrew 'Install refuses a folder whose owner is still foreign after the move'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $racedRoot 'config.json'))) 'nothing written into a foreign folder'
+    Assert-Same $script:taskCalls.Count 0 'no task registered for a foreign folder'
 
     # Case I: Real child process execution of Uninstall on an empty InstallRoot with RELIAN_DEPLOY_TEST unset emits valid JSON on stdout and exits 0.
     Remove-Item Env:\RELIAN_DEPLOY_TEST -ErrorAction SilentlyContinue

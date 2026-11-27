@@ -652,9 +652,10 @@ $script:WgTestTaskPresent = {
 
 # Why a folder that already exists cannot be trusted, or nothing: a link, an owner other than SYSTEM or Administrators,
 # or an Allow rule (not inherit-only) giving anyone else write, delete or ACL rights. Same rule as Relian-CIPP
-# templates/intune/managed/locked-folder/common.ps1.
+# templates/intune/managed/locked-folder/common.ps1. -OwnerOnly skips the rules: a folder this run just made inherits
+# the parent's Users rights until it is hardened, but its owner is already ours and nobody can forge one.
 $script:WgUntrustedDirectory = {
-    param([string]$Path)
+    param([string]$Path, [switch]$OwnerOnly)
     if ($PSVersionTable.PSEdition -eq 'Core' -and -not $IsWindows) {
         return
     }
@@ -664,6 +665,7 @@ $script:WgUntrustedDirectory = {
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
     if ($trusted -notcontains $owner) { return "$Path is owned by $owner" }
+    if ($OwnerOnly) { return }
     $rights = [System.Security.AccessControl.FileSystemRights]'Write, Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
     foreach ($r in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
         if ($r.AccessControlType -eq 'Allow' -and -not ($r.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -and
@@ -1136,6 +1138,11 @@ function Invoke-WgRun {
         }
         if (-not (Test-Path -LiteralPath $root)) {
             $null = New-Item -ItemType Directory -Path $root -Force -ErrorAction Stop
+        }
+        # Someone may have recreated the folder between the move and New-Item: refuse it before hardening.
+        $why = & $script:WgUntrustedDirectory -Path $root -OwnerOnly
+        if ($why) {
+            throw "refusing install folder: $why"
         }
         & $script:WgHardenDirectoryAcl -Path $root
 
