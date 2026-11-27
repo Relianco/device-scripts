@@ -1,0 +1,6 @@
+{
+  "name": "Group Policy evidence report",
+  "kind": "diagnostic",
+  "installsSoftware": false,
+  "packageArguments": "Optional: {\"Section\":\"Summary\"} (default), Gpos (with optional \"Offset\" from the previous nextOffset), Policy, Store, Profiles, Dc, Rsop (computer scope; add \"RsopUser\":\"<sAMAccountName>\" for that user's scope), or {\"Gpo\":\"<name or GUID>\"} for one GPO's settings, folder redirection and script names. Base64 in PackageArguments. Read-only stdout JSON, at most 8000 UTF-8 bytes; cpassword values are counted, never printed; no custom field writes."
+}

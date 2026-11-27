@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "edge-startup-boost-off",
+  "title": "Turn off Edge startup boost",
+  "description": "Sets StartupBoostEnabled to 0.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Policies\\Microsoft\\Edge",
+      "name": "StartupBoostEnabled",
+      "type": "dword",
+      "value": 0
+    }
+  ]
+}

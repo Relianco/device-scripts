@@ -1,0 +1,14 @@
+{
+  "name": "Adobe Acrobat Reader",
+  "channel": "Continuous",
+  "platform": "Windows",
+  "arch": "x64",
+  "language": "en_US",
+  "version": "26.2.22031.0",
+  "file": "AcroRdrDCx642600222031_en_US.exe",
+  "url": "https://ardownload2.adobe.com/pub/adobe/acrobat/win/AcrobatDC/2600222031/AcroRdrDCx642600222031_en_US.exe",
+  "sha256": "86e98feb3f2afa66656a85cbbc6fb71d6a3217ebf8fdc21f4d1a54d21cb45028",
+  "size": 789419184,
+  "hashAlgorithm": "SHA256",
+  "source": "https://ardownload2.adobe.com/pub/adobe/acrobat/win/AcrobatDC/"
+}

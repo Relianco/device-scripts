@@ -1,0 +1,13 @@
+{
+  "name": "Microsoft Edge",
+  "channel": "Stable",
+  "platform": "Windows",
+  "arch": "x64",
+  "version": "155.0.4283.62",
+  "file": "MicrosoftEdgeEnterpriseX64.msi",
+  "url": "https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/bf3e7059-ee35-457f-946e-42963960692d/MicrosoftEdgeEnterpriseX64.msi",
+  "sha256": "20119979eb1670f670d38c093fd1c61f5a91d880c473f8614825ce9aef35f68a",
+  "size": 214589440,
+  "hashAlgorithm": "SHA256",
+  "source": "https://edgeupdates.microsoft.com/api/products"
+}

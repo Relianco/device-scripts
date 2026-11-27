@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "id": "avd-logon-timeouts",
+  "title": "Shorten virtual desktop logon waits",
+  "description": "Sets the shell timeout to 30000 milliseconds, the first logon and desktop switch timeouts to 30 seconds, and CleanupInvalidSessions to 1. The computer is not restarted. There is no prompt.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer",
+      "name": "AppReadinessPreShellTimeoutMs",
+      "type": "dword",
+      "value": 30000
+    },
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+      "name": "FirstLogonTimeout",
+      "type": "dword",
+      "value": 30
+    },
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+      "name": "DelayedDesktopSwitchTimeout",
+      "type": "dword",
+      "value": 30
+    },
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\FSLogix\\Apps",
+      "name": "CleanupInvalidSessions",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}

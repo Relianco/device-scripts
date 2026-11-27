@@ -1,0 +1,9 @@
+{
+  "name": "Notepad++",
+  "arch": "x64",
+  "sourceUrl": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.8.1/npp.8.9.8.1.Installer.x64.exe",
+  "file": "npp.8.9.8.1.Installer.x64.exe",
+  "sha256": "26f3bcced788fadbac4e7e577b430ea2ce6060cf3bcad993ef4612ecd7d743da",
+  "size": 6963432,
+  "version": "8.9.8.1"
+}

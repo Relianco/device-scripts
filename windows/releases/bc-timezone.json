@@ -1,0 +1,6 @@
+{
+  "name": "Time zone (default BC permanent UTC-7)",
+  "kind": "check",
+  "installsSoftware": false,
+  "packageArguments": "Optional. {\"Fix\":\"true\"} (base64 eyJGaXgiOiJ0cnVlIn0=) switches a device on FromZone (default Pacific Standard Time) to TargetZone (default British Columbia Standard Time), then restarts installed Comet services (backup.delegate, backup.elevator). Exit 3 when TargetZone is missing (needs the cumulative update); FallbackZone (for example Yukon Standard Time) opts in to a fallback instead. Other zones are left alone. Without Fix the run is read-only."
+}

@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian Winget-AutoUpdate",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Wau.ps1",
+  "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Wau.ps1 -DeploymentType Install -Action Install -PinVersion 2.12.0 -ListUrl https://relianpub.blob.core.windows.net/pub/wau/broad/ -UpdatesAtTime 01:00:00 -AvdUpdatesAtTime 02:00:00",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Wau.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 2.12.0",
+  "detectionScript": "Detect-Wau.ps1",
+  "detectReplace": []
+}

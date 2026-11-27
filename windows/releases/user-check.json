@@ -1,0 +1,8 @@
+{
+  "name": "User check",
+  "kind": "identity",
+  "installsSoftware": false,
+  "signInUrl": "https://login.microsoftonline.com/",
+  "pagePin": "microsoft-sign-in",
+  "codePin": "Pass a 4 to 8 character code of letters and digits as PinVersion when the run is queued. This file does not store that code."
+}

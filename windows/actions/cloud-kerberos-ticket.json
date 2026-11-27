@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "cloud-kerberos-ticket",
+  "title": "Allow cloud Kerberos tickets",
+  "description": "Sets CloudKerberosTicketRetrievalEnabled to 1, including when a value is already present.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\Kerberos\\Parameters",
+      "name": "CloudKerberosTicketRetrievalEnabled",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}

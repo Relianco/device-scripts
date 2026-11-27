@@ -1,0 +1,146 @@
+name: PR verify
+
+# PowerShell floor for this repo. The website's pr-verify runs typecheck,
+# lint, and vitest on its own runner labels. This repo has no Node app, so
+# the floor is the pwsh suite, the reviewer unit tests, and the Linux and
+# macOS shell tests, on ubuntu-24.04.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: PowerShell tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install PowerShell
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          curl -fsSL -o /tmp/packages-microsoft-prod.deb "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb"
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y powershell librsvg2-bin
+          pwsh -NoProfile -Command 'Write-Output $PSVersionTable.PSVersion.ToString()'
+
+      - name: Run the PowerShell suite
+        run: pwsh -NoProfile -File tests/run-all.ps1
+
+      - name: Run the reviewer unit tests
+        run: node --test tests/ai-pr-review.test.mjs tests/secret-scan.test.mjs
+
+      - name: Run the Linux runner tests
+        run: bash tests/linux/run-tests.sh
+
+      - name: Run the macOS runner tests
+        run: bash tests/macos/run-tests.sh
+
+  maintenance-windows:
+    name: Windows maintenance regressions
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Run offline maintenance tests including native handles and NTFS ACLs
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File tests/windows/storage-maintenance.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/storage-maintenance-profile-report.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Aged-file deletion needs settable creation times (NTFS), under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/storage-maintenance-cleanup-tiers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/storage-maintenance-cleanup-tiers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Audit chain, atomic replace and the lock file on NTFS, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/storage-maintenance-profile-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/storage-maintenance-profile-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/update-maintenance.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/maintenance-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/maintenance-session-close.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/remediation-loader.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/windows/scansnap-update-prompts.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Read-only evidence: real registry on a Windows host, then Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/endpoint-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/endpoint-evidence.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # folder-inventory read job: a real NTFS walk with a path over 260 characters, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/folder-inventory.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/folder-inventory.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # AutoElevate hung-agent repair: Windows PowerShell 5.1 is the host on a device.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/autoelevate-hung-repair.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Windows PowerShell 5.1 is the host on Server 2016 guests.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/comet-vss-provider.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/eventlog-source.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-stale-computers.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-group-member.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-user-offboard.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/ad-user-identity.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # gpo-registry-value: the real backup-folder DACL, under Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/gpo-registry-value.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The wau package runs under Intune's Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wau-plan.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/intune-wau.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The WireGuard Remediation verifies the signed map with .NET Framework RSA under Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/wireguard-intune.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The read-only job loader: a real child killed at the timeout, under pwsh and Windows PowerShell 5.1.
+          pwsh -NoProfile -File tests/windows/read-job.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/read-job.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Component store report and repair run under Windows PowerShell 5.1 on servers.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/component-store.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/component-store-repair.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # NinjaOne runs jobs in Windows PowerShell 5.1.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/nable-agent-removal.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/reset-wazuh-enrollment.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Windows PowerShell 5.1 is what the runner uses on a device: real junctions, sharing violations, registry provider and event log.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/outlook-suggestion-sources.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # Collectors are job modules under NinjaOne's Windows PowerShell 5.1: storage-health runs real CIM through the loader.
+          powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows/collectors-piped-field.Tests.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

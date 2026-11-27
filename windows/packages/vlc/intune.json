@@ -1,0 +1,9 @@
+{
+  "displayName": "Relian VLC media player",
+  "publisher": "Relian",
+  "setupFile": "Invoke-Vlc.ps1",
+  "installCommand": "%SystemRoot%\\sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Vlc.ps1 -DeploymentType Install -Action Install -PinVersion 3.0.24",
+  "uninstallCommand": "C:\\Windows\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\Invoke-Vlc.ps1 -DeploymentType Uninstall -Action Uninstall -PinVersion 3.0.24",
+  "detectionScript": "Detect-Vlc.ps1",
+  "detectReplace": []
+}

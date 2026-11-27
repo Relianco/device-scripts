@@ -1,0 +1,11 @@
+{
+  "name": "Mozilla Firefox",
+  "arch": "win64",
+  "locale": "en-US",
+  "version": "158.0",
+  "productVersion": "158.0.0.0",
+  "sourceUrl": "https://archive.mozilla.org/pub/firefox/releases/158.0/win64/en-US/Firefox%20Setup%20158.0.msi",
+  "file": "Firefox Setup 158.0.msi",
+  "sha256": "f1c8fae86653ecae39f47c909bfec04033598dd5f9229577f8114ebc2b48176f",
+  "size": 95043584
+}

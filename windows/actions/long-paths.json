@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "long-paths",
+  "title": "Turn on long paths",
+  "description": "Sets LongPathsEnabled to 1. This does not restart the computer.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SYSTEM\\CurrentControlSet\\Control\\FileSystem",
+      "name": "LongPathsEnabled",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}

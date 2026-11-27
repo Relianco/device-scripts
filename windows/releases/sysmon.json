@@ -1,0 +1,9 @@
+{
+  "name": "Sysmon",
+  "arch": "x64",
+  "sourceUrl": "https://download.sysinternals.com/files/Sysmon.zip",
+  "file": "Sysmon.zip",
+  "sha256": "00ecf1b46aec99299d3ae0bca79dc621458bd014b20b509d7c5c8e8c8611aa54",
+  "size": 2938038,
+  "version": "15.22"
+}

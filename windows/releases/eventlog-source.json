@@ -1,0 +1,6 @@
+{
+  "name": "Event log source",
+  "kind": "configuration",
+  "installsSoftware": false,
+  "packageArguments": "Base64-encoded UTF-8 JSON object. {\"Source\":\"ExampleApp\"} registers the source ExampleApp in the Application log. Add \"Section\":\"Evidence\" for a read-only check. Add \"LogName\" to use another existing log, and \"CreateLog\":\"true\" to create it. Uninstall removes only that source."
+}

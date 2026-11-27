@@ -1,0 +1,9 @@
+{
+  "name": "Adobe Acrobat",
+  "arch": "x64",
+  "installerUrl": "https://trials.adobe.com/AdobeProducts/APRO/Acrobat_HelpX/win32/Acrobat_DC_Web_x64_WWMUI.zip",
+  "installerFile": "Acrobat_DC_Web_x64_WWMUI.zip",
+  "installerSha256": "8fd2b12cf31fb28974a9755c56c79c11600f712324ff42c41ab89dee8b57d1c9",
+  "installerSize": 1699354397,
+  "editionNote": "Standard and Pro share this installer. The edition is chosen by the caller because the bytes are the same."
+}

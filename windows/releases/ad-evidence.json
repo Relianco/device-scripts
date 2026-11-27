@@ -1,0 +1,6 @@
+{
+  "name": "Active Directory evidence report",
+  "kind": "diagnostic",
+  "installsSoftware": false,
+  "packageArguments": "Optional: {\"Section\":\"Inventory\"} (default; optional \"SearchBase\":\"<DN inside the domain>\" and \"Offset\" from the previous nextOffset), Scp, or {\"Name\":\"<computer name>\"} for the Reach section (optional \"Services\":\"<name,name>\", default NinjaRMMAgent,ncstreamer). Base64 in PackageArguments. Read-only stdout JSON, at most 8000 UTF-8 bytes; no AD, DNS, DHCP or custom field writes."
+}

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "teams-avd-media",
+  "title": "Mark Teams as a virtual desktop",
+  "description": "Sets IsWVDEnvironment to 1.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Microsoft\\Teams",
+      "name": "IsWVDEnvironment",
+      "type": "dword",
+      "value": 1
+    }
+  ]
+}

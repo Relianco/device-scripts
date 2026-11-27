@@ -1,0 +1,59 @@
+{
+  "name": "Windows Package Manager",
+  "arch": "x64",
+  "version": "1.29.380.0",
+  "bundleVersion": "2026.917.151.0",
+  "files": [
+    {
+      "role": "package",
+      "file": "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+      "sha256": "65dea9c01ce08ee7b763366b27c0e651f97db857c11ca9b9c301826c10092f2e",
+      "size": 217276577,
+      "version": "1.29.380.0"
+    },
+    {
+      "role": "license",
+      "file": "e53e159d00e04f729cc2180cffd1c02e_License1.xml",
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/e53e159d00e04f729cc2180cffd1c02e_License1.xml",
+      "sha256": "bcb15118ec47df24e3e6013a7006147c3a15b3a8104ed660fe87c8b4ed01f485",
+      "size": 2686,
+      "version": "1.29.380.0"
+    },
+    {
+      "role": "dependencies",
+      "file": "DesktopAppInstaller_Dependencies.zip",
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/DesktopAppInstaller_Dependencies.zip",
+      "sha256": "ba875afe9d190f61218985ac0292a99d1db710bf93e13c68944ca9d89f0d82d1",
+      "size": 97760717,
+      "version": "1.29.380.0"
+    },
+    {
+      "role": "dependency",
+      "file": "Microsoft.VCLibs.140.00_14.0.33519.0_x64.appx",
+      "path": "x64/Microsoft.VCLibs.140.00_14.0.33519.0_x64.appx",
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/DesktopAppInstaller_Dependencies.zip",
+      "sha256": "9c17b521f9d690a1f504da5108ed6eec5669eb3a8fd1331eef43e40d84e74283",
+      "size": 896581,
+      "version": "14.0.33519.0"
+    },
+    {
+      "role": "dependency",
+      "file": "Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx",
+      "path": "x64/Microsoft.VCLibs.140.00.UWPDesktop_14.0.33728.0_x64.appx",
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/DesktopAppInstaller_Dependencies.zip",
+      "sha256": "077a3d1a5d0622bd3004dca85f5e192d6e98ec79b83d4aa06766759ea6c09c3d",
+      "size": 6757465,
+      "version": "14.0.33728.0"
+    },
+    {
+      "role": "dependency",
+      "file": "Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx",
+      "path": "x64/Microsoft.WindowsAppRuntime.1.8_8000.616.304.0_x64.appx",
+      "url": "https://github.com/microsoft/winget-cli/releases/download/v1.29.380/DesktopAppInstaller_Dependencies.zip",
+      "sha256": "a31595cc4b5aebc18466ec24e8d4b566fe0fcafb52d833b6d139b8691d0e5177",
+      "size": 25431545,
+      "version": "8000.616.304.0"
+    }
+  ]
+}

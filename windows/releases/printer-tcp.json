@@ -1,0 +1,53 @@
+{
+  "name": "printer-tcp",
+  "drivers": [
+    {
+      "id": "BrotherHlL2370Dw",
+      "driverName": "Brother HL-L2370DW series",
+      "sourceUrl": "https://catalog.s.download.windowsupdate.com/d/msdownload/update/driver/drvs/2019/08/498d2e8b-35d3-4e32-b214-b33facc5756c_461156f49788809b4b143a833e7b6aeedc2822f1.cab",
+      "file": "498d2e8b-35d3-4e32-b214-b33facc5756c_461156f49788809b4b143a833e7b6aeedc2822f1.cab",
+      "sha256": "725cd890e7c7ba08f85b14c86256fad6d7606eb8b582f957eab0659b98b2c0e8",
+      "size": 19139543,
+      "version": "1.6.0.0",
+      "inf": "BROHL17A.INF",
+      "catalog": "BROHL17A.CAT",
+      "stage": "Cab"
+    },
+    {
+      "id": "KonicaUniversalPcl",
+      "driverName": "KONICA MINOLTA Universal PCL",
+      "sourceUrl": "https://cscsupportftp.mykonicaminolta.com/DownloadFile/Download.ashx?fileversionid=43620&productid=1801",
+      "file": "KM_UPD_pcl6_win64_v391203eit100_WHQL_efigs_ja_sc_tc_ko_inst.exe",
+      "sha256": "30cf9b9bd9a1517ab835efe6200a7aa2b5c4850e58fdffe220297ff0501c6e71",
+      "size": 32858888,
+      "version": "3.9.1203.500",
+      "inf": "KOUWNJ1_.inf",
+      "catalog": "KOUWNJ1_.CAT",
+      "stage": "SevenZipSfx"
+    },
+    {
+      "id": "ToshibaUniversalPcl2",
+      "driverName": "TOSHIBA Universal Printer 2",
+      "sourceUrl": "https://business.toshiba.com/downloads/KB/f1Ulds/21836/ebn-Uni-7.222.5412.313.zip",
+      "file": "ebn-Uni-7.222.5412.313.zip",
+      "sha256": "118ed2bdda94084b553a4d862e59913a565d6e7a2f3f3b1304b22caee4949415",
+      "size": 87653514,
+      "version": "7.222.5412.313",
+      "inf": "eSf6u.inf",
+      "catalog": "eSf6u.cat",
+      "stage": "Zip"
+    },
+    {
+      "id": "XeroxGlobalPcl6",
+      "driverName": "Xerox Global Print Driver PCL6",
+      "sourceUrl": "https://download.support.xerox.com/pub/drivers/GLOBALPRINTDRIVER/drivers/win10x64/ar/UNIV_5.1116.2.0_PCL6_x64.zip",
+      "file": "UNIV_5.1116.2.0_PCL6_x64.zip",
+      "sha256": "d25c343d51bea1e6b03ff653d4ed1904cf1ca7229bb895be1fe980490ed5b888",
+      "size": 38853832,
+      "version": "51116.200.0.0",
+      "inf": "x3UNIVX.inf",
+      "catalog": "x3UNIVX.cat",
+      "stage": "Zip"
+    }
+  ]
+}

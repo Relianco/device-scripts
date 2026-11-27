@@ -1,0 +1,9 @@
+{
+  "name": "AutoElevate",
+  "arch": "x86",
+  "sourceUrl": "https://autoelevate-installers.s3.us-east-2.amazonaws.com/current/AESetup.msi",
+  "file": "AESetup.msi",
+  "sha256": "391e21349bdd0053067b7c6528b872ce4f4db522e48f3c546291dce40f596bfa",
+  "size": 5267456,
+  "version": "2.11.1959"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "WireGuard client",
+  "version": "1.1.1",
+  "packageArguments": "Base64-encoded UTF-8 JSON object. Install/Update/Repair need TunnelName, Address (IPv4 CIDR), ServerPublicKey, Endpoint (host:port), AllowedIPs (comma-separated IPv4 CIDRs, no 0.0.0.0/0). Optional: PersistentKeepalive (default 25), NrptNamespaces and NrptServers (comma-separated, together), DisableGsaPrivateAccess (true|false, default false), Mode=Check for a read-only report. Uninstall needs TunnelName only. Intune actions (docs/wireguard-client.md): Prepare (key only; also MapUrl, MapKey, TrustedGateways, TrustedGatewayMacs, optional LegacyPattern), Report, Apply, Revoke, Rotate; without TunnelName they read tenant.json.",
+  "x64": {
+    "sourceUrl": "https://download.wireguard.com/windows-client/wireguard-amd64-1.1.1.msi",
+    "file": "wireguard-amd64-1.1.1.msi",
+    "sha256": "7bfed60ad61b785c914b38b61555a975488e1d3ec472dbfb2fcdf498fca75242",
+    "size": 3293184
+  },
+  "arm64": {
+    "sourceUrl": "https://download.wireguard.com/windows-client/wireguard-arm64-1.1.1.msi",
+    "file": "wireguard-arm64-1.1.1.msi",
+    "sha256": "8336335c738d4aff040fa9d11b752da65a80b6f41d3262d6ba5e82f97ebd1bd4",
+    "size": 2949120
+  }
+}

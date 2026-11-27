@@ -1,0 +1,5 @@
+{
+  "name": "Apply action",
+  "installsSoftware": false,
+  "actionBaseUrl": "https://raw.githubusercontent.com/Relianco/device-scripts/main/windows/actions"
+}

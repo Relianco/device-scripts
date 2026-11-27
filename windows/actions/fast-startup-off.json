@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "id": "fast-startup-off",
+  "title": "Turn off Fast Startup",
+  "description": "Sets HiberbootEnabled to 0. This does not restart the computer.",
+  "steps": [
+    {
+      "kind": "registry",
+      "op": "set",
+      "hive": "HKLM",
+      "path": "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power",
+      "name": "HiberbootEnabled",
+      "type": "dword",
+      "value": 0
+    }
+  ]
+}

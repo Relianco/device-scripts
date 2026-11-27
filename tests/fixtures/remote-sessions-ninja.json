@@ -1,0 +1,391 @@
+{
+ "devices": [
+  {
+   "id": "dev-a",
+   "systemName": "PC-01",
+   "nodeClass": "WINDOWS_WORKSTATION",
+   "organizationId": "org-a"
+  },
+  {
+   "id": "dev-b",
+   "systemName": "SRV-01",
+   "nodeClass": "WINDOWS_SERVER",
+   "organizationId": "org-b"
+  },
+  {
+   "id": "dev-c",
+   "systemName": "SRV-02",
+   "nodeClass": "WINDOWS_SERVER",
+   "organizationId": "org-c"
+  },
+  {
+   "id": "dev-d",
+   "systemName": "PC-02",
+   "nodeClass": "WINDOWS_WORKSTATION",
+   "organizationId": "org-b"
+  }
+ ],
+ "activities": [
+  {
+   "id": 23716874,
+   "activityTime": 1795182090,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "8230077061211F90SPBXYUBL6AGF0HNI",
+    "message": {
+     "code": "nc_session_terminated_with_handle",
+     "params": {
+      "duration": "7",
+      "sessionHandle": "8230077061",
+      "participants": "[PLAYER, STREAMER]"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716872,
+   "activityTime": 1795182082,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "8230077061211F90SPBXYUBL6AGF0HNI",
+    "message": {
+     "code": "nc_session_established_with_handle",
+     "params": {
+      "sessionHandle": "8230077061"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716870,
+   "activityTime": 1795182079.900519,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "8230077061211F90SPBXYUBL6AGF0HNI",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "SRV-02",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-c"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716703,
+   "activityTime": 1795181732.034069,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "9440189190211F90UNQV13E9ZS79EQFM",
+    "message": {
+     "code": "nc_failed_to_initiate_connection_with_message",
+     "params": {
+      "message": "wamp.error.canceled"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716696,
+   "activityTime": 1795181718.094228,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "9440189190211F90UNQV13E9ZS79EQFM",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "SRV-02",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-c"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716487,
+   "activityTime": 1795181307,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "4314106653211F90KWGWV6ZLP8MKVO2N",
+    "message": {
+     "code": "nc_session_terminated_with_handle",
+     "params": {
+      "duration": "13",
+      "sessionHandle": "4314106653",
+      "participants": "[PLAYER, STREAMER]"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716484,
+   "activityTime": 1795181294,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "4314106653211F90KWGWV6ZLP8MKVO2N",
+    "message": {
+     "code": "nc_session_established_with_handle",
+     "params": {
+      "sessionHandle": "4314106653"
+     }
+    }
+   }
+  },
+  {
+   "id": 23716483,
+   "activityTime": 1795181291.317184,
+   "deviceId": "dev-c",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "4314106653211F90KWGWV6ZLP8MKVO2N",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "SRV-02",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-c"
+     }
+    }
+   }
+  },
+  {
+   "id": 23705674,
+   "activityTime": 1795113834,
+   "deviceId": "dev-a",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "5592750678211F90GUEAWF29GATLVYSJ",
+    "message": {
+     "code": "nc_session_terminated_with_handle",
+     "params": {
+      "duration": "2448",
+      "sessionHandle": "5592750678",
+      "participants": "[PLAYER, STREAMER]"
+     }
+    }
+   }
+  },
+  {
+   "id": 23705306,
+   "activityTime": 1795111385,
+   "deviceId": "dev-a",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "5592750678211F90GUEAWF29GATLVYSJ",
+    "message": {
+     "code": "nc_session_established_with_handle",
+     "params": {
+      "sessionHandle": "5592750678"
+     }
+    }
+   }
+  },
+  {
+   "id": 23705305,
+   "activityTime": 1795111380.907031,
+   "deviceId": "dev-a",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "5592750678211F90GUEAWF29GATLVYSJ",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "PC-01",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-a"
+     }
+    }
+   }
+  },
+  {
+   "id": 23518063,
+   "activityTime": 1794885107,
+   "deviceId": "dev-b",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "4714976556211F90SYUAUQ68SHGNRGV3",
+    "message": {
+     "code": "nc_session_terminated_with_handle",
+     "params": {
+      "duration": "2356",
+      "sessionHandle": "4714976556",
+      "participants": "[PLAYER, STREAMER]"
+     }
+    }
+   }
+  },
+  {
+   "id": 23462941,
+   "activityTime": 1794882750,
+   "deviceId": "dev-b",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "4714976556211F90SYUAUQ68SHGNRGV3",
+    "message": {
+     "code": "nc_session_established_with_handle",
+     "params": {
+      "sessionHandle": "4714976556"
+     }
+    }
+   }
+  },
+  {
+   "id": 23462940,
+   "activityTime": 1794882747.666349,
+   "deviceId": "dev-b",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "4714976556211F90SYUAUQ68SHGNRGV3",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "SRV-01",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-b"
+     }
+    }
+   }
+  },
+  {
+   "id": 23458705,
+   "activityTime": 1794882570.306227,
+   "deviceId": "dev-b",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "2315920241211F90RVOVYZZJ0ZDGSSOO",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "SRV-01",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-b"
+     }
+    }
+   }
+  },
+  {
+   "id": 23458303,
+   "activityTime": 1794882553.399932,
+   "deviceId": "dev-b",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "5966168942211F90IDQAUUUMGWOFP4PD",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "SRV-01",
+      "appUserName": "Relian Tech",
+      "appUserId": "1",
+      "appUserEmail": "tech@relian.ca",
+      "nodeId": "dev-b"
+     }
+    }
+   }
+  },
+  {
+   "id": 22699356,
+   "activityTime": 1794859016,
+   "deviceId": "dev-d",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "9872937265211F90OFIRX2GXWY4HJSKI",
+    "message": {
+     "code": "nc_session_terminated_with_handle",
+     "params": {
+      "duration": "144",
+      "sessionHandle": "9872937265",
+      "participants": "[PLAYER, STREAMER]"
+     }
+    }
+   }
+  },
+  {
+   "id": 22694004,
+   "activityTime": 1794858872,
+   "deviceId": "dev-d",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "9872937265211F90OFIRX2GXWY4HJSKI",
+    "message": {
+     "code": "nc_session_established_with_handle",
+     "params": {
+      "sessionHandle": "9872937265"
+     }
+    }
+   }
+  },
+  {
+   "id": 22693628,
+   "activityTime": 1794858867.813446,
+   "deviceId": "dev-d",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "9872937265211F90OFIRX2GXWY4HJSKI",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "PC-02",
+      "appUserName": "Client Staff",
+      "appUserId": "31",
+      "appUserEmail": "staff@client.example",
+      "nodeId": "dev-d"
+     }
+    }
+   }
+  },
+  {
+   "id": 22655390,
+   "activityTime": 1794857691.571084,
+   "deviceId": "dev-d",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "3454014536211F90VFT4LIKIIDXBLOD4",
+    "message": {
+     "code": "nc_failed_to_initiate_connection_with_message",
+     "params": {
+      "message": "no_route_to_target: No route found for target ca.00000000-0000-0000-0000-000000000000.agent.0"
+     }
+    }
+   }
+  },
+  {
+   "id": 22655380,
+   "activityTime": 1794857691.504224,
+   "deviceId": "dev-d",
+   "activityType": "NINJA_REMOTE",
+   "data": {
+    "sessionName": "3454014536211F90VFT4LIKIIDXBLOD4",
+    "message": {
+     "code": "nc_session_requested",
+     "params": {
+      "nodeDisplayName": "PC-02",
+      "appUserName": "Client Staff",
+      "appUserId": "31",
+      "appUserEmail": "staff@client.example",
+      "nodeId": "dev-d"
+     }
+    }
+   }
+  }
+ ]
+}

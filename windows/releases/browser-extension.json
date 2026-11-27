@@ -1,0 +1,25 @@
+{
+  "name": "Browser extension",
+  "browsers": [
+    {
+      "name": "Chrome",
+      "policy": "HKLM:\\SOFTWARE\\Policies\\Google\\Chrome\\ExtensionInstallForcelist",
+      "updateUrl": "https://clients2.google.com/service/update2/crx"
+    },
+    {
+      "name": "Edge",
+      "policy": "HKLM:\\SOFTWARE\\Policies\\Microsoft\\Edge\\ExtensionInstallForcelist",
+      "updateUrl": "https://edge.microsoft.com/extensionwebstorebase/v1/crx"
+    },
+    {
+      "name": "Brave",
+      "policy": "HKLM:\\SOFTWARE\\Policies\\BraveSoftware\\Brave\\ExtensionInstallForcelist",
+      "updateUrl": "https://clients2.google.com/service/update2/crx"
+    },
+    {
+      "name": "Firefox",
+      "policy": "policies.json",
+      "updateUrl": "https://addons.mozilla.org/firefox/downloads/latest/"
+    }
+  ]
+}

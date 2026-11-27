@@ -1,0 +1,9 @@
+{
+  "name": "Wazuh Agent",
+  "arch": "x86",
+  "sourceUrl": "https://packages.wazuh.com/4.x/windows/wazuh-agent-4.14.9-1.msi",
+  "file": "wazuh-agent-4.14.9-1.msi",
+  "sha256": "e3f18109d36c98c2f861f210fc6661226d99251b79321c5d7ff27821b906ea49",
+  "size": 6045696,
+  "version": "4.14.9"
+}

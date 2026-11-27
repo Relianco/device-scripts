@@ -1,0 +1,20 @@
+{
+  "name": "virtio-win guest tools",
+  "arch": "x64",
+  "drivers": {
+    "file": "virtio-win-gt-x64.msi",
+    "sourceUrl": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-gt-x64.msi",
+    "url": "https://relianpub.blob.core.windows.net/pub/sec/virtio-win-gt-x64-0.1.302-4f4388468a7ac5286bd1f1924ef02e7281a60a600390a7cfcfd55809efc0889f.msi",
+    "sha256": "4f4388468a7ac5286bd1f1924ef02e7281a60a600390a7cfcfd55809efc0889f",
+    "size": 4887552,
+    "version": "0.1.302"
+  },
+  "agent": {
+    "file": "qemu-ga-x86_64.msi",
+    "sourceUrl": "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-qemu-ga/qemu-ga-win-110.2.3-2.el10/qemu-ga-x86_64.msi",
+    "url": "https://relianpub.blob.core.windows.net/pub/sec/qemu-ga-x86_64-110.2.3-19dcf8abc30f70c2eb6e87282601fd0476e4e0b19936f63d9c80be30db0796ed.msi",
+    "sha256": "19dcf8abc30f70c2eb6e87282601fd0476e4e0b19936f63d9c80be30db0796ed",
+    "size": 11909632,
+    "version": "110.2.3"
+  }
+}
