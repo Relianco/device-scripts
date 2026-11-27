@@ -117,6 +117,7 @@ $script:PdProfiles = {
 # 'ok', 'in-use' (a sharing violation: its user is signed in elsewhere, or a service holds it), or reg.exe's error.
 $script:PdLoadHive = {
     param($Mount, $File)
+    $ErrorActionPreference = 'Continue'  # Windows PowerShell 5.1 turns redirected native stderr into a terminating error under Stop
     $out = (& reg.exe load "HKU\$Mount" $File 2>&1 | Out-String).Trim()
     if ($LASTEXITCODE -eq 0) { return 'ok' }
     if ($out -match 'being used by another process') { return 'in-use' }
@@ -125,6 +126,7 @@ $script:PdLoadHive = {
 # Handles this process opened keep the hive loaded, so collect them first and retry.
 $script:PdUnloadHive = {
     param($Mount)
+    $ErrorActionPreference = 'Continue'  # as in PdLoadHive
     for ($i = 0; $i -lt 5; $i++) {
         [GC]::Collect(); [GC]::WaitForPendingFinalizers()
         $null = & reg.exe unload "HKU\$Mount" 2>&1
@@ -141,25 +143,39 @@ $script:PdReadUserValues = {
         try {
             foreach ($n in @($k.GetValueNames())) {
                 $v = $k.GetValue($n)
-                [pscustomobject]@{ Key = $key; Name = $n; Bytes = $(if ($v -is [byte[]]) { $v } else { [byte[]]@() }) }
+                [pscustomobject]@{ Key = $key; Name = $n; Bytes = $(if ($v -is [byte[]]) { $v } else { $null }) }
             }
         } finally { $k.Dispose() }
     }
 }
-# Each value to be deleted, as base64, in a new SYSTEM-only JSON file. Throws on any failure, so nothing is deleted.
-# Undo: reg add "HKU\<sid>\Printers\<key>" /v "<name>" /t REG_BINARY /d <hex of data> (with the user's hive loaded).
-$script:PdBackupUserValues = {
-    param($Sid, $Values)
+# A new JSON file in the SYSTEM and Administrators only backup folder. Throws on any failure.
+function Save-PdBackup {
+    param([string]$Prefix, $Doc)
     $dir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'Relian\PrinterDefaultsBackup'
     $null = New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop
     $acl = New-Object Security.AccessControl.DirectorySecurity
     $acl.SetSecurityDescriptorSddlForm('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
     Set-Acl -LiteralPath $dir -AclObject $acl -ErrorAction Stop
-    $doc = [ordered]@{ sid = $Sid; utc = [DateTime]::UtcNow.ToString('o'); values = @($Values | ForEach-Object { [ordered]@{ key = $_.Key; name = $_.Name; data = [Convert]::ToBase64String([byte[]]$_.Bytes) } }) }
-    $path = Join-Path $dir ('{0}-{1}-{2}.json' -f $Sid, [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), [Guid]::NewGuid().ToString('N').Substring(0, 8))
-    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($doc | ConvertTo-Json -Depth 4))
+    $path = Join-Path $dir ('{0}-{1}-{2}.json' -f $Prefix, [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'), [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes(($Doc | ConvertTo-Json -Depth 4))
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
+    return $path
+}
+# A printer's machine default before it is changed: the Get-PrintConfiguration reading and the default DEVMODE (base64).
+# Undo: Set-PrintConfiguration with the reading, or write the DEVMODE back. Throws on any failure, so nothing is changed.
+$script:PdBackupPrinter = {
+    param($Name, $Before)
+    Initialize-PdWinSpool
+    $dm = [Convert]::ToBase64String([Relian.PrinterDefaultsWinSpool]::ReadDevMode([string]$Name))
+    $null = Save-PdBackup ('printer-' + ($Name -replace '[^A-Za-z0-9.-]', '_')) ([ordered]@{ printer = $Name; utc = [DateTime]::UtcNow.ToString('o'); before = $Before; devmode = $dm })
+}
+# Each value to be deleted, as base64, in a new SYSTEM-only JSON file. Throws on any failure, so nothing is deleted.
+# Undo: reg add "HKU\<sid>\Printers\<key>" /v "<name>" /t REG_BINARY /d <hex of data> (with the user's hive loaded).
+$script:PdBackupUserValues = {
+    param($Sid, $Values)
+    $doc = [ordered]@{ sid = $Sid; utc = [DateTime]::UtcNow.ToString('o'); values = @($Values | ForEach-Object { [ordered]@{ key = $_.Key; name = $_.Name; data = [Convert]::ToBase64String([byte[]]$_.Bytes) } }) }
+    $path = Save-PdBackup $Sid $doc
     if (@((Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json).values).Count -ne @($Values).Count) { throw 'backup read-back differs' }
 }
 $script:PdWriteUserValue = {
@@ -367,6 +383,7 @@ function Invoke-PdPrinter {
         if (Test-PdConfigOk $cfg -KeepColour:$keep) { $e.status = 'unchanged'; return $e }
         if ($ReportOnly) { $e.status = 'drift'; return $e }
         if ((& $script:PdJobCount $Printer.Name) -gt 0) { $e.status = 'busy'; return $e }
+        & $script:PdBackupPrinter $Printer.Name $e.before
         $color = $(if ($cfg.Color -and -not $keep) { $false } else { $null })
         $duplex = $(if ([string]$cfg.Duplex -ne 'OneSided') { 'OneSided' } else { $null })
         try { & $script:PdSetConfig $Printer.Name $color $duplex } catch { $e.error = 'Set-PrintConfiguration: ' + $_.Exception.Message }
@@ -386,7 +403,8 @@ function Invoke-PdPrinter {
 function Invoke-PdUser {
     param([string]$Sid, [string]$Root, $Drivers, [string[]]$Busy = @(), [switch]$ReportOnly)
     $u = [ordered]@{ sid = $Sid; status = 'compliant'; drift = ''; error = '' }
-    $values = @(& $script:PdReadUserValues $Root)
+    # A value that is not REG_BINARY is not a DEVMODE: left alone.
+    $values = @(& $script:PdReadUserValues $Root | Where-Object { $null -ne $_.Bytes })
     $all = @($Drivers.Keys) + @($values | ForEach-Object { $_.Name })
     $bad = @($values | Where-Object {
             $drv = $(if ($Drivers.ContainsKey($_.Name)) { $Drivers[$_.Name] } else { '' })
@@ -409,6 +427,11 @@ function Invoke-PdUser {
             & $script:PdWriteUserValue $Root $v.Key $v.Name $b
         } else { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
     }
+    # Read back: each changed value must be gone or now fine.
+    $done = @($now | ForEach-Object { "$($_.Key)\$($_.Name)" })
+    $left = @(& $script:PdReadUserValues $Root | Where-Object { $null -ne $_.Bytes -and $done -contains "$($_.Key)\$($_.Name)" -and
+            -not (Test-PdUserDevModeOk $_.Bytes -KeepColour:(Test-PdKeepColour -Name $_.Name -AllNames $all)) })
+    if ($left.Count -gt 0) { $u.status = 'failed'; $u.error = 'still drifting after the change: ' + (@($left | ForEach-Object { "$($_.Key)\$($_.Name)" }) -join ';'); return $u }
     $u.status = $(if ($later.Count -gt 0) { 'busy' } else { 'changed' })
     return $u
 }
@@ -429,7 +452,9 @@ function Invoke-PdJob {
         $names = @($printers | ForEach-Object { $_.Name })
         $r.Printers = @(foreach ($p in $printers) { [pscustomobject](Invoke-PdPrinter -Printer $p -AllNames $names -ReportOnly:$ReportOnly) })
 
-        $busy = @($r.Printers | Where-Object { $_.status -eq 'busy' } | ForEach-Object { $_.name })
+        # Busy and failed printers keep their users' values: with a wrong machine default, deleting a user's override
+        # would hand the user that default.
+        $busy = @($r.Printers | Where-Object { $_.status -eq 'busy' -or $_.status -eq 'failed' } | ForEach-Object { $_.name })
         $loaded = @($hives | Where-Object { $_ -match '^S-1-(5-21|12-1)-[\d-]+$' })
         $profiles = @(& $script:PdProfiles)
         $sids = [Collections.Generic.List[string]]::new()
@@ -474,13 +499,11 @@ function Invoke-PdJob {
     return [pscustomobject]$r
 }
 
-# -Detect (Intune Remediation detection): 1 when a run can fix something (a drifted printer or user value) or the job
-# itself failed; 0 otherwise. A queue or hive that cannot be read (an unreachable home printer) stays in the JSON line
-# but does not start a remediation that would fail on it too.
+# -Detect (Intune Remediation detection): 0 only when the report found everything compliant; drift, a queue or hive
+# that could not be read, or a job error is 1 (Intune runs a remediation only on 1, never reports those compliant).
 function Get-PdDetectExit {
     param($Result)
-    $all = @($Result.Printers | ForEach-Object { $_.status }) + @($Result.Users | ForEach-Object { $_.status })
-    return $(if ($Result.Error -or $all -contains 'drift') { 1 } else { 0 })
+    return $(if ($Result.ExitCode -eq 0) { 0 } else { 1 })
 }
 
 function ConvertTo-PdJobLine {
