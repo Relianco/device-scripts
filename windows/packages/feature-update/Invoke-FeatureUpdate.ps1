@@ -395,11 +395,12 @@ function Get-HardwareInfo {
             $hw.tpmReady = [bool]($tpm.IsEnabled_InitialValue -and $tpm.IsActivated_InitialValue)
         } else { $hw.tpmPresent = $false }
     } catch { $hw.tpmPresent = $null; $hw.tpmError = Limit-Text "$_" 80 }
-    # Confirm-SecureBootUEFI answers on UEFI (true or false) and throws "not supported on this platform" on legacy BIOS.
+    # Confirm-SecureBootUEFI answers on UEFI (true or false) and throws PlatformNotSupportedException on legacy BIOS.
     try { $hw.secureBoot = [bool](Confirm-SecureBootUEFI -ErrorAction Stop); $hw.uefi = $true }
     catch {
         $hw.secureBoot = $null
-        $hw.uefi = if ("$_" -match 'not supported on this platform') { $false } else { $null }
+        # Exception type, not message text: the message is localized.
+        $hw.uefi = if ($_.Exception -is [System.PlatformNotSupportedException]) { $false } else { $null }
     }
     try { $hw.cpu = Limit-Text ((Get-CimInstance Win32_Processor -ErrorAction Stop | Select-Object -First 1).Name) 80 } catch { }
     try { $hw.ramGB = [math]::Round((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).TotalPhysicalMemory / 1GB, 1) } catch { }
