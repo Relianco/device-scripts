@@ -89,9 +89,16 @@ $script:PdReadUserValues = { param($Root)
     if ($script:F.ReadThrows -eq $sid) { throw 'read failed' }
     @(if ($script:F.Values.ContainsKey($sid)) { $script:F.Values[$sid] | ForEach-Object { [pscustomobject]@{ Key = $_[0]; Name = $_[1]; Bytes = [byte[]]$_[2] } } })
 }
-$script:PdDeleteUserValue = { param($Root, $Key, $Name) $script:Log.Add("delete $Root $Key $Name") }
+$script:PdDeleteUserValue = { param($Root, $Key, $Name)
+    $script:Log.Add("delete $Root $Key $Name")
+    $sid = $Root -replace '^RelianPD_', ''
+    if ($script:F.Values.ContainsKey($sid)) { $script:F.Values[$sid] = @($script:F.Values[$sid] | Where-Object { -not ($_[0] -eq $Key -and $_[1] -eq $Name) }) }
+}
+$script:PdBackupPrinter = { param($Name, $Before) }
 $script:PdWriteUserValue = { param($Root, $Key, $Name, $Bytes)
     $script:Log.Add("write $Root $Key $Name color=$([BitConverter]::ToInt16($Bytes, 92)) duplex=$([BitConverter]::ToInt16($Bytes, 94)) fields=$([BitConverter]::ToUInt32($Bytes, 72))")
+    $sid = $Root -replace '^RelianPD_', ''
+    $script:F.Values[$sid] = @($script:F.Values[$sid] | ForEach-Object { if ($_[0] -eq $Key -and $_[1] -eq $Name) { , @($Key, $Name, $Bytes) } else { , $_ } })
 }
 $script:PdBackupUserValues = { param($Sid, $Values)
     if ($script:F.ContainsKey('BackupThrows') -and $script:F.BackupThrows) { throw 'disk full' }
@@ -283,9 +290,10 @@ Reset-Test -Printers @(@('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'On
 $script:PdGetConfig = { param($Name) if ($Name -eq 'Home Printer') { throw 'unspecified failure' }; [pscustomobject]$script:F.Config[$Name] }
 $r = Invoke-PdJob -ReportOnly
 Assert-Same $r.ExitCode 2 'report: unreadable queue and hive fail the report'
-Assert-Same (Get-PdDetectExit $r) 0 'detect: unreadable queue or hive alone does not start a remediation'
 $script:PdGetPrinters = { throw 'spooler stopped' }
 Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: a job-level error is never compliant'
+$script:PdGetPrinters = { @($script:F.Driver.Keys | Sort-Object | ForEach-Object { [pscustomobject]@{ Name = $_; Driver = $script:F.Driver[$_] } }) }
+$script:PdGetConfig = { param($Name) [pscustomobject]$script:F.Config[$Name] }
 
 # The whole script with -Detect where there are no print cmdlets (Linux CI): job error, exit 1, one JSON line. Skipped
 # where Get-Printer exists: the child would read that host's real printers and user hives, not a fixed failure.
@@ -297,6 +305,58 @@ if (-not (Get-Command Get-Printer -ErrorAction SilentlyContinue)) {
     Assert-Same $code 1 'script -Detect exit with no spooler'
     Assert-Same (($out[-1] | ConvertFrom-Json).mode) 'report' 'script -Detect changes nothing'
 }
+
+# Review (Relian-CIPP #240) follow-ups.
+$script:PdSetDevMode = { param($Name)
+    $script:Log.Add("devmode $Name")
+    if ($script:F.DevModeFixes) { $script:F.Config[$Name] = @{ Color = $false; Duplex = 'OneSided' } }
+}
+$script:PdJobCount = { param($Name) if ($script:F.Jobs.ContainsKey($Name)) { $script:F.Jobs[$Name] } else { 0 } }
+# Detection fails closed: a queue or hive that cannot be read is not reported compliant.
+Reset-Test -Printers @(@('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided'), @('Home Printer', 'HP WSD', $true, 'OneSided'))
+$script:PdGetConfig = { param($Name) if ($Name -eq 'Home Printer') { throw 'access denied' }; [pscustomobject]$script:F.Config[$Name] }
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: an unreadable queue is not compliant'
+Reset-Test -Printers @() -Profiles @($b) -Denied @($b)
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: a hive that will not load is not compliant'
+$script:PdGetConfig = { param($Name) [pscustomobject]$script:F.Config[$Name] }
+
+# A user value for a printer whose machine default could not be fixed is kept (deleting a mono override there would
+# hand the user the colour default).
+Reset-Test -Printers @(, @('Front Desk', 'TOSHIBA Universal Printer 2', $true, 'TwoSidedLongEdge')) -SetIgnored -Loaded @($a) -Values @{ $a = @(, @('DevModePerUser', 'Front Desk', (New-DevMode 1 2))) }
+$r = Invoke-PdJob
+Assert-Same (Entry $r 'Front Desk').status 'failed' 'machine fix failed'
+Assert-Same @(Lines 'delete *').Count 0 'user value of a failed printer kept'
+
+# A value that is not REG_BINARY is not a DEVMODE: never drift, never deleted.
+Reset-Test -Printers @(, @('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided')) -Loaded @($a)
+$script:PdReadUserValues = { param($Root) [pscustomobject]@{ Key = 'DevModePerUser'; Name = 'Copy Room'; Bytes = $null } }
+$r = Invoke-PdJob
+Assert-Same $r.Users[0].status 'compliant' 'non-binary value is not drift'
+Assert-Same @(Lines 'delete *').Count 0 'non-binary value kept'
+
+# User changes are read back: a value still drifting after the delete fails the run.
+Reset-Test -Printers @(, @('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided')) -Loaded @($a)
+$script:PdReadUserValues = { param($Root) [pscustomobject]@{ Key = 'DevModePerUser'; Name = 'Copy Room'; Bytes = (New-DevMode 2 1) } }
+$r = Invoke-PdJob
+Assert-Same $r.Users[0].status 'failed' 'value back after delete is failed'
+Assert-Same $r.ExitCode 2 'read-back failure exit'
+$script:PdReadUserValues = { param($Root)
+    $sid = $Root -replace '^RelianPD_', ''
+    if ($script:F.ReadThrows -eq $sid) { throw 'read failed' }
+    @(if ($script:F.Values.ContainsKey($sid)) { $script:F.Values[$sid] | ForEach-Object { [pscustomobject]@{ Key = $_[0]; Name = $_[1]; Bytes = [byte[]]$_[2] } } })
+}
+
+# A printer's machine default is backed up before it is changed; a failed backup changes nothing.
+Reset-Test -Printers @(, @('Front Desk', 'TOSHIBA Universal Printer 2', $true, 'TwoSidedLongEdge'))
+$script:PdBackupPrinter = { param($Name, $Before) $script:Log.Add("pbackup $Name $Before") }
+$r = Invoke-PdJob
+Assert-Same (($script:Log | Where-Object { $_ -match '^(pbackup|set) ' }) -join ';') 'pbackup Front Desk color/TwoSidedLongEdge;set Front Desk color=False duplex=OneSided' 'machine backup before set'
+Reset-Test -Printers @(, @('Front Desk', 'TOSHIBA Universal Printer 2', $true, 'TwoSidedLongEdge'))
+$script:PdBackupPrinter = { param($Name, $Before) throw 'disk full' }
+$r = Invoke-PdJob
+Assert-Same @(Lines 'set *').Count 0 'failed machine backup changes nothing'
+Assert-Same (Entry $r 'Front Desk').status 'failed' 'failed machine backup is failed'
+$script:PdBackupPrinter = { param($Name, $Before) }
 
 # One JSON line.
 $line = ConvertTo-PdJobLine $r
