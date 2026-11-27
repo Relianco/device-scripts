@@ -21,8 +21,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # Both files come from one commit of this repo. The package must not put the key on the msiexec command line:
-# 9959b94 or later does not, ee89218 does (never pin it again).
-$script:AePackageCommit = 'c2720a2ffdfc8ba41add4e6bdf10b10341049039'
+# Pin a commit whose Invoke-AutoElevate.ps1 matches AePackageSha256 (the squashed root of 2026-11-27 does).
+$script:AePackageCommit = '2e7e949068158536372a8f1728429b623a659147'
 $script:AePackagePath = 'windows/packages/autoelevate/Invoke-AutoElevate.ps1'
 $script:AePackageSha256 = '85f7422b5f468db6157bfe6ec6463aeae9178ecf121ae7ddcf1b91b2e3a5ef61'
 $script:AeRecoveryPath = 'windows/packages/autoelevate/reference/ServiceRecovery.ps1'
