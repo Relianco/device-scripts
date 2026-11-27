@@ -251,6 +251,33 @@ $r = Invoke-PdJob
 Assert-Same (Entry $r 'Front Desk').status 'failed' 'unreadable queue fails'
 Assert-Same @(Lines 'set Front Desk*').Count 0 'unreadable queue untouched'
 
+# -Detect (Intune Remediation detection): exit 1 only when a run could fix something (a drifted printer or user value) or
+# the job itself failed; a queue or hive that cannot be read is in the JSON line but does not start a remediation that
+# would fail on it too.
+Reset-Test -Printers $machine
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: drifted printer'
+Reset-Test -Printers @(, @('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided')) -Loaded @($a) -Values @{ $a = @(, @('DevModePerUser', 'Copy Room', (New-DevMode 2 1))) }
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: drifted user value'
+Reset-Test -Printers @(, @('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided'))
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 0 'detect: compliant'
+Reset-Test -Printers @(, @('Business Printer Colour', 'Xerox Global Print Driver PS', $true, 'OneSided')) -Loaded @($a) -Values @{ $a = @(, @('DevModePerUser', 'Business Printer Colour', (New-DevMode 2 1))) }
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 0 'detect: a colour option kept in colour, machine and user, is compliant'
+Reset-Test -Printers @(@('Copy Room', 'TOSHIBA Universal Printer 2', $false, 'OneSided'), @('Home Printer', 'HP WSD', $true, 'OneSided')) -Profiles @($b) -Denied @($b)
+$script:PdGetConfig = { param($Name) if ($Name -eq 'Home Printer') { throw 'unspecified failure' }; [pscustomobject]$script:F.Config[$Name] }
+$r = Invoke-PdJob -ReportOnly
+Assert-Same $r.ExitCode 2 'report: unreadable queue and hive fail the report'
+Assert-Same (Get-PdDetectExit $r) 0 'detect: unreadable queue or hive alone does not start a remediation'
+$script:PdGetPrinters = { throw 'spooler stopped' }
+Assert-Same (Get-PdDetectExit (Invoke-PdJob -ReportOnly)) 1 'detect: a job-level error is never compliant'
+
+# The whole script with -Detect on a machine with no print cmdlets (this test host): job error, exit 1, one JSON line.
+$env:RELIAN_DEPLOY_TEST = ''
+$out = @(& pwsh -NoProfile -File $modulePath -Detect 2>&1)
+$code = $LASTEXITCODE
+$env:RELIAN_DEPLOY_TEST = '1'
+Assert-Same $code 1 'script -Detect exit with no spooler'
+Assert-Same (($out[-1] | ConvertFrom-Json).mode) 'report' 'script -Detect changes nothing'
+
 # One JSON line.
 $line = ConvertTo-PdJobLine $r
 $obj = $line | ConvertFrom-Json

@@ -11,10 +11,11 @@
 # earlier run is unloaded first. A hive that will not unload fails the run.
 # Colour options (a Colour/Color name, -KeepColourPattern, or a plain queue with a "<name> BW" twin) keep colour and
 # are still made one-sided, machine and user. The job loader forwards only -ReportOnly, so the default pattern is what runs.
-# -ReportOnly changes nothing (hives are still loaded to be read, and unloaded).
+# -ReportOnly changes nothing (hives are still loaded to be read, and unloaded). -Detect is -ReportOnly with the exit
+# code an Intune Remediation detection needs (Get-PdDetectExit); a Remediation runs the script with no parameters.
 # Exit 0 compliant or changed, 1 drift under -ReportOnly or a busy printer, 2 failed. Prints one JSON line.
 [CmdletBinding()]
-param([switch]$ReportOnly, [string]$KeepColourPattern = '(?i)\bcolou?r\b')
+param([switch]$ReportOnly, [switch]$Detect, [string]$KeepColourPattern = '(?i)\bcolou?r\b')
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -457,6 +458,15 @@ function Invoke-PdJob {
     return [pscustomobject]$r
 }
 
+# -Detect (Intune Remediation detection): 1 when a run can fix something (a drifted printer or user value) or the job
+# itself failed; 0 otherwise. A queue or hive that cannot be read (an unreachable home printer) stays in the JSON line
+# but does not start a remediation that would fail on it too.
+function Get-PdDetectExit {
+    param($Result)
+    $all = @($Result.Printers | ForEach-Object { $_.status }) + @($Result.Users | ForEach-Object { $_.status })
+    return $(if ($Result.Error -or $all -contains 'drift') { 1 } else { 0 })
+}
+
 function ConvertTo-PdJobLine {
     param([Parameter(Mandatory)]$Result)
     [ordered]@{
@@ -470,6 +480,6 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
-$jobResult = Invoke-PdJob -ReportOnly:$ReportOnly
+$jobResult = Invoke-PdJob -ReportOnly:($ReportOnly -or $Detect)
 Write-Output (ConvertTo-PdJobLine $jobResult)
-exit $jobResult.ExitCode
+exit $(if ($Detect) { Get-PdDetectExit $jobResult } else { $jobResult.ExitCode })
