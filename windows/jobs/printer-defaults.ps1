@@ -4,17 +4,19 @@
 # Machine default: Set-PrintConfiguration -Color $false -DuplexingMode OneSided, only the setting that is wrong; a driver
 # that ignores it gets the same change through its default DEVMODE. A printer with a job in its queue is not touched
 # (status busy, run again later). PDF, OneNote, XPS, fax and image printers are left alone.
-# Users: HKU\<sid>\Printers\DevModePerUser and DevModes2. A value is deleted (not rewritten) when it is not monochrome or
-# says two-sided; the printer then uses the machine default. Deleted values are first written to
+# Users: HKU\<sid>\Printers\DevModePerUser and DevModes2. A value is deleted when it is not monochrome or says
+# two-sided; the printer then uses the machine default. On a colour option, a value that chose colour is rewritten with
+# only dmDuplex set to one-sided, so the user's colour choice stays. Deleted values are first written to
 # %ProgramData%\Relian\PrinterDefaultsBackup (SYSTEM and Administrators only); a failed backup deletes nothing. Signed-in users are read in their loaded hive. Signed-out
 # users' NTUSER.DAT is loaded under HKU\RelianPD_<sid> only when not in use, and always unloaded; a mount left by an
 # earlier run is unloaded first. A hive that will not unload fails the run.
 # Colour options (a Colour/Color name, -KeepColourPattern, or a plain queue with a "<name> BW" twin) keep colour and
 # are still made one-sided, machine and user. The job loader forwards only -ReportOnly, so the default pattern is what runs.
-# -ReportOnly changes nothing (hives are still loaded to be read, and unloaded).
+# -ReportOnly changes nothing (hives are still loaded to be read, and unloaded). -Detect is -ReportOnly with the exit
+# code an Intune Remediation detection needs (Get-PdDetectExit); a Remediation runs the script with no parameters.
 # Exit 0 compliant or changed, 1 drift under -ReportOnly or a busy printer, 2 failed. Prints one JSON line.
 [CmdletBinding()]
-param([switch]$ReportOnly, [string]$KeepColourPattern = '(?i)\bcolou?r\b')
+param([switch]$ReportOnly, [switch]$Detect, [string]$KeepColourPattern = '(?i)\bcolou?r\b')
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -159,6 +161,12 @@ $script:PdBackupUserValues = {
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
     if (@((Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json).values).Count -ne @($Values).Count) { throw 'backup read-back differs' }
+}
+$script:PdWriteUserValue = {
+    param($Root, $Key, $Name, $Bytes)
+    $k = [Microsoft.Win32.Registry]::Users.OpenSubKey("$Root\Printers\$Key", $true)
+    if (-not $k) { throw "cannot open $Root\Printers\$Key" }
+    try { $k.SetValue($Name, [byte[]]$Bytes, [Microsoft.Win32.RegistryValueKind]::Binary) } finally { $k.Dispose() }
 }
 $script:PdDeleteUserValue = {
     param($Root, $Key, $Name)
@@ -391,7 +399,16 @@ function Invoke-PdUser {
     $later = @($bad | Where-Object { ($Busy -contains $_.Name) -or ($Drivers.ContainsKey($_.Name) -and (& $script:PdJobCount $_.Name) -gt 0) })
     $now = @($bad | Where-Object { $later -notcontains $_ })
     if ($now.Count -gt 0) { & $script:PdBackupUserValues $Sid $now }
-    foreach ($v in $now) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    foreach ($v in $now) {
+        # A colour option's value that chose colour keeps it: only dmDuplex is set to one-sided. Deleting it would drop the
+        # colour choice where the queue's own default is black and white. Every other drifted value is deleted.
+        $b = [byte[]]$v.Bytes
+        if ($b.Length -ge 96 -and (Test-PdKeepColour -Name $v.Name -AllNames $all) -and ([BitConverter]::ToUInt32($b, 72) -band 0x800) -and [BitConverter]::ToInt16($b, 92) -eq 2) {
+            $b = [byte[]]$b.Clone(); [Array]::Copy([BitConverter]::GetBytes([int16]1), 0, $b, 94, 2)
+            [Array]::Copy([BitConverter]::GetBytes([uint32]([BitConverter]::ToUInt32($b, 72) -bor 0x1000)), 0, $b, 72, 4)  # DM_DUPLEX, so dmDuplex counts
+            & $script:PdWriteUserValue $Root $v.Key $v.Name $b
+        } else { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    }
     $u.status = $(if ($later.Count -gt 0) { 'busy' } else { 'changed' })
     return $u
 }
@@ -457,6 +474,15 @@ function Invoke-PdJob {
     return [pscustomobject]$r
 }
 
+# -Detect (Intune Remediation detection): 1 when a run can fix something (a drifted printer or user value) or the job
+# itself failed; 0 otherwise. A queue or hive that cannot be read (an unreachable home printer) stays in the JSON line
+# but does not start a remediation that would fail on it too.
+function Get-PdDetectExit {
+    param($Result)
+    $all = @($Result.Printers | ForEach-Object { $_.status }) + @($Result.Users | ForEach-Object { $_.status })
+    return $(if ($Result.Error -or $all -contains 'drift') { 1 } else { 0 })
+}
+
 function ConvertTo-PdJobLine {
     param([Parameter(Mandatory)]$Result)
     [ordered]@{
@@ -470,6 +496,6 @@ if ($env:RELIAN_DEPLOY_TEST -eq '1' -and $MyInvocation.InvocationName -eq '.') {
     return
 }
 
-$jobResult = Invoke-PdJob -ReportOnly:$ReportOnly
+$jobResult = Invoke-PdJob -ReportOnly:($ReportOnly -or $Detect)
 Write-Output (ConvertTo-PdJobLine $jobResult)
-exit $jobResult.ExitCode
+exit $(if ($Detect) { Get-PdDetectExit $jobResult } else { $jobResult.ExitCode })
