@@ -90,6 +90,9 @@ $script:PdReadUserValues = { param($Root)
     @(if ($script:F.Values.ContainsKey($sid)) { $script:F.Values[$sid] | ForEach-Object { [pscustomobject]@{ Key = $_[0]; Name = $_[1]; Bytes = [byte[]]$_[2] } } })
 }
 $script:PdDeleteUserValue = { param($Root, $Key, $Name) $script:Log.Add("delete $Root $Key $Name") }
+$script:PdWriteUserValue = { param($Root, $Key, $Name, $Bytes)
+    $script:Log.Add("write $Root $Key $Name color=$([BitConverter]::ToInt16($Bytes, 92)) duplex=$([BitConverter]::ToInt16($Bytes, 94)) fields=$([BitConverter]::ToUInt32($Bytes, 72))")
+}
 $script:PdBackupUserValues = { param($Sid, $Values)
     if ($script:F.ContainsKey('BackupThrows') -and $script:F.BackupThrows) { throw 'disk full' }
     $script:Log.Add("backup $Sid " + (@($Values | ForEach-Object { $_.Name }) -join ','))
@@ -233,7 +236,21 @@ Assert-Same (Entry $r 'Business Printer Colour').status 'changed' 'colour option
 Assert-Same (Entry $r 'Business Printer Colour').after 'color/OneSided' 'colour option after'
 Assert-Same (Entry $r 'Xerox WorkCentre 7845').status 'unchanged' 'twin already one-sided'
 Assert-Same (Entry $r 'Xerox WorkCentre 7845').keepColour 'True' 'twin flagged'
-Assert-Same ((Lines 'delete *') -join ';') "delete $x DevModePerUser Business Printer BW;delete $x DevModePerUser Xerox WorkCentre 7845" 'user: BW colour and twin two-sided deleted, colour option kept'
+Assert-Same ((Lines 'delete *') -join ';') "delete $x DevModePerUser Business Printer BW" 'user: BW queue colour deleted, colour option kept'
+Assert-Same ((Lines 'write *') -join ';') "write $x DevModePerUser Xerox WorkCentre 7845 color=2 duplex=1 fields=6144" 'user: twin colour + two-sided made one-sided, colour kept'
+
+# A colour option's saved preference that says colour and two-sided is rewritten one-sided, not deleted: deleting it
+# would drop the user's colour choice wherever the queue's own default is black and white (codex review #242).
+$y = 'S-1-5-21-1-2-3-1006'
+Reset-Test -Printers @(@('Business Printer Colour', 'Xerox Global Print Driver PS', $false, 'OneSided'), @('Front Desk', 'TOSHIBA Universal Printer 2', $false, 'OneSided')) -Loaded @($y) -Values @{
+    $y = @(@('DevModePerUser', 'Business Printer Colour', (New-DevMode 2 2)), @('DevModes2', 'Front Desk', (New-DevMode 2 2)))
+}
+$r = Invoke-PdJob
+Assert-Same (($script:Log | Where-Object { $_ -match '^(backup|delete|write) ' }) -join ';') "backup $y Business Printer Colour,Front Desk;write $y DevModePerUser Business Printer Colour color=2 duplex=1 fields=6144;delete $y DevModes2 Front Desk" 'colour option rewritten one-sided keeping colour; other queue deleted'
+Assert-Same $r.Users[0].status 'changed' 'rewritten user changed'
+Reset-Test -Printers @(, @('Business Printer Colour', 'Xerox Global Print Driver PS', $false, 'OneSided')) -Loaded @($y) -Values @{ $y = @(, @('DevModePerUser', 'Business Printer Colour', [byte[]]@(1, 2, 3))) }
+$r = Invoke-PdJob
+Assert-Same ((Lines 'delete *') -join ';') "delete $y DevModePerUser Business Printer Colour" 'a short colour-option value is deleted, never parsed'
 
 # A driver whose Color reads false while its PrintTicket still says Color is not compliant; DEVMODE fallback runs.
 Reset-Test -Printers @(, @('Xerox Q BW', 'Xerox Global Print Driver PS', $false, 'OneSided')) -SetIgnored

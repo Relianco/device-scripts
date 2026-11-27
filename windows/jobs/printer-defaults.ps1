@@ -4,8 +4,9 @@
 # Machine default: Set-PrintConfiguration -Color $false -DuplexingMode OneSided, only the setting that is wrong; a driver
 # that ignores it gets the same change through its default DEVMODE. A printer with a job in its queue is not touched
 # (status busy, run again later). PDF, OneNote, XPS, fax and image printers are left alone.
-# Users: HKU\<sid>\Printers\DevModePerUser and DevModes2. A value is deleted (not rewritten) when it is not monochrome or
-# says two-sided; the printer then uses the machine default. Deleted values are first written to
+# Users: HKU\<sid>\Printers\DevModePerUser and DevModes2. A value is deleted when it is not monochrome or says
+# two-sided; the printer then uses the machine default. On a colour option, a value that chose colour is rewritten with
+# only dmDuplex set to one-sided, so the user's colour choice stays. Deleted values are first written to
 # %ProgramData%\Relian\PrinterDefaultsBackup (SYSTEM and Administrators only); a failed backup deletes nothing. Signed-in users are read in their loaded hive. Signed-out
 # users' NTUSER.DAT is loaded under HKU\RelianPD_<sid> only when not in use, and always unloaded; a mount left by an
 # earlier run is unloaded first. A hive that will not unload fails the run.
@@ -160,6 +161,12 @@ $script:PdBackupUserValues = {
     $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
     if (@((Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json).values).Count -ne @($Values).Count) { throw 'backup read-back differs' }
+}
+$script:PdWriteUserValue = {
+    param($Root, $Key, $Name, $Bytes)
+    $k = [Microsoft.Win32.Registry]::Users.OpenSubKey("$Root\Printers\$Key", $true)
+    if (-not $k) { throw "cannot open $Root\Printers\$Key" }
+    try { $k.SetValue($Name, [byte[]]$Bytes, [Microsoft.Win32.RegistryValueKind]::Binary) } finally { $k.Dispose() }
 }
 $script:PdDeleteUserValue = {
     param($Root, $Key, $Name)
@@ -392,7 +399,15 @@ function Invoke-PdUser {
     $later = @($bad | Where-Object { ($Busy -contains $_.Name) -or ($Drivers.ContainsKey($_.Name) -and (& $script:PdJobCount $_.Name) -gt 0) })
     $now = @($bad | Where-Object { $later -notcontains $_ })
     if ($now.Count -gt 0) { & $script:PdBackupUserValues $Sid $now }
-    foreach ($v in $now) { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    foreach ($v in $now) {
+        # A colour option's value that chose colour keeps it: only dmDuplex is set to one-sided. Deleting it would drop the
+        # colour choice where the queue's own default is black and white. Every other drifted value is deleted.
+        $b = [byte[]]$v.Bytes
+        if ($b.Length -ge 96 -and (Test-PdKeepColour -Name $v.Name -AllNames $all) -and ([BitConverter]::ToUInt32($b, 72) -band 0x800) -and [BitConverter]::ToInt16($b, 92) -eq 2) {
+            $b = [byte[]]$b.Clone(); [Array]::Copy([BitConverter]::GetBytes([int16]1), 0, $b, 94, 2)
+            & $script:PdWriteUserValue $Root $v.Key $v.Name $b
+        } else { & $script:PdDeleteUserValue $Root $v.Key $v.Name }
+    }
     $u.status = $(if ($later.Count -gt 0) { 'busy' } else { 'changed' })
     return $u
 }
